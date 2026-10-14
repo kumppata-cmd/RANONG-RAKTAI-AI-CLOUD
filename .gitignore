@@ -1,0 +1,52 @@
+# ═══════════════════════════════════════════════════
+# RANONG RAKTAI AI — .gitignore
+# ห้ามนำข้อมูลลับและข้อมูลผู้ป่วยเข้า GitHub
+# ═══════════════════════════════════════════════════
+
+# ── ข้อมูลลับ (SECRETS) ──────────────────────────
+.env
+.env.*
+*.env
+secrets/
+credentials/
+
+# ── ข้อมูลผู้ป่วย (PATIENT DATA) ─────────────────
+01_LINE_INBOX/
+02_BILLS_RECEIPTS/
+03_PRESCRIPTIONS/
+04_LAB_RESULTS/
+05_DIALYSIS_RECORDS/
+06_AI_REVIEW/
+logs/
+
+# ── Python ───────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+dist/
+build/
+.eggs/
+venv/
+.venv/
+env/
+
+# ── IDE ──────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ── OS ───────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Windows batch files (ไม่ใช้บน Cloud) ────────
+*.bat
+*.cmd
+
+# ── ngrok (ไม่ใช้บน Cloud) ──────────────────────
+ngrok*

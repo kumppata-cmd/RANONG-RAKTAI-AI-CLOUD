@@ -1,0 +1,20 @@
+# RANONG RAKTAI AI — Cloud Dependencies
+# Deploy บน Render Managed Cloud
+
+# Web Framework
+flask==3.1.0
+gunicorn==23.0.0
+
+# HTTP Client
+requests==2.32.3
+
+# PDF Processing
+pypdf==5.1.0
+PyMuPDF==1.25.1
+
+# OCR
+pytesseract==0.3.13
+Pillow==11.1.0
+
+# NOTE: Tesseract OCR binary ต้องติดตั้งผ่าน apt (ดู Dockerfile)
+# NOTE: ไม่ใช้ python-dotenv บน cloud — ตั้ง ENV ผ่าน Render Dashboard

@@ -1,0 +1,41 @@
+# RANONG RAKTAI AI — Render Blueprint
+# ใช้ Docker เพื่อติดตั้ง Tesseract OCR + Thai language pack
+
+services:
+  - type: web
+    name: ranong-raktai-ai
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    region: singapore  # ใกล้ประเทศไทยที่สุด
+    plan: starter      # เริ่มต้นที่ starter ($7/mo)
+    healthCheckPath: /health
+    envVars:
+      # PORT — Render กำหนดอัตโนมัติ (ไม่ต้องตั้งเอง)
+
+      # LINE Messaging API (ตั้งค่าใน Render Dashboard)
+      - key: LINE_CHANNEL_SECRET
+        sync: false  # ตั้งค่าด้วยตนเองใน Dashboard
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false
+
+      # Claude API (ตั้งค่าใน Render Dashboard)
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      # ระบบ
+      - key: ENABLE_AI_CLASSIFY
+        value: "true"
+      - key: STORAGE_BACKEND
+        value: "local"  # เปลี่ยนเป็น "s3" หรือ "gcs" เมื่อพร้อม
+      - key: BASE_DIR
+        value: "/tmp/ranong_raktai"
+
+      # Cloud Storage (ตั้งค่าเมื่อพร้อมใช้งาน)
+      # - key: STORAGE_BUCKET
+      #   sync: false
+      # - key: AWS_ACCESS_KEY_ID
+      #   sync: false
+      # - key: AWS_SECRET_ACCESS_KEY
+      #   sync: false
+      # - key: AWS_DEFAULT_REGION
+      #   value: "ap-southeast-1"
