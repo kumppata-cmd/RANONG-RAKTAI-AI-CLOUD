@@ -29,5 +29,5 @@ RUN mkdir -p /tmp/ranong_raktai/logs
 # Expose port (Render กำหนด PORT ผ่าน env)
 EXPOSE 10000
 
-# รัน Gunicorn
-CMD ["gunicorn", "server:app", "--bind", "0.0.0.0:10000", "--workers", "2", "--timeout", "120", "--access-logfile", "-"]
+# รัน Gunicorn (ใช้ PORT จาก Render ENV, fallback 10000)
+CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --timeout 120 --access-logfile -

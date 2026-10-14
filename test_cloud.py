@@ -54,68 +54,83 @@ def test_root():
 
 
 def test_webhook_invalid_signature():
-    """ทดสอบ webhook ปฏิเสธ signature ผิด."""
-    with server.app.test_client() as client:
-        body = json.dumps({"events": []}).encode("utf-8")
-        resp = client.post(
-            "/webhook",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "X-Line-Signature": "invalid_signature",
-            },
-        )
-        assert resp.status_code == 403
-        print("PASS: webhook rejects invalid signature")
+    """ทดสอบ webhook ปฏิเสธ signature ผิด (production mode)."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = False
+        with server.app.test_client() as client:
+            body = json.dumps({"events": []}).encode("utf-8")
+            resp = client.post(
+                "/webhook",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Line-Signature": "invalid_signature",
+                },
+            )
+            assert resp.status_code == 403
+            print("PASS: webhook rejects invalid signature (production)")
+    finally:
+        server.IS_TESTING = original
 
 
 def test_webhook_valid_signature():
-    """ทดสอบ webhook รับ signature ถูกต้อง."""
-    with server.app.test_client() as client:
-        body = json.dumps({"events": []}).encode("utf-8")
-        sig = make_signature(body)
-        resp = client.post(
-            "/webhook",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "X-Line-Signature": sig,
-            },
-        )
-        assert resp.status_code == 200
-        data = resp.get_json()
-        assert data["status"] == "ok"
-        print("PASS: webhook accepts valid signature")
+    """ทดสอบ webhook รับ signature ถูกต้อง (production mode)."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = False
+        with server.app.test_client() as client:
+            body = json.dumps({"events": []}).encode("utf-8")
+            sig = make_signature(body)
+            resp = client.post(
+                "/webhook",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Line-Signature": sig,
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["status"] == "ok"
+            print("PASS: webhook accepts valid signature (production)")
+    finally:
+        server.IS_TESTING = original
 
 
 def test_webhook_text_message():
-    """ทดสอบ webhook รับข้อความ 'สถานะ'."""
-    with server.app.test_client() as client:
-        payload = {
-            "events": [
-                {
-                    "type": "message",
-                    "replyToken": "test_reply_token",
-                    "message": {
-                        "type": "text",
-                        "id": "12345",
-                        "text": "สถานะ",
-                    },
-                }
-            ]
-        }
-        body = json.dumps(payload).encode("utf-8")
-        sig = make_signature(body)
-        resp = client.post(
-            "/webhook",
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "X-Line-Signature": sig,
-            },
-        )
-        assert resp.status_code == 200
-        print("PASS: webhook handles text message 'สถานะ'")
+    """ทดสอบ webhook รับข้อความ 'สถานะ' (production mode)."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = False
+        with server.app.test_client() as client:
+            payload = {
+                "events": [
+                    {
+                        "type": "message",
+                        "replyToken": "test_reply_token",
+                        "message": {
+                            "type": "text",
+                            "id": "12345",
+                            "text": "สถานะ",
+                        },
+                    }
+                ]
+            }
+            body = json.dumps(payload).encode("utf-8")
+            sig = make_signature(body)
+            resp = client.post(
+                "/webhook",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Line-Signature": sig,
+                },
+            )
+            assert resp.status_code == 200
+            print("PASS: webhook handles text message 'สถานะ' (production)")
+    finally:
+        server.IS_TESTING = original
 
 
 def test_verify_signature():
@@ -261,6 +276,103 @@ def test_detect_file_type():
     print("PASS: detect_file_type")
 
 
+# ═══════════════════════════════════════════════════════════
+# Testing Mode Tests (APP_ENV=testing)
+# ═══════════════════════════════════════════════════════════
+
+
+def test_testing_mode_webhook_rejected():
+    """ทดสอบ: testing mode ปฏิเสธ webhook ทุก request ก่อนดาวน์โหลด."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = True
+        with server.app.test_client() as client:
+            body = json.dumps({"events": []}).encode("utf-8")
+            resp = client.post(
+                "/webhook",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Line-Signature": "any_value",
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["status"] == "rejected"
+            assert data["mode"] == "testing"
+            assert "APP_ENV=testing" in data["reason"]
+            print("PASS: testing mode rejects webhook before processing")
+    finally:
+        server.IS_TESTING = original
+
+
+def test_testing_mode_health_works():
+    """ทดสอบ: /health ทำงานได้ในโหมด testing โดยไม่ต้องใช้ API Key."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = True
+        with server.app.test_client() as client:
+            resp = client.get("/health")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["status"] == "running"
+            assert data["testing_mode"] is True
+            assert data["ai_classify"] is False  # ต้องปิดเมื่อ testing
+            print("PASS: /health works in testing mode (no API Key needed)")
+    finally:
+        server.IS_TESTING = original
+
+
+def test_testing_mode_no_api_calls():
+    """ทดสอบ: classify_with_claude ไม่เรียก API จริงในโหมด testing."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = True
+        # สร้างไฟล์ทดสอบ
+        text_file = os.path.join(os.environ["BASE_DIR"], "api_test.txt")
+        with open(text_file, "w", encoding="utf-8") as f:
+            f.write("ผลตรวจเลือด BUN creatinine eGFR")
+        result = server.classify_with_claude(text_file)
+        # ต้อง fallback เป็น keyword classification โดยไม่เรียก API
+        assert "category" in result
+        assert result["category"] in server.FOLDERS
+        print("PASS: classify_with_claude uses keyword fallback in testing mode")
+    finally:
+        server.IS_TESTING = original
+
+
+def test_testing_mode_no_line_reply():
+    """ทดสอบ: reply_message ไม่ส่งข้อความจริงในโหมด testing."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = True
+        # เรียก reply_message — ต้องไม่ error และไม่เรียก HTTP จริง
+        server.reply_message("fake_token", "test message")
+        print("PASS: reply_message blocked in testing mode (no LINE API call)")
+    finally:
+        server.IS_TESTING = original
+
+
+def test_testing_mode_no_download():
+    """ทดสอบ: download_line_content ไม่ดาวน์โหลดไฟล์ในโหมด testing."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = True
+        result = server.download_line_content("fake_message_id")
+        assert result is None
+        print("PASS: download_line_content blocked in testing mode (no file download)")
+    finally:
+        server.IS_TESTING = original
+
+
+def test_testing_mode_is_default():
+    """ทดสอบ: ค่าเริ่มต้น APP_ENV คือ testing เมื่อไม่ได้กำหนด."""
+    # server.APP_ENV ถูกตั้งตอน import — ตรวจว่า IS_TESTING เป็น True ตามค่าเริ่มต้น
+    assert server.IS_TESTING is True, "IS_TESTING should default to True"
+    assert server.APP_ENV == "testing", f"APP_ENV should be 'testing', got '{server.APP_ENV}'"
+    print("PASS: APP_ENV defaults to 'testing' (IS_TESTING=True)")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -284,6 +396,13 @@ def main():
         test_classify_keywords_dialysis,
         test_storage_local,
         test_detect_file_type,
+        # Testing mode tests
+        test_testing_mode_webhook_rejected,
+        test_testing_mode_health_works,
+        test_testing_mode_no_api_calls,
+        test_testing_mode_no_line_reply,
+        test_testing_mode_no_download,
+        test_testing_mode_is_default,
     ]
 
     passed = 0

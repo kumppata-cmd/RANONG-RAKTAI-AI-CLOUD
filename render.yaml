@@ -23,6 +23,8 @@ services:
         sync: false
 
       # ระบบ
+      - key: APP_ENV
+        value: "testing"  # เปลี่ยนเป็น "production" เมื่อพร้อมรับเอกสารจริง
       - key: ENABLE_AI_CLASSIFY
         value: "true"
       - key: STORAGE_BACKEND

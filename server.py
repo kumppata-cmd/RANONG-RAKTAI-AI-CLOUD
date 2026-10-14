@@ -62,6 +62,13 @@ except ImportError:
 
 # ─── Config ──────────────────────────────────────────────
 # Cloud: ไม่ใช้ dotenv — ตั้งค่า ENV ผ่าน Render Dashboard
+
+# APP_ENV: โหมดการทำงาน
+#   "testing"    = ค่าเริ่มต้น — ปฏิเสธ webhook, ไม่ดาวน์โหลด, ไม่เรียก API
+#   "production" = ใช้งานจริง — ต้องตั้งค่าด้วยตนเองใน Render Dashboard
+APP_ENV = os.getenv("APP_ENV", "testing").lower().strip()
+IS_TESTING = APP_ENV != "production"
+
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
@@ -373,6 +380,9 @@ def verify_signature(body: bytes, signature: str) -> bool:
 
 def reply_message(reply_token: str, text: str):
     """ส่งข้อความตอบกลับไปยัง LINE."""
+    if IS_TESTING:
+        logger.info("TESTING MODE: ไม่ส่งข้อความตอบกลับ LINE")
+        return
     if not LINE_CHANNEL_ACCESS_TOKEN:
         return
     url = "https://api.line.me/v2/bot/message/reply"
@@ -400,6 +410,9 @@ def reply_message(reply_token: str, text: str):
 
 def download_line_content(message_id: str) -> bytes | None:
     """ดาวน์โหลดไฟล์จาก LINE Content API."""
+    if IS_TESTING:
+        logger.info("TESTING MODE: ไม่ดาวน์โหลดไฟล์จาก LINE")
+        return None
     url = f"https://api-data.line.me/v2/bot/message/{message_id}/content"
     headers = {"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}
     try:
@@ -526,6 +539,10 @@ def call_claude_api(messages_content: list) -> dict | None:
 
 def classify_with_claude(filepath: str) -> dict:
     """ส่งเอกสารไปให้ Claude API จำแนกประเภท."""
+    if IS_TESTING:
+        logger.info("TESTING MODE: ไม่เรียก Claude API — ใช้ keyword classification แทน")
+        return classify_with_keywords(filepath)
+
     if not ANTHROPIC_API_KEY:
         logger.warning("ANTHROPIC_API_KEY ไม่ได้ตั้งค่า — ใช้ keyword classification แทน")
         return classify_with_keywords(filepath)
@@ -793,6 +810,18 @@ def process_file_async(filepath: str, reply_token: str | None = None):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """รับ LINE Webhook events."""
+    # ── Testing Mode Guard ──────────────────────────────
+    # เมื่อ APP_ENV=testing: ปฏิเสธทุก request ทันที
+    # ไม่ดาวน์โหลด ไม่ประมวลผล ไม่เรียก API ภายนอก
+    if IS_TESTING:
+        logger.info("TESTING MODE: ปฏิเสธ webhook — ไม่ประมวลผลเอกสาร")
+        return jsonify({
+            "status": "rejected",
+            "reason": "APP_ENV=testing — webhook ถูกปิดใช้งาน",
+            "mode": "testing",
+        }), 200
+    # ── End Testing Guard ───────────────────────────────
+
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data()
 
@@ -892,12 +921,14 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check endpoint."""
+    """Health check endpoint — ทำงานได้โดยไม่ต้องใช้ API Key."""
     return jsonify({
         "status": "running",
         "version": "cloud-1.0",
+        "app_env": APP_ENV,
+        "testing_mode": IS_TESTING,
         "timestamp": datetime.now().isoformat(),
-        "ai_classify": ENABLE_AI_CLASSIFY,
+        "ai_classify": ENABLE_AI_CLASSIFY and not IS_TESTING,
         "storage_backend": STORAGE_BACKEND,
         "ocr_ready": HAS_TESSERACT and HAS_PIL,
         "pymupdf_ready": HAS_PYMUPDF,
@@ -928,6 +959,8 @@ for folder in FOLDERS.values():
 logger.info("=" * 60)
 logger.info("RANONG RAKTAI AI — Cloud Version")
 logger.info("=" * 60)
+logger.info(f"APP_ENV: {APP_ENV}")
+logger.info(f"TESTING MODE: {'เปิด (ปลอดภัย — ไม่รับเอกสาร/เรียก API)' if IS_TESTING else 'ปิด (Production)'}")
 logger.info(f"PORT: {PORT}")
 logger.info(f"STORAGE_BACKEND: {STORAGE_BACKEND}")
 logger.info(f"BASE_DIR: {BASE_DIR}")
