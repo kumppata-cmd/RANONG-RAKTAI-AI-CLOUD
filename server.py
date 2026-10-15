@@ -73,25 +73,6 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
-def verify_signature(body, signature):
-    import base64
-    import hashlib
-    import hmac
-
-    if not LINE_CHANNEL_SECRET or not signature:
-        return False
-
-    digest = hmac.new(
-        LINE_CHANNEL_SECRET.encode("utf-8"),
-        body,
-        hashlib.sha256
-    ).digest()
-
-    expected = base64.b64encode(digest).decode("utf-8")
-    return hmac.compare_digest(expected, signature)
-
-
-
 # Render กำหนด PORT ให้ — ต้องใช้ค่านี้
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -829,28 +810,41 @@ def process_file_async(filepath: str, reply_token: str | None = None):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """รับ LINE Webhook events."""
+    logger.info(f"POST /webhook received (content_length={request.content_length}, mode={'testing' if IS_TESTING else 'production'})")
+
     # Testing Mode Guard
     if IS_TESTING:
         signature = request.headers.get("X-Line-Signature", "")
         body = request.get_data()
 
-        if not verify_signature(body, signature):
+        sig_valid = verify_signature(body, signature)
+        logger.info(f"TESTING MODE: signature_valid={sig_valid}")
+        if not sig_valid:
+            logger.warning("TESTING MODE: Webhook signature ไม่ถูกต้อง — ปฏิเสธ")
             abort(403)
 
         try:
             payload = json.loads(body)
         except json.JSONDecodeError:
+            logger.warning("TESTING MODE: JSON decode ล้มเหลว")
             abort(400)
+
+        event_count = len(payload.get("events", []))
+        logger.info(f"TESTING MODE: รับ {event_count} event(s)")
 
         for event in payload.get("events", []):
             if event.get("type") == "message":
                 msg = event.get("message", {})
+                msg_type = msg.get("type", "unknown")
                 if (
-                    msg.get("type") == "text"
+                    msg_type == "text"
                     and msg.get("text", "").strip() == "TEST-03"
                 ):
-                    logger.info("TEST-03 received safely")
+                    logger.info("TESTING MODE: TEST-03 received safely")
+                else:
+                    logger.info(f"TESTING MODE: รับข้อความ type={msg_type} (ไม่ประมวลผล)")
 
+        logger.info("TESTING MODE: ส่ง response status=testing — ไม่ดาวน์โหลด/จัดเก็บเอกสาร")
         return jsonify({"status": "testing", "accepted": True}), 200
     # ── End Testing Guard ───────────────────────────────
 

@@ -306,6 +306,27 @@ def test_testing_mode_webhook_rejected():
         server.IS_TESTING = original
 
 
+def test_testing_mode_webhook_invalid_sig():
+    """ทดสอบ: testing mode ปฏิเสธ webhook ที่ signature ไม่ถูกต้อง."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = True
+        with server.app.test_client() as client:
+            body = json.dumps({"events": []}).encode("utf-8")
+            resp = client.post(
+                "/webhook",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Line-Signature": "invalid_signature_value",
+                },
+            )
+            assert resp.status_code == 403
+            print("PASS: testing mode rejects webhook with invalid signature (403)")
+    finally:
+        server.IS_TESTING = original
+
+
 def test_testing_mode_health_works():
     """ทดสอบ: /health ทำงานได้ในโหมด testing โดยไม่ต้องใช้ API Key."""
     original = server.IS_TESTING
@@ -429,6 +450,7 @@ def main():
         test_detect_file_type,
         # Testing mode tests
         test_testing_mode_webhook_rejected,
+        test_testing_mode_webhook_invalid_sig,
         test_testing_mode_health_works,
         test_testing_mode_no_api_calls,
         test_testing_mode_no_line_reply,
