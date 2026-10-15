@@ -73,6 +73,25 @@ LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
+def verify_signature(body, signature):
+    import base64
+    import hashlib
+    import hmac
+
+    if not LINE_CHANNEL_SECRET or not signature:
+        return False
+
+    digest = hmac.new(
+        LINE_CHANNEL_SECRET.encode("utf-8"),
+        body,
+        hashlib.sha256
+    ).digest()
+
+    expected = base64.b64encode(digest).decode("utf-8")
+    return hmac.compare_digest(expected, signature)
+
+
+
 # Render กำหนด PORT ให้ — ต้องใช้ค่านี้
 PORT = int(os.getenv("PORT", "10000"))
 
@@ -810,9 +829,7 @@ def process_file_async(filepath: str, reply_token: str | None = None):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     """รับ LINE Webhook events."""
-    # ── Testing Mode Guard ──────────────────────────────
-    # เมื่อ APP_ENV=testing: ปฏิเสธทุก request ทันที
-    # ไม่ดาวน์โหลด ไม่ประมวลผล ไม่เรียก API ภายนอก
+    # Testing Mode Guard
         if IS_TESTING:
         signature = request.headers.get("X-Line-Signature", "")
         body = request.get_data()
@@ -834,7 +851,7 @@ def webhook():
                 ):
                     logger.info("TEST-03 received safely")
 
-      return jsonify({"status": "testing", "accepted": True}), 200
+        return jsonify({"status": "testing", "accepted": True}), 200
     # ── End Testing Guard ───────────────────────────────
 
     signature = request.headers.get("X-Line-Signature", "")
