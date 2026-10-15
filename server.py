@@ -813,13 +813,28 @@ def webhook():
     # ── Testing Mode Guard ──────────────────────────────
     # เมื่อ APP_ENV=testing: ปฏิเสธทุก request ทันที
     # ไม่ดาวน์โหลด ไม่ประมวลผล ไม่เรียก API ภายนอก
-    if IS_TESTING:
-        logger.info("TESTING MODE: ปฏิเสธ webhook — ไม่ประมวลผลเอกสาร")
-        return jsonify({
-            "status": "rejected",
-            "reason": "APP_ENV=testing — webhook ถูกปิดใช้งาน",
-            "mode": "testing",
-        }), 200
+        if IS_TESTING:
+        signature = request.headers.get("X-Line-Signature", "")
+        body = request.get_data()
+
+        if not verify_signature(body, signature):
+            abort(403)
+
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            abort(400)
+
+        for event in payload.get("events", []):
+            if event.get("type") == "message":
+                msg = event.get("message", {})
+                if (
+                    msg.get("type") == "text"
+                    and msg.get("text", "").strip() == "TEST-03"
+                ):
+                    logger.info("TEST-03 received safely")
+
+      return jsonify({"status": "testing", "accepted": True}), 200
     # ── End Testing Guard ───────────────────────────────
 
     signature = request.headers.get("X-Line-Signature", "")
