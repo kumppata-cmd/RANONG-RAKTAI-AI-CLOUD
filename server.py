@@ -830,7 +830,7 @@ def process_file_async(filepath: str, reply_token: str | None = None):
 def webhook():
     """รับ LINE Webhook events."""
     # Testing Mode Guard
-        if IS_TESTING:
+    if IS_TESTING:
         signature = request.headers.get("X-Line-Signature", "")
         body = request.get_data()
 

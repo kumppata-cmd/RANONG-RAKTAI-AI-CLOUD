@@ -282,26 +282,26 @@ def test_detect_file_type():
 
 
 def test_testing_mode_webhook_rejected():
-    """ทดสอบ: testing mode ปฏิเสธ webhook ทุก request ก่อนดาวน์โหลด."""
+    """ทดสอบ: testing mode รับ webhook แต่ไม่ประมวลผลเอกสาร — verify signature + return testing status."""
     original = server.IS_TESTING
     try:
         server.IS_TESTING = True
         with server.app.test_client() as client:
             body = json.dumps({"events": []}).encode("utf-8")
+            sig = make_signature(body)
             resp = client.post(
                 "/webhook",
                 data=body,
                 headers={
                     "Content-Type": "application/json",
-                    "X-Line-Signature": "any_value",
+                    "X-Line-Signature": sig,
                 },
             )
             assert resp.status_code == 200
             data = resp.get_json()
-            assert data["status"] == "rejected"
-            assert data["mode"] == "testing"
-            assert "APP_ENV=testing" in data["reason"]
-            print("PASS: testing mode rejects webhook before processing")
+            assert data["status"] == "testing"
+            assert data["accepted"] is True
+            print("PASS: testing mode accepts webhook with valid signature (no document processing)")
     finally:
         server.IS_TESTING = original
 
@@ -373,6 +373,37 @@ def test_testing_mode_is_default():
     print("PASS: APP_ENV defaults to 'testing' (IS_TESTING=True)")
 
 
+def test_testing_mode_webhook_test03():
+    """ทดสอบ: testing mode รับข้อความ TEST-03 ผ่าน webhook อย่างปลอดภัย."""
+    original = server.IS_TESTING
+    try:
+        server.IS_TESTING = True
+        with server.app.test_client() as client:
+            body = json.dumps({
+                "events": [{
+                    "type": "message",
+                    "replyToken": "test_reply_token",
+                    "message": {"type": "text", "text": "TEST-03"},
+                }]
+            }).encode("utf-8")
+            sig = make_signature(body)
+            resp = client.post(
+                "/webhook",
+                data=body,
+                headers={
+                    "Content-Type": "application/json",
+                    "X-Line-Signature": sig,
+                },
+            )
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["status"] == "testing"
+            assert data["accepted"] is True
+            print("PASS: TEST-03 message accepted in testing mode (no document processing)")
+    finally:
+        server.IS_TESTING = original
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -403,6 +434,7 @@ def main():
         test_testing_mode_no_line_reply,
         test_testing_mode_no_download,
         test_testing_mode_is_default,
+        test_testing_mode_webhook_test03,
     ]
 
     passed = 0
