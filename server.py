@@ -448,6 +448,10 @@ def get_content_type_ext(message_id: str) -> str:
 
 def save_to_inbox(data: bytes, filename: str) -> str:
     """บันทึกไฟล์ลง inbox (ephemeral disk)."""
+    # ป้องกัน path traversal — ใช้เฉพาะชื่อไฟล์ ไม่รวม path
+    filename = os.path.basename(filename)
+    if not filename:
+        filename = f"unnamed_{datetime.now():%Y%m%d_%H%M%S}.dat"
     inbox = os.path.join(BASE_DIR, FOLDERS["inbox"])
     os.makedirs(inbox, exist_ok=True)
     filepath = os.path.join(inbox, filename)
@@ -648,8 +652,8 @@ def classify_with_keywords(filepath: str) -> dict:
 
     content_lower = content.lower()
 
-    # Log OCR text sample for debugging
-    logger.info(f"OCR text sample: {content.strip()[:200]}")
+    # Log เฉพาะจำนวนตัวอักษร — ห้ามบันทึกเนื้อหาเอกสารลง log
+    logger.info(f"OCR extracted: {len(content.strip())} chars")
 
     rules = {
         "bills": (

@@ -425,6 +425,119 @@ def test_testing_mode_webhook_test03():
         server.IS_TESTING = original
 
 
+# ═══════════════════════════════════════════════════════════
+# File Processing Pipeline Tests (Step 8)
+# ═══════════════════════════════════════════════════════════
+
+
+def test_save_to_inbox_mock_jpg():
+    """ทดสอบ save_to_inbox กับ mock JPG binary."""
+    # JPEG magic bytes + padding (ไม่ใช่ภาพจริง ไม่มีข้อมูลผู้ป่วย)
+    mock_jpg = b"\xff\xd8\xff\xe0" + b"\x00" * 200
+    filepath = server.save_to_inbox(mock_jpg, "test_mock.jpg")
+    assert os.path.exists(filepath), f"ไฟล์ไม่ถูกสร้าง: {filepath}"
+    assert os.path.basename(filepath).endswith(".jpg")
+    with open(filepath, "rb") as f:
+        assert f.read() == mock_jpg
+    print("PASS: save_to_inbox mock JPG")
+
+
+def test_save_to_inbox_mock_png():
+    """ทดสอบ save_to_inbox กับ mock PNG binary."""
+    mock_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 200
+    filepath = server.save_to_inbox(mock_png, "test_mock.png")
+    assert os.path.exists(filepath), f"ไฟล์ไม่ถูกสร้าง: {filepath}"
+    assert os.path.basename(filepath).endswith(".png")
+    with open(filepath, "rb") as f:
+        assert f.read() == mock_png
+    print("PASS: save_to_inbox mock PNG")
+
+
+def test_save_to_inbox_mock_pdf():
+    """ทดสอบ save_to_inbox กับ mock PDF binary."""
+    mock_pdf = b"%PDF-1.4 mock document" + b"\x00" * 200
+    filepath = server.save_to_inbox(mock_pdf, "test_mock.pdf")
+    assert os.path.exists(filepath), f"ไฟล์ไม่ถูกสร้าง: {filepath}"
+    assert os.path.basename(filepath).endswith(".pdf")
+    with open(filepath, "rb") as f:
+        assert f.read() == mock_pdf
+    print("PASS: save_to_inbox mock PDF")
+
+
+def test_save_to_inbox_duplicate():
+    """ทดสอบ save_to_inbox ไม่ทับไฟล์ที่มีชื่อซ้ำ."""
+    data1 = b"first file content"
+    data2 = b"second file content"
+    path1 = server.save_to_inbox(data1, "duplicate_test.txt")
+    path2 = server.save_to_inbox(data2, "duplicate_test.txt")
+    assert os.path.exists(path1)
+    assert os.path.exists(path2)
+    assert path1 != path2, "ไฟล์ซ้ำต้องได้ path ต่างกัน"
+    with open(path1, "rb") as f:
+        assert f.read() == data1
+    with open(path2, "rb") as f:
+        assert f.read() == data2
+    print("PASS: save_to_inbox duplicate filename protection")
+
+
+def test_copy_to_category_lab():
+    """ทดสอบ copy_to_category คัดลอกไปโฟลเดอร์ lab ถูกต้อง."""
+    # สร้างไฟล์ต้นทาง
+    src_file = os.path.join(os.environ["BASE_DIR"], "copy_test_lab.txt")
+    with open(src_file, "w", encoding="utf-8") as f:
+        f.write("mock lab result for testing")
+    dest = server.copy_to_category(src_file, "lab")
+    assert os.path.exists(dest), f"ไฟล์ไม่ถูกคัดลอก: {dest}"
+    assert server.FOLDERS["lab"] in dest, f"ต้องอยู่ในโฟลเดอร์ {server.FOLDERS['lab']}"
+    # ต้นฉบับยังอยู่
+    assert os.path.exists(src_file), "ไฟล์ต้นฉบับถูกลบ (ต้องคัดลอก ไม่ใช่ย้าย)"
+    print(f"PASS: copy_to_category → lab ({dest})")
+
+
+def test_path_traversal_blocked():
+    """ทดสอบ save_to_inbox ป้องกัน path traversal."""
+    malicious_name = "../../etc/passwd.txt"
+    data = b"path traversal test"
+    filepath = server.save_to_inbox(data, malicious_name)
+    # ไฟล์ต้องอยู่ใน inbox เท่านั้น ไม่ใช่ ../../etc/
+    inbox_dir = os.path.join(os.environ["BASE_DIR"], server.FOLDERS["inbox"])
+    assert filepath.startswith(inbox_dir), (
+        f"Path traversal! ไฟล์หลุดออกนอก inbox: {filepath}"
+    )
+    assert os.path.basename(filepath) == "passwd.txt" or "passwd" in os.path.basename(filepath)
+    assert os.path.exists(filepath)
+    print("PASS: path traversal blocked — file stays in inbox")
+
+
+def test_oversized_file_rejected():
+    """ทดสอบ validate_file ปฏิเสธไฟล์เกิน 20 MB."""
+    big_file = os.path.join(os.environ["BASE_DIR"], "big_test.txt")
+    with open(big_file, "wb") as f:
+        # เขียน 21 MB (เกิน MAX_FILE_SIZE = 20 MB)
+        f.write(b"x" * (21 * 1024 * 1024))
+    valid, reason = server.validate_file(big_file)
+    assert valid is False, "ไฟล์เกิน 20 MB ต้องถูกปฏิเสธ"
+    assert "MB" in reason or "ใหญ่เกิน" in reason
+    # ล้าง — ลบไฟล์ใหญ่ทิ้ง
+    os.remove(big_file)
+    print("PASS: oversized file rejected (>20 MB)")
+
+
+def test_storage_s3_fallback():
+    """ทดสอบ StorageS3 fallback ไป local เมื่อยังไม่เชื่อมต่อ."""
+    s3 = server.StorageS3()
+    data = b"s3 fallback test content"
+    path = s3.save(data, "bills", "s3_test_bill.txt")
+    # ต้อง fallback ไป local — ไฟล์ต้องอยู่บน disk
+    assert os.path.exists(path), f"S3 fallback ไม่ได้เก็บไฟล์: {path}"
+    with open(path, "rb") as f:
+        assert f.read() == data
+    # list_files ต้อง return empty list (ยังไม่เชื่อมต่อ S3)
+    files = s3.list_files("bills")
+    assert isinstance(files, list)
+    print(f"PASS: StorageS3 fallback to local ({path})")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -457,6 +570,15 @@ def main():
         test_testing_mode_no_download,
         test_testing_mode_is_default,
         test_testing_mode_webhook_test03,
+        # File processing pipeline tests (Step 8)
+        test_save_to_inbox_mock_jpg,
+        test_save_to_inbox_mock_png,
+        test_save_to_inbox_mock_pdf,
+        test_save_to_inbox_duplicate,
+        test_copy_to_category_lab,
+        test_path_traversal_blocked,
+        test_oversized_file_rejected,
+        test_storage_s3_fallback,
     ]
 
     passed = 0
