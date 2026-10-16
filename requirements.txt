@@ -16,5 +16,9 @@ PyMuPDF==1.25.1
 pytesseract==0.3.13
 Pillow==11.1.0
 
+# Google Cloud Storage
+google-cloud-storage==2.18.2
+google-auth==2.35.0
+
 # NOTE: Tesseract OCR binary ต้องติดตั้งผ่าน apt (ดู Dockerfile)
 # NOTE: ไม่ใช้ python-dotenv บน cloud — ตั้ง ENV ผ่าน Render Dashboard

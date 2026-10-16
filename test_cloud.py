@@ -37,7 +37,7 @@ def test_health():
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["status"] == "running"
-        assert data["version"] == "cloud-1.0"
+        assert "cloud-1." in data["version"]
         assert "ocr_ready" in data
         print("PASS: /health endpoint")
 
@@ -538,6 +538,296 @@ def test_storage_s3_fallback():
     print(f"PASS: StorageS3 fallback to local ({path})")
 
 
+# ═══════════════════════════════════════════════════════════
+# GCS Storage Tests (Phase B — mock, ไม่เรียก GCS จริง)
+# ═══════════════════════════════════════════════════════════
+
+def test_gcs_no_credentials_fallback():
+    """GCS ไม่มี credentials → fallback ไป local."""
+    gcs = server.StorageGCS()
+    assert not gcs.is_ready, "GCS ไม่ควร ready เมื่อไม่มี credentials"
+    assert gcs._init_error is not None
+    # save ควร fallback ไป local
+    test_data = b"test content for fallback"
+    result = gcs.save(test_data, "lab", "fallback_test.pdf")
+    assert "gs://" not in result, "ควร fallback ไม่ใช่ GCS"
+    assert os.path.exists(result), f"ไฟล์ fallback ไม่มี: {result}"
+    os.unlink(result)
+    print(f"PASS: test_gcs_no_credentials_fallback")
+
+
+def test_gcs_invalid_base64_credentials():
+    """GCS credentials Base64 ไม่ถูกต้อง → fallback."""
+    orig = os.environ.get("GCS_CREDENTIALS_BASE64", "")
+    os.environ["GCS_CREDENTIALS_BASE64"] = "not_valid_base64!!!"
+    os.environ["STORAGE_BUCKET"] = "test-bucket"
+    try:
+        gcs = server.StorageGCS()
+        assert not gcs.is_ready, "GCS ไม่ควร ready เมื่อ credentials ไม่ถูกต้อง"
+    finally:
+        if orig:
+            os.environ["GCS_CREDENTIALS_BASE64"] = orig
+        else:
+            os.environ.pop("GCS_CREDENTIALS_BASE64", None)
+        os.environ.pop("STORAGE_BUCKET", None)
+    print(f"PASS: test_gcs_invalid_base64_credentials")
+
+
+def test_gcs_content_type_detection():
+    """ตรวจสอบ Content-Type mapping ถูกต้อง."""
+    gcs = server.StorageGCS()
+    assert gcs._get_content_type("report.pdf") == "application/pdf"
+    assert gcs._get_content_type("scan.jpg") == "image/jpeg"
+    assert gcs._get_content_type("scan.jpeg") == "image/jpeg"
+    assert gcs._get_content_type("photo.png") == "image/png"
+    assert gcs._get_content_type("notes.txt") == "text/plain; charset=utf-8"
+    assert gcs._get_content_type("unknown.xyz") == "application/octet-stream"
+    print(f"PASS: test_gcs_content_type_detection")
+
+
+def test_gcs_path_traversal_in_save():
+    """GCS save ป้องกัน path traversal ในชื่อไฟล์."""
+    gcs = server.StorageGCS()
+    # ไม่มี credentials → fallback ไป local แต่ยังตรวจ path traversal
+    result = gcs.save(b"test", "lab", "../../etc/passwd.pdf")
+    # ไฟล์ต้องอยู่ในโฟลเดอร์ที่ถูกต้อง ไม่ใช่ /etc/
+    assert "/etc/" not in result, f"Path traversal ไม่ถูกป้องกัน: {result}"
+    if os.path.exists(result):
+        os.unlink(result)
+    print(f"PASS: test_gcs_path_traversal_in_save")
+
+
+def test_gcs_empty_filename_handling():
+    """GCS save ชื่อไฟล์ว่าง → สร้างชื่อแบบอัตโนมัติ."""
+    gcs = server.StorageGCS()
+    result = gcs.save(b"test data", "review", "")
+    assert os.path.exists(result), f"ไฟล์ไม่ถูกสร้าง: {result}"
+    basename = os.path.basename(result)
+    assert "unnamed_" in basename, f"ชื่อไฟล์ไม่ถูกต้อง: {basename}"
+    os.unlink(result)
+    print(f"PASS: test_gcs_empty_filename_handling")
+
+
+def test_gcs_list_files_not_ready():
+    """GCS list_files เมื่อไม่มี credentials → return []."""
+    gcs = server.StorageGCS()
+    result = gcs.list_files("lab")
+    assert result == [], f"ควร return [] แต่ได้: {result}"
+    print(f"PASS: test_gcs_list_files_not_ready")
+
+
+def test_gcs_check_connection_not_ready():
+    """GCS check_connection เมื่อไม่มี credentials → status=not_ready."""
+    gcs = server.StorageGCS()
+    result = gcs.check_connection()
+    assert result["status"] == "not_ready", f"ควร not_ready แต่ได้: {result}"
+    assert "error" in result
+    print(f"PASS: test_gcs_check_connection_not_ready")
+
+
+def _inject_google_mock_modules():
+    """สร้าง mock google modules ใน sys.modules (ไม่ต้องติดตั้ง google-cloud-storage)."""
+    import types
+    import unittest.mock as mock
+
+    # สร้าง mock module hierarchy
+    google_mod = types.ModuleType("google")
+    google_cloud_mod = types.ModuleType("google.cloud")
+    google_cloud_storage_mod = types.ModuleType("google.cloud.storage")
+    google_oauth2_mod = types.ModuleType("google.oauth2")
+    google_oauth2_sa_mod = types.ModuleType("google.oauth2.service_account")
+
+    # mock Client และ Credentials
+    mock_client_cls = mock.MagicMock()
+    mock_creds_cls = mock.MagicMock()
+
+    google_cloud_storage_mod.Client = mock_client_cls
+    google_oauth2_sa_mod.Credentials = mock_creds_cls
+
+    google_mod.cloud = google_cloud_mod
+    google_mod.oauth2 = google_oauth2_mod
+    google_cloud_mod.storage = google_cloud_storage_mod
+    google_oauth2_mod.service_account = google_oauth2_sa_mod
+
+    # ใส่ใน sys.modules
+    modules = {
+        "google": google_mod,
+        "google.cloud": google_cloud_mod,
+        "google.cloud.storage": google_cloud_storage_mod,
+        "google.oauth2": google_oauth2_mod,
+        "google.oauth2.service_account": google_oauth2_sa_mod,
+    }
+    return modules, mock_client_cls, mock_creds_cls
+
+
+def test_gcs_valid_credentials_mock():
+    """GCS ด้วย credentials จำลอง — ตรวจ init flow (mock google libs)."""
+    import unittest.mock as mock
+
+    # สร้าง service account JSON จำลอง
+    fake_sa = {
+        "type": "service_account",
+        "project_id": "test-project",
+        "private_key_id": "fake-key-id",
+        "private_key": "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n",
+        "client_email": "test@test-project.iam.gserviceaccount.com",
+        "client_id": "123456",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+    fake_b64 = base64.b64encode(json.dumps(fake_sa).encode()).decode()
+
+    orig_bucket = os.environ.get("STORAGE_BUCKET", "")
+    orig_creds = os.environ.get("GCS_CREDENTIALS_BASE64", "")
+    os.environ["STORAGE_BUCKET"] = "test-bucket-mock"
+    os.environ["GCS_CREDENTIALS_BASE64"] = fake_b64
+
+    # เก็บ original modules
+    orig_modules = {}
+    for key in ["google", "google.cloud", "google.cloud.storage", "google.oauth2", "google.oauth2.service_account"]:
+        orig_modules[key] = sys.modules.get(key)
+
+    orig_storage_bucket = server.STORAGE_BUCKET
+    try:
+        server.STORAGE_BUCKET = "test-bucket-mock"
+        modules, mock_client_cls, mock_creds_cls = _inject_google_mock_modules()
+        sys.modules.update(modules)
+
+        mock_client = mock.MagicMock()
+        mock_bucket = mock.MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+        mock_client_cls.return_value = mock_client
+
+        gcs = server.StorageGCS()
+        assert gcs.is_ready, "GCS ควร ready เมื่อ mock credentials สำเร็จ"
+        assert gcs.bucket_name == "test-bucket-mock"
+
+        # ทดสอบ upload
+        mock_blob = mock.MagicMock()
+        mock_bucket.blob.return_value = mock_blob
+
+        result = gcs.save(b"\xff\xd8\xfftest jpg data", "lab", "test_scan.jpg")
+        assert result.startswith("gs://"), f"ผลลัพธ์ควรเป็น gs:// แต่ได้: {result}"
+        mock_blob.upload_from_string.assert_called_once()
+        call_args = mock_blob.upload_from_string.call_args
+        assert call_args[1]["content_type"] == "image/jpeg"
+
+        # ทดสอบ list_files
+        mock_blob1 = mock.MagicMock()
+        mock_blob1.name = "04_LAB_RESULTS/file1.pdf"
+        mock_blob2 = mock.MagicMock()
+        mock_blob2.name = "04_LAB_RESULTS/file2.jpg"
+        mock_client.list_blobs.return_value = [mock_blob1, mock_blob2]
+
+        files = gcs.list_files("lab")
+        assert len(files) == 2
+        assert "file1.pdf" in files
+        assert "file2.jpg" in files
+    finally:
+        server.STORAGE_BUCKET = orig_storage_bucket
+        # คืนค่า modules เดิม
+        for key, val in orig_modules.items():
+            if val is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = val
+        if orig_bucket:
+            os.environ["STORAGE_BUCKET"] = orig_bucket
+        else:
+            os.environ.pop("STORAGE_BUCKET", None)
+        if orig_creds:
+            os.environ["GCS_CREDENTIALS_BASE64"] = orig_creds
+        else:
+            os.environ.pop("GCS_CREDENTIALS_BASE64", None)
+
+    print(f"PASS: test_gcs_valid_credentials_mock")
+
+
+def test_gcs_upload_error_fallback():
+    """GCS upload ล้มเหลว → fallback ไป local."""
+    import unittest.mock as mock
+
+    fake_sa = {
+        "type": "service_account",
+        "project_id": "test-project",
+        "private_key_id": "fake",
+        "private_key": "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n",
+        "client_email": "test@test.iam.gserviceaccount.com",
+        "client_id": "123",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+    }
+    fake_b64 = base64.b64encode(json.dumps(fake_sa).encode()).decode()
+
+    orig_bucket = os.environ.get("STORAGE_BUCKET", "")
+    orig_creds = os.environ.get("GCS_CREDENTIALS_BASE64", "")
+    os.environ["STORAGE_BUCKET"] = "test-bucket"
+    os.environ["GCS_CREDENTIALS_BASE64"] = fake_b64
+
+    # เก็บ original modules
+    orig_modules = {}
+    for key in ["google", "google.cloud", "google.cloud.storage", "google.oauth2", "google.oauth2.service_account"]:
+        orig_modules[key] = sys.modules.get(key)
+
+    orig_storage_bucket = server.STORAGE_BUCKET
+    try:
+        server.STORAGE_BUCKET = "test-bucket"
+        modules, mock_client_cls, mock_creds_cls = _inject_google_mock_modules()
+        sys.modules.update(modules)
+
+        mock_client = mock.MagicMock()
+        mock_bucket = mock.MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+        mock_blob = mock.MagicMock()
+        mock_blob.upload_from_string.side_effect = Exception("Network error")
+        mock_bucket.blob.return_value = mock_blob
+        mock_client_cls.return_value = mock_client
+
+        gcs = server.StorageGCS()
+        assert gcs.is_ready
+
+        result = gcs.save(b"test data", "lab", "error_test.pdf")
+        # ควร fallback ไป local
+        assert "gs://" not in result, f"ควร fallback แต่ได้: {result}"
+        assert os.path.exists(result)
+        os.unlink(result)
+    finally:
+        server.STORAGE_BUCKET = orig_storage_bucket
+        # คืนค่า modules เดิม
+        for key, val in orig_modules.items():
+            if val is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = val
+        if orig_bucket:
+            os.environ["STORAGE_BUCKET"] = orig_bucket
+        else:
+            os.environ.pop("STORAGE_BUCKET", None)
+        if orig_creds:
+            os.environ["GCS_CREDENTIALS_BASE64"] = orig_creds
+        else:
+            os.environ.pop("GCS_CREDENTIALS_BASE64", None)
+
+    print(f"PASS: test_gcs_upload_error_fallback")
+
+
+def test_testing_docs_mode():
+    """testing-docs mode: IS_TESTING=True, IS_TESTING_DOCS=True."""
+    # ตรวจสอบค่า IS_TESTING_DOCS ปัจจุบัน (ควรเป็น False เพราะ APP_ENV=testing)
+    assert server.IS_TESTING is True, "IS_TESTING ควรเป็น True"
+    assert server.IS_TESTING_DOCS is False, "IS_TESTING_DOCS ควรเป็น False เพราะ APP_ENV=testing"
+    print(f"PASS: test_testing_docs_mode")
+
+
+def test_health_version_updated():
+    """Health endpoint แสดง version cloud-1.1-gcs."""
+    with server.app.test_client() as client:
+        resp = client.get("/health")
+        data = resp.get_json()
+        assert "1.1-gcs" in data["version"], f"version ผิด: {data['version']}"
+    print(f"PASS: test_health_version_updated")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -579,6 +869,18 @@ def main():
         test_path_traversal_blocked,
         test_oversized_file_rejected,
         test_storage_s3_fallback,
+        # GCS Storage tests (Phase B)
+        test_gcs_no_credentials_fallback,
+        test_gcs_invalid_base64_credentials,
+        test_gcs_content_type_detection,
+        test_gcs_path_traversal_in_save,
+        test_gcs_empty_filename_handling,
+        test_gcs_list_files_not_ready,
+        test_gcs_check_connection_not_ready,
+        test_gcs_valid_credentials_mock,
+        test_gcs_upload_error_fallback,
+        test_testing_docs_mode,
+        test_health_version_updated,
     ]
 
     passed = 0

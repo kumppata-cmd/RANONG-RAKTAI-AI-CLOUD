@@ -64,10 +64,13 @@ except ImportError:
 # Cloud: ไม่ใช้ dotenv — ตั้งค่า ENV ผ่าน Render Dashboard
 
 # APP_ENV: โหมดการทำงาน
-#   "testing"    = ค่าเริ่มต้น — ปฏิเสธ webhook, ไม่ดาวน์โหลด, ไม่เรียก API
-#   "production" = ใช้งานจริง — ต้องตั้งค่าด้วยตนเองใน Render Dashboard
+#   "testing"      = ค่าเริ่มต้น — ไม่เรียก Claude API, ไม่ตอบกลับ LINE
+#   "testing-docs" = ทดสอบรับเอกสาร — ดาวน์โหลด+จัดเก็บ GCS ได้ แต่ไม่เรียก Claude
+#   "production"   = ใช้งานจริง — ต้องตั้งค่าด้วยตนเองใน Render Dashboard
 APP_ENV = os.getenv("APP_ENV", "testing").lower().strip()
 IS_TESTING = APP_ENV != "production"
+# testing-docs: อนุญาตดาวน์โหลดไฟล์และจัดเก็บ GCS แต่ไม่เรียก Claude API
+IS_TESTING_DOCS = APP_ENV == "testing-docs"
 
 LINE_CHANNEL_SECRET = os.getenv("LINE_CHANNEL_SECRET", "").strip()
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -174,26 +177,119 @@ class StorageS3:
 
 
 class StorageGCS:
-    """เก็บไฟล์บน Google Cloud Storage — ยังไม่เชื่อมต่อจริง (placeholder)."""
+    """เก็บไฟล์บน Google Cloud Storage.
+
+    Authentication:
+      ใช้ Service Account JSON Key ที่ Base64-encoded เก็บใน ENV variable
+      GCS_CREDENTIALS_BASE64 — ไม่เก็บ JSON Key ใน code หรือ GitHub
+
+    ถ้า credentials ไม่พร้อม → fallback ไป StorageLocal พร้อม warning
+    """
+
+    # Content-Type mapping สำหรับไฟล์ที่ระบบรองรับ
+    CONTENT_TYPES = {
+        ".pdf": "application/pdf",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".txt": "text/plain; charset=utf-8",
+    }
 
     def __init__(self):
-        self.bucket = STORAGE_BUCKET
-        logger.info(f"GCS Storage: bucket={self.bucket} (ยังไม่เชื่อมต่อ)")
+        self.bucket_name = STORAGE_BUCKET
+        self._client = None
+        self._bucket = None
+        self._fallback = StorageLocal()
+        self._init_error = None
+
+        if not self.bucket_name:
+            self._init_error = "STORAGE_BUCKET ไม่ได้ตั้งค่า"
+            logger.warning(f"GCS Storage: {self._init_error} — fallback ไป local")
+            return
+
+        creds_b64 = os.getenv("GCS_CREDENTIALS_BASE64", "").strip()
+        if not creds_b64:
+            self._init_error = "GCS_CREDENTIALS_BASE64 ไม่ได้ตั้งค่า"
+            logger.warning(f"GCS Storage: {self._init_error} — fallback ไป local")
+            return
+
+        try:
+            from google.cloud import storage as gcs_storage
+            from google.oauth2 import service_account
+
+            creds_json = json.loads(base64.b64decode(creds_b64))
+            credentials = service_account.Credentials.from_service_account_info(creds_json)
+            self._client = gcs_storage.Client(credentials=credentials, project=creds_json.get("project_id"))
+            self._bucket = self._client.bucket(self.bucket_name)
+            logger.info(f"GCS Storage: bucket={self.bucket_name} — เชื่อมต่อสำเร็จ")
+        except ImportError:
+            self._init_error = "google-cloud-storage ไม่ได้ติดตั้ง"
+            logger.warning(f"GCS Storage: {self._init_error} — fallback ไป local")
+        except Exception as e:
+            self._init_error = f"GCS init error: {e}"
+            logger.error(f"GCS Storage: {self._init_error} — fallback ไป local")
+
+    @property
+    def is_ready(self) -> bool:
+        return self._client is not None and self._bucket is not None
+
+    def _get_content_type(self, filename: str) -> str:
+        ext = os.path.splitext(filename)[1].lower()
+        return self.CONTENT_TYPES.get(ext, "application/octet-stream")
 
     def save(self, data: bytes, category: str, filename: str) -> str:
-        # TODO: เชื่อมต่อ google-cloud-storage เมื่อพร้อม
-        # from google.cloud import storage
-        # client = storage.Client()
-        # bucket = client.bucket(self.bucket)
-        # blob = bucket.blob(f"{FOLDERS.get(category, FOLDERS['review'])}/{filename}")
-        # blob.upload_from_string(data)
-        # return f"gs://{self.bucket}/{blob.name}"
-        logger.warning("GCS Storage ยังไม่เชื่อมต่อ — fallback ไป local")
-        return StorageLocal().save(data, category, filename)
+        """อัปโหลดไฟล์ไป GCS — fallback ไป local ถ้า GCS ไม่พร้อม."""
+        # ป้องกัน path traversal (ต้องทำก่อน is_ready check เพราะ fallback ก็ต้องใช้ชื่อที่ปลอดภัย)
+        filename = os.path.basename(filename)
+        if not filename:
+            filename = f"unnamed_{datetime.now():%Y%m%d_%H%M%S}.dat"
+
+        if not self.is_ready:
+            logger.warning(f"GCS ไม่พร้อม ({self._init_error}) — fallback ไป local")
+            return self._fallback.save(data, category, filename)
+
+        folder = FOLDERS.get(category, FOLDERS["review"])
+        # เพิ่ม timestamp เพื่อป้องกันไฟล์ซ้ำ
+        name, ext = os.path.splitext(filename)
+        unique_name = f"{name}_{datetime.now():%Y%m%d_%H%M%S_%f}{ext}"
+        blob_path = f"{folder}/{unique_name}"
+
+        content_type = self._get_content_type(filename)
+
+        try:
+            blob = self._bucket.blob(blob_path)
+            blob.upload_from_string(data, content_type=content_type)
+            gcs_uri = f"gs://{self.bucket_name}/{blob_path}"
+            logger.info(f"GCS upload สำเร็จ: {gcs_uri} ({len(data):,} bytes, {content_type})")
+            return gcs_uri
+        except Exception as e:
+            logger.error(f"GCS upload ล้มเหลว: {e} — fallback ไป local")
+            return self._fallback.save(data, category, filename)
 
     def list_files(self, category: str) -> list[str]:
-        logger.warning("GCS Storage ยังไม่เชื่อมต่อ")
-        return []
+        """แสดงรายการไฟล์ใน GCS bucket ตามประเภท."""
+        if not self.is_ready:
+            return []
+
+        folder = FOLDERS.get(category, FOLDERS["review"])
+        prefix = f"{folder}/"
+
+        try:
+            blobs = self._client.list_blobs(self.bucket_name, prefix=prefix)
+            return [blob.name.split("/")[-1] for blob in blobs if blob.name != prefix]
+        except Exception as e:
+            logger.error(f"GCS list_files ล้มเหลว: {e}")
+            return []
+
+    def check_connection(self) -> dict:
+        """ตรวจสอบการเชื่อมต่อ GCS — ใช้ใน health check."""
+        if not self.is_ready:
+            return {"status": "not_ready", "error": self._init_error}
+        try:
+            self._bucket.reload()
+            return {"status": "connected", "bucket": self.bucket_name}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
 
 
 def get_storage():
@@ -380,7 +476,7 @@ def verify_signature(body: bytes, signature: str) -> bool:
 
 def reply_message(reply_token: str, text: str):
     """ส่งข้อความตอบกลับไปยัง LINE."""
-    if IS_TESTING:
+    if IS_TESTING and not IS_TESTING_DOCS:
         logger.info("TESTING MODE: ไม่ส่งข้อความตอบกลับ LINE")
         return
     if not LINE_CHANNEL_ACCESS_TOKEN:
@@ -410,7 +506,7 @@ def reply_message(reply_token: str, text: str):
 
 def download_line_content(message_id: str) -> bytes | None:
     """ดาวน์โหลดไฟล์จาก LINE Content API."""
-    if IS_TESTING:
+    if IS_TESTING and not IS_TESTING_DOCS:
         logger.info("TESTING MODE: ไม่ดาวน์โหลดไฟล์จาก LINE")
         return None
     url = f"https://api-data.line.me/v2/bot/message/{message_id}/content"
@@ -736,7 +832,8 @@ def copy_to_category(src_path: str, category: str) -> str:
     shutil.copy2(src_path, dest_path)
     logger.info(f"คัดลอก → {dest_path}")
 
-    # Cloud storage (ถ้าตั้งค่าไว้)
+    # Cloud storage (ถ้าตั้งค่าไว้ และ backend ไม่ใช่ local)
+    cloud_path = None
     if STORAGE_BACKEND != "local":
         try:
             with open(src_path, "rb") as f:
@@ -746,7 +843,7 @@ def copy_to_category(src_path: str, category: str) -> str:
         except Exception as e:
             logger.error(f"Cloud storage error: {e}")
 
-    return dest_path
+    return cloud_path if cloud_path and cloud_path.startswith("gs://") else dest_path
 
 
 def process_file_async(filepath: str, reply_token: str | None = None):
@@ -817,7 +914,7 @@ def webhook():
     logger.info(f"POST /webhook received (content_length={request.content_length}, mode={'testing' if IS_TESTING else 'production'})")
 
     # Testing Mode Guard
-    if IS_TESTING:
+    if IS_TESTING and not IS_TESTING_DOCS:
         signature = request.headers.get("X-Line-Signature", "")
         body = request.get_data()
 
@@ -851,6 +948,10 @@ def webhook():
         logger.info("TESTING MODE: ส่ง response status=testing — ไม่ดาวน์โหลด/จัดเก็บเอกสาร")
         return jsonify({"status": "testing", "accepted": True}), 200
     # ── End Testing Guard ───────────────────────────────
+
+    # testing-docs: อนุญาตรับเอกสารและจัดเก็บ แต่ไม่เรียก Claude API
+    if IS_TESTING_DOCS:
+        logger.info("TESTING-DOCS MODE: อนุญาตรับเอกสาร — ไม่เรียก Claude API")
 
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data()
@@ -952,9 +1053,9 @@ def webhook():
 @app.route("/health", methods=["GET"])
 def health():
     """Health check endpoint — ทำงานได้โดยไม่ต้องใช้ API Key."""
-    return jsonify({
+    health_info = {
         "status": "running",
-        "version": "cloud-1.0",
+        "version": "cloud-1.1-gcs",
         "app_env": APP_ENV,
         "testing_mode": IS_TESTING,
         "timestamp": datetime.now().isoformat(),
@@ -963,7 +1064,11 @@ def health():
         "ocr_ready": HAS_TESSERACT and HAS_PIL,
         "pymupdf_ready": HAS_PYMUPDF,
         "supported_types": list(ALLOWED_EXTENSIONS),
-    }), 200
+    }
+    # เพิ่มสถานะ GCS ถ้าใช้ gcs backend
+    if STORAGE_BACKEND == "gcs" and hasattr(storage, "check_connection"):
+        health_info["gcs"] = storage.check_connection()
+    return jsonify(health_info), 200
 
 
 @app.route("/", methods=["GET"])
@@ -990,7 +1095,13 @@ logger.info("=" * 60)
 logger.info("RANONG RAKTAI AI — Cloud Version")
 logger.info("=" * 60)
 logger.info(f"APP_ENV: {APP_ENV}")
-logger.info(f"TESTING MODE: {'เปิด (ปลอดภัย — ไม่รับเอกสาร/เรียก API)' if IS_TESTING else 'ปิด (Production)'}")
+if IS_TESTING_DOCS:
+    _mode_desc = "TESTING-DOCS (รับเอกสาร+จัดเก็บ GCS ได้ — ไม่เรียก Claude API)"
+elif IS_TESTING:
+    _mode_desc = "เปิด (ปลอดภัย — ไม่รับเอกสาร/เรียก API)"
+else:
+    _mode_desc = "ปิด (Production)"
+logger.info(f"TESTING MODE: {_mode_desc}")
 logger.info(f"PORT: {PORT}")
 logger.info(f"STORAGE_BACKEND: {STORAGE_BACKEND}")
 logger.info(f"BASE_DIR: {BASE_DIR}")

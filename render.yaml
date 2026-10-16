@@ -28,16 +28,12 @@ services:
       - key: ENABLE_AI_CLASSIFY
         value: "true"
       - key: STORAGE_BACKEND
-        value: "local"  # เปลี่ยนเป็น "s3" หรือ "gcs" เมื่อพร้อม
+        value: "gcs"  # ใช้ Google Cloud Storage
       - key: BASE_DIR
         value: "/tmp/ranong_raktai"
 
-      # Cloud Storage (ตั้งค่าเมื่อพร้อมใช้งาน)
-      # - key: STORAGE_BUCKET
-      #   sync: false
-      # - key: AWS_ACCESS_KEY_ID
-      #   sync: false
-      # - key: AWS_SECRET_ACCESS_KEY
-      #   sync: false
-      # - key: AWS_DEFAULT_REGION
-      #   value: "ap-southeast-1"
+      # Google Cloud Storage (ตั้งค่าใน Render Dashboard)
+      - key: STORAGE_BUCKET
+        sync: false  # ตั้งค่าด้วยตนเอง: ranong-raktai-ai-test-2026
+      - key: GCS_CREDENTIALS_BASE64
+        sync: false  # Base64 ของ Service Account JSON Key
