@@ -875,6 +875,33 @@ def process_file_async(filepath: str, reply_token: str | None = None):
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
+            # ลบไฟล์ชั่วคราวหลัง cloud upload สำเร็จ
+            # ลบเฉพาะเมื่อ (1) dest เป็น gs:// (upload สำเร็จ)
+            #              (2) filepath อยู่ใน BASE_DIR (ป้องกันลบไฟล์นอก temp)
+            if dest and dest.startswith("gs://"):
+                _safe_base = os.path.realpath(BASE_DIR)
+                _real_fp = os.path.realpath(filepath)
+                if _real_fp.startswith(_safe_base + os.sep):
+                    try:
+                        os.remove(filepath)
+                        logger.info(f"ลบไฟล์ชั่วคราว inbox: {os.path.basename(filepath)}")
+                    except OSError as e:
+                        logger.warning(f"ลบไฟล์ชั่วคราวไม่สำเร็จ: {e}")
+                    # ลบ local copy ใน category folder ด้วย (ephemeral)
+                    _local_cat_dest = os.path.join(
+                        BASE_DIR,
+                        FOLDERS.get(category, FOLDERS["review"]),
+                        os.path.basename(filepath),
+                    )
+                    if os.path.exists(_local_cat_dest):
+                        try:
+                            os.remove(_local_cat_dest)
+                            logger.info(f"ลบ local copy: {os.path.basename(_local_cat_dest)}")
+                        except OSError:
+                            pass  # ไม่ร้ายแรง — จะหายเมื่อ Render restart
+                else:
+                    logger.warning(f"ข้ามการลบ — ไฟล์อยู่นอก BASE_DIR: {filepath}")
+
             # ตอบกลับ LINE
             cat_names = {
                 "bills": "ใบเสร็จ/บิล",
@@ -1017,7 +1044,7 @@ def webhook():
 
             elif msg_type == "text":
                 text = msg.get("text", "")
-                logger.info(f"รับข้อความ: {text[:50]}...")
+                logger.info(f"รับข้อความ: {len(text)} chars")
                 if text.strip().lower() in ("สถานะ", "status"):
                     inbox_path = os.path.join(BASE_DIR, FOLDERS["inbox"])
                     inbox_count = len(os.listdir(inbox_path)) if os.path.exists(inbox_path) else 0

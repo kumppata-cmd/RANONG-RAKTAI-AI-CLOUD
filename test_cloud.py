@@ -828,6 +828,223 @@ def test_health_version_updated():
     print(f"PASS: test_health_version_updated")
 
 
+# ═══════════════════════════════════════════════════════════
+# Security Remediation Tests
+# ═══════════════════════════════════════════════════════════
+
+
+def test_cleanup_after_gcs_upload_success():
+    """ลบไฟล์ชั่วคราวเมื่อ GCS upload สำเร็จ (dest เริ่มด้วย gs://)."""
+    import threading
+
+    inbox = os.path.join(server.BASE_DIR, server.FOLDERS["inbox"])
+    lab_folder = os.path.join(server.BASE_DIR, server.FOLDERS["lab"])
+    os.makedirs(inbox, exist_ok=True)
+    os.makedirs(lab_folder, exist_ok=True)
+
+    # สร้างไฟล์จำลองใน inbox
+    test_file = os.path.join(inbox, "cleanup_test_lab_report.txt")
+    with open(test_file, "w") as f:
+        f.write("ผลตรวจ creatinine 1.2 mg/dL")
+
+    assert os.path.exists(test_file), "ไฟล์ต้นทางต้องมีอยู่ก่อน"
+
+    # Mock copy_to_category ให้ return gs:// path (จำลอง GCS upload สำเร็จ)
+    original_copy = server.copy_to_category
+
+    def mock_copy_to_category(src, cat):
+        # คัดลอกไปยัง local folder จริง (เพื่อทดสอบว่า local copy ถูกลบด้วย)
+        import shutil
+        dest_folder = os.path.join(server.BASE_DIR, server.FOLDERS.get(cat, server.FOLDERS["review"]))
+        os.makedirs(dest_folder, exist_ok=True)
+        local_dest = os.path.join(dest_folder, os.path.basename(src))
+        shutil.copy2(src, local_dest)
+        return "gs://test-bucket/04_LAB_RESULTS/cleanup_test_lab_report.txt"
+
+    server.copy_to_category = mock_copy_to_category
+    try:
+        # เรียก process_file_async แล้วรอให้ thread ทำงานเสร็จ
+        server.process_file_async(test_file, reply_token=None)
+        # รอ thread daemon ทำงาน
+        for t in threading.enumerate():
+            if t.daemon and t.name != "MainThread":
+                t.join(timeout=5)
+
+        assert not os.path.exists(test_file), \
+            f"ไฟล์ inbox ต้องถูกลบหลัง GCS upload สำเร็จ: {test_file}"
+        print("PASS: cleanup after GCS upload success")
+    finally:
+        server.copy_to_category = original_copy
+        # cleanup
+        if os.path.exists(test_file):
+            os.remove(test_file)
+
+
+def test_no_cleanup_when_gcs_fails():
+    """ไม่ลบไฟล์เมื่อ GCS upload ล้มเหลว (fallback local)."""
+    import threading
+
+    inbox = os.path.join(server.BASE_DIR, server.FOLDERS["inbox"])
+    os.makedirs(inbox, exist_ok=True)
+
+    test_file = os.path.join(inbox, "no_cleanup_test.txt")
+    with open(test_file, "w") as f:
+        f.write("ใบเสร็จค่ายา 500 บาท")
+
+    # Mock copy_to_category ให้ return local path (จำลอง GCS ล้มเหลว)
+    original_copy = server.copy_to_category
+
+    def mock_copy_local(src, cat):
+        return os.path.join(server.BASE_DIR, server.FOLDERS.get(cat, "review"), os.path.basename(src))
+
+    server.copy_to_category = mock_copy_local
+    try:
+        server.process_file_async(test_file, reply_token=None)
+        for t in threading.enumerate():
+            if t.daemon and t.name != "MainThread":
+                t.join(timeout=5)
+
+        assert os.path.exists(test_file), \
+            "ไฟล์ inbox ต้องยังอยู่เมื่อ GCS upload ล้มเหลว"
+        print("PASS: no cleanup when GCS fails (fallback local)")
+    finally:
+        server.copy_to_category = original_copy
+        if os.path.exists(test_file):
+            os.remove(test_file)
+
+
+def test_cleanup_oserror_graceful():
+    """os.remove() ล้มเหลว ต้องไม่ crash — log warning แล้วทำงานต่อ."""
+    import threading
+    from unittest.mock import patch
+
+    inbox = os.path.join(server.BASE_DIR, server.FOLDERS["inbox"])
+    os.makedirs(inbox, exist_ok=True)
+
+    test_file = os.path.join(inbox, "oserror_test.txt")
+    with open(test_file, "w") as f:
+        f.write("ผลตรวจ BUN 15 mg/dL")
+
+    original_copy = server.copy_to_category
+
+    def mock_copy_gcs(src, cat):
+        return "gs://test-bucket/04_LAB_RESULTS/oserror_test.txt"
+
+    server.copy_to_category = mock_copy_gcs
+
+    # Mock os.remove ให้ raise OSError
+    original_remove = os.remove
+    remove_calls = []
+
+    def mock_remove(path):
+        remove_calls.append(path)
+        raise OSError("Permission denied (mock)")
+
+    try:
+        os.remove = mock_remove
+        server.process_file_async(test_file, reply_token=None)
+        for t in threading.enumerate():
+            if t.daemon and t.name != "MainThread":
+                t.join(timeout=5)
+
+        # ตรวจว่าพยายามลบ (มี call) แต่ไม่ crash
+        assert len(remove_calls) > 0, "ต้องมีการพยายามลบไฟล์"
+        print("PASS: cleanup OSError handled gracefully")
+    finally:
+        os.remove = original_remove
+        server.copy_to_category = original_copy
+        if os.path.exists(test_file):
+            original_remove(test_file)
+
+
+def test_cleanup_path_safety():
+    """ไม่ลบไฟล์ที่อยู่นอก BASE_DIR (ป้องกัน path traversal)."""
+    import threading
+
+    # สร้างไฟล์ชั่วคราวนอก BASE_DIR
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".txt", prefix="outside_") as f:
+        f.write(b"test file outside BASE_DIR")
+        outside_file = f.name
+
+    original_copy = server.copy_to_category
+
+    def mock_copy_gcs(src, cat):
+        return "gs://test-bucket/04_LAB_RESULTS/outside_test.txt"
+
+    server.copy_to_category = mock_copy_gcs
+    try:
+        server.process_file_async(outside_file, reply_token=None)
+        for t in threading.enumerate():
+            if t.daemon and t.name != "MainThread":
+                t.join(timeout=5)
+
+        assert os.path.exists(outside_file), \
+            "ไฟล์นอก BASE_DIR ต้องไม่ถูกลบ"
+        print("PASS: cleanup path safety — files outside BASE_DIR not deleted")
+    finally:
+        server.copy_to_category = original_copy
+        if os.path.exists(outside_file):
+            os.remove(outside_file)
+
+
+def test_text_message_log_no_content():
+    """Log ข้อความ LINE ต้องไม่บันทึกเนื้อหา — บันทึกเฉพาะจำนวนตัวอักษร."""
+    import io
+    import logging
+
+    # ต้องทดสอบใน production mode เพราะ testing mode return ก่อนถึง text handler
+    original_testing = server.IS_TESTING
+    original_testing_docs = server.IS_TESTING_DOCS
+
+    # จับ log output
+    log_capture = io.StringIO()
+    handler = logging.StreamHandler(log_capture)
+    handler.setLevel(logging.INFO)
+    server.logger.addHandler(handler)
+
+    try:
+        server.IS_TESTING = False
+        server.IS_TESTING_DOCS = False
+
+        # ส่ง webhook text message จำลอง
+        body = json.dumps({
+            "events": [{
+                "type": "message",
+                "replyToken": "test_token_remediation",
+                "message": {
+                    "type": "text",
+                    "text": "ข้อมูลลับผู้ป่วย: นาย ก. creatinine 5.0"
+                }
+            }]
+        }).encode("utf-8")
+
+        sig = make_signature(body)
+        with server.app.test_client() as client:
+            resp = client.post(
+                "/webhook",
+                data=body,
+                content_type="application/json",
+                headers={"X-Line-Signature": sig},
+            )
+
+        log_output = log_capture.getvalue()
+
+        # ต้องไม่มีเนื้อหาข้อความใน log
+        assert "ข้อมูลลับผู้ป่วย" not in log_output, \
+            "เนื้อหาข้อความผู้ป่วยต้องไม่ปรากฏใน log"
+        assert "creatinine 5.0" not in log_output, \
+            "ข้อมูลทางการแพทย์ต้องไม่ปรากฏใน log"
+        # ต้องมี log แสดงจำนวนตัวอักษร
+        assert "chars" in log_output, \
+            "Log ต้องแสดงจำนวนตัวอักษร (chars) แทนเนื้อหา"
+
+        print("PASS: text message log does not contain patient data")
+    finally:
+        server.IS_TESTING = original_testing
+        server.IS_TESTING_DOCS = original_testing_docs
+        server.logger.removeHandler(handler)
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -881,6 +1098,12 @@ def main():
         test_gcs_upload_error_fallback,
         test_testing_docs_mode,
         test_health_version_updated,
+        # Security Remediation tests
+        test_cleanup_after_gcs_upload_success,
+        test_no_cleanup_when_gcs_fails,
+        test_cleanup_oserror_graceful,
+        test_cleanup_path_safety,
+        test_text_message_log_no_content,
     ]
 
     passed = 0
