@@ -897,10 +897,11 @@ def reply_message(reply_token: str, text: str):
             timeout=10,
         )
         resp.raise_for_status()
+        logger.info(f"ตอบกลับ LINE สำเร็จ (status={resp.status_code})")
     except Exception as e:
         # ไม่ log str(e) — exception ของ requests อาจมี URL และบริบทของ request
         status = getattr(getattr(e, "response", None), "status_code", "-")
-        logger.warning(
+        logger.error(
             f"ตอบกลับ LINE ไม่สำเร็จ: {type(e).__name__} (status={status})"
         )
 

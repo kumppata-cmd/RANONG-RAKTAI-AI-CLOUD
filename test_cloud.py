@@ -1876,6 +1876,118 @@ def test_line_capability_preserved():
     print("PASS: ความสามารถรับเอกสาร LINE และจัดเก็บยังทำงานครบ")
 
 
+# ─── กลุ่ม: Testing-docs reply logging ─────────────────────────
+
+
+def _text_event(text="ทดสอบ", event_id="evt-txt-001", user_id="Uabcdef1234567890"):
+    """สร้าง text message event สำหรับทดสอบ."""
+    return {
+        "type": "message",
+        "webhookEventId": event_id,
+        "deliveryContext": {"isRedelivery": False},
+        "replyToken": "reply-token-text-test",
+        "source": {"type": "user", "userId": user_id},
+        "message": {"type": "text", "id": "msg-txt-001", "text": text},
+    }
+
+
+def test_testing_docs_text_reply_called():
+    """โหมด testing-docs ต้องเรียก reply_message สำหรับข้อความ text."""
+    _fresh_state()
+    orig_testing = server.IS_TESTING
+    orig_docs = server.IS_TESTING_DOCS
+    orig_reply = server.reply_message
+    replies = []
+    try:
+        server.IS_TESTING = True
+        server.IS_TESTING_DOCS = True
+        server.reply_message = lambda token, text: replies.append(text)
+        resp = _post_webhook([_text_event("สถานะ", event_id="evt-docreply-01")])
+        _join_workers()
+        assert resp.status_code == 200
+        assert len(replies) >= 1, "ต้องเรียก reply_message อย่างน้อย 1 ครั้ง"
+        assert any("ทำงานปกติ" in r for r in replies), \
+            f"ต้องตอบสถานะระบบ แต่ได้: {replies}"
+    finally:
+        server.IS_TESTING = orig_testing
+        server.IS_TESTING_DOCS = orig_docs
+        server.reply_message = orig_reply
+    print("PASS: testing-docs เรียก reply_message สำหรับข้อความ text")
+
+
+def test_testing_docs_reply_success_logged():
+    """โหมด testing-docs ต้อง log INFO เมื่อ LINE Reply API ตอบกลับสำเร็จ."""
+    _fresh_state()
+    orig_testing = server.IS_TESTING
+    orig_docs = server.IS_TESTING_DOCS
+    orig_reply = server.reply_message
+    try:
+        server.IS_TESTING = True
+        server.IS_TESTING_DOCS = True
+        # คืนค่า reply_message จริง แต่ mock HTTP request
+        server.reply_message = orig_reply
+
+        class FakeResp:
+            status_code = 200
+            def raise_for_status(self):
+                pass
+
+        import unittest.mock as _mock
+        with _LogCapture() as cap, \
+             _mock.patch.object(server.http_requests, "post", return_value=FakeResp()):
+            server.reply_message("fake-token", "ทดสอบ")
+
+        assert any("ตอบกลับ LINE สำเร็จ" in r for r in cap.records), \
+            f"ต้องมี INFO log สำเร็จ แต่ได้: {cap.records}"
+        assert any("status=200" in r for r in cap.records), \
+            "ต้องแสดง status code ใน log"
+    finally:
+        server.IS_TESTING = orig_testing
+        server.IS_TESTING_DOCS = orig_docs
+        server.reply_message = orig_reply
+    print("PASS: testing-docs log INFO เมื่อ reply สำเร็จ")
+
+
+def test_testing_docs_reply_failure_logged():
+    """โหมด testing-docs ต้อง log ERROR เมื่อ LINE Reply API ล้มเหลว."""
+    _fresh_state()
+    orig_testing = server.IS_TESTING
+    orig_docs = server.IS_TESTING_DOCS
+    orig_reply = server.reply_message
+    try:
+        server.IS_TESTING = True
+        server.IS_TESTING_DOCS = True
+        server.reply_message = orig_reply
+
+        class FakeErrorResp:
+            status_code = 401
+
+        class FakeHTTPError(Exception):
+            def __init__(self):
+                self.response = FakeErrorResp()
+                super().__init__("Unauthorized")
+
+        import unittest.mock as _mock
+        with _LogCapture() as cap, \
+             _mock.patch.object(server.http_requests, "post",
+                                side_effect=FakeHTTPError()):
+            server.reply_message("fake-token", "ทดสอบ")
+
+        assert any("ตอบกลับ LINE ไม่สำเร็จ" in r for r in cap.records), \
+            f"ต้องมี ERROR log ล้มเหลว แต่ได้: {cap.records}"
+        assert any("status=401" in r for r in cap.records), \
+            "ต้องแสดง HTTP status ใน error log"
+        # ต้องไม่มี token หรือเนื้อหาข้อความใน log
+        for r in cap.records:
+            assert "fake-token" not in r, "Reply token ต้องไม่อยู่ใน log"
+            assert "ทดสอบ" not in r or "ตอบกลับ" in r, "เนื้อหาข้อความต้องไม่อยู่ใน log"
+    finally:
+        server.IS_TESTING = orig_testing
+        server.IS_TESTING_DOCS = orig_docs
+        server.reply_message = orig_reply
+    print("PASS: testing-docs log ERROR เมื่อ reply ล้มเหลว")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -1978,6 +2090,10 @@ def main():
         test_ocr_releases_memory_per_page,
         # ── Phase 1: ความสามารถเดิมต้องยังอยู่ ──
         test_line_capability_preserved,
+        # ── Testing-docs reply logging ──
+        test_testing_docs_text_reply_called,
+        test_testing_docs_reply_success_logged,
+        test_testing_docs_reply_failure_logged,
     ]
 
     passed = 0
