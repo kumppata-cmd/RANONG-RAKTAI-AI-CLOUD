@@ -31,6 +31,8 @@ import logging
 import shutil
 import tempfile
 import threading
+import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -95,9 +97,17 @@ BASE_DIR = os.getenv("BASE_DIR", "/tmp/ranong_raktai")
 
 # ─── ข้อจำกัดไฟล์ ────────────────────────────────────────
 MAX_FILE_SIZE = 20 * 1024 * 1024      # 20 MB
+# ขนาดขั้นต่ำเฉพาะไฟล์ binary — ไฟล์จริงของรูปแบบเหล่านี้ไม่เล็กกว่านี้
+# ไม่ใช้กับ .txt เพราะบันทึกข้อความสั้น ๆ เป็นเอกสารที่ถูกต้องได้
+MIN_BINARY_FILE_SIZE = 100
 MAX_PDF_PAGES = 50
 MAX_PDF_PAGES_VISION = 5
 ALLOWED_EXTENSIONS = {".txt", ".pdf", ".jpg", ".jpeg", ".png"}
+
+# ความยาวสูงสุดของชื่อไฟล์ขาเข้าที่ยอมรับก่อนตัดทิ้ง
+# (ชื่อไฟล์จากผู้ใช้ไม่ถูกนำไปใช้เป็นชื่อจัดเก็บแล้ว — ดู Phase 1 §2
+#  แต่ยังจำกัดไว้เพื่อกัน input ที่ยาวผิดปกติ)
+MAX_FILENAME_LENGTH = 200
 
 FOLDERS = {
     "inbox":    "01_LINE_INBOX",
@@ -107,6 +117,36 @@ FOLDERS = {
     "dialysis": "05_DIALYSIS_RECORDS",
     "review":   "06_AI_REVIEW",
 }
+
+# ─── AI ภายนอก — ล็อกที่ระดับโค้ด ────────────────────────
+# ข้อมูลผู้ป่วยต้องไม่ถูกส่งออกนอกระบบ จึงไม่อ่านค่านี้จาก ENV โดยเจตนา
+# การเปลี่ยนค่าต้องแก้โค้ด + review + commit เท่านั้น
+# ENABLE_AI_CLASSIFY ถูกเพิกเฉยสำหรับเส้นทาง AI ภายนอก
+EXTERNAL_AI_CLASSIFICATION_ALLOWED = False
+
+# ─── OCR ─────────────────────────────────────────────────
+# 200 DPI เพียงพอสำหรับ Tesseract กับข้อความขนาดปกติ และใช้หน่วยความจำ
+# น้อยกว่า 300 DPI ราว 56% (A4: ~26 MB → ~11.6 MB ต่อหน้า)
+OCR_DPI = int(os.getenv("OCR_DPI", "200"))
+# จำกัดงาน OCR ที่ทำพร้อมกันต่อ worker — ป้องกัน OOM บน instance เล็ก
+OCR_MAX_CONCURRENT = int(os.getenv("OCR_MAX_CONCURRENT", "1"))
+
+# ─── Rate Limiting / Deduplication ───────────────────────
+# Phase 1: เตรียมโค้ดไว้ ยังไม่เชื่อมบริการ Redis จริง
+# ถ้า REDIS_URL ว่าง (ค่าเริ่มต้น) ระบบใช้ in-memory backend ต่อ worker
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "5"))
+RATE_LIMIT_PER_HOUR = int(os.getenv("RATE_LIMIT_PER_HOUR", "30"))
+RATE_LIMIT_PER_DAY = int(os.getenv("RATE_LIMIT_PER_DAY", "100"))
+
+DEDUP_TTL_SECONDS = int(os.getenv("DEDUP_TTL_SECONDS", "86400"))      # 24 ชม.
+DEDUP_CONTENT_TTL_SECONDS = int(os.getenv("DEDUP_CONTENT_TTL", "600"))  # 10 นาที
+
+# Salt สำหรับ hash LINE User ID ก่อนใช้เป็น key
+# ยังไม่ตั้งใน ENV (Phase 1 ห้ามแก้ ENV) — ใช้ค่าสุ่มต่อ process ไปก่อน
+# ผลคือ rate limit counter จะรีเซ็ตเมื่อ restart ซึ่งยอมรับได้ในเฟสนี้
+USER_ID_SALT = os.getenv("USER_ID_SALT", "").strip() or uuid.uuid4().hex
 
 # ─── Logging ─────────────────────────────────────────────
 log_dir = os.path.join(BASE_DIR, "logs")
@@ -136,7 +176,14 @@ app = Flask(__name__)
 class StorageLocal:
     """เก็บไฟล์บน local disk (ephemeral บน Render)."""
 
-    def save(self, data: bytes, category: str, filename: str) -> str:
+    def save(
+        self,
+        data: bytes,
+        category: str,
+        filename: str,
+        metadata: dict | None = None,
+    ) -> str:
+        # metadata ไม่ถูกใช้บน local disk — รับไว้ให้ interface ตรงกับ GCS
         folder = os.path.join(BASE_DIR, FOLDERS.get(category, FOLDERS["review"]))
         os.makedirs(folder, exist_ok=True)
         dest = os.path.join(folder, filename)
@@ -161,7 +208,13 @@ class StorageS3:
         self.bucket = STORAGE_BUCKET
         logger.info(f"S3 Storage: bucket={self.bucket} (ยังไม่เชื่อมต่อ)")
 
-    def save(self, data: bytes, category: str, filename: str) -> str:
+    def save(
+        self,
+        data: bytes,
+        category: str,
+        filename: str,
+        metadata: dict | None = None,
+    ) -> str:
         # TODO: เชื่อมต่อ boto3 เมื่อพร้อม
         # import boto3
         # s3 = boto3.client('s3')
@@ -169,7 +222,7 @@ class StorageS3:
         # s3.put_object(Bucket=self.bucket, Key=key, Body=data)
         # return f"s3://{self.bucket}/{key}"
         logger.warning("S3 Storage ยังไม่เชื่อมต่อ — fallback ไป local")
-        return StorageLocal().save(data, category, filename)
+        return StorageLocal().save(data, category, filename, metadata)
 
     def list_files(self, category: str) -> list[str]:
         logger.warning("S3 Storage ยังไม่เชื่อมต่อ")
@@ -237,8 +290,20 @@ class StorageGCS:
         ext = os.path.splitext(filename)[1].lower()
         return self.CONTENT_TYPES.get(ext, "application/octet-stream")
 
-    def save(self, data: bytes, category: str, filename: str) -> str:
-        """อัปโหลดไฟล์ไป GCS — fallback ไป local ถ้า GCS ไม่พร้อม."""
+    def save(
+        self,
+        data: bytes,
+        category: str,
+        filename: str,
+        metadata: dict | None = None,
+    ) -> str:
+        """อัปโหลดไฟล์ไป GCS — fallback ไป local ถ้า GCS ไม่พร้อม.
+
+        filename ที่ส่งเข้ามาควรเป็นชื่อแบบ UUID ที่สร้างตอนรับไฟล์
+        (ดู build_storage_filename) — ไม่ใช่ชื่อไฟล์ต้นฉบับจากผู้ใช้
+
+        metadata ต้องไม่มีข้อมูลส่วนบุคคล — ดู build_object_metadata
+        """
         # ป้องกัน path traversal (ต้องทำก่อน is_ready check เพราะ fallback ก็ต้องใช้ชื่อที่ปลอดภัย)
         filename = os.path.basename(filename)
         if not filename:
@@ -249,21 +314,37 @@ class StorageGCS:
             return self._fallback.save(data, category, filename)
 
         folder = FOLDERS.get(category, FOLDERS["review"])
-        # เพิ่ม timestamp เพื่อป้องกันไฟล์ซ้ำ
-        name, ext = os.path.splitext(filename)
-        unique_name = f"{name}_{datetime.now():%Y%m%d_%H%M%S_%f}{ext}"
-        blob_path = f"{folder}/{unique_name}"
+        # แบ่งตามเดือน เพื่อไม่ให้โฟลเดอร์เดียวสะสมไฟล์จนเปิดช้า
+        blob_path = f"{folder}/{datetime.now():%Y-%m}/{filename}"
 
         content_type = self._get_content_type(filename)
 
         try:
             blob = self._bucket.blob(blob_path)
-            blob.upload_from_string(data, content_type=content_type)
+            if metadata:
+                blob.metadata = metadata
+            # if_generation_match=0 → เขียนได้เฉพาะเมื่อ object ยังไม่มี
+            # เป็นการกันเขียนทับแบบ atomic ฝั่ง GCS ซึ่งทำงานแม้ dedup layer ล่ม
+            blob.upload_from_string(
+                data, content_type=content_type, if_generation_match=0
+            )
             gcs_uri = f"gs://{self.bucket_name}/{blob_path}"
-            logger.info(f"GCS upload สำเร็จ: {gcs_uri} ({len(data):,} bytes, {content_type})")
+            # ไม่ log ชื่อไฟล์ต้นฉบับ — ชื่อ object เป็น UUID จึงไม่ระบุตัวบุคคล
+            logger.info(
+                f"GCS upload สำเร็จ: {folder} ({len(data):,} bytes, {content_type})"
+            )
             return gcs_uri
         except Exception as e:
-            logger.error(f"GCS upload ล้มเหลว: {e} — fallback ไป local")
+            # 412 Precondition Failed = object นี้มีอยู่แล้ว → ถือว่าจัดเก็บสำเร็จ
+            # (เป็นผลจากการส่งซ้ำ ไม่ใช่ความผิดพลาด) จึงไม่ fallback ไป local
+            if getattr(e, "code", None) == 412:
+                gcs_uri = f"gs://{self.bucket_name}/{blob_path}"
+                logger.info(f"GCS: object มีอยู่แล้ว ไม่เขียนทับ ({folder})")
+                return gcs_uri
+            # ไม่ log str(e) — ข้อความ error ของ GCS อาจมี blob path
+            logger.error(
+                f"GCS upload ล้มเหลว: {type(e).__name__} — fallback ไป local"
+            )
             return self._fallback.save(data, category, filename)
 
     def list_files(self, category: str) -> list[str]:
@@ -278,7 +359,7 @@ class StorageGCS:
             blobs = self._client.list_blobs(self.bucket_name, prefix=prefix)
             return [blob.name.split("/")[-1] for blob in blobs if blob.name != prefix]
         except Exception as e:
-            logger.error(f"GCS list_files ล้มเหลว: {e}")
+            logger.error(f"GCS list_files ล้มเหลว: {type(e).__name__}")
             return []
 
     def check_connection(self) -> dict:
@@ -305,6 +386,258 @@ storage = get_storage()
 
 
 # ═══════════════════════════════════════════════════════════
+# Rate Limiting & Deduplication
+#
+# ออกแบบให้ปลอดภัยเมื่อมีหลาย Gunicorn worker:
+#   - backend ที่แชร์ได้ (Redis) ทำให้ dedup เป็น atomic ข้าม worker
+#   - ถ้ายังไม่เชื่อม Redis หรือ Redis ล่ม → fallback เป็น in-memory ต่อ worker
+#     พร้อมลดเพดาน rate limit ลงครึ่งหนึ่ง เพื่อให้เพดานรวมใกล้เคียงค่าที่ตั้งไว้
+#
+# Phase 1: ยังไม่เชื่อมบริการ Redis จริง (REDIS_URL ว่าง) และไม่เพิ่ม
+#          dependency — import redis แบบ optional เท่านั้น
+# ═══════════════════════════════════════════════════════════
+
+def hash_user_id(user_id: str) -> str:
+    """แปลง LINE User ID เป็น hash — ไม่เก็บ ID ดิบใน key, log หรือ metadata."""
+    return hashlib.sha256(
+        ((user_id or "unknown") + USER_ID_SALT).encode("utf-8")
+    ).hexdigest()[:32]
+
+
+class InMemoryBackend:
+    """Backend เริ่มต้น — อยู่ใน process เดียว ไม่แชร์ข้าม worker."""
+
+    name = "memory"
+    is_shared = False
+
+    def __init__(self):
+        self._data: dict[str, list] = {}   # key -> [value, expire_at]
+        self._lock = threading.Lock()
+        self._last_cleanup = time.time()
+
+    def _purge(self, now: float):
+        """ลบ key ที่หมดอายุ — ทำทุก 60 วินาที ป้องกัน memory leak."""
+        if now - self._last_cleanup < 60:
+            return
+        expired = [k for k, v in self._data.items() if v[1] <= now]
+        for k in expired:
+            self._data.pop(k, None)
+        self._last_cleanup = now
+
+    def set_if_absent(self, key: str, ttl: int) -> bool:
+        """ตั้งค่าเฉพาะเมื่อยังไม่มี key — atomic ภายใน process."""
+        now = time.time()
+        with self._lock:
+            self._purge(now)
+            entry = self._data.get(key)
+            if entry and entry[1] > now:
+                return False
+            self._data[key] = [1, now + ttl]
+            return True
+
+    def incr(self, key: str, ttl: int) -> int:
+        now = time.time()
+        with self._lock:
+            self._purge(now)
+            entry = self._data.get(key)
+            if entry and entry[1] > now:
+                entry[0] += 1
+                return entry[0]
+            self._data[key] = [1, now + ttl]
+            return 1
+
+    def decr(self, key: str) -> None:
+        now = time.time()
+        with self._lock:
+            entry = self._data.get(key)
+            if entry and entry[1] > now and entry[0] > 0:
+                entry[0] -= 1
+
+
+class RedisBackend:
+    """Backend ที่แชร์ข้าม worker — ใช้คำสั่ง atomic ของ Redis."""
+
+    name = "redis"
+    is_shared = True
+
+    def __init__(self, client):
+        self._c = client
+
+    def set_if_absent(self, key: str, ttl: int) -> bool:
+        # SET key 1 NX EX ttl — atomic ในคำสั่งเดียว
+        return bool(self._c.set(key, 1, nx=True, ex=ttl))
+
+    def incr(self, key: str, ttl: int) -> int:
+        value = int(self._c.incr(key))
+        if value == 1:
+            self._c.expire(key, ttl)
+        return value
+
+    def decr(self, key: str) -> None:
+        self._c.decr(key)
+
+
+class StateStore:
+    """เลือก backend และจัดการเมื่อ Redis ใช้ไม่ได้ (fail-open + fallback).
+
+    สถานะที่เป็นไปได้:
+      not_configured = ยังไม่ตั้ง REDIS_URL (ค่าเริ่มต้นใน Phase 1)
+      unavailable    = ตั้ง REDIS_URL แล้วแต่ไม่มี redis package
+      connected      = เชื่อมต่อ Redis สำเร็จ
+      degraded       = เคยเชื่อมได้/ตั้งค่าไว้ แต่เรียกใช้ไม่สำเร็จ → ใช้ fallback
+    """
+
+    def __init__(self, redis_url: str = ""):
+        self._fallback = InMemoryBackend()
+        self._redis = None
+        self._status = "not_configured"
+        self._error = None
+        if redis_url:
+            self._connect(redis_url)
+
+    def _connect(self, url: str):
+        try:
+            import redis as redis_lib   # optional — ไม่อยู่ใน requirements.txt
+        except ImportError:
+            self._status = "unavailable"
+            self._error = "redis package ไม่ได้ติดตั้ง"
+            logger.warning(f"Redis: {self._error} — ใช้ in-memory fallback")
+            return
+        try:
+            client = redis_lib.Redis.from_url(
+                url,
+                socket_connect_timeout=2,   # timeout สั้น — ไม่ให้ Redis ที่ค้าง
+                socket_timeout=2,           # ทำให้ LINE webhook timeout ตาม
+                retry_on_timeout=False,
+                health_check_interval=30,
+                decode_responses=True,
+            )
+            client.ping()
+            self._redis = RedisBackend(client)
+            self._status = "connected"
+            logger.info("Redis: เชื่อมต่อสำเร็จ — dedup/rate limit แชร์ข้าม worker")
+        except Exception as e:
+            self._status = "degraded"
+            self._error = type(e).__name__
+            logger.error(f"Redis: เชื่อมต่อไม่สำเร็จ ({self._error}) — ใช้ in-memory fallback")
+
+    @property
+    def status(self) -> str:
+        return self._status
+
+    @property
+    def error(self) -> str | None:
+        return self._error
+
+    @property
+    def is_shared(self) -> bool:
+        """True เฉพาะเมื่อ backend แชร์ข้าม worker ได้จริง."""
+        return self._redis is not None
+
+    def _call(self, method: str, *args):
+        if self._redis is not None:
+            try:
+                return getattr(self._redis, method)(*args)
+            except Exception as e:
+                self._status = "degraded"
+                self._error = type(e).__name__
+                self._redis = None
+                logger.error(
+                    f"Redis ใช้ไม่ได้ ({self._error}) — สลับไป in-memory fallback"
+                )
+        return getattr(self._fallback, method)(*args)
+
+    def set_if_absent(self, key: str, ttl: int) -> bool:
+        return self._call("set_if_absent", key, ttl)
+
+    def incr(self, key: str, ttl: int) -> int:
+        return self._call("incr", key, ttl)
+
+    def decr(self, key: str) -> None:
+        return self._call("decr", key)
+
+
+class DedupGuard:
+    """ป้องกันการประมวลผลซ้ำจาก LINE retry และ event ที่ส่งซ้ำ.
+
+    LINE ระบุว่า event เดียวกันอาจถูกส่งมามากกว่าหนึ่งครั้ง และ event ที่
+    ส่งซ้ำจะมี webhookEventId เดิม ต่างกันเฉพาะ deliveryContext.isRedelivery
+    """
+
+    def __init__(self, store: StateStore):
+        self._store = store
+
+    def is_new_event(self, event_id: str) -> bool:
+        if not event_id:
+            return True     # ไม่มี id → ให้ชั้นอื่น (message id / sha256) กันแทน
+        return self._store.set_if_absent(f"dedup:evt:{event_id}", DEDUP_TTL_SECONDS)
+
+    def is_new_message(self, message_id: str) -> bool:
+        if not message_id:
+            return True
+        return self._store.set_if_absent(f"dedup:msg:{message_id}", DEDUP_TTL_SECONDS)
+
+    def is_new_content(self, user_hash: str, content_sha256: str) -> bool:
+        """กันผู้ใช้ส่งไฟล์เนื้อหาเดิมซ้ำด้วยมือ — หน้าต่างสั้นเพียง 10 นาที
+        เพราะผู้ป่วยอาจตั้งใจส่งเอกสารหน้าตาเหมือนกันคนละรอบจริง ๆ
+        """
+        key = f"dedup:sha:{user_hash}:{content_sha256}"
+        return self._store.set_if_absent(key, DEDUP_CONTENT_TTL_SECONDS)
+
+
+class RateLimiter:
+    """จำกัดจำนวนไฟล์ต่อผู้ส่ง — นับ 3 หน้าต่างเวลาพร้อมกัน.
+
+    เพิ่มตัวนับก่อนแล้วตรวจ ถ้าเกินจะคืนค่า (decr) ทุก key ที่เพิ่งเพิ่มไป
+    เพื่อไม่ให้คำขอที่ถูกปฏิเสธกิน quota ของหน้าต่างอื่น
+    """
+
+    def __init__(self, store: StateStore):
+        self._store = store
+
+    def _limit(self, configured: int) -> int:
+        """ลดเพดานครึ่งหนึ่งเมื่อ backend ไม่ได้แชร์ข้าม worker.
+
+        Gunicorn 2 workers ที่นับแยกกันจะทำให้เพดานรวมเป็น 2 เท่า
+        การหารสองทำให้เพดานรวมใกล้เคียงค่าที่ตั้งไว้
+        """
+        if self._store.is_shared:
+            return configured
+        return max(1, configured // 2)
+
+    def check(self, user_hash: str) -> tuple[bool, str]:
+        now = int(time.time())
+        windows = [
+            (f"rl:{user_hash}:m:{now // 60}", 60,
+             self._limit(RATE_LIMIT_PER_MINUTE), "นาที"),
+            (f"rl:{user_hash}:h:{now // 3600}", 3600,
+             self._limit(RATE_LIMIT_PER_HOUR), "ชั่วโมง"),
+            (f"rl:{user_hash}:d:{now // 86400}", 86400,
+             self._limit(RATE_LIMIT_PER_DAY), "วัน"),
+        ]
+        incremented: list[str] = []
+        for key, ttl, limit, unit in windows:
+            value = self._store.incr(key, ttl)
+            incremented.append(key)
+            if value > limit:
+                for k in incremented:
+                    self._store.decr(k)
+                return False, (
+                    f"ส่งเอกสารได้ไม่เกิน {limit} ไฟล์ต่อ{unit}\n"
+                    f"กรุณารอสักครู่แล้วส่งใหม่อีกครั้ง"
+                )
+        return True, "OK"
+
+
+state_store = StateStore(REDIS_URL)
+dedup_guard = DedupGuard(state_store)
+rate_limiter = RateLimiter(state_store)
+
+# จำกัดงาน OCR ที่ทำพร้อมกันต่อ worker — ป้องกัน OOM บน instance เล็ก
+_ocr_semaphore = threading.Semaphore(max(1, OCR_MAX_CONCURRENT))
+
+
+# ═══════════════════════════════════════════════════════════
 # File Validation
 # ═══════════════════════════════════════════════════════════
 
@@ -315,30 +648,53 @@ MAGIC_BYTES = {
 }
 
 
+def looks_like_utf8_text(filepath: str) -> bool:
+    """ตรวจว่าเป็นไฟล์ข้อความ UTF-8 ที่ถูกต้องและไม่มี null byte.
+
+    ตรวจทั้งไฟล์ ไม่ใช่แค่ 1024 ไบต์แรก — ไฟล์ binary ที่ขึ้นต้นด้วยข้อความ
+    จะถูกจับได้ที่ไบต์ถัดไป และ null byte เป็นสัญญาณชัดว่าไม่ใช่ไฟล์ข้อความ
+    """
+    try:
+        with open(filepath, "rb") as f:
+            data = f.read(MAX_FILE_SIZE + 1)
+    except OSError:
+        return False
+
+    if not data:
+        return False
+    if b"\x00" in data:
+        return False
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 def detect_file_type(filepath: str) -> str | None:
     """ตรวจสอบชนิดไฟล์จริงจาก magic bytes."""
     try:
         with open(filepath, "rb") as f:
             header = f.read(8)
-    except Exception:
+    except OSError:
         return None
 
     for magic, ext in MAGIC_BYTES.items():
         if header[:len(magic)] == magic:
             return ext
 
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            f.read(1024)
+    if looks_like_utf8_text(filepath):
         return ".txt"
-    except (UnicodeDecodeError, Exception):
-        pass
 
     return None
 
 
 def validate_file(filepath: str) -> tuple[bool, str]:
-    """ตรวจสอบไฟล์ก่อนประมวลผล."""
+    """ตรวจสอบไฟล์ก่อนประมวลผล.
+
+    ข้อความที่คืนกลับต้องไม่มีชื่อไฟล์หรือข้อมูลส่วนบุคคล
+    เพราะถูกนำไปบันทึกลง log และ classification record
+    """
     try:
         size = os.path.getsize(filepath)
     except OSError:
@@ -354,7 +710,14 @@ def validate_file(filepath: str) -> tuple[bool, str]:
     if ext not in ALLOWED_EXTENSIONS:
         return False, f"ไม่รองรับนามสกุล {ext}"
 
-    if ext != ".txt":
+    if ext != ".txt" and size < MIN_BINARY_FILE_SIZE:
+        return False, f"ไฟล์ {ext} เล็กผิดปกติ ({size} bytes) — อาจเสียหาย"
+
+    if ext == ".txt":
+        # เดิมข้าม .txt ไปเลย ทำให้ไฟล์ binary ที่เปลี่ยนนามสกุลเป็น .txt ผ่านได้
+        if not looks_like_utf8_text(filepath):
+            return False, "นามสกุล .txt แต่เนื้อหาไม่ใช่ข้อความ UTF-8"
+    else:
         real_type = detect_file_type(filepath)
         if real_type is None:
             return False, "ไม่สามารถระบุชนิดไฟล์จริงได้"
@@ -387,7 +750,8 @@ def extract_pdf_text(filepath: str) -> str:
         logger.warning("pypdf ไม่ได้ติดตั้ง")
         return ""
     except Exception as e:
-        logger.error(f"อ่าน PDF ล้มเหลว: {e}")
+        # ไม่ log str(e) — OSError จาก pypdf มี path พร้อมชื่อไฟล์
+        logger.error(f"อ่าน PDF ล้มเหลว: {type(e).__name__}")
         return ""
 
 
@@ -410,50 +774,83 @@ def is_scanned_pdf(filepath: str) -> bool:
 # OCR — Tesseract (tha+eng)
 # ═══════════════════════════════════════════════════════════
 
-MAX_OCR_PAGES = 5
+MAX_OCR_PAGES = int(os.getenv("MAX_OCR_PAGES", "5"))
 
 
 def extract_text_with_ocr(filepath: str) -> str:
-    """ดึงข้อความด้วย Tesseract OCR (tha+eng)."""
+    """ดึงข้อความด้วย Tesseract OCR (tha+eng).
+
+    การจัดการหน่วยความจำ:
+      - render ที่ OCR_DPI (ค่าเริ่มต้น 200) แทน 300 — ลดหน่วยความจำราว 56%
+        (A4 ที่ 300 DPI ≈ 26 MB ต่อ buffer, ที่ 200 DPI ≈ 11.6 MB)
+      - คืนหน่วยความจำของ pixmap และ image ทันทีหลังจบแต่ละหน้า
+        แทนที่จะสะสมไว้จนจบลูป → พีคเท่ากับหนึ่งหน้า ไม่ใช่ทุกหน้ารวมกัน
+      - จำกัดงาน OCR พร้อมกันต่อ worker ด้วย semaphore — ป้องกัน OOM
+        บน Render instance 512 MB ที่รัน 2 workers
+    """
     if not HAS_TESSERACT or not HAS_PIL:
         logger.warning("OCR ไม่พร้อม — ขาด pytesseract หรือ Pillow")
         return ""
 
     ext = os.path.splitext(filepath)[1].lower()
     ocr_lang = "tha+eng"
+    scale = OCR_DPI / 72
 
-    try:
-        if ext in (".jpg", ".jpeg", ".png"):
-            img = Image.open(filepath)
-            text = pytesseract.image_to_string(img, lang=ocr_lang)
-            logger.info(f"OCR ภาพ: ได้ {len(text.strip())} ตัวอักษร")
-            return text.strip()
+    with _ocr_semaphore:
+        try:
+            if ext in (".jpg", ".jpeg", ".png"):
+                img = None
+                try:
+                    img = Image.open(filepath)
+                    text = pytesseract.image_to_string(img, lang=ocr_lang)
+                finally:
+                    if img is not None:
+                        img.close()
+                logger.info(f"OCR ภาพ: ได้ {len(text.strip())} ตัวอักษร")
+                return text.strip()
 
-        if ext == ".pdf":
-            if not HAS_PYMUPDF:
-                logger.warning("PyMuPDF ไม่ได้ติดตั้ง — ไม่สามารถ OCR PDF สแกนได้")
-                return ""
+            if ext == ".pdf":
+                if not HAS_PYMUPDF:
+                    logger.warning("PyMuPDF ไม่ได้ติดตั้ง — ไม่สามารถ OCR PDF สแกนได้")
+                    return ""
 
-            doc = pymupdf.open(filepath)
-            num_pages = min(len(doc), MAX_OCR_PAGES)
-            texts = []
+                doc = pymupdf.open(filepath)
+                try:
+                    num_pages = min(len(doc), MAX_OCR_PAGES)
+                    texts = []
 
-            for i in range(num_pages):
-                page = doc[i]
-                mat = pymupdf.Matrix(300 / 72, 300 / 72)
-                pix = page.get_pixmap(matrix=mat)
-                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                page_text = pytesseract.image_to_string(img, lang=ocr_lang)
-                if page_text.strip():
-                    texts.append(page_text.strip())
+                    for i in range(num_pages):
+                        pix = None
+                        img = None
+                        try:
+                            page = doc[i]
+                            mat = pymupdf.Matrix(scale, scale)
+                            pix = page.get_pixmap(matrix=mat)
+                            img = Image.frombytes(
+                                "RGB", [pix.width, pix.height], pix.samples
+                            )
+                            page_text = pytesseract.image_to_string(img, lang=ocr_lang)
+                            if page_text.strip():
+                                texts.append(page_text.strip())
+                        finally:
+                            # คืนหน่วยความจำทันที ไม่รอ garbage collector
+                            if img is not None:
+                                img.close()
+                            if pix is not None:
+                                pix = None
+                finally:
+                    doc.close()
 
-            doc.close()
-            full_text = "\n\n".join(texts)
-            logger.info(f"OCR PDF สแกน ({num_pages} หน้า): ได้ {len(full_text)} ตัวอักษร")
-            return full_text
+                full_text = "\n\n".join(texts)
+                logger.info(
+                    f"OCR PDF สแกน ({num_pages} หน้า @ {OCR_DPI} DPI): "
+                    f"ได้ {len(full_text)} ตัวอักษร"
+                )
+                return full_text
 
-    except Exception as e:
-        logger.error(f"OCR ล้มเหลว ({filepath}): {e}")
+        except Exception as e:
+            # ไม่ log filepath หรือ str(e) — ทั้งสองอย่างอาจมีชื่อไฟล์ของผู้ป่วย
+            logger.error(f"OCR ล้มเหลว: {type(e).__name__}")
 
     return ""
 
@@ -501,7 +898,11 @@ def reply_message(reply_token: str, text: str):
         )
         resp.raise_for_status()
     except Exception as e:
-        logger.warning(f"ตอบกลับ LINE ไม่สำเร็จ: {e}")
+        # ไม่ log str(e) — exception ของ requests อาจมี URL และบริบทของ request
+        status = getattr(getattr(e, "response", None), "status_code", "-")
+        logger.warning(
+            f"ตอบกลับ LINE ไม่สำเร็จ: {type(e).__name__} (status={status})"
+        )
 
 
 def download_line_content(message_id: str) -> bytes | None:
@@ -520,7 +921,11 @@ def download_line_content(message_id: str) -> bytes | None:
             return None
         return content
     except Exception as e:
-        logger.error(f"ดาวน์โหลดไฟล์จาก LINE ล้มเหลว (msg_id={message_id}): {e}")
+        status = getattr(getattr(e, "response", None), "status_code", "-")
+        logger.error(
+            f"ดาวน์โหลดไฟล์จาก LINE ล้มเหลว: {type(e).__name__} "
+            f"(status={status}, msg_id={message_id})"
+        )
         return None
 
 
@@ -542,12 +947,74 @@ def get_content_type_ext(message_id: str) -> str:
     return ".dat"
 
 
+def normalize_incoming_extension(raw_name_or_ext: str) -> str:
+    """ดึงนามสกุลที่ปลอดภัยจากชื่อไฟล์หรือนามสกุลที่ผู้ใช้ส่งมา.
+
+    ชื่อไฟล์ต้นฉบับถูกใช้เพื่อดูนามสกุลเท่านั้น ไม่ถูกนำไปตั้งชื่อไฟล์จัดเก็บ
+    """
+    raw = (raw_name_or_ext or "")[:MAX_FILENAME_LENGTH]
+    ext = raw if raw.startswith(".") else os.path.splitext(raw)[1]
+    ext = ext.lower().strip()
+    return ext if ext in ALLOWED_EXTENSIONS else ""
+
+
+def build_storage_filename(ext: str) -> tuple[str, str]:
+    """สร้างชื่อไฟล์สุ่มที่ไม่ระบุตัวบุคคล.
+
+    ชื่อไฟล์ต้นฉบับจากผู้ใช้มักมีชื่อผู้ป่วย (เช่น "สมชาย_ผลเลือด.pdf")
+    จึงไม่นำมาใช้เป็นชื่อจัดเก็บและไม่บันทึกลง log
+
+    UUID v4 มีความสุ่ม 122 บิต — ชื่อไฟล์ซ้ำกันแทบเป็นไปไม่ได้
+    จึงไม่ต้องพึ่ง timestamp ต่อท้ายอีกต่อไป
+
+    คืนค่า (doc_id, filename)
+    """
+    safe_ext = ext if ext in ALLOWED_EXTENSIONS else ".dat"
+    doc_id = str(uuid.uuid4())
+    return doc_id, f"{doc_id}{safe_ext}"
+
+
+def content_sha256(data: bytes) -> str:
+    """hash เนื้อหาไฟล์ — ใช้ตรวจไฟล์ซ้ำและยืนยันความถูกต้อง."""
+    return hashlib.sha256(data).hexdigest()
+
+
+def build_object_metadata(
+    doc_id: str,
+    category: str,
+    ext: str,
+    size_bytes: int,
+    sha256_hex: str,
+) -> dict:
+    """สร้าง metadata สำหรับ GCS object.
+
+    ต้องไม่มีข้อมูลส่วนบุคคล — ไม่เก็บชื่อไฟล์ต้นฉบับ, LINE User ID,
+    ชื่อผู้ป่วย หรือเนื้อหาเอกสาร
+    """
+    return {
+        "doc_id": doc_id,
+        "category": category,
+        "ext": ext,
+        "size_bytes": str(size_bytes),
+        "content_sha256": sha256_hex,
+        "received_at": datetime.now().isoformat(timespec="seconds"),
+        "source": "line_oa",
+        "classifier": "internal",
+    }
+
+
 def save_to_inbox(data: bytes, filename: str) -> str:
-    """บันทึกไฟล์ลง inbox (ephemeral disk)."""
+    """บันทึกไฟล์ลง inbox (ephemeral disk).
+
+    filename ควรเป็นชื่อแบบ UUID จาก build_storage_filename
+    """
     # ป้องกัน path traversal — ใช้เฉพาะชื่อไฟล์ ไม่รวม path
     filename = os.path.basename(filename)
     if not filename:
         filename = f"unnamed_{datetime.now():%Y%m%d_%H%M%S}.dat"
+    if len(filename) > MAX_FILENAME_LENGTH:
+        name, ext = os.path.splitext(filename)
+        filename = name[: max(1, MAX_FILENAME_LENGTH - len(ext))] + ext
     inbox = os.path.join(BASE_DIR, FOLDERS["inbox"])
     os.makedirs(inbox, exist_ok=True)
     filepath = os.path.join(inbox, filename)
@@ -558,7 +1025,8 @@ def save_to_inbox(data: bytes, filename: str) -> str:
         )
     with open(filepath, "wb") as f:
         f.write(data)
-    logger.info(f"บันทึกไฟล์: {filepath} ({len(data):,} bytes)")
+    # ไม่ log path เต็ม — log เฉพาะ basename ซึ่งเป็น UUID และขนาดไฟล์
+    logger.info(f"บันทึกไฟล์ inbox: {os.path.basename(filepath)} ({len(data):,} bytes)")
     return filepath
 
 
@@ -604,11 +1072,9 @@ def call_claude_api(messages_content: list) -> dict | None:
             timeout=60,
         )
         if resp.status_code != 200:
-            try:
-                err_body = resp.text[:500]
-            except Exception:
-                err_body = "(ไม่สามารถอ่าน response ได้)"
-            logger.error(f"Claude API HTTP {resp.status_code}: {err_body}")
+            # ไม่ log response body — error ของ API อาจสะท้อนเนื้อหา request
+            # ซึ่งเป็น base64 ของเอกสารผู้ป่วยกลับมา
+            logger.error(f"Claude API HTTP {resp.status_code}")
             resp.raise_for_status()
 
         result = resp.json()
@@ -633,12 +1099,22 @@ def call_claude_api(messages_content: list) -> dict | None:
         logger.warning("Claude ตอบไม่เป็น JSON")
         return None
     except Exception as e:
-        logger.error(f"Claude API error: {e}")
+        # เส้นทางนี้ถูกล็อกไว้แล้ว แต่ยังต้องปลอดภัยหากมีการเปิดใช้ในอนาคต
+        # — str(e) อาจมีเนื้อหา request ซึ่งเป็น base64 ของเอกสารผู้ป่วย
+        logger.error(f"Claude API error: {type(e).__name__}")
         return None
 
 
 def classify_with_claude(filepath: str) -> dict:
-    """ส่งเอกสารไปให้ Claude API จำแนกประเภท."""
+    """ส่งเอกสารไปให้ Claude API จำแนกประเภท.
+
+    ถูกล็อกไว้ที่ระดับโค้ดด้วย EXTERNAL_AI_CLASSIFICATION_ALLOWED
+    เพื่อไม่ให้การตั้งค่า ENV เปิดการส่งข้อมูลผู้ป่วยออกนอกระบบได้
+    """
+    if not EXTERNAL_AI_CLASSIFICATION_ALLOWED:
+        logger.info("AI ภายนอกปิดอยู่ที่ระดับโค้ด — ใช้การจำแนกภายใน")
+        return classify_with_keywords(filepath)
+
     if IS_TESTING:
         logger.info("TESTING MODE: ไม่เรียก Claude API — ใช้ keyword classification แทน")
         return classify_with_keywords(filepath)
@@ -709,7 +1185,7 @@ def classify_with_claude(filepath: str) -> dict:
             return classify_with_keywords(filepath)
 
     except Exception as e:
-        logger.error(f"classify_with_claude error: {e}")
+        logger.error(f"classify_with_claude error: {type(e).__name__}")
         return classify_with_keywords(filepath)
 
 
@@ -806,9 +1282,11 @@ def classify_with_keywords(filepath: str) -> dict:
         if score >= min_match and score > best_score:
             best, best_score = cat, score
 
+    # log เฉพาะจำนวน hits — ไม่ log รายการคำที่ match
+    # เพราะคำที่พบเปิดเผยเนื้อหาเชิงคลินิกของเอกสาร
     for cat, matched in all_matches.items():
         if matched:
-            logger.info(f"  keyword [{cat}]: {len(matched)} hits = {matched[:5]}")
+            logger.info(f"  keyword [{cat}]: {len(matched)} hits")
 
     return {
         "category": best,
@@ -817,7 +1295,9 @@ def classify_with_keywords(filepath: str) -> dict:
     }
 
 
-def copy_to_category(src_path: str, category: str) -> str:
+def copy_to_category(
+    src_path: str, category: str, metadata: dict | None = None
+) -> str:
     """คัดลอกไฟล์ไปยังโฟลเดอร์ตามประเภท + cloud storage."""
     # Local copy (ephemeral)
     dest_folder = os.path.join(BASE_DIR, FOLDERS.get(category, FOLDERS["review"]))
@@ -830,7 +1310,8 @@ def copy_to_category(src_path: str, category: str) -> str:
             dest_folder, f"{name}_{datetime.now():%Y%m%d_%H%M%S}{ext}"
         )
     shutil.copy2(src_path, dest_path)
-    logger.info(f"คัดลอก → {dest_path}")
+    # ไม่ log path เต็ม
+    logger.info(f"คัดลอก → {FOLDERS.get(category, FOLDERS['review'])}")
 
     # Cloud storage (ถ้าตั้งค่าไว้ และ backend ไม่ใช่ local)
     cloud_path = None
@@ -838,16 +1319,26 @@ def copy_to_category(src_path: str, category: str) -> str:
         try:
             with open(src_path, "rb") as f:
                 data = f.read()
-            cloud_path = storage.save(data, category, filename)
-            logger.info(f"Cloud storage → {cloud_path}")
+            cloud_path = storage.save(data, category, filename, metadata)
         except Exception as e:
-            logger.error(f"Cloud storage error: {e}")
+            logger.error(f"Cloud storage error: {type(e).__name__}")
 
     return cloud_path if cloud_path and cloud_path.startswith("gs://") else dest_path
 
 
-def process_file_async(filepath: str, reply_token: str | None = None):
-    """ประมวลผลไฟล์ในเธรดแยก."""
+def process_file_async(
+    filepath: str,
+    reply_token: str | None = None,
+    doc_id: str | None = None,
+    sha256_hex: str | None = None,
+):
+    """ประมวลผลไฟล์ในเธรดแยก.
+
+    doc_id และ sha256_hex มาจากตอนรับไฟล์ ถ้าไม่ส่งมาจะอนุมานจากชื่อไฟล์
+    (ชื่อไฟล์เป็น UUID อยู่แล้ว) เพื่อให้เรียกใช้แบบเดิมได้
+    """
+    _doc_id = doc_id or os.path.splitext(os.path.basename(filepath))[0]
+
     def _run():
         try:
             is_valid, reason = validate_file(filepath)
@@ -860,15 +1351,29 @@ def process_file_async(filepath: str, reply_token: str | None = None):
                 result = classify_with_keywords(filepath)
 
             category = result.get("category", "review")
-            dest = copy_to_category(filepath, category)
+            ext_now = os.path.splitext(filepath)[1].lower()
+            try:
+                size_now = os.path.getsize(filepath)
+            except OSError:
+                size_now = 0
 
-            # บันทึก log
+            metadata = build_object_metadata(
+                doc_id=_doc_id,
+                category=category,
+                ext=ext_now,
+                size_bytes=size_now,
+                sha256_hex=sha256_hex or "",
+            )
+            dest = copy_to_category(filepath, category, metadata=metadata)
+
+            # บันทึก log — ไม่เก็บ path หรือชื่อไฟล์ต้นฉบับ
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
-                "source": filepath,
-                "destination": dest,
-                "file_size": os.path.getsize(filepath),
-                "file_type": os.path.splitext(filepath)[1].lower(),
+                "doc_id": _doc_id,
+                "stored": bool(dest and dest.startswith("gs://")),
+                "category": category,
+                "file_size": size_now,
+                "file_type": ext_now,
                 "classification": result,
             }
             log_file = os.path.join(BASE_DIR, "logs", "classification_log.jsonl")
@@ -884,9 +1389,11 @@ def process_file_async(filepath: str, reply_token: str | None = None):
                 if _real_fp.startswith(_safe_base + os.sep):
                     try:
                         os.remove(filepath)
-                        logger.info(f"ลบไฟล์ชั่วคราว inbox: {os.path.basename(filepath)}")
+                        logger.info(f"ลบไฟล์ชั่วคราว inbox: {_doc_id}")
                     except OSError as e:
-                        logger.warning(f"ลบไฟล์ชั่วคราวไม่สำเร็จ: {e}")
+                        logger.warning(
+                            f"ลบไฟล์ชั่วคราวไม่สำเร็จ: {type(e).__name__}"
+                        )
                     # ลบ local copy ใน category folder ด้วย (ephemeral)
                     _local_cat_dest = os.path.join(
                         BASE_DIR,
@@ -896,11 +1403,11 @@ def process_file_async(filepath: str, reply_token: str | None = None):
                     if os.path.exists(_local_cat_dest):
                         try:
                             os.remove(_local_cat_dest)
-                            logger.info(f"ลบ local copy: {os.path.basename(_local_cat_dest)}")
+                            logger.info(f"ลบ local copy: {_doc_id}")
                         except OSError:
                             pass  # ไม่ร้ายแรง — จะหายเมื่อ Render restart
                 else:
-                    logger.warning(f"ข้ามการลบ — ไฟล์อยู่นอก BASE_DIR: {filepath}")
+                    logger.warning("ข้ามการลบ — ไฟล์อยู่นอก BASE_DIR")
 
             # ตอบกลับ LINE
             cat_names = {
@@ -925,10 +1432,42 @@ def process_file_async(filepath: str, reply_token: str | None = None):
                     f"จัดเก็บใน: {FOLDERS.get(category, FOLDERS['review'])}",
                 )
         except Exception as e:
-            logger.error(f"ประมวลผลไฟล์ล้มเหลว: {e}")
+            # ไม่ log str(e) — ข้อความ exception ของ I/O มักมี path พร้อมชื่อไฟล์
+            logger.error(
+                f"ประมวลผลไฟล์ล้มเหลว: {type(e).__name__} (doc_id={_doc_id})"
+            )
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
+
+
+def _handle_incoming_document(
+    data: bytes,
+    ext: str,
+    user_hash: str,
+    reply_token: str | None,
+):
+    """ขั้นตอนร่วมของการรับเอกสารจาก LINE (ทั้งภาพและไฟล์).
+
+    ชั้นที่ 3 ของการกันไฟล์ซ้ำ — ตรวจ sha256 ของเนื้อหา
+    ต้องทำหลังดาวน์โหลด (ต้องมีข้อมูลถึงจะ hash ได้) แต่ก่อนบันทึกลง inbox
+    จึงไม่มี temp file ค้างเมื่อพบว่าซ้ำ
+    """
+    sha256_hex = content_sha256(data)
+
+    if not dedup_guard.is_new_content(user_hash, sha256_hex):
+        logger.info(f"ข้ามเอกสารเนื้อหาซ้ำ (sha={sha256_hex[:8]}…)")
+        reply_message(
+            reply_token,
+            "ได้รับเอกสารนี้แล้วเมื่อสักครู่\nไม่ต้องส่งซ้ำครับ",
+        )
+        return
+
+    doc_id, filename = build_storage_filename(ext)
+    filepath = save_to_inbox(data, filename)
+    process_file_async(
+        filepath, reply_token, doc_id=doc_id, sha256_hex=sha256_hex
+    )
 
 
 # ═══════════════════════════════════════════════════════════
@@ -999,48 +1538,81 @@ def webhook():
         event_type = event.get("type")
         reply_token = event.get("replyToken")
 
+        # ─── ชั้นที่ 1: dedup ด้วย webhookEventId ────────────────
+        # LINE อาจส่ง event เดียวกันซ้ำจาก retry หรือปัญหาเครือข่าย
+        # event ที่ส่งซ้ำมี webhookEventId เดิม ต่างแค่ isRedelivery
+        # ต้องตรวจก่อน rate limit เพื่อไม่ให้ retry กิน quota ของผู้ป่วย
+        event_id = event.get("webhookEventId", "")
+        is_redelivery = bool(
+            event.get("deliveryContext", {}).get("isRedelivery", False)
+        )
+        if not dedup_guard.is_new_event(event_id):
+            logger.info(
+                f"ข้าม event ซ้ำ (id={event_id[:8]}…, redelivery={is_redelivery})"
+            )
+            continue
+        if is_redelivery:
+            logger.info(f"event นี้เป็น redelivery (id={event_id[:8]}…)")
+
+        user_hash = hash_user_id(event.get("source", {}).get("userId", ""))
+
         if event_type == "message":
             msg = event.get("message", {})
             msg_type = msg.get("type")
             msg_id = msg.get("id")
 
+            if msg_type in ("image", "file") and not msg_id:
+                logger.warning(f"ข้อความ type={msg_type} ไม่มี message id — ข้าม")
+                continue
+
+            # ─── ชั้นที่ 2: dedup ด้วย message id ────────────────
+            if msg_type in ("image", "file") and not dedup_guard.is_new_message(msg_id):
+                logger.info(f"ข้ามข้อความซ้ำ (msg_id={msg_id})")
+                continue
+
             if msg_type == "image":
                 logger.info(f"รับภาพ (id={msg_id})")
+
+                allowed, limit_msg = rate_limiter.check(user_hash)
+                if not allowed:
+                    logger.warning(f"เกิน rate limit (user={user_hash[:8]}…)")
+                    reply_message(reply_token, limit_msg)
+                    continue
+
                 ext = get_content_type_ext(msg_id)
                 if ext not in ALLOWED_EXTENSIONS:
                     ext = ".jpg"
                 data = download_line_content(msg_id)
-                if data:
-                    filename = f"LINE_{datetime.now():%Y%m%d_%H%M%S}_{msg_id}{ext}"
-                    filepath = save_to_inbox(data, filename)
-                    process_file_async(filepath, reply_token)
-                else:
+                if not data:
                     reply_message(reply_token, "ไม่สามารถดาวน์โหลดภาพได้")
+                    continue
+                _handle_incoming_document(data, ext, user_hash, reply_token)
 
             elif msg_type == "file":
-                file_name = msg.get("fileName", f"file_{msg_id}")
-                logger.info(f"รับไฟล์: {file_name} (id={msg_id})")
+                # ชื่อไฟล์จากผู้ใช้ใช้เพื่อดูนามสกุลเท่านั้น
+                # ไม่นำไปตั้งชื่อจัดเก็บและไม่บันทึกลง log เพราะมักมีชื่อผู้ป่วย
+                file_ext = normalize_incoming_extension(msg.get("fileName", ""))
+                logger.info(f"รับไฟล์: ext={file_ext or 'unknown'} (id={msg_id})")
 
-                file_ext = os.path.splitext(file_name)[1].lower()
-                if file_ext not in ALLOWED_EXTENSIONS:
+                if not file_ext:
                     reply_message(
                         reply_token,
-                        f"ไม่รองรับไฟล์ประเภท {file_ext}\n"
+                        "ไม่รองรับไฟล์ประเภทนี้\n"
                         f"รองรับ: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
                     )
                     continue
 
+                allowed, limit_msg = rate_limiter.check(user_hash)
+                if not allowed:
+                    logger.warning(f"เกิน rate limit (user={user_hash[:8]}…)")
+                    reply_message(reply_token, limit_msg)
+                    continue
+
                 data = download_line_content(msg_id)
-                if data:
-                    safe_name = "".join(
-                        c for c in file_name
-                        if c.isalnum() or c in ".-_ "
-                    ).strip() or f"file_{msg_id}"
-                    filename = f"LINE_{datetime.now():%Y%m%d_%H%M%S}_{safe_name}"
-                    filepath = save_to_inbox(data, filename)
-                    process_file_async(filepath, reply_token)
-                else:
+                if not data:
                     reply_message(reply_token, "ไม่สามารถดาวน์โหลดไฟล์ได้")
+                    continue
+                _handle_incoming_document(data, file_ext, user_hash, reply_token)
 
             elif msg_type == "text":
                 text = msg.get("text", "")
@@ -1089,8 +1661,24 @@ def health():
         "ai_classify": ENABLE_AI_CLASSIFY and not IS_TESTING,
         "storage_backend": STORAGE_BACKEND,
         "ocr_ready": HAS_TESSERACT and HAS_PIL,
+        "ocr_dpi": OCR_DPI,
         "pymupdf_ready": HAS_PYMUPDF,
         "supported_types": list(ALLOWED_EXTENSIONS),
+        # ล็อกที่ระดับโค้ด — ตรวจสอบจากภายนอกได้ว่ายังปิดอยู่จริง
+        "external_ai": (
+            "enabled" if EXTERNAL_AI_CLASSIFICATION_ALLOWED else "disabled_by_code"
+        ),
+        "state_store": {
+            "status": state_store.status,
+            "shared_across_workers": state_store.is_shared,
+            "error": state_store.error,
+        },
+        "rate_limit": {
+            "per_minute": RATE_LIMIT_PER_MINUTE,
+            "per_hour": RATE_LIMIT_PER_HOUR,
+            "per_day": RATE_LIMIT_PER_DAY,
+            "effective_halved": not state_store.is_shared,
+        },
     }
     # เพิ่มสถานะ GCS ถ้าใช้ gcs backend
     if STORAGE_BACKEND == "gcs" and hasattr(storage, "check_connection"):

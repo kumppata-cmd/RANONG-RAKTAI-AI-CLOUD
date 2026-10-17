@@ -852,7 +852,7 @@ def test_cleanup_after_gcs_upload_success():
     # Mock copy_to_category ให้ return gs:// path (จำลอง GCS upload สำเร็จ)
     original_copy = server.copy_to_category
 
-    def mock_copy_to_category(src, cat):
+    def mock_copy_to_category(src, cat, metadata=None):
         # คัดลอกไปยัง local folder จริง (เพื่อทดสอบว่า local copy ถูกลบด้วย)
         import shutil
         dest_folder = os.path.join(server.BASE_DIR, server.FOLDERS.get(cat, server.FOLDERS["review"]))
@@ -894,7 +894,7 @@ def test_no_cleanup_when_gcs_fails():
     # Mock copy_to_category ให้ return local path (จำลอง GCS ล้มเหลว)
     original_copy = server.copy_to_category
 
-    def mock_copy_local(src, cat):
+    def mock_copy_local(src, cat, metadata=None):
         return os.path.join(server.BASE_DIR, server.FOLDERS.get(cat, "review"), os.path.basename(src))
 
     server.copy_to_category = mock_copy_local
@@ -927,7 +927,7 @@ def test_cleanup_oserror_graceful():
 
     original_copy = server.copy_to_category
 
-    def mock_copy_gcs(src, cat):
+    def mock_copy_gcs(src, cat, metadata=None):
         return "gs://test-bucket/04_LAB_RESULTS/oserror_test.txt"
 
     server.copy_to_category = mock_copy_gcs
@@ -968,7 +968,7 @@ def test_cleanup_path_safety():
 
     original_copy = server.copy_to_category
 
-    def mock_copy_gcs(src, cat):
+    def mock_copy_gcs(src, cat, metadata=None):
         return "gs://test-bucket/04_LAB_RESULTS/outside_test.txt"
 
     server.copy_to_category = mock_copy_gcs
@@ -1045,6 +1045,837 @@ def test_text_message_log_no_content():
         server.logger.removeHandler(handler)
 
 
+# ═══════════════════════════════════════════════════════════
+# Phase 1 — Security Hardening tests
+# ═══════════════════════════════════════════════════════════
+
+import logging
+import re
+import threading as _threading
+import unittest.mock as _mock
+
+PATIENT_NAME = "สมชาย"
+PATIENT_SURNAME = "ใจดี"
+PATIENT_FILENAME = f"{PATIENT_NAME}_{PATIENT_SURNAME}_ผลเลือด.pdf"
+
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
+
+
+def _valid_pdf_bytes(marker: bytes = b"creatinine 1.2 mg/dL") -> bytes:
+    """PDF จำลองที่ผ่านการตรวจ magic bytes และใหญ่พอ."""
+    return b"%PDF-1.4\n" + marker + b"\n" + (b"0" * 200) + b"\n%%EOF\n"
+
+
+def _valid_jpeg_bytes() -> bytes:
+    return b"\xff\xd8\xff\xe0" + (b"\x00" * 200) + b"\xff\xd9"
+
+
+class _LogCapture:
+    """เก็บข้อความ log ทั้งหมดของ server ระหว่างบล็อก with."""
+
+    def __init__(self):
+        self.records = []
+        self._handler = None
+
+    def __enter__(self):
+        capture = self
+
+        class _H(logging.Handler):
+            def emit(self, record):
+                try:
+                    capture.records.append(record.getMessage())
+                except Exception:
+                    capture.records.append("<unformattable>")
+
+        self._handler = _H()
+        logging.getLogger("server").addHandler(self._handler)
+        logging.getLogger().addHandler(self._handler)
+        return self
+
+    def __exit__(self, *exc):
+        logging.getLogger("server").removeHandler(self._handler)
+        logging.getLogger().removeHandler(self._handler)
+        return False
+
+    @property
+    def text(self) -> str:
+        return "\n".join(self.records)
+
+
+class FakeRedisClient:
+    """Redis client จำลองขั้นต่ำ — ไม่ต้องติดตั้ง redis หรือ fakeredis.
+
+    รองรับเฉพาะคำสั่งที่ RedisBackend ใช้: set(nx,ex), incr, expire, decr, ping
+    แชร์ dict เดียวกันได้หลาย client เพื่อจำลองหลาย worker
+    """
+
+    def __init__(self, shared_store=None, fail=False):
+        self.store = shared_store if shared_store is not None else {}
+        self.fail = fail
+        self.calls = []
+
+    def _check(self):
+        if self.fail:
+            raise ConnectionError("fake redis down")
+
+    def ping(self):
+        self._check()
+        return True
+
+    def set(self, key, value, nx=False, ex=None):
+        self._check()
+        self.calls.append(("set", key))
+        if nx and key in self.store:
+            return None
+        self.store[key] = int(value)
+        return True
+
+    def incr(self, key):
+        self._check()
+        self.calls.append(("incr", key))
+        self.store[key] = int(self.store.get(key, 0)) + 1
+        return self.store[key]
+
+    def decr(self, key):
+        self._check()
+        self.calls.append(("decr", key))
+        self.store[key] = max(0, int(self.store.get(key, 0)) - 1)
+        return self.store[key]
+
+    def expire(self, key, ttl):
+        self._check()
+        return True
+
+
+def _fresh_state():
+    """คืน state store ใหม่ (in-memory) และผูก dedup/rate limiter เข้ากับมัน."""
+    store = server.StateStore("")
+    server.state_store = store
+    server.dedup_guard = server.DedupGuard(store)
+    server.rate_limiter = server.RateLimiter(store)
+    return store
+
+
+def _join_workers(timeout=5):
+    for t in _threading.enumerate():
+        if t.daemon and t.name != "MainThread":
+            t.join(timeout=timeout)
+
+
+def _post_webhook(events):
+    """POST webhook พร้อม signature ที่ถูกต้อง (production mode)."""
+    body = json.dumps({"events": events}).encode("utf-8")
+    with server.app.test_client() as client:
+        return client.post(
+            "/webhook",
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Line-Signature": make_signature(body),
+            },
+        )
+
+
+def _file_event(
+    file_name=PATIENT_FILENAME,
+    msg_id="msgid-0001",
+    event_id="evt-0001",
+    user_id="Uabcdef1234567890",
+    redelivery=False,
+):
+    return {
+        "type": "message",
+        "webhookEventId": event_id,
+        "deliveryContext": {"isRedelivery": redelivery},
+        "replyToken": "reply-token-test",
+        "source": {"type": "user", "userId": user_id},
+        "message": {"type": "file", "id": msg_id, "fileName": file_name},
+    }
+
+
+class _ProdWebhook:
+    """รัน webhook ในโหมด production พร้อม mock ขอบนอกทั้งหมด.
+
+    ไม่เรียกเครือข่ายจริง ไม่แตะ GCS จริง
+    """
+
+    def __init__(self, download_data=None, content_ext=".jpg"):
+        self.download_data = (
+            download_data if download_data is not None else _valid_pdf_bytes()
+        )
+        self.content_ext = content_ext
+        self.replies = []
+        self.saved = []          # (category, filename, metadata)
+        self.downloads = 0
+        self._orig = {}
+
+    def __enter__(self):
+        _fresh_state()
+        self._orig = {
+            "IS_TESTING": server.IS_TESTING,
+            "IS_TESTING_DOCS": server.IS_TESTING_DOCS,
+            "download_line_content": server.download_line_content,
+            "get_content_type_ext": server.get_content_type_ext,
+            "reply_message": server.reply_message,
+            "copy_to_category": server.copy_to_category,
+        }
+        server.IS_TESTING = False
+        server.IS_TESTING_DOCS = False
+
+        def fake_download(message_id):
+            self.downloads += 1
+            return self.download_data
+
+        def fake_reply(token, text):
+            self.replies.append(text)
+
+        def fake_copy(src, cat, metadata=None):
+            self.saved.append((cat, os.path.basename(src), metadata))
+            return f"gs://test-bucket/{server.FOLDERS.get(cat, 'x')}/{os.path.basename(src)}"
+
+        server.download_line_content = fake_download
+        server.get_content_type_ext = lambda mid: self.content_ext
+        server.reply_message = fake_reply
+        server.copy_to_category = fake_copy
+        return self
+
+    def __exit__(self, *exc):
+        _join_workers()
+        for k, v in self._orig.items():
+            setattr(server, k, v)
+        return False
+
+
+# ─── กลุ่ม A: Logs ไม่มีข้อมูลผู้ป่วย ────────────────────────
+
+def test_patient_name_never_in_logs():
+    """ชื่อผู้ป่วยในชื่อไฟล์ต้องไม่ปรากฏใน log ใด ๆ."""
+    with _LogCapture() as cap:
+        with _ProdWebhook(download_data=_valid_pdf_bytes()):
+            _post_webhook([_file_event()])
+            _join_workers()
+    assert PATIENT_NAME not in cap.text, f"ชื่อผู้ป่วยรั่วใน log: {cap.text[:400]}"
+    assert PATIENT_SURNAME not in cap.text, f"นามสกุลรั่วใน log: {cap.text[:400]}"
+    assert "ext=.pdf" in cap.text, "ควร log นามสกุลแทนชื่อไฟล์"
+    print("PASS: ชื่อผู้ป่วยไม่ปรากฏใน log")
+
+
+def test_patient_name_never_in_stored_filename():
+    """ชื่อไฟล์ที่ส่งเข้า storage ต้องเป็น UUID ไม่ใช่ชื่อผู้ป่วย."""
+    with _ProdWebhook(download_data=_valid_pdf_bytes()) as w:
+        _post_webhook([_file_event()])
+        _join_workers()
+    assert w.saved, "ต้องมีการจัดเก็บอย่างน้อย 1 ไฟล์"
+    _cat, stored_name, _meta = w.saved[0]
+    assert PATIENT_NAME not in stored_name, f"ชื่อผู้ป่วยอยู่ในชื่อไฟล์: {stored_name}"
+    stem = os.path.splitext(stored_name)[0]
+    assert UUID_RE.match(stem), f"ชื่อไฟล์ไม่ใช่ UUID: {stored_name}"
+    print("PASS: ชื่อไฟล์จัดเก็บเป็น UUID ไม่มีชื่อผู้ป่วย")
+
+
+def test_error_log_has_no_exception_detail():
+    """error log ต้องมีเฉพาะชนิด exception ไม่มี path หรือข้อความละเอียด."""
+    secret_path = "/tmp/" + PATIENT_NAME + "_secret_path.txt"
+
+    def boom(src, cat, metadata=None):
+        raise RuntimeError(f"failed writing {secret_path}")
+
+    orig = server.copy_to_category
+    tmp = os.path.join(server.BASE_DIR, server.FOLDERS["inbox"], "errlog_test.txt")
+    os.makedirs(os.path.dirname(tmp), exist_ok=True)
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("ผลตรวจ creatinine 1.2 mg/dL")
+    try:
+        server.copy_to_category = boom
+        with _LogCapture() as cap:
+            server.process_file_async(tmp, reply_token=None, doc_id="doc-err")
+            _join_workers()
+        assert "RuntimeError" in cap.text, "ควร log ชนิด exception"
+        assert secret_path not in cap.text, f"path รั่วใน log: {cap.text[:300]}"
+        assert PATIENT_NAME not in cap.text, "ชื่อผู้ป่วยรั่วใน error log"
+    finally:
+        server.copy_to_category = orig
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    print("PASS: error log ไม่มีรายละเอียด exception ที่รั่วข้อมูล")
+
+
+def test_keyword_log_counts_only():
+    """log ของ keyword matching ต้องมีเฉพาะจำนวน ไม่มีรายการคำ."""
+    tmp = os.path.join(server.BASE_DIR, "kwlog_test.txt")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("ผลตรวจ creatinine eGFR BUN potassium ค่าปกติ mg/dL")
+    try:
+        with _LogCapture() as cap:
+            server.classify_with_keywords(tmp)
+        assert "hits" in cap.text, "ควร log จำนวน hits"
+        assert "creatinine" not in cap.text, f"คำที่ match รั่วใน log: {cap.text[:300]}"
+        assert "eGFR" not in cap.text, "คำที่ match รั่วใน log"
+    finally:
+        os.unlink(tmp)
+    print("PASS: keyword log มีเฉพาะจำนวน ไม่มีรายการคำ")
+
+
+def test_classification_log_has_no_path():
+    """classification_log.jsonl ต้องไม่มี path หรือชื่อไฟล์ต้นฉบับ."""
+    log_file = os.path.join(server.BASE_DIR, "logs", "classification_log.jsonl")
+    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+    before = os.path.getsize(log_file) if os.path.exists(log_file) else 0
+
+    with _ProdWebhook(download_data=_valid_pdf_bytes()):
+        _post_webhook([_file_event()])
+        _join_workers()
+
+    assert os.path.exists(log_file), "ต้องมี classification log"
+    with open(log_file, "r", encoding="utf-8") as f:
+        f.seek(before)
+        new_content = f.read()
+    assert new_content.strip(), "ต้องมี entry ใหม่"
+    entry = json.loads(new_content.strip().splitlines()[-1])
+    assert "source" not in entry, "ต้องไม่มีฟิลด์ source (path)"
+    assert "destination" not in entry, "ต้องไม่มีฟิลด์ destination (path)"
+    assert "doc_id" in entry and "category" in entry
+    assert PATIENT_NAME not in new_content, "ชื่อผู้ป่วยอยู่ใน classification log"
+    print("PASS: classification log ไม่มี path หรือชื่อไฟล์ต้นฉบับ")
+
+
+# ─── กลุ่ม B: UUID และ metadata ─────────────────────────────
+
+def test_build_storage_filename_uuid():
+    """build_storage_filename คืนชื่อ UUID และไม่ซ้ำกัน."""
+    doc_id, fname = server.build_storage_filename(".pdf")
+    assert UUID_RE.match(doc_id), f"doc_id ไม่ใช่ UUID v4: {doc_id}"
+    assert fname == f"{doc_id}.pdf"
+    names = {server.build_storage_filename(".jpg")[1] for _ in range(200)}
+    assert len(names) == 200, "ชื่อไฟล์ซ้ำกัน — UUID ไม่ทำงาน"
+    _d, bad = server.build_storage_filename(".exe")
+    assert bad.endswith(".dat"), f"นามสกุลที่ไม่รองรับควรเป็น .dat: {bad}"
+    print("PASS: build_storage_filename สร้าง UUID ไม่ซ้ำ")
+
+
+def test_metadata_contains_no_pii():
+    """metadata ต้องไม่มีชื่อไฟล์ต้นฉบับหรือ LINE User ID."""
+    meta = server.build_object_metadata(
+        doc_id="doc-1", category="lab", ext=".pdf",
+        size_bytes=1234, sha256_hex="abc123",
+    )
+    blob = json.dumps(meta, ensure_ascii=False)
+    assert PATIENT_NAME not in blob and "fileName" not in blob
+    assert "original_filename" not in meta, "ต้องไม่เก็บชื่อไฟล์ต้นฉบับ"
+    assert "user_id" not in meta and "userId" not in blob
+    for key in ("doc_id", "category", "ext", "size_bytes",
+                "content_sha256", "received_at", "source", "classifier"):
+        assert key in meta, f"ขาดฟิลด์ {key}"
+    assert all(isinstance(v, str) for v in meta.values()), \
+        "ค่า metadata ของ GCS ต้องเป็น string ทั้งหมด"
+    print("PASS: metadata ไม่มีข้อมูลส่วนบุคคล")
+
+
+def test_metadata_passed_to_storage():
+    """metadata ต้องถูกส่งต่อไปยัง storage layer จริง."""
+    with _ProdWebhook(download_data=_valid_pdf_bytes()) as w:
+        _post_webhook([_file_event()])
+        _join_workers()
+    _cat, _name, meta = w.saved[0]
+    assert meta is not None, "metadata ต้องถูกส่งไป storage"
+    assert meta["source"] == "line_oa"
+    assert len(meta["content_sha256"]) == 64, "ต้องมี sha256 ของเนื้อหา"
+    print("PASS: metadata ถูกส่งต่อไปยัง storage")
+
+
+def test_gcs_blob_path_uuid_and_month():
+    """GCS object path = {folder}/{YYYY-MM}/{uuid}.ext และตั้ง metadata."""
+    import types
+    fake_sa = {"type": "service_account", "project_id": "p",
+               "private_key": "k", "client_email": "e@x.iam.gserviceaccount.com",
+               "token_uri": "https://oauth2.googleapis.com/token"}
+    fake_b64 = base64.b64encode(json.dumps(fake_sa).encode()).decode()
+    orig_modules = {k: sys.modules.get(k) for k in
+                    ["google", "google.cloud", "google.cloud.storage",
+                     "google.oauth2", "google.oauth2.service_account"]}
+    orig_bucket_env = os.environ.get("GCS_CREDENTIALS_BASE64", "")
+    orig_storage_bucket = server.STORAGE_BUCKET
+    os.environ["GCS_CREDENTIALS_BASE64"] = fake_b64
+    try:
+        server.STORAGE_BUCKET = "test-bucket-uuid"
+        modules, mock_client_cls, _ = _inject_google_mock_modules()
+        sys.modules.update(modules)
+        mock_client, mock_bucket, mock_blob = (_mock.MagicMock(),
+                                               _mock.MagicMock(),
+                                               _mock.MagicMock())
+        mock_client.bucket.return_value = mock_bucket
+        mock_bucket.blob.return_value = mock_blob
+        mock_client_cls.return_value = mock_client
+
+        gcs = server.StorageGCS()
+        assert gcs.is_ready
+        doc_id, fname = server.build_storage_filename(".pdf")
+        meta = server.build_object_metadata(doc_id, "lab", ".pdf", 500, "f" * 64)
+        uri = gcs.save(_valid_pdf_bytes(), "lab", fname, meta)
+
+        blob_path = mock_bucket.blob.call_args[0][0]
+        parts = blob_path.split("/")
+        assert parts[0] == "04_LAB_RESULTS", f"folder ผิด: {blob_path}"
+        assert re.match(r"^\d{4}-\d{2}$", parts[1]), f"ไม่มี month partition: {blob_path}"
+        assert parts[2] == fname and UUID_RE.match(os.path.splitext(parts[2])[0])
+        assert uri.startswith("gs://test-bucket-uuid/")
+        assert mock_blob.metadata == meta, "metadata ต้องถูกตั้งบน blob"
+        kwargs = mock_blob.upload_from_string.call_args[1]
+        assert kwargs["if_generation_match"] == 0, \
+            "ต้องใช้ if_generation_match=0 กันเขียนทับ"
+        print("PASS: GCS path เป็น UUID + month partition พร้อม metadata")
+    finally:
+        server.STORAGE_BUCKET = orig_storage_bucket
+        os.environ["GCS_CREDENTIALS_BASE64"] = orig_bucket_env
+        for k, v in orig_modules.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+def test_gcs_precondition_412_treated_as_stored():
+    """GCS 412 (object มีอยู่แล้ว) ต้องถือว่าจัดเก็บสำเร็จ ไม่ fallback ไป local."""
+    fake_sa = {"type": "service_account", "project_id": "p", "private_key": "k",
+               "client_email": "e@x.iam.gserviceaccount.com",
+               "token_uri": "https://oauth2.googleapis.com/token"}
+    fake_b64 = base64.b64encode(json.dumps(fake_sa).encode()).decode()
+    orig_modules = {k: sys.modules.get(k) for k in
+                    ["google", "google.cloud", "google.cloud.storage",
+                     "google.oauth2", "google.oauth2.service_account"]}
+    orig_env = os.environ.get("GCS_CREDENTIALS_BASE64", "")
+    orig_storage_bucket = server.STORAGE_BUCKET
+    os.environ["GCS_CREDENTIALS_BASE64"] = fake_b64
+    try:
+        server.STORAGE_BUCKET = "test-bucket-412"
+        modules, mock_client_cls, _ = _inject_google_mock_modules()
+        sys.modules.update(modules)
+        mock_client, mock_bucket, mock_blob = (_mock.MagicMock(),
+                                               _mock.MagicMock(),
+                                               _mock.MagicMock())
+        mock_client.bucket.return_value = mock_bucket
+        mock_bucket.blob.return_value = mock_blob
+        mock_client_cls.return_value = mock_client
+
+        class Precondition(Exception):
+            code = 412
+
+        mock_blob.upload_from_string.side_effect = Precondition("exists")
+        gcs = server.StorageGCS()
+        result = gcs.save(b"x" * 300, "lab", "dup-uuid.pdf")
+        assert result.startswith("gs://"), f"412 ควรถือว่าสำเร็จ แต่ได้: {result}"
+        print("PASS: GCS 412 ถือว่าจัดเก็บแล้ว ไม่เขียนทับและไม่ fallback")
+    finally:
+        server.STORAGE_BUCKET = orig_storage_bucket
+        os.environ["GCS_CREDENTIALS_BASE64"] = orig_env
+        for k, v in orig_modules.items():
+            if v is None:
+                sys.modules.pop(k, None)
+            else:
+                sys.modules[k] = v
+
+
+# ─── กลุ่ม C: Dedup และ Rate limit ──────────────────────────
+
+def test_dedup_same_event_id():
+    """event id เดิมส่งซ้ำ → ไม่ดาวน์โหลดและไม่จัดเก็บรอบสอง."""
+    with _ProdWebhook() as w:
+        ev = _file_event(event_id="evt-dup", msg_id="msg-dup")
+        r1 = _post_webhook([ev])
+        _join_workers()
+        r2 = _post_webhook([ev])
+        _join_workers()
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert w.downloads == 1, f"ควรดาวน์โหลดครั้งเดียว แต่ได้ {w.downloads}"
+    assert len(w.saved) == 1, f"ควรจัดเก็บครั้งเดียว แต่ได้ {len(w.saved)}"
+    print("PASS: dedup ด้วย webhookEventId")
+
+
+def test_dedup_message_id_when_event_id_differs():
+    """event id ต่างแต่ message id เดิม → ยังต้องกันซ้ำได้."""
+    with _ProdWebhook() as w:
+        _post_webhook([_file_event(event_id="evt-A", msg_id="msg-same")])
+        _join_workers()
+        _post_webhook([_file_event(event_id="evt-B", msg_id="msg-same")])
+        _join_workers()
+    assert w.downloads == 1, f"message id ซ้ำต้องถูกกัน (downloads={w.downloads})"
+    print("PASS: dedup ด้วย message id")
+
+
+def test_redelivery_flag_processed_once():
+    """redelivery ของ event เดิมต้องไม่ถูกประมวลผลซ้ำ."""
+    with _ProdWebhook() as w:
+        _post_webhook([_file_event(event_id="evt-rd", msg_id="msg-rd")])
+        _join_workers()
+        with _LogCapture() as cap:
+            _post_webhook([_file_event(event_id="evt-rd", msg_id="msg-rd",
+                                       redelivery=True)])
+            _join_workers()
+    assert w.downloads == 1, "redelivery ต้องไม่ประมวลผลซ้ำ"
+    assert "ข้าม event ซ้ำ" in cap.text
+    print("PASS: redelivery ถูกกันด้วย dedup")
+
+
+def test_content_hash_dedup_no_temp_file():
+    """เนื้อหาเดิมส่งซ้ำ (คนละ message) → ไม่จัดเก็บ และไม่มี temp file ค้าง."""
+    inbox = os.path.join(server.BASE_DIR, server.FOLDERS["inbox"])
+    os.makedirs(inbox, exist_ok=True)
+    same = _valid_pdf_bytes("เอกสารเดียวกัน".encode("utf-8"))
+    with _ProdWebhook(download_data=same) as w:
+        _post_webhook([_file_event(event_id="e1", msg_id="m1")])
+        _join_workers()
+        before = set(os.listdir(inbox))
+        _post_webhook([_file_event(event_id="e2", msg_id="m2")])
+        _join_workers()
+        after = set(os.listdir(inbox))
+    assert len(w.saved) == 1, f"เนื้อหาซ้ำต้องจัดเก็บครั้งเดียว (saved={len(w.saved)})"
+    assert after == before, f"ต้องไม่มี temp file ใหม่ค้าง: {after - before}"
+    assert any("ไม่ต้องส่งซ้ำ" in r for r in w.replies), "ควรแจ้งผู้ส่งว่าได้รับแล้ว"
+    print("PASS: dedup ด้วย sha256 ของเนื้อหา + ไม่มี temp file ค้าง")
+
+
+def test_dedup_shared_across_workers():
+    """สอง instance ที่ใช้ backend ร่วมกัน ต้องกันซ้ำข้าม worker ได้."""
+    shared = {}
+    s1, s2 = server.StateStore(""), server.StateStore("")
+    s1._redis = server.RedisBackend(FakeRedisClient(shared))
+    s2._redis = server.RedisBackend(FakeRedisClient(shared))
+    g1, g2 = server.DedupGuard(s1), server.DedupGuard(s2)
+    assert g1.is_new_event("evt-shared") is True, "worker แรกต้องผ่าน"
+    assert g2.is_new_event("evt-shared") is False, \
+        "worker ที่สองต้องเห็นว่าซ้ำ — มิฉะนั้นไฟล์จะถูกบันทึกซ้ำใน GCS"
+    print("PASS: dedup แชร์ข้าม worker ผ่าน backend ร่วม")
+
+
+def test_rate_limit_blocks_and_isolates_users():
+    """เกินเพดานต่อนาทีถูกปฏิเสธ และผู้ใช้คนอื่นไม่ได้รับผลกระทบ."""
+    store = _fresh_state()
+    limiter = server.RateLimiter(store)
+    limit = limiter._limit(server.RATE_LIMIT_PER_MINUTE)
+    for i in range(limit):
+        ok, _ = limiter.check("userA")
+        assert ok, f"คำขอที่ {i+1} ควรผ่าน (เพดาน {limit})"
+    ok, msg = limiter.check("userA")
+    assert not ok, "คำขอที่เกินเพดานต้องถูกปฏิเสธ"
+    assert "รอสักครู่" in msg
+    ok_b, _ = limiter.check("userB")
+    assert ok_b, "ผู้ใช้คนอื่นต้องไม่ถูกกระทบ"
+    print(f"PASS: rate limit ปฏิเสธเมื่อเกิน {limit}/นาที และแยกตามผู้ใช้")
+
+
+def test_rate_limit_no_quota_burn_on_reject():
+    """คำขอที่ถูกปฏิเสธต้องไม่กิน quota ของหน้าต่างชั่วโมง/วัน."""
+    store = _fresh_state()
+    limiter = server.RateLimiter(store)
+    minute_limit = limiter._limit(server.RATE_LIMIT_PER_MINUTE)
+    for _ in range(minute_limit):
+        limiter.check("userC")
+    now = int(server.time.time())
+    hour_key = f"rl:userC:h:{now // 3600}"
+    before = store.incr(hour_key, 3600) - 1   # อ่านค่าโดยไม่ทิ้งผลข้างเคียง
+    store.decr(hour_key)
+    limiter.check("userC")          # ถูกปฏิเสธที่หน้าต่างนาที
+    after = store.incr(hour_key, 3600) - 1
+    store.decr(hour_key)
+    assert after == before, \
+        f"ตัวนับชั่วโมงต้องไม่เพิ่มเมื่อถูกปฏิเสธ (ก่อน {before} หลัง {after})"
+    print("PASS: คำขอที่ถูกปฏิเสธไม่กิน quota ของหน้าต่างอื่น")
+
+
+def test_rate_limit_halved_when_not_shared():
+    """เมื่อ backend ไม่แชร์ข้าม worker เพดานต้องถูกลดครึ่งหนึ่ง."""
+    store = server.StateStore("")
+    limiter = server.RateLimiter(store)
+    assert store.is_shared is False
+    assert limiter._limit(10) == 5, "ควรลดครึ่งเมื่อไม่แชร์"
+    shared_store = server.StateStore("")
+    shared_store._redis = server.RedisBackend(FakeRedisClient())
+    assert server.RateLimiter(shared_store)._limit(10) == 10, \
+        "ไม่ควรลดเมื่อแชร์ข้าม worker ได้"
+    print("PASS: เพดานลดครึ่งเมื่อ backend ไม่แชร์ข้าม worker")
+
+
+def test_retry_does_not_consume_rate_quota():
+    """LINE retry ต้องไม่กิน quota ของผู้ป่วย."""
+    with _ProdWebhook() as w:
+        ev = _file_event(event_id="evt-q", msg_id="msg-q")
+        for _ in range(8):
+            _post_webhook([ev])
+        _join_workers()
+        store = server.state_store
+        now = int(server.time.time())
+        key = f"rl:{server.hash_user_id('Uabcdef1234567890')}:m:{now // 60}"
+        count = store.incr(key, 60) - 1
+        store.decr(key)
+    assert w.downloads == 1, "retry ต้องถูก dedup"
+    assert count == 1, f"retry ต้องนับ quota ครั้งเดียว แต่ได้ {count}"
+    print("PASS: retry ไม่กิน quota (นับครั้งเดียวจาก 8 ครั้ง)")
+
+
+def test_rate_limited_request_not_downloaded():
+    """คำขอที่เกิน rate limit ต้องไม่ถูกดาวน์โหลดและไม่จัดเก็บ."""
+    with _ProdWebhook() as w:
+        limit = server.rate_limiter._limit(server.RATE_LIMIT_PER_MINUTE)
+        for i in range(limit + 3):
+            _post_webhook([_file_event(event_id=f"e{i}", msg_id=f"m{i}")])
+        _join_workers()
+    assert w.downloads == limit, \
+        f"ควรดาวน์โหลดเท่าเพดาน {limit} แต่ได้ {w.downloads}"
+    assert any("ไม่เกิน" in r for r in w.replies), "ควรแจ้งผู้ส่งว่าเกินเพดาน"
+    print(f"PASS: คำขอเกินเพดานไม่ถูกดาวน์โหลด (ดาวน์โหลด {limit} จาก {limit + 3})")
+
+
+def test_redis_backend_used_when_available():
+    """RedisBackend ใช้คำสั่ง atomic SET NX และนับผ่าน INCR."""
+    client = FakeRedisClient()
+    backend = server.RedisBackend(client)
+    assert backend.set_if_absent("k1", 60) is True
+    assert backend.set_if_absent("k1", 60) is False, "SET NX ต้องกันซ้ำ"
+    assert backend.incr("c1", 60) == 1 and backend.incr("c1", 60) == 2
+    backend.decr("c1")
+    assert client.store["c1"] == 1
+    assert any(c[0] == "set" for c in client.calls)
+    print("PASS: RedisBackend ใช้คำสั่ง atomic ถูกต้อง")
+
+
+def test_redis_failure_falls_back_safely():
+    """Redis ล่มกลางทาง → สลับไป in-memory ไม่ throw และรายงาน degraded."""
+    store = server.StateStore("")
+    store._redis = server.RedisBackend(FakeRedisClient(fail=True))
+    store._status = "connected"
+    with _LogCapture() as cap:
+        ok = store.set_if_absent("key-after-failure", 60)
+    assert ok is True, "ต้องยังทำงานได้ (fail-open) ไม่ throw"
+    assert store.status == "degraded", f"สถานะควรเป็น degraded ได้ {store.status}"
+    assert store.is_shared is False, "หลัง fallback ต้องไม่ถือว่าแชร์ข้าม worker"
+    assert "in-memory fallback" in cap.text
+    assert store.set_if_absent("key-after-failure", 60) is False, \
+        "fallback ต้องยังกันซ้ำภายใน worker ได้"
+    print("PASS: Redis ล่ม → fallback ปลอดภัย ไม่หยุดรับเอกสาร")
+
+
+def test_state_store_not_configured_by_default():
+    """Phase 1: ยังไม่เชื่อม Redis — ต้องไม่ crash และรายงานสถานะถูกต้อง."""
+    store = server.StateStore("")
+    assert store.status == "not_configured"
+    assert store.is_shared is False
+    assert store.set_if_absent("x", 60) is True
+    with server.app.test_client() as client:
+        data = client.get("/health").get_json()
+    assert data["state_store"]["status"] in (
+        "not_configured", "unavailable", "degraded", "connected")
+    assert data["external_ai"] == "disabled_by_code", \
+        "health ต้องรายงานว่า AI ภายนอกปิดอยู่"
+    print("PASS: ไม่มี Redis ก็ทำงานได้ และ health รายงานสถานะครบ")
+
+
+def test_redis_url_without_package_falls_back():
+    """ตั้ง REDIS_URL แต่ไม่มี redis package → unavailable + ใช้ fallback."""
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) \
+        else __builtins__.__import__
+
+    def fake_import(name, *a, **kw):
+        if name == "redis":
+            raise ImportError("no redis")
+        return real_import(name, *a, **kw)
+
+    with _mock.patch("builtins.__import__", side_effect=fake_import):
+        store = server.StateStore("redis://localhost:6379")
+    assert store.status == "unavailable", f"สถานะควร unavailable ได้ {store.status}"
+    assert store.set_if_absent("y", 60) is True, "ต้องยังทำงานได้ด้วย fallback"
+    print("PASS: ไม่มี redis package → fallback ไม่ crash")
+
+
+# ─── กลุ่ม D: ตรวจชนิดไฟล์ ขนาด และ error ───────────────────
+
+def test_txt_with_null_bytes_rejected():
+    """ไฟล์ binary ที่เปลี่ยนนามสกุลเป็น .txt ต้องถูกปฏิเสธ."""
+    tmp = os.path.join(server.BASE_DIR, "fake_text.txt")
+    with open(tmp, "wb") as f:
+        f.write("ผลตรวจ".encode("utf-8") + b"\x00\x01\x02binary")
+    try:
+        ok, reason = server.validate_file(tmp)
+        assert not ok, "ไฟล์ที่มี null byte ต้องถูกปฏิเสธ"
+        assert "UTF-8" in reason
+    finally:
+        os.unlink(tmp)
+    print("PASS: .txt ที่มี null byte ถูกปฏิเสธ")
+
+
+def test_invalid_utf8_txt_rejected():
+    """.txt ที่ decode UTF-8 ไม่ได้ ต้องถูกปฏิเสธ."""
+    tmp = os.path.join(server.BASE_DIR, "bad_utf8.txt")
+    with open(tmp, "wb") as f:
+        f.write(b"\xff\xfe\xfd invalid utf8 sequence \xc3\x28")
+    try:
+        ok, _ = server.validate_file(tmp)
+        assert not ok, ".txt ที่ไม่ใช่ UTF-8 ต้องถูกปฏิเสธ"
+    finally:
+        os.unlink(tmp)
+    print("PASS: .txt ที่ไม่ใช่ UTF-8 ถูกปฏิเสธ")
+
+
+def test_short_txt_still_accepted():
+    """บันทึกข้อความสั้นยังต้องรับได้ — ขนาดขั้นต่ำใช้เฉพาะไฟล์ binary."""
+    tmp = os.path.join(server.BASE_DIR, "short_note.txt")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("ผลตรวจปกติ")
+    try:
+        ok, reason = server.validate_file(tmp)
+        assert ok, f".txt สั้นต้องผ่าน แต่ถูกปฏิเสธ: {reason}"
+    finally:
+        os.unlink(tmp)
+    print("PASS: .txt สั้นยังรับได้")
+
+
+def test_truncated_binary_rejected():
+    """ไฟล์ binary ที่เล็กผิดปกติต้องถูกปฏิเสธ."""
+    tmp = os.path.join(server.BASE_DIR, "tiny.pdf")
+    with open(tmp, "wb") as f:
+        f.write(b"%PDF-1.4\n")
+    try:
+        ok, reason = server.validate_file(tmp)
+        assert not ok, "PDF ที่เล็กผิดปกติต้องถูกปฏิเสธ"
+        assert "เล็กผิดปกติ" in reason
+    finally:
+        os.unlink(tmp)
+    print("PASS: ไฟล์ binary ที่เล็กผิดปกติถูกปฏิเสธ")
+
+
+def test_missing_message_id_skipped():
+    """event ที่ไม่มี message id ต้องถูกข้าม ไม่ crash."""
+    with _ProdWebhook() as w:
+        ev = _file_event(msg_id=None, event_id="evt-noid")
+        ev["message"]["id"] = None
+        with _LogCapture() as cap:
+            resp = _post_webhook([ev])
+            _join_workers()
+    assert resp.status_code == 200, "ต้องตอบ 200 ไม่ crash"
+    assert w.downloads == 0, "ต้องไม่พยายามดาวน์โหลด"
+    assert "ไม่มี message id" in cap.text
+    print("PASS: event ที่ไม่มี message id ถูกข้ามอย่างปลอดภัย")
+
+
+def test_unsupported_extension_reply_has_no_filename():
+    """ไฟล์ผิดประเภท → ปฏิเสธ และข้อความตอบกลับต้องไม่มีชื่อไฟล์."""
+    with _ProdWebhook() as w:
+        _post_webhook([_file_event(file_name=f"{PATIENT_NAME}_รายงาน.exe",
+                                   event_id="evt-exe", msg_id="msg-exe")])
+        _join_workers()
+    assert w.downloads == 0, "ไฟล์ผิดประเภทต้องไม่ถูกดาวน์โหลด"
+    assert w.replies, "ต้องตอบกลับผู้ส่ง"
+    joined = " ".join(w.replies)
+    assert PATIENT_NAME not in joined, f"ชื่อผู้ป่วยรั่วในข้อความตอบกลับ: {joined}"
+    assert "ไม่รองรับ" in joined
+    print("PASS: ไฟล์ผิดประเภทถูกปฏิเสธ และคำตอบไม่มีชื่อไฟล์")
+
+
+def test_normalize_incoming_extension():
+    """ดึงนามสกุลอย่างปลอดภัยจากชื่อไฟล์ที่ผู้ใช้ส่งมา."""
+    assert server.normalize_incoming_extension("ผลเลือด.PDF") == ".pdf"
+    assert server.normalize_incoming_extension("x.exe") == ""
+    assert server.normalize_incoming_extension("") == ""
+    assert server.normalize_incoming_extension(".jpg") == ".jpg"
+    long_name = "ก" * 5000 + ".pdf"
+    assert server.normalize_incoming_extension(long_name) == "", \
+        "ชื่อยาวเกินต้องถูกตัดจนไม่เหลือนามสกุลที่ถูกต้อง"
+    print("PASS: normalize_incoming_extension ทำงานถูกต้อง")
+
+
+def test_long_filename_truncated_in_inbox():
+    """ชื่อไฟล์ยาวผิดปกติต้องถูกตัดและไม่ทำให้ระบบพัง."""
+    long_name = "a" * 500 + ".pdf"
+    path = server.save_to_inbox(_valid_pdf_bytes(), long_name)
+    try:
+        base = os.path.basename(path)
+        assert len(base) <= server.MAX_FILENAME_LENGTH, f"ชื่อไฟล์ยาวเกิน: {len(base)}"
+        assert base.endswith(".pdf"), "นามสกุลต้องคงอยู่"
+    finally:
+        if os.path.exists(path):
+            os.unlink(path)
+    print("PASS: ชื่อไฟล์ยาวถูกตัดอย่างปลอดภัย")
+
+
+def test_external_ai_blocked_by_code():
+    """classify_with_claude ต้องไม่เรียก network แม้อยู่ในโหมด production."""
+    tmp = os.path.join(server.BASE_DIR, "ai_block.txt")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("ใบเสร็จรับเงิน ค่ายา จำนวนเงิน 500 บาท")
+    orig_testing = server.IS_TESTING
+    orig_key = server.ANTHROPIC_API_KEY
+    orig_post = server.http_requests.post
+    called = []
+    try:
+        server.IS_TESTING = False
+        server.ANTHROPIC_API_KEY = "sk-ant-fake-key-should-not-be-used"
+        server.http_requests.post = lambda *a, **k: called.append(a) or (_ for _ in ()).throw(
+            AssertionError("ห้ามเรียก network")
+        )
+        assert server.EXTERNAL_AI_CLASSIFICATION_ALLOWED is False
+        result = server.classify_with_claude(tmp)
+        assert called == [], "ต้องไม่มีการเรียก HTTP ออกไปเลย"
+        assert result.get("category") in {"bills", "rx", "lab", "dialysis", "review"}
+    finally:
+        server.IS_TESTING = orig_testing
+        server.ANTHROPIC_API_KEY = orig_key
+        server.http_requests.post = orig_post
+        os.unlink(tmp)
+    print("PASS: AI ภายนอกถูกล็อกที่ระดับโค้ด ไม่เรียก network")
+
+
+# ─── กลุ่ม E: OCR ───────────────────────────────────────────
+
+def test_ocr_dpi_reduced():
+    """OCR ต้อง render ที่ 200 DPI เพื่อลดการใช้หน่วยความจำ."""
+    assert server.OCR_DPI == 200, f"OCR_DPI ควรเป็น 200 ได้ {server.OCR_DPI}"
+    a4_300 = int(595 * 300 / 72) * int(842 * 300 / 72) * 3
+    a4_200 = int(595 * server.OCR_DPI / 72) * int(842 * server.OCR_DPI / 72) * 3
+    assert a4_200 < a4_300 * 0.5, "หน่วยความจำต่อหน้าควรลดลงเกินครึ่ง"
+    print(f"PASS: OCR ที่ {server.OCR_DPI} DPI — buffer/หน้า "
+          f"{a4_300 // 1048576} MB → {a4_200 // 1048576} MB")
+
+
+def test_ocr_concurrency_limited():
+    """ต้องมี semaphore จำกัดงาน OCR พร้อมกันต่อ worker."""
+    assert hasattr(server, "_ocr_semaphore"), "ต้องมี _ocr_semaphore"
+    acquired = server._ocr_semaphore.acquire(blocking=False)
+    assert acquired, "semaphore ควรว่างตอนเริ่มทดสอบ"
+    try:
+        assert server._ocr_semaphore.acquire(blocking=False) is False, \
+            "ต้องจำกัดงาน OCR พร้อมกันไม่เกิน OCR_MAX_CONCURRENT"
+    finally:
+        server._ocr_semaphore.release()
+    print("PASS: OCR จำกัดงานพร้อมกันด้วย semaphore")
+
+
+def test_ocr_releases_memory_per_page():
+    """OCR PDF ต้องคืนหน่วยความจำรายหน้า ไม่สะสมทุกหน้า."""
+    import inspect
+    src = inspect.getsource(server.extract_text_with_ocr)
+    assert "finally:" in src and "img.close()" in src, \
+        "ต้องปิด image ใน finally รายหน้า"
+    assert "pix = None" in src, "ต้องคืน pixmap รายหน้า"
+    loop_body = src.split("for i in range(num_pages):")[1]
+    assert loop_body.index("finally:") < loop_body.index("full_text") \
+        if "full_text" in loop_body else True
+    print("PASS: OCR คืนหน่วยความจำรายหน้า")
+
+
+def test_line_capability_preserved():
+    """ความสามารถเดิมต้องยังอยู่: รับไฟล์ LINE → จัดเก็บ → ตอบกลับ."""
+    with _ProdWebhook(download_data=_valid_pdf_bytes("ใบเสร็จรับเงิน ค่ายา บาท".encode("utf-8"))) as w:
+        resp = _post_webhook([_file_event(file_name="receipt.pdf",
+                                          event_id="evt-cap", msg_id="msg-cap")])
+        _join_workers()
+    assert resp.status_code == 200
+    assert w.downloads == 1, "ต้องดาวน์โหลดไฟล์จาก LINE"
+    assert len(w.saved) == 1, "ต้องจัดเก็บลง storage"
+    assert any("รับเอกสารแล้ว" in r for r in w.replies), "ต้องตอบกลับผู้ส่ง"
+    print("PASS: ความสามารถรับเอกสาร LINE และจัดเก็บยังทำงานครบ")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -1104,6 +1935,49 @@ def main():
         test_cleanup_oserror_graceful,
         test_cleanup_path_safety,
         test_text_message_log_no_content,
+        # ── Phase 1: Logs ไม่มีข้อมูลผู้ป่วย ──
+        test_patient_name_never_in_logs,
+        test_patient_name_never_in_stored_filename,
+        test_error_log_has_no_exception_detail,
+        test_keyword_log_counts_only,
+        test_classification_log_has_no_path,
+        # ── Phase 1: UUID และ metadata ──
+        test_build_storage_filename_uuid,
+        test_metadata_contains_no_pii,
+        test_metadata_passed_to_storage,
+        test_gcs_blob_path_uuid_and_month,
+        test_gcs_precondition_412_treated_as_stored,
+        # ── Phase 1: Dedup และ Rate limit ──
+        test_dedup_same_event_id,
+        test_dedup_message_id_when_event_id_differs,
+        test_redelivery_flag_processed_once,
+        test_content_hash_dedup_no_temp_file,
+        test_dedup_shared_across_workers,
+        test_rate_limit_blocks_and_isolates_users,
+        test_rate_limit_no_quota_burn_on_reject,
+        test_rate_limit_halved_when_not_shared,
+        test_retry_does_not_consume_rate_quota,
+        test_rate_limited_request_not_downloaded,
+        test_redis_backend_used_when_available,
+        test_redis_failure_falls_back_safely,
+        test_state_store_not_configured_by_default,
+        test_redis_url_without_package_falls_back,
+        # ── Phase 1: ชนิดไฟล์ ขนาด และ error ──
+        test_txt_with_null_bytes_rejected,
+        test_invalid_utf8_txt_rejected,
+        test_short_txt_still_accepted,
+        test_truncated_binary_rejected,
+        test_missing_message_id_skipped,
+        test_unsupported_extension_reply_has_no_filename,
+        test_normalize_incoming_extension,
+        test_long_filename_truncated_in_inbox,
+        test_external_ai_blocked_by_code,
+        # ── Phase 1: OCR ──
+        test_ocr_dpi_reduced,
+        test_ocr_concurrency_limited,
+        test_ocr_releases_memory_per_page,
+        # ── Phase 1: ความสามารถเดิมต้องยังอยู่ ──
+        test_line_capability_preserved,
     ]
 
     passed = 0
