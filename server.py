@@ -71,6 +71,7 @@ except ImportError:
 #   "production"   = ใช้งานจริง — ต้องตั้งค่าด้วยตนเองใน Render Dashboard
 APP_ENV = os.getenv("APP_ENV", "testing").lower().strip()
 IS_TESTING = APP_ENV != "production"
+IS_PRODUCTION = APP_ENV == "production"
 # testing-docs: อนุญาตดาวน์โหลดไฟล์และจัดเก็บ GCS แต่ไม่เรียก Claude API
 IS_TESTING_DOCS = APP_ENV == "testing-docs"
 
@@ -90,7 +91,8 @@ ENABLE_AI_CLASSIFY = os.getenv("ENABLE_AI_CLASSIFY", "true").lower() == "true"
 #   "s3"     = Amazon S3 (ต้องตั้ง AWS_* env vars)
 #   "gcs"    = Google Cloud Storage (ต้องตั้ง GCS_* env vars)
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local")
-STORAGE_BUCKET = os.getenv("STORAGE_BUCKET", "")
+# รองรับทั้ง GCS_BUCKET_NAME (แนะนำ) และ STORAGE_BUCKET (backward-compatible)
+STORAGE_BUCKET = os.getenv("GCS_BUCKET_NAME") or os.getenv("STORAGE_BUCKET", "")
 
 # โฟลเดอร์ชั่วคราวบน Render (ephemeral)
 BASE_DIR = os.getenv("BASE_DIR", "/tmp/ranong_raktai")
@@ -232,11 +234,18 @@ class StorageS3:
 class StorageGCS:
     """เก็บไฟล์บน Google Cloud Storage.
 
-    Authentication:
-      ใช้ Service Account JSON Key ที่ Base64-encoded เก็บใน ENV variable
-      GCS_CREDENTIALS_BASE64 — ไม่เก็บ JSON Key ใน code หรือ GitHub
+    Authentication (ลำดับความสำคัญ):
+      1. GOOGLE_APPLICATION_CREDENTIALS — path ไปที่ Service Account JSON Key
+         (Application Default Credentials — ADC, แนะนำสำหรับ Render)
+      2. GCS_CREDENTIALS_BASE64 — Base64 ของ Service Account JSON Key
+         (backward-compatible)
+      3. ถ้าไม่มีทั้งสอง → google-cloud-storage จะลอง ADC อื่น ๆ
+         (เช่น Workload Identity, metadata server)
 
-    ถ้า credentials ไม่พร้อม → fallback ไป StorageLocal พร้อม warning
+    Bucket name: อ่านจาก GCS_BUCKET_NAME หรือ STORAGE_BUCKET
+
+    ถ้า STORAGE_BACKEND=gcs แต่เชื่อมต่อ GCS ไม่ได้ → ERROR ชัดเจน
+    ห้าม fallback ไป local แบบเงียบ ๆ เพราะจะทำให้เอกสารหายตอน redeploy
     """
 
     # Content-Type mapping สำหรับไฟล์ที่ระบบรองรับ
@@ -254,33 +263,59 @@ class StorageGCS:
         self._bucket = None
         self._fallback = StorageLocal()
         self._init_error = None
+        self._auth_method = None  # "adc", "base64", "default"
 
         if not self.bucket_name:
-            self._init_error = "STORAGE_BUCKET ไม่ได้ตั้งค่า"
-            logger.warning(f"GCS Storage: {self._init_error} — fallback ไป local")
-            return
-
-        creds_b64 = os.getenv("GCS_CREDENTIALS_BASE64", "").strip()
-        if not creds_b64:
-            self._init_error = "GCS_CREDENTIALS_BASE64 ไม่ได้ตั้งค่า"
-            logger.warning(f"GCS Storage: {self._init_error} — fallback ไป local")
+            self._init_error = (
+                "GCS_BUCKET_NAME หรือ STORAGE_BUCKET ไม่ได้ตั้งค่า"
+            )
+            logger.error(f"GCS Storage: {self._init_error}")
             return
 
         try:
             from google.cloud import storage as gcs_storage
-            from google.oauth2 import service_account
-
-            creds_json = json.loads(base64.b64decode(creds_b64))
-            credentials = service_account.Credentials.from_service_account_info(creds_json)
-            self._client = gcs_storage.Client(credentials=credentials, project=creds_json.get("project_id"))
-            self._bucket = self._client.bucket(self.bucket_name)
-            logger.info(f"GCS Storage: bucket={self.bucket_name} — เชื่อมต่อสำเร็จ")
         except ImportError:
             self._init_error = "google-cloud-storage ไม่ได้ติดตั้ง"
-            logger.warning(f"GCS Storage: {self._init_error} — fallback ไป local")
+            logger.error(f"GCS Storage: {self._init_error}")
+            return
+
+        try:
+            # ลำดับ 1: GOOGLE_APPLICATION_CREDENTIALS (ADC — path ไปที่ JSON Key)
+            adc_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip()
+            creds_b64 = os.getenv("GCS_CREDENTIALS_BASE64", "").strip()
+
+            if adc_path:
+                # ADC: google-cloud-storage ใช้ GOOGLE_APPLICATION_CREDENTIALS อัตโนมัติ
+                self._client = gcs_storage.Client()
+                self._auth_method = "adc"
+                logger.info("GCS Storage: ใช้ Application Default Credentials (ADC)")
+            elif creds_b64:
+                # ลำดับ 2: Base64-encoded Service Account JSON Key
+                from google.oauth2 import service_account
+                creds_json = json.loads(base64.b64decode(creds_b64))
+                credentials = service_account.Credentials.from_service_account_info(
+                    creds_json
+                )
+                self._client = gcs_storage.Client(
+                    credentials=credentials,
+                    project=creds_json.get("project_id"),
+                )
+                self._auth_method = "base64"
+                logger.info("GCS Storage: ใช้ GCS_CREDENTIALS_BASE64")
+            else:
+                # ลำดับ 3: ลอง ADC อื่น ๆ (Workload Identity, metadata server)
+                self._client = gcs_storage.Client()
+                self._auth_method = "default"
+                logger.info("GCS Storage: ลอง default credentials")
+
+            self._bucket = self._client.bucket(self.bucket_name)
+            logger.info(
+                f"GCS Storage: bucket={self.bucket_name}, "
+                f"auth={self._auth_method} — เชื่อมต่อสำเร็จ"
+            )
         except Exception as e:
-            self._init_error = f"GCS init error: {e}"
-            logger.error(f"GCS Storage: {self._init_error} — fallback ไป local")
+            self._init_error = f"GCS init error: {type(e).__name__}"
+            logger.error(f"GCS Storage: {self._init_error}")
 
     @property
     def is_ready(self) -> bool:
@@ -297,7 +332,10 @@ class StorageGCS:
         filename: str,
         metadata: dict | None = None,
     ) -> str:
-        """อัปโหลดไฟล์ไป GCS — fallback ไป local ถ้า GCS ไม่พร้อม.
+        """อัปโหลดไฟล์ไป GCS.
+
+        Production mode: ถ้า GCS ไม่พร้อมหรือ upload ล้มเหลว → raise RuntimeError
+        Testing mode: fallback ไป local storage พร้อม ERROR log
 
         filename ที่ส่งเข้ามาควรเป็นชื่อแบบ UUID ที่สร้างตอนรับไฟล์
         (ดู build_storage_filename) — ไม่ใช่ชื่อไฟล์ต้นฉบับจากผู้ใช้
@@ -310,7 +348,17 @@ class StorageGCS:
             filename = f"unnamed_{datetime.now():%Y%m%d_%H%M%S}.dat"
 
         if not self.is_ready:
-            logger.warning(f"GCS ไม่พร้อม ({self._init_error}) — fallback ไป local")
+            err_msg = (
+                f"GCS ไม่พร้อม ({self._init_error}) — "
+                f"ไม่สามารถจัดเก็บเอกสารได้"
+            )
+            logger.error(err_msg)
+            if IS_PRODUCTION:
+                raise RuntimeError(err_msg)
+            # Testing mode: fallback ไป local พร้อมแจ้งเตือน
+            logger.error(
+                "เอกสารจะเก็บบน local disk ชั่วคราว (หายเมื่อ redeploy)"
+            )
             return self._fallback.save(data, category, filename)
 
         folder = FOLDERS.get(category, FOLDERS["review"])
@@ -343,8 +391,14 @@ class StorageGCS:
                 return gcs_uri
             # ไม่ log str(e) — ข้อความ error ของ GCS อาจมี blob path
             logger.error(
-                f"GCS upload ล้มเหลว: {type(e).__name__} — fallback ไป local"
+                f"GCS upload ล้มเหลว: {type(e).__name__}"
             )
+            if IS_PRODUCTION:
+                raise RuntimeError(
+                    f"GCS upload ล้มเหลว — ไม่สามารถจัดเก็บเอกสารได้"
+                )
+            # Testing mode: fallback ไป local
+            logger.error("fallback ไป local storage")
             return self._fallback.save(data, category, filename)
 
     def list_files(self, category: str) -> list[str]:
@@ -1299,8 +1353,12 @@ def classify_with_keywords(filepath: str) -> dict:
 def copy_to_category(
     src_path: str, category: str, metadata: dict | None = None
 ) -> str:
-    """คัดลอกไฟล์ไปยังโฟลเดอร์ตามประเภท + cloud storage."""
-    # Local copy (ephemeral)
+    """คัดลอกไฟล์ไปยังโฟลเดอร์ตามประเภท + cloud storage.
+
+    Production mode: ถ้า cloud upload ล้มเหลว จะ raise RuntimeError
+    เพื่อให้ process_file_async() จับแล้วแจ้งข้อผิดพลาดกลับไป
+    """
+    # Local copy (ephemeral — เป็น temp ระหว่างรอ upload)
     dest_folder = os.path.join(BASE_DIR, FOLDERS.get(category, FOLDERS["review"]))
     os.makedirs(dest_folder, exist_ok=True)
     filename = os.path.basename(src_path)
@@ -1321,8 +1379,15 @@ def copy_to_category(
             with open(src_path, "rb") as f:
                 data = f.read()
             cloud_path = storage.save(data, category, filename, metadata)
+        except RuntimeError:
+            # Production mode — GCS ล้มเหลว ห้าม fallback
+            raise
         except Exception as e:
             logger.error(f"Cloud storage error: {type(e).__name__}")
+            if IS_PRODUCTION:
+                raise RuntimeError(
+                    f"จัดเก็บเอกสารใน GCS ล้มเหลว: {type(e).__name__}"
+                )
 
     return cloud_path if cloud_path and cloud_path.startswith("gs://") else dest_path
 
@@ -1432,11 +1497,30 @@ def process_file_async(
                     f"ประเภท: {cat_name}\n"
                     f"จัดเก็บใน: {FOLDERS.get(category, FOLDERS['review'])}",
                 )
+        except RuntimeError as e:
+            # Production mode — GCS ล้มเหลว ต้องแจ้งผู้ใช้
+            logger.error(
+                f"จัดเก็บเอกสารล้มเหลว (Production): {type(e).__name__} "
+                f"(doc_id={_doc_id})"
+            )
+            if reply_token:
+                reply_message(
+                    reply_token,
+                    "ขออภัย ระบบไม่สามารถจัดเก็บเอกสารได้ในขณะนี้\n"
+                    "กรุณาลองส่งใหม่ในอีกสักครู่\n"
+                    "หากยังไม่ได้ กรุณาแจ้งเจ้าหน้าที่",
+                )
         except Exception as e:
             # ไม่ log str(e) — ข้อความ exception ของ I/O มักมี path พร้อมชื่อไฟล์
             logger.error(
                 f"ประมวลผลไฟล์ล้มเหลว: {type(e).__name__} (doc_id={_doc_id})"
             )
+            if IS_PRODUCTION and reply_token:
+                reply_message(
+                    reply_token,
+                    "ขออภัย เกิดข้อผิดพลาดในการประมวลผลเอกสาร\n"
+                    "กรุณาลองส่งใหม่อีกครั้ง",
+                )
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
@@ -1519,6 +1603,19 @@ def webhook():
     # testing-docs: อนุญาตรับเอกสารและจัดเก็บ แต่ไม่เรียก Claude API
     if IS_TESTING_DOCS:
         logger.info("TESTING-DOCS MODE: อนุญาตรับเอกสาร — ไม่เรียก Claude API")
+
+    # Production guard: ตรวจว่า GCS พร้อมก่อนรับเอกสาร
+    # ถ้า GCS ไม่พร้อม ปฏิเสธ webhook ทั้งหมดเพื่อไม่ให้เอกสารหายตอน redeploy
+    if IS_PRODUCTION and STORAGE_BACKEND == "gcs":
+        if not hasattr(storage, "is_ready") or not storage.is_ready:
+            gcs_err = getattr(storage, "_init_error", "unknown")
+            logger.error(
+                f"PRODUCTION: GCS ไม่พร้อม ({gcs_err}) — ปฏิเสธ webhook"
+            )
+            return jsonify({
+                "status": "error",
+                "reason": "storage_not_ready",
+            }), 503
 
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data()
@@ -1652,12 +1749,17 @@ def webhook():
 
 @app.route("/health", methods=["GET"])
 def health():
-    """Health check endpoint — ทำงานได้โดยไม่ต้องใช้ API Key."""
+    """Health check endpoint — ทำงานได้โดยไม่ต้องใช้ API Key.
+
+    Production mode: คืน HTTP 503 ถ้า GCS ไม่พร้อม
+    เพื่อให้ Render ตรวจจับปัญหาและรายงาน
+    """
     health_info = {
         "status": "running",
-        "version": "cloud-1.1-gcs",
+        "version": "cloud-2.0-production",
         "app_env": APP_ENV,
         "testing_mode": IS_TESTING,
+        "production_mode": IS_PRODUCTION,
         "timestamp": datetime.now().isoformat(),
         "ai_classify": ENABLE_AI_CLASSIFY and not IS_TESTING,
         "storage_backend": STORAGE_BACKEND,
@@ -1681,10 +1783,45 @@ def health():
             "effective_halved": not state_store.is_shared,
         },
     }
+
+    http_status = 200
+
     # เพิ่มสถานะ GCS ถ้าใช้ gcs backend
     if STORAGE_BACKEND == "gcs" and hasattr(storage, "check_connection"):
-        health_info["gcs"] = storage.check_connection()
-    return jsonify(health_info), 200
+        gcs_status = storage.check_connection()
+        if hasattr(storage, "_auth_method"):
+            gcs_status["auth_method"] = storage._auth_method
+        health_info["gcs"] = gcs_status
+
+        # Production: ถ้า GCS ไม่พร้อม → health check fail
+        if IS_PRODUCTION and gcs_status.get("status") != "connected":
+            health_info["status"] = "degraded"
+            health_info["accepting_documents"] = False
+            http_status = 503
+        else:
+            health_info["accepting_documents"] = True
+    elif IS_PRODUCTION and STORAGE_BACKEND != "gcs":
+        # Production ต้องใช้ GCS เท่านั้น
+        health_info["status"] = "misconfigured"
+        health_info["accepting_documents"] = False
+        health_info["error"] = "Production ต้องตั้ง STORAGE_BACKEND=gcs"
+        http_status = 503
+    else:
+        health_info["accepting_documents"] = not IS_TESTING or IS_TESTING_DOCS
+
+    # Production checklist
+    if IS_PRODUCTION:
+        health_info["production_checklist"] = {
+            "line_channel_secret": bool(LINE_CHANNEL_SECRET),
+            "line_access_token": bool(LINE_CHANNEL_ACCESS_TOKEN),
+            "storage_gcs": STORAGE_BACKEND == "gcs",
+            "gcs_ready": (
+                hasattr(storage, "is_ready") and storage.is_ready
+            ),
+            "external_ai_locked": not EXTERNAL_AI_CLASSIFICATION_ALLOWED,
+        }
+
+    return jsonify(health_info), http_status
 
 
 @app.route("/", methods=["GET"])
@@ -1720,6 +1857,12 @@ else:
 logger.info(f"TESTING MODE: {_mode_desc}")
 logger.info(f"PORT: {PORT}")
 logger.info(f"STORAGE_BACKEND: {STORAGE_BACKEND}")
+if STORAGE_BACKEND == "gcs":
+    logger.info(f"GCS_BUCKET: {STORAGE_BUCKET or '(ไม่ได้ตั้งค่า)'}")
+    if hasattr(storage, '_auth_method') and storage._auth_method:
+        logger.info(f"GCS_AUTH: {storage._auth_method}")
+    if hasattr(storage, '_init_error') and storage._init_error:
+        logger.error(f"GCS_ERROR: {storage._init_error}")
 logger.info(f"BASE_DIR: {BASE_DIR}")
 logger.info(f"AI Classification: {'เปิด' if ENABLE_AI_CLASSIFY else 'ปิด'}")
 logger.info(f"OCR (Tesseract): {'พร้อม' if HAS_TESSERACT and HAS_PIL else 'ไม่พร้อม'}")
@@ -1736,6 +1879,50 @@ else:
     logger.warning("LINE_CHANNEL_ACCESS_TOKEN: ไม่ได้ตั้งค่า")
 
 logger.info(f"รองรับไฟล์: {', '.join(sorted(ALLOWED_EXTENSIONS))}")
+
+# ─── Production Startup Validation ────────────────────────
+if IS_PRODUCTION:
+    logger.info("=" * 40)
+    logger.info("PRODUCTION MODE — ตรวจสอบความพร้อม")
+    _prod_ok = True
+
+    if STORAGE_BACKEND != "gcs":
+        logger.error(
+            "PRODUCTION ERROR: STORAGE_BACKEND ต้องเป็น 'gcs' — "
+            f"ปัจจุบัน: '{STORAGE_BACKEND}'"
+        )
+        _prod_ok = False
+
+    if not (hasattr(storage, "is_ready") and storage.is_ready):
+        logger.error(
+            "PRODUCTION ERROR: GCS ไม่พร้อม — "
+            "ระบบจะปฏิเสธ webhook จนกว่า GCS จะเชื่อมต่อได้"
+        )
+        _prod_ok = False
+
+    if not LINE_CHANNEL_SECRET:
+        logger.error("PRODUCTION ERROR: LINE_CHANNEL_SECRET ไม่ได้ตั้งค่า")
+        _prod_ok = False
+
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        logger.error("PRODUCTION ERROR: LINE_CHANNEL_ACCESS_TOKEN ไม่ได้ตั้งค่า")
+        _prod_ok = False
+
+    if EXTERNAL_AI_CLASSIFICATION_ALLOWED:
+        logger.warning(
+            "PRODUCTION WARNING: EXTERNAL_AI_CLASSIFICATION_ALLOWED=True — "
+            "ข้อมูลผู้ป่วยจะถูกส่งไป Claude API"
+        )
+
+    if _prod_ok:
+        logger.info("PRODUCTION: ✓ ระบบพร้อมรับเอกสาร")
+    else:
+        logger.error(
+            "PRODUCTION: ✗ ระบบยังไม่พร้อม — "
+            "จะปฏิเสธเอกสารจนกว่าจะแก้ไข"
+        )
+    logger.info("=" * 40)
+
 logger.info("=" * 60)
 
 

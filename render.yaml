@@ -18,22 +18,31 @@ services:
       - key: LINE_CHANNEL_ACCESS_TOKEN
         sync: false
 
-      # Claude API (ตั้งค่าใน Render Dashboard)
+      # Claude API (ตั้งค่าใน Render Dashboard — ปิดด้วย code lock)
       - key: ANTHROPIC_API_KEY
         sync: false
 
       # ระบบ
       - key: APP_ENV
         value: "testing"  # เปลี่ยนเป็น "production" เมื่อพร้อมรับเอกสารจริง
+        # Production mode:
+        #   - ต้องตั้ง STORAGE_BACKEND=gcs
+        #   - GCS ต้องเชื่อมต่อได้ มิฉะนั้นจะปฏิเสธเอกสาร
+        #   - ห้าม fallback ไป local storage
+        #   - Health check คืน 503 ถ้า GCS ไม่พร้อม
       - key: ENABLE_AI_CLASSIFY
         value: "true"
       - key: STORAGE_BACKEND
-        value: "gcs"  # ใช้ Google Cloud Storage
+        value: "gcs"  # Production ต้องใช้ "gcs" เท่านั้น
       - key: BASE_DIR
         value: "/tmp/ranong_raktai"
 
       # Google Cloud Storage (ตั้งค่าใน Render Dashboard)
-      - key: STORAGE_BUCKET
-        sync: false  # ตั้งค่าด้วยตนเอง: ranong-raktai-ai-test-2026
-      - key: GCS_CREDENTIALS_BASE64
-        sync: false  # Base64 ของ Service Account JSON Key
+      # แนะนำ: ใช้ GCS_BUCKET_NAME + GOOGLE_APPLICATION_CREDENTIALS (ADC)
+      - key: GCS_BUCKET_NAME
+        sync: false  # ชื่อ Production bucket (ห้ามใช้ test bucket)
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false  # path ไปที่ Service Account JSON Key (ADC)
+      # ─ ทางเลือก (backward-compatible) ─
+      # - key: STORAGE_BUCKET        # alias ของ GCS_BUCKET_NAME
+      # - key: GCS_CREDENTIALS_BASE64  # Base64 ของ JSON Key (ถ้าไม่ใช้ ADC)

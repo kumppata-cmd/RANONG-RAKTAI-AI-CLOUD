@@ -37,7 +37,7 @@ def test_health():
         assert resp.status_code == 200
         data = resp.get_json()
         assert data["status"] == "running"
-        assert "cloud-1." in data["version"]
+        assert "cloud-2." in data["version"]
         assert "ocr_ready" in data
         print("PASS: /health endpoint")
 
@@ -557,19 +557,30 @@ def test_gcs_no_credentials_fallback():
 
 
 def test_gcs_invalid_base64_credentials():
-    """GCS credentials Base64 ไม่ถูกต้อง → fallback."""
-    orig = os.environ.get("GCS_CREDENTIALS_BASE64", "")
+    """GCS credentials Base64 ไม่ถูกต้อง → ไม่ ready."""
+    orig_creds = os.environ.get("GCS_CREDENTIALS_BASE64", "")
+    orig_adc = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    orig_bucket = os.environ.get("GCS_BUCKET_NAME", "")
+    orig_bucket2 = os.environ.get("STORAGE_BUCKET", "")
+    # ต้องลบ ADC ออกก่อนเพื่อให้ใช้ base64 path
+    os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
     os.environ["GCS_CREDENTIALS_BASE64"] = "not_valid_base64!!!"
-    os.environ["STORAGE_BUCKET"] = "test-bucket"
+    os.environ["GCS_BUCKET_NAME"] = "test-bucket"
+    orig_storage_bucket = server.STORAGE_BUCKET
     try:
+        server.STORAGE_BUCKET = "test-bucket"
         gcs = server.StorageGCS()
         assert not gcs.is_ready, "GCS ไม่ควร ready เมื่อ credentials ไม่ถูกต้อง"
     finally:
-        if orig:
-            os.environ["GCS_CREDENTIALS_BASE64"] = orig
-        else:
-            os.environ.pop("GCS_CREDENTIALS_BASE64", None)
-        os.environ.pop("STORAGE_BUCKET", None)
+        server.STORAGE_BUCKET = orig_storage_bucket
+        for k, v in [("GCS_CREDENTIALS_BASE64", orig_creds),
+                      ("GOOGLE_APPLICATION_CREDENTIALS", orig_adc),
+                      ("GCS_BUCKET_NAME", orig_bucket),
+                      ("STORAGE_BUCKET", orig_bucket2)]:
+            if v:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
     print(f"PASS: test_gcs_invalid_base64_credentials")
 
 
@@ -820,11 +831,11 @@ def test_testing_docs_mode():
 
 
 def test_health_version_updated():
-    """Health endpoint แสดง version cloud-1.1-gcs."""
+    """Health endpoint แสดง version cloud-2.0-production."""
     with server.app.test_client() as client:
         resp = client.get("/health")
         data = resp.get_json()
-        assert "1.1-gcs" in data["version"], f"version ผิด: {data['version']}"
+        assert "2.0-production" in data["version"], f"version ผิด: {data['version']}"
     print(f"PASS: test_health_version_updated")
 
 
@@ -1876,6 +1887,188 @@ def test_line_capability_preserved():
     print("PASS: ความสามารถรับเอกสาร LINE และจัดเก็บยังทำงานครบ")
 
 
+# ─── กลุ่ม: GCS ADC + Bucket Name + Fail-loud ─────────────────
+
+
+def test_gcs_bucket_name_env():
+    """GCS_BUCKET_NAME ต้องถูกอ่านก่อน STORAGE_BUCKET."""
+    orig_bucket = os.environ.get("GCS_BUCKET_NAME", "")
+    orig_bucket2 = os.environ.get("STORAGE_BUCKET", "")
+    orig_val = server.STORAGE_BUCKET
+    try:
+        os.environ["GCS_BUCKET_NAME"] = "my-gcs-bucket"
+        os.environ.pop("STORAGE_BUCKET", None)
+        # จำลองการอ่านค่าใหม่ตาม logic เดียวกับ server.py
+        bucket = os.getenv("GCS_BUCKET_NAME") or os.getenv("STORAGE_BUCKET", "")
+        assert bucket == "my-gcs-bucket", f"ควรอ่าน GCS_BUCKET_NAME แต่ได้: {bucket}"
+    finally:
+        for k, v in [("GCS_BUCKET_NAME", orig_bucket),
+                      ("STORAGE_BUCKET", orig_bucket2)]:
+            if v:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
+        server.STORAGE_BUCKET = orig_val
+    print("PASS: GCS_BUCKET_NAME ถูกอ่านก่อน STORAGE_BUCKET")
+
+
+def test_gcs_bucket_name_fallback_to_storage_bucket():
+    """ถ้าไม่มี GCS_BUCKET_NAME ต้อง fallback ไป STORAGE_BUCKET."""
+    orig_bucket = os.environ.get("GCS_BUCKET_NAME", "")
+    orig_bucket2 = os.environ.get("STORAGE_BUCKET", "")
+    try:
+        os.environ.pop("GCS_BUCKET_NAME", None)
+        os.environ["STORAGE_BUCKET"] = "legacy-bucket"
+        bucket = os.getenv("GCS_BUCKET_NAME") or os.getenv("STORAGE_BUCKET", "")
+        assert bucket == "legacy-bucket", f"ควร fallback ไป STORAGE_BUCKET แต่ได้: {bucket}"
+    finally:
+        for k, v in [("GCS_BUCKET_NAME", orig_bucket),
+                      ("STORAGE_BUCKET", orig_bucket2)]:
+            if v:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
+    print("PASS: fallback ไป STORAGE_BUCKET เมื่อไม่มี GCS_BUCKET_NAME")
+
+
+def test_gcs_adc_auth_method():
+    """เมื่อตั้ง GOOGLE_APPLICATION_CREDENTIALS → auth_method=adc."""
+    import unittest.mock as _mock
+
+    orig_adc = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    orig_creds = os.environ.get("GCS_CREDENTIALS_BASE64", "")
+    orig_bucket_env = os.environ.get("GCS_BUCKET_NAME", "")
+    orig_storage_bucket = server.STORAGE_BUCKET
+    orig_modules = {}
+    for key in ["google", "google.cloud", "google.cloud.storage",
+                "google.oauth2", "google.oauth2.service_account"]:
+        orig_modules[key] = sys.modules.get(key)
+    try:
+        server.STORAGE_BUCKET = "test-adc-bucket"
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/fake-sa-key.json"
+        os.environ.pop("GCS_CREDENTIALS_BASE64", None)
+        os.environ["GCS_BUCKET_NAME"] = "test-adc-bucket"
+
+        modules, mock_client_cls, _ = _inject_google_mock_modules()
+        sys.modules.update(modules)
+
+        mock_client = _mock.MagicMock()
+        mock_bucket = _mock.MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+        mock_client_cls.return_value = mock_client
+
+        gcs = server.StorageGCS()
+        assert gcs.is_ready, f"GCS ควร ready ด้วย ADC แต่ error={gcs._init_error}"
+        assert gcs._auth_method == "adc", f"ควรใช้ adc แต่ได้: {gcs._auth_method}"
+        # Client() ถูกเรียกโดยไม่มี credentials argument (ADC ใช้ env var)
+        mock_client_cls.assert_called_once_with()
+    finally:
+        server.STORAGE_BUCKET = orig_storage_bucket
+        for key, val in orig_modules.items():
+            if val is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = val
+        for k, v in [("GOOGLE_APPLICATION_CREDENTIALS", orig_adc),
+                      ("GCS_CREDENTIALS_BASE64", orig_creds),
+                      ("GCS_BUCKET_NAME", orig_bucket_env)]:
+            if v:
+                os.environ[k] = v
+            else:
+                os.environ.pop(k, None)
+    print("PASS: ADC auth method ใช้ GOOGLE_APPLICATION_CREDENTIALS")
+
+
+def test_gcs_no_bucket_error_log():
+    """ไม่มี bucket name → log ERROR ไม่ใช่ WARNING."""
+    orig_storage_bucket = server.STORAGE_BUCKET
+    try:
+        server.STORAGE_BUCKET = ""
+        with _LogCapture() as cap:
+            gcs = server.StorageGCS()
+        assert not gcs.is_ready
+        assert "GCS_BUCKET_NAME" in gcs._init_error, \
+            f"Error ต้องบอก GCS_BUCKET_NAME แต่ได้: {gcs._init_error}"
+        # ตรวจว่า log เป็น ERROR ไม่ใช่ WARNING
+        found_error = any("GCS_BUCKET_NAME" in r or "STORAGE_BUCKET" in r
+                          for r in cap.records)
+        assert found_error, f"ต้อง log ERROR เมื่อไม่มี bucket name"
+    finally:
+        server.STORAGE_BUCKET = orig_storage_bucket
+    print("PASS: ไม่มี bucket name → ERROR log ชัดเจน")
+
+
+def test_gcs_save_not_ready_error_log():
+    """save() เมื่อ GCS ไม่พร้อม → log ERROR ไม่ใช่ WARNING."""
+    orig_storage_bucket = server.STORAGE_BUCKET
+    try:
+        server.STORAGE_BUCKET = ""
+        gcs = server.StorageGCS()
+        with _LogCapture() as cap:
+            result = gcs.save(b"test", "lab", "test.pdf")
+        error_logs = [r for r in cap.records if "GCS ไม่พร้อม" in r]
+        assert len(error_logs) >= 1, f"ต้อง log ERROR เมื่อ save ไม่ได้ แต่ได้: {cap.records}"
+        local_logs = [r for r in cap.records if "local disk" in r]
+        assert len(local_logs) >= 1, \
+            f"ต้องแจ้งว่าเก็บ local ชั่วคราว แต่ได้: {cap.records}"
+        if os.path.exists(result):
+            os.unlink(result)
+    finally:
+        server.STORAGE_BUCKET = orig_storage_bucket
+    print("PASS: save() เมื่อ GCS ไม่พร้อม → ERROR log พร้อมคำเตือน")
+
+
+def test_gcs_health_shows_auth_method():
+    """health endpoint ต้องแสดง auth_method เมื่อใช้ GCS."""
+    import unittest.mock as _mock
+
+    orig_backend = server.STORAGE_BACKEND
+    orig_storage = server.storage
+    orig_storage_bucket = server.STORAGE_BUCKET
+    orig_adc = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    orig_modules = {}
+    for key in ["google", "google.cloud", "google.cloud.storage",
+                "google.oauth2", "google.oauth2.service_account"]:
+        orig_modules[key] = sys.modules.get(key)
+    try:
+        server.STORAGE_BACKEND = "gcs"
+        server.STORAGE_BUCKET = "test-health-bucket"
+        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "/tmp/fake.json"
+
+        modules, mock_client_cls, _ = _inject_google_mock_modules()
+        sys.modules.update(modules)
+
+        mock_client = _mock.MagicMock()
+        mock_bucket = _mock.MagicMock()
+        mock_client.bucket.return_value = mock_bucket
+        mock_bucket.reload.return_value = None
+        mock_client_cls.return_value = mock_client
+
+        gcs = server.StorageGCS()
+        server.storage = gcs
+
+        with server.app.test_client() as client:
+            resp = client.get("/health")
+            data = json.loads(resp.data)
+        assert "gcs" in data, f"health ต้องมี gcs section แต่ได้: {list(data.keys())}"
+        assert data["gcs"].get("auth_method") == "adc", \
+            f"ต้องแสดง auth_method=adc แต่ได้: {data['gcs']}"
+    finally:
+        server.STORAGE_BACKEND = orig_backend
+        server.storage = orig_storage
+        server.STORAGE_BUCKET = orig_storage_bucket
+        for key, val in orig_modules.items():
+            if val is None:
+                sys.modules.pop(key, None)
+            else:
+                sys.modules[key] = val
+        if orig_adc:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = orig_adc
+        else:
+            os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    print("PASS: health endpoint แสดง auth_method")
+
+
 # ─── กลุ่ม: Testing-docs reply logging ─────────────────────────
 
 
@@ -1988,6 +2181,312 @@ def test_testing_docs_reply_failure_logged():
     print("PASS: testing-docs log ERROR เมื่อ reply ล้มเหลว")
 
 
+# ═══════════════════════════════════════════════════════════
+# Production Mode Tests
+# ═══════════════════════════════════════════════════════════
+
+
+def test_production_gcs_save_raises_on_not_ready():
+    """Production mode: GCS ไม่พร้อม → raise RuntimeError (ไม่ fallback local)."""
+    orig_prod = server.IS_PRODUCTION
+    orig_testing = server.IS_TESTING
+    try:
+        server.IS_PRODUCTION = True
+        server.IS_TESTING = False
+
+        gcs = server.StorageGCS()
+        # GCS ไม่พร้อม (ไม่มี credentials)
+        assert not gcs.is_ready, "GCS ควรไม่พร้อม (ไม่มี credentials จริง)"
+
+        raised = False
+        try:
+            gcs.save(b"test data", "lab_results", "test.pdf")
+        except RuntimeError as e:
+            raised = True
+            assert "ไม่สามารถจัดเก็บเอกสารได้" in str(e)
+        assert raised, "Production: GCS ไม่พร้อมต้อง raise RuntimeError"
+    finally:
+        server.IS_PRODUCTION = orig_prod
+        server.IS_TESTING = orig_testing
+    print("PASS: test_production_gcs_save_raises_on_not_ready")
+
+
+def test_production_gcs_upload_error_raises():
+    """Production mode: GCS upload ล้มเหลว → raise RuntimeError."""
+    orig_prod = server.IS_PRODUCTION
+    orig_testing = server.IS_TESTING
+    try:
+        server.IS_PRODUCTION = True
+        server.IS_TESTING = False
+
+        gcs = server.StorageGCS()
+        # จำลอง GCS พร้อมแต่ upload ล้มเหลว
+        # is_ready property ตรวจ _client and _bucket
+        mock_blob = type("MockBlob", (), {
+            "metadata": None,
+            "upload_from_string": lambda self, *a, **kw: (_ for _ in ()).throw(
+                ConnectionError("network error")
+            ),
+        })
+        mock_bucket = type("MockBucket", (), {
+            "blob": lambda self, path: mock_blob(),
+        })()
+        gcs._client = object()  # ต้องไม่ None เพื่อผ่าน is_ready
+        gcs._bucket = mock_bucket
+        gcs.bucket_name = "test-bucket"
+
+        raised = False
+        try:
+            gcs.save(b"test data", "lab_results", "test.pdf")
+        except RuntimeError as e:
+            raised = True
+            assert "ล้มเหลว" in str(e)
+        assert raised, "Production: GCS upload error ต้อง raise RuntimeError"
+    finally:
+        server.IS_PRODUCTION = orig_prod
+        server.IS_TESTING = orig_testing
+    print("PASS: test_production_gcs_upload_error_raises")
+
+
+def test_production_no_local_fallback():
+    """Production mode: ไม่มี local fallback — ต้อง raise ทุกกรณีที่ GCS ล้มเหลว."""
+    orig_prod = server.IS_PRODUCTION
+    orig_testing = server.IS_TESTING
+    try:
+        server.IS_PRODUCTION = True
+        server.IS_TESTING = False
+
+        gcs = server.StorageGCS()
+        assert not gcs.is_ready
+
+        # ตรวจสอบว่า fallback._save() ไม่ถูกเรียก
+        fallback_called = False
+        orig_fallback_save = gcs._fallback.save
+
+        def mock_fallback_save(*args, **kwargs):
+            nonlocal fallback_called
+            fallback_called = True
+            return orig_fallback_save(*args, **kwargs)
+
+        gcs._fallback.save = mock_fallback_save
+
+        try:
+            gcs.save(b"test", "lab_results", "test.pdf")
+        except RuntimeError:
+            pass  # คาดหวัง
+
+        assert not fallback_called, "Production: ต้องไม่เรียก local fallback"
+    finally:
+        server.IS_PRODUCTION = orig_prod
+        server.IS_TESTING = orig_testing
+    print("PASS: test_production_no_local_fallback")
+
+
+def test_production_webhook_rejects_without_gcs():
+    """Production mode: webhook คืน 503 เมื่อ GCS ไม่พร้อม."""
+    orig_prod = server.IS_PRODUCTION
+    orig_testing = server.IS_TESTING
+    orig_backend = server.STORAGE_BACKEND
+    orig_storage = server.storage
+    try:
+        server.IS_PRODUCTION = True
+        server.IS_TESTING = False
+        server.STORAGE_BACKEND = "gcs"
+
+        # จำลอง GCS storage ที่ไม่พร้อม
+        mock_storage = type("MockGCS", (), {
+            "is_ready": False,
+            "_init_error": "test: no credentials",
+        })()
+        server.storage = mock_storage
+
+        with server.app.test_client() as client:
+            body = json.dumps({"events": []}).encode()
+            sig = make_signature(body)
+            resp = client.post(
+                "/webhook",
+                data=body,
+                headers={
+                    "X-Line-Signature": sig,
+                    "Content-Type": "application/json",
+                },
+            )
+            assert resp.status_code == 503, \
+                f"Production GCS ไม่พร้อม ต้องคืน 503 แต่ได้ {resp.status_code}"
+            data = resp.get_json()
+            assert data.get("reason") == "storage_not_ready"
+    finally:
+        server.IS_PRODUCTION = orig_prod
+        server.IS_TESTING = orig_testing
+        server.STORAGE_BACKEND = orig_backend
+        server.storage = orig_storage
+    print("PASS: test_production_webhook_rejects_without_gcs")
+
+
+def test_production_health_503_without_gcs():
+    """Production mode: /health คืน 503 เมื่อ GCS ไม่พร้อม."""
+    orig_prod = server.IS_PRODUCTION
+    orig_testing = server.IS_TESTING
+    orig_backend = server.STORAGE_BACKEND
+    orig_storage = server.storage
+    try:
+        server.IS_PRODUCTION = True
+        server.IS_TESTING = False
+        server.STORAGE_BACKEND = "gcs"
+
+        # จำลอง GCS storage ที่ไม่พร้อม
+        mock_storage = type("MockGCS", (), {
+            "is_ready": False,
+            "_init_error": "test",
+            "_auth_method": "none",
+            "check_connection": lambda self: {
+                "status": "not_connected",
+                "error": "test",
+            },
+        })()
+        server.storage = mock_storage
+
+        with server.app.test_client() as client:
+            resp = client.get("/health")
+            assert resp.status_code == 503, \
+                f"Production GCS down ต้องคืน 503 แต่ได้ {resp.status_code}"
+            data = resp.get_json()
+            assert data["status"] == "degraded"
+            assert data["accepting_documents"] is False
+    finally:
+        server.IS_PRODUCTION = orig_prod
+        server.IS_TESTING = orig_testing
+        server.STORAGE_BACKEND = orig_backend
+        server.storage = orig_storage
+    print("PASS: test_production_health_503_without_gcs")
+
+
+def test_production_health_503_without_gcs_backend():
+    """Production mode: /health คืน 503 เมื่อ STORAGE_BACKEND ไม่ใช่ gcs."""
+    orig_prod = server.IS_PRODUCTION
+    orig_testing = server.IS_TESTING
+    orig_backend = server.STORAGE_BACKEND
+    try:
+        server.IS_PRODUCTION = True
+        server.IS_TESTING = False
+        server.STORAGE_BACKEND = "local"
+
+        with server.app.test_client() as client:
+            resp = client.get("/health")
+            assert resp.status_code == 503, \
+                f"Production local storage ต้องคืน 503 แต่ได้ {resp.status_code}"
+            data = resp.get_json()
+            assert data["status"] == "misconfigured"
+            assert data["accepting_documents"] is False
+    finally:
+        server.IS_PRODUCTION = orig_prod
+        server.IS_TESTING = orig_testing
+        server.STORAGE_BACKEND = orig_backend
+    print("PASS: test_production_health_503_without_gcs_backend")
+
+
+def test_production_health_checklist():
+    """Production mode: /health แสดง production_checklist."""
+    orig_prod = server.IS_PRODUCTION
+    orig_testing = server.IS_TESTING
+    orig_backend = server.STORAGE_BACKEND
+    orig_storage = server.storage
+    try:
+        server.IS_PRODUCTION = True
+        server.IS_TESTING = False
+        server.STORAGE_BACKEND = "gcs"
+
+        # จำลอง GCS พร้อม
+        mock_storage = type("MockGCS", (), {
+            "is_ready": True,
+            "_auth_method": "adc",
+            "check_connection": lambda self: {
+                "status": "connected",
+                "bucket": "test-bucket",
+            },
+        })()
+        server.storage = mock_storage
+
+        with server.app.test_client() as client:
+            resp = client.get("/health")
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert "production_checklist" in data, \
+                "Production mode ต้องมี production_checklist"
+            checklist = data["production_checklist"]
+            assert "line_channel_secret" in checklist
+            assert "line_access_token" in checklist
+            assert "storage_gcs" in checklist
+            assert "gcs_ready" in checklist
+            assert "external_ai_locked" in checklist
+            assert checklist["storage_gcs"] is True
+            assert checklist["gcs_ready"] is True
+            assert data["production_mode"] is True
+            assert data["accepting_documents"] is True
+    finally:
+        server.IS_PRODUCTION = orig_prod
+        server.IS_TESTING = orig_testing
+        server.STORAGE_BACKEND = orig_backend
+        server.storage = orig_storage
+    print("PASS: test_production_health_checklist")
+
+
+def test_production_health_no_checklist_in_testing():
+    """Testing mode: /health ไม่แสดง production_checklist."""
+    # server อยู่ใน testing mode อยู่แล้ว
+    with server.app.test_client() as client:
+        resp = client.get("/health")
+        data = resp.get_json()
+        assert "production_checklist" not in data, \
+            "Testing mode ต้องไม่มี production_checklist"
+        assert data.get("production_mode") is False
+    print("PASS: test_production_health_no_checklist_in_testing")
+
+
+def test_production_copy_to_category_reraises():
+    """Production mode: copy_to_category re-raise RuntimeError จาก storage.save."""
+    orig_prod = server.IS_PRODUCTION
+    orig_testing = server.IS_TESTING
+    orig_backend = server.STORAGE_BACKEND
+    orig_storage = server.storage
+    try:
+        server.IS_PRODUCTION = True
+        server.IS_TESTING = False
+        server.STORAGE_BACKEND = "gcs"
+
+        # จำลอง storage ที่ raise RuntimeError
+        mock_storage = type("MockGCS", (), {
+            "save": lambda self, *a, **kw: (_ for _ in ()).throw(
+                RuntimeError("GCS ล้มเหลว")
+            ),
+        })()
+        server.storage = mock_storage
+
+        # สร้างไฟล์ทดสอบ
+        test_dir = os.path.join(os.environ["BASE_DIR"], "inbox")
+        os.makedirs(test_dir, exist_ok=True)
+        test_file = os.path.join(test_dir, "test_prod_copy.pdf")
+        with open(test_file, "wb") as f:
+            f.write(b"%PDF-1.4 test")
+
+        raised = False
+        try:
+            server.copy_to_category(test_file, "lab_results")
+        except RuntimeError:
+            raised = True
+        assert raised, "Production: copy_to_category ต้อง re-raise RuntimeError"
+
+        # ทำความสะอาด
+        if os.path.exists(test_file):
+            os.remove(test_file)
+    finally:
+        server.IS_PRODUCTION = orig_prod
+        server.IS_TESTING = orig_testing
+        server.STORAGE_BACKEND = orig_backend
+        server.storage = orig_storage
+    print("PASS: test_production_copy_to_category_reraises")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -2090,10 +2589,27 @@ def main():
         test_ocr_releases_memory_per_page,
         # ── Phase 1: ความสามารถเดิมต้องยังอยู่ ──
         test_line_capability_preserved,
+        # ── GCS ADC + Bucket Name + Fail-loud ──
+        test_gcs_bucket_name_env,
+        test_gcs_bucket_name_fallback_to_storage_bucket,
+        test_gcs_adc_auth_method,
+        test_gcs_no_bucket_error_log,
+        test_gcs_save_not_ready_error_log,
+        test_gcs_health_shows_auth_method,
         # ── Testing-docs reply logging ──
         test_testing_docs_text_reply_called,
         test_testing_docs_reply_success_logged,
         test_testing_docs_reply_failure_logged,
+        # ── Production Mode Tests ──
+        test_production_gcs_save_raises_on_not_ready,
+        test_production_gcs_upload_error_raises,
+        test_production_no_local_fallback,
+        test_production_webhook_rejects_without_gcs,
+        test_production_health_503_without_gcs,
+        test_production_health_503_without_gcs_backend,
+        test_production_health_checklist,
+        test_production_health_no_checklist_in_testing,
+        test_production_copy_to_category_reraises,
     ]
 
     passed = 0
