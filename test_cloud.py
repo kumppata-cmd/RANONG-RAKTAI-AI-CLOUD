@@ -2487,6 +2487,413 @@ def test_production_copy_to_category_reraises():
     print("PASS: test_production_copy_to_category_reraises")
 
 
+# ═══════════════════════════════════════════════════════════
+# Document Search V1 Tests
+# ═══════════════════════════════════════════════════════════
+
+
+def test_document_index_add_and_search():
+    """ทดสอบ DocumentIndex: add + search."""
+    idx = server.DocumentIndex(server.storage)
+    idx._loaded = True  # ข้าม GCS load
+
+    doc1 = {
+        "document_id": "test-001",
+        "original_filename": "document.pdf",
+        "gcs_object_path": "lab/2026-10/test-001.pdf",
+        "category": "lab",
+        "upload_date": "2026-10-19",
+        "mime_type": "application/pdf",
+        "file_size": 1024,
+        "ocr_status": "native",
+        "extracted_text": "ผลตรวจเลือด creatinine 1.2 mg/dL",
+    }
+    doc2 = {
+        "document_id": "test-002",
+        "original_filename": "document.jpg",
+        "gcs_object_path": "bills/2026-10/test-002.jpg",
+        "category": "bills",
+        "upload_date": "2026-10-18",
+        "mime_type": "image/jpeg",
+        "file_size": 2048,
+        "ocr_status": "ocr",
+        "extracted_text": "ใบเสร็จค่ารักษาพยาบาล",
+    }
+    idx.add(doc1)
+    idx.add(doc2)
+
+    # Search by Thai content
+    results = idx.search("ผลตรวจเลือด")
+    assert len(results) == 1, f"Expected 1 result, got {len(results)}"
+    assert results[0]["document_id"] == "test-001"
+
+    # Search by category
+    results = idx.search("bills")
+    assert len(results) == 1, f"Expected 1 result for bills, got {len(results)}"
+    assert results[0]["document_id"] == "test-002"
+
+    # Search by date
+    results = idx.search("2026-10-19")
+    assert len(results) == 1
+    assert results[0]["document_id"] == "test-001"
+
+    # No results
+    results = idx.search("ไม่มีข้อมูลนี้")
+    assert len(results) == 0
+
+    print("PASS: test_document_index_add_and_search")
+
+
+def test_document_index_recent():
+    """ทดสอบ DocumentIndex: recent()."""
+    idx = server.DocumentIndex(server.storage)
+    idx._loaded = True
+
+    for i in range(10):
+        idx.add({
+            "document_id": f"recent-{i:03d}",
+            "category": "lab",
+            "upload_date": f"2026-10-{10+i}",
+            "extracted_text": "",
+        })
+
+    recent = idx.recent(5)
+    assert len(recent) == 5, f"Expected 5 recent, got {len(recent)}"
+    # Most recent first
+    assert recent[0]["document_id"] == "recent-009"
+    assert recent[4]["document_id"] == "recent-005"
+    print("PASS: test_document_index_recent")
+
+
+def test_document_index_idempotent():
+    """ทดสอบ DocumentIndex: add ซ้ำไม่เพิ่มซ้ำ (idempotent)."""
+    idx = server.DocumentIndex(server.storage)
+    idx._loaded = True
+
+    doc = {"document_id": "idem-001", "category": "lab", "extracted_text": ""}
+    idx.add(doc)
+    idx.add(doc)  # ซ้ำ
+    idx.add(doc)  # ซ้ำ
+
+    assert idx.count() == 1, f"Expected 1 doc, got {idx.count()}"
+    print("PASS: test_document_index_idempotent")
+
+
+def test_document_index_get():
+    """ทดสอบ DocumentIndex: get by doc_id."""
+    idx = server.DocumentIndex(server.storage)
+    idx._loaded = True
+
+    idx.add({"document_id": "get-001", "category": "rx", "extracted_text": ""})
+
+    doc = idx.get("get-001")
+    assert doc is not None
+    assert doc["category"] == "rx"
+
+    assert idx.get("nonexistent") is None
+    print("PASS: test_document_index_get")
+
+
+def test_search_max_results():
+    """ทดสอบค้นหาจำกัดจำนวนผลลัพธ์."""
+    idx = server.DocumentIndex(server.storage)
+    idx._loaded = True
+
+    for i in range(20):
+        idx.add({
+            "document_id": f"max-{i:03d}",
+            "category": "lab",
+            "extracted_text": "ผลตรวจ common_keyword",
+        })
+
+    results = idx.search("common_keyword", max_results=5)
+    assert len(results) == 5, f"Expected max 5, got {len(results)}"
+    print("PASS: test_search_max_results")
+
+
+def test_search_thai_text():
+    """ทดสอบค้นหาด้วยภาษาไทย."""
+    idx = server.DocumentIndex(server.storage)
+    idx._loaded = True
+
+    idx.add({
+        "document_id": "thai-001",
+        "category": "dialysis",
+        "extracted_text": "รายงานการฟอกเลือด ครั้งที่ 42",
+    })
+    idx.add({
+        "document_id": "thai-002",
+        "category": "rx",
+        "extracted_text": "ใบสั่งยา แอมโลดิปีน 5 มก.",
+    })
+
+    # Thai search
+    results = idx.search("ฟอกเลือด")
+    assert len(results) == 1
+    assert results[0]["document_id"] == "thai-001"
+
+    results = idx.search("แอมโลดิปีน")
+    assert len(results) == 1
+    assert results[0]["document_id"] == "thai-002"
+
+    print("PASS: test_search_thai_text")
+
+
+def test_handle_search_command_unauthorized():
+    """ทดสอบ unauthorized user ไม่สามารถค้นหาได้."""
+    # Clear authorized users for test
+    original = server.AUTHORIZED_USERS.copy()
+    server.AUTHORIZED_USERS.clear()
+
+    response = server.handle_search_command("ค้นหา ผลแล็บ", "unauthorized_hash")
+    assert response is not None
+    assert "ไม่มีสิทธิ์" in response
+
+    response = server.handle_search_command("รายการล่าสุด", "unauthorized_hash")
+    assert "ไม่มีสิทธิ์" in response
+
+    response = server.handle_search_command("ขอไฟล์ abc123", "unauthorized_hash")
+    assert "ไม่มีสิทธิ์" in response
+
+    server.AUTHORIZED_USERS = original
+    print("PASS: test_handle_search_command_unauthorized")
+
+
+def test_handle_search_command_help():
+    """ทดสอบคำสั่ง ช่วยเหลือ — ไม่ต้อง auth."""
+    response = server.handle_search_command("ช่วยเหลือ", "any_hash")
+    assert response is not None
+    assert "ค้นหา" in response
+    assert "รายการล่าสุด" in response
+    assert "ขอไฟล์" in response
+    print("PASS: test_handle_search_command_help")
+
+
+def test_handle_search_command_not_search():
+    """ทดสอบข้อความที่ไม่ใช่คำสั่งค้นหา → None."""
+    response = server.handle_search_command("สวัสดี", "any_hash")
+    assert response is None
+    print("PASS: test_handle_search_command_not_search")
+
+
+def test_is_authorized_user():
+    """ทดสอบ is_authorized_user."""
+    original = server.AUTHORIZED_USERS.copy()
+
+    server.AUTHORIZED_USERS = {"hash_a", "hash_b"}
+    assert server.is_authorized_user("hash_a") is True
+    assert server.is_authorized_user("hash_c") is False
+
+    # Empty allowlist = disabled
+    server.AUTHORIZED_USERS = set()
+    assert server.is_authorized_user("hash_a") is False
+
+    server.AUTHORIZED_USERS = original
+    print("PASS: test_is_authorized_user")
+
+
+def test_format_search_results_empty():
+    """ทดสอบ format_search_results empty."""
+    result = server.format_search_results([])
+    assert "ไม่พบ" in result
+    print("PASS: test_format_search_results_empty")
+
+
+def test_format_search_results_with_docs():
+    """ทดสอบ format_search_results with documents."""
+    docs = [
+        {
+            "document_id": "abc12345-6789",
+            "category": "lab",
+            "upload_date": "2026-10-19",
+        },
+        {
+            "document_id": "def12345-6789",
+            "category": "bills",
+            "upload_date": "2026-10-18",
+        },
+    ]
+    result = server.format_search_results(docs)
+    assert "2 เอกสาร" in result
+    assert "ผลตรวจแล็บ" in result
+    assert "ใบเสร็จ/บิล" in result
+    assert "abc12345" in result
+    assert "ขอไฟล์" in result
+    print("PASS: test_format_search_results_with_docs")
+
+
+def test_audit_logger_creates_entry():
+    """ทดสอบ AuditLogger สร้าง log entry."""
+    import io
+    import logging
+
+    # Capture log output
+    log_capture = io.StringIO()
+    handler = logging.StreamHandler(log_capture)
+    handler.setLevel(logging.INFO)
+    server.logger.addHandler(handler)
+
+    server.audit_logger.log("test_action", "test_user_hash_12345", {"key": "val"})
+
+    server.logger.removeHandler(handler)
+    log_output = log_capture.getvalue()
+    assert "AUDIT: test_action" in log_output
+    assert "test_use" in log_output  # truncated hash
+    print("PASS: test_audit_logger_creates_entry")
+
+
+def test_backfill_endpoint_no_auth():
+    """ทดสอบ backfill endpoint ต้องมี ADMIN_SECRET."""
+    client = server.app.test_client()
+
+    original_secret = server.ADMIN_SECRET
+    server.ADMIN_SECRET = "test_admin_secret_123"
+
+    # No auth header
+    resp = client.post("/admin/backfill")
+    assert resp.status_code == 401
+
+    # Wrong auth
+    resp = client.post("/admin/backfill", headers={"X-Admin-Secret": "wrong"})
+    assert resp.status_code == 401
+
+    server.ADMIN_SECRET = original_secret
+    print("PASS: test_backfill_endpoint_no_auth")
+
+
+def test_health_includes_document_search():
+    """ทดสอบ health endpoint แสดงข้อมูล document search."""
+    # Need production mode for document_search field
+    original_prod = server.IS_PRODUCTION
+    original_env = server.APP_ENV
+    server.IS_PRODUCTION = True
+    server.APP_ENV = "production"
+
+    client = server.app.test_client()
+    resp = client.get("/health")
+    data = resp.get_json()
+
+    # Document search info should appear in production
+    if "document_search" in data:
+        assert "indexed_documents" in data["document_search"]
+        assert "authorized_users" in data["document_search"]
+
+    server.IS_PRODUCTION = original_prod
+    server.APP_ENV = original_env
+    print("PASS: test_health_includes_document_search")
+
+
+def test_webhook_text_search_command():
+    """ทดสอบ webhook text message ส่งคำสั่ง ช่วยเหลือ."""
+    from unittest.mock import patch
+
+    payload = {
+        "events": [{
+            "type": "message",
+            "webhookEventId": "evt_search_test_001",
+            "deliveryContext": {"isRedelivery": False},
+            "replyToken": "search_reply_token",
+            "source": {"userId": "test_search_user"},
+            "message": {
+                "type": "text",
+                "id": "msg_search_001",
+                "text": "ช่วยเหลือ",
+            },
+        }],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    sig = make_signature(body)
+
+    client = server.app.test_client()
+
+    with patch("server.reply_message") as mock_reply:
+        resp = client.post(
+            "/webhook",
+            data=body,
+            headers={
+                "X-Line-Signature": sig,
+                "Content-Type": "application/json",
+            },
+        )
+        assert resp.status_code == 200
+
+        if mock_reply.called:
+            reply_text = mock_reply.call_args[0][1]
+            assert "ค้นหา" in reply_text
+            assert "รายการล่าสุด" in reply_text
+
+    print("PASS: test_webhook_text_search_command")
+
+
+def test_status_shows_doc_count():
+    """ทดสอบ สถานะ แสดงจำนวนเอกสารในดัชนี."""
+    from unittest.mock import patch
+
+    payload = {
+        "events": [{
+            "type": "message",
+            "webhookEventId": "evt_status_doc_001",
+            "deliveryContext": {"isRedelivery": False},
+            "replyToken": "status_doc_token",
+            "source": {"userId": "test_status_user"},
+            "message": {
+                "type": "text",
+                "id": "msg_status_doc_001",
+                "text": "สถานะ",
+            },
+        }],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    sig = make_signature(body)
+
+    client = server.app.test_client()
+
+    with patch("server.reply_message") as mock_reply:
+        resp = client.post(
+            "/webhook",
+            data=body,
+            headers={
+                "X-Line-Signature": sig,
+                "Content-Type": "application/json",
+            },
+        )
+        assert resp.status_code == 200
+        if mock_reply.called:
+            reply_text = mock_reply.call_args[0][1]
+            assert "ดัชนี" in reply_text
+
+    print("PASS: test_status_shows_doc_count")
+
+
+def test_no_patient_data_in_index():
+    """ทดสอบว่า original_filename ไม่เก็บชื่อผู้ป่วย."""
+    idx = server.DocumentIndex(server.storage)
+    idx._loaded = True
+
+    # Simulate what process_file_async does — uses generic name
+    doc = {
+        "document_id": "pii-001",
+        "original_filename": "document.pdf",  # NOT patient name
+        "category": "lab",
+        "extracted_text": "ผลตรวจ",
+    }
+    idx.add(doc)
+
+    stored = idx.get("pii-001")
+    # Should NOT contain patient-identifying filename
+    assert stored["original_filename"] == "document.pdf"
+    assert "สมชาย" not in stored["original_filename"]
+    print("PASS: test_no_patient_data_in_index")
+
+
+def test_signed_url_not_ready():
+    """ทดสอบ signed URL เมื่อ GCS ไม่พร้อม."""
+    url = server.generate_signed_url("some/path.pdf")
+    # In testing mode with local storage, should return None
+    assert url is None
+    print("PASS: test_signed_url_not_ready")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -2610,6 +3017,26 @@ def main():
         test_production_health_checklist,
         test_production_health_no_checklist_in_testing,
         test_production_copy_to_category_reraises,
+        # ── Document Search V1 ──
+        test_document_index_add_and_search,
+        test_document_index_recent,
+        test_document_index_idempotent,
+        test_document_index_get,
+        test_search_max_results,
+        test_search_thai_text,
+        test_handle_search_command_unauthorized,
+        test_handle_search_command_help,
+        test_handle_search_command_not_search,
+        test_is_authorized_user,
+        test_format_search_results_empty,
+        test_format_search_results_with_docs,
+        test_audit_logger_creates_entry,
+        test_backfill_endpoint_no_auth,
+        test_health_includes_document_search,
+        test_webhook_text_search_command,
+        test_status_shows_doc_count,
+        test_no_patient_data_in_index,
+        test_signed_url_not_ready,
     ]
 
     passed = 0

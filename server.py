@@ -33,7 +33,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from flask import Flask, request, abort, jsonify
@@ -131,6 +131,31 @@ FOLDERS = {
 # ENABLE_AI_CLASSIFY ถูกเพิกเฉยสำหรับเส้นทาง AI ภายนอก
 EXTERNAL_AI_CLASSIFICATION_ALLOWED = False
 
+# ─── Document Search V1 ────────────────────────────────────
+# Allowlist: LINE user IDs (hashed) ที่อนุญาตให้ค้นหา/เรียกดูเอกสาร
+# ตั้งค่าใน Render Dashboard: AUTHORIZED_USERS=hash1,hash2,...
+# ถ้าไม่ตั้ง = ปิดระบบค้นหาสำหรับทุกคน (ปลอดภัย)
+_authorized_env = os.getenv("AUTHORIZED_USERS", "").strip()
+AUTHORIZED_USERS: set[str] = {
+    u.strip() for u in _authorized_env.split(",") if u.strip()
+}
+
+# Admin secret สำหรับ backfill endpoint
+ADMIN_SECRET = os.getenv("ADMIN_SECRET", "").strip()
+
+# จำนวนผลค้นหาสูงสุดต่อครั้ง
+SEARCH_MAX_RESULTS = 5
+
+# Signed URL expiry (วินาที) — สั้นเพื่อความปลอดภัย
+SIGNED_URL_EXPIRY = 900  # 15 นาที
+
+# OCR text extraction ขีดจำกัด (ตัวอักษร) สำหรับเก็บใน index
+MAX_INDEX_TEXT_LENGTH = 5000
+
+# GCS paths for index/audit data
+INDEX_OBJECT_PATH = "_index/documents.jsonl"
+AUDIT_PREFIX = "_audit/"
+
 # ─── OCR ─────────────────────────────────────────────────
 # 200 DPI เพียงพอสำหรับ Tesseract กับข้อความขนาดปกติ และใช้หน่วยความจำ
 # น้อยกว่า 300 DPI ราว 56% (A4: ~26 MB → ~11.6 MB ต่อหน้า)
@@ -182,6 +207,8 @@ app = Flask(__name__)
 
 class StorageLocal:
     """เก็บไฟล์บน local disk (ephemeral บน Render)."""
+
+    is_ready = False  # Local storage ไม่ถือว่า "พร้อม" สำหรับ Document Search
 
     def save(
         self,
@@ -469,6 +496,363 @@ def get_storage():
 
 
 storage = get_storage()
+
+
+# ═══════════════════════════════════════════════════════════
+# Document Index — GCS-based persistent index
+#
+# เก็บ metadata ของเอกสารทั้งหมดเป็น JSONL ใน GCS bucket
+# โหลดเข้า memory ตอน startup, append เมื่อรับเอกสารใหม่
+# ค้นหาแบบ substring match ใน memory — เพียงพอสำหรับคลินิก
+#
+# ไม่ใช้ local SQLite เพราะ Render filesystem เป็น ephemeral
+# ไม่เพิ่ม database service ภายนอก — ใช้ GCS ที่มีอยู่แล้ว
+# ค่าใช้จ่ายเพิ่ม: $0 (ใช้ GCS bucket เดิม)
+#
+# สำหรับคลินิกที่มีเอกสาร < 50,000 ชิ้น index ≈ 50 MB ใน memory
+# ═══════════════════════════════════════════════════════════
+
+class DocumentIndex:
+    """Persistent document index stored in GCS as JSONL."""
+
+    def __init__(self, storage_instance):
+        self._storage = storage_instance
+        self._docs: list[dict] = []
+        self._doc_map: dict[str, dict] = {}  # doc_id -> doc
+        self._lock = threading.Lock()
+        self._loaded = False
+
+    def _load(self):
+        """โหลด index จาก GCS เข้า memory — เรียกครั้งเดียวตอน startup."""
+        if self._loaded or not hasattr(self._storage, '_client') or not self._storage.is_ready:
+            return
+        try:
+            blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
+            if not blob.exists():
+                logger.info("Document index: ไม่มีไฟล์ index ใน GCS — เริ่มจาก empty")
+                self._loaded = True
+                return
+            content = blob.download_as_text(encoding="utf-8")
+            count = 0
+            for line in content.strip().split("\n"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    doc = json.loads(line)
+                    self._docs.append(doc)
+                    self._doc_map[doc.get("document_id", "")] = doc
+                    count += 1
+                except json.JSONDecodeError:
+                    continue
+            logger.info(f"Document index: โหลด {count} เอกสารจาก GCS")
+            self._loaded = True
+        except Exception as e:
+            logger.error(f"Document index load ล้มเหลว: {type(e).__name__}")
+            self._loaded = True  # ไม่ retry ซ้ำ — จะ append ได้ต่อไป
+
+    def add(self, doc_meta: dict):
+        """เพิ่มเอกสารใหม่ลง index (memory + GCS)."""
+        with self._lock:
+            doc_id = doc_meta.get("document_id", "")
+            if doc_id in self._doc_map:
+                return  # idempotent — มีอยู่แล้ว
+            self._docs.append(doc_meta)
+            self._doc_map[doc_id] = doc_meta
+
+        # Append to GCS (non-blocking attempt — ถ้าล้มเหลวไม่ถือว่าร้ายแรง)
+        try:
+            if self._storage.is_ready:
+                line = json.dumps(doc_meta, ensure_ascii=False) + "\n"
+                blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
+                if blob.exists():
+                    existing = blob.download_as_text(encoding="utf-8")
+                    blob.upload_from_string(
+                        existing + line, content_type="application/jsonl"
+                    )
+                else:
+                    blob.upload_from_string(
+                        line, content_type="application/jsonl"
+                    )
+                logger.info(f"Document index: เพิ่ม doc_id={doc_id[:8]}…")
+        except Exception as e:
+            logger.error(f"Document index append ล้มเหลว: {type(e).__name__}")
+
+    def get(self, doc_id: str) -> dict | None:
+        """ดึงเอกสารตาม document_id."""
+        self._ensure_loaded()
+        return self._doc_map.get(doc_id)
+
+    def recent(self, n: int = 5) -> list[dict]:
+        """เอกสารล่าสุด n ชิ้น."""
+        self._ensure_loaded()
+        return list(reversed(self._docs[-n:]))
+
+    def search(self, query: str, max_results: int = SEARCH_MAX_RESULTS) -> list[dict]:
+        """ค้นหาเอกสาร — substring match ใน category, extracted_text, upload_date.
+
+        รองรับภาษาไทย — ใช้ substring match ซึ่งทำงานได้ดีกับภาษาไทย
+        เพราะไม่ต้องแบ่งคำ
+        """
+        self._ensure_loaded()
+        query_lower = query.lower().strip()
+        if not query_lower:
+            return []
+
+        results = []
+        for doc in reversed(self._docs):  # ใหม่ก่อน
+            searchable = " ".join([
+                doc.get("category", ""),
+                doc.get("original_filename", ""),
+                doc.get("extracted_text", ""),
+                doc.get("upload_date", ""),
+                doc.get("mime_type", ""),
+            ]).lower()
+            if query_lower in searchable:
+                results.append(doc)
+                if len(results) >= max_results:
+                    break
+        return results
+
+    def count(self) -> int:
+        """จำนวนเอกสารทั้งหมดใน index."""
+        self._ensure_loaded()
+        return len(self._docs)
+
+    def _ensure_loaded(self):
+        if not self._loaded:
+            self._load()
+
+    def _save_full(self):
+        """เขียน index ทั้งหมดลง GCS — ใช้ตอน backfill."""
+        if not self._storage.is_ready:
+            return False
+        try:
+            lines = []
+            for doc in self._docs:
+                lines.append(json.dumps(doc, ensure_ascii=False))
+            content = "\n".join(lines) + "\n" if lines else ""
+            blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
+            blob.upload_from_string(content, content_type="application/jsonl")
+            logger.info(f"Document index: บันทึก {len(self._docs)} เอกสารลง GCS")
+            return True
+        except Exception as e:
+            logger.error(f"Document index save ล้มเหลว: {type(e).__name__}")
+            return False
+
+
+# สร้าง document index instance
+doc_index = DocumentIndex(storage)
+# Lazy load — จะโหลดตอนเรียกใช้ครั้งแรก
+
+
+# ═══════════════════════════════════════════════════════════
+# Audit Logger — บันทึกการค้นหา/เรียกดูเอกสาร
+# ═══════════════════════════════════════════════════════════
+
+class AuditLogger:
+    """บันทึก audit log ลง GCS แบบ append-per-month."""
+
+    def __init__(self, storage_instance):
+        self._storage = storage_instance
+
+    def log(self, action: str, user_hash: str, details: dict | None = None):
+        """บันทึก audit event.
+
+        action: search, view, download, backfill
+        user_hash: SHA-256 hash ของ LINE user ID
+        details: ข้อมูลเพิ่มเติม (ห้ามมีข้อมูลผู้ป่วย)
+        """
+        entry = {
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "action": action,
+            "user_hash": user_hash[:8] + "…",
+            "details": details or {},
+        }
+        line = json.dumps(entry, ensure_ascii=False) + "\n"
+
+        # เขียนลง GCS
+        if self._storage.is_ready:
+            try:
+                month_key = datetime.now().strftime("%Y-%m")
+                audit_path = f"{AUDIT_PREFIX}{month_key}.jsonl"
+                blob = self._storage._bucket.blob(audit_path)
+                if blob.exists():
+                    existing = blob.download_as_text(encoding="utf-8")
+                    blob.upload_from_string(
+                        existing + line, content_type="application/jsonl"
+                    )
+                else:
+                    blob.upload_from_string(
+                        line, content_type="application/jsonl"
+                    )
+            except Exception as e:
+                logger.error(f"Audit log write ล้มเหลว: {type(e).__name__}")
+
+        # Fallback: เขียนลง local log ด้วย
+        logger.info(f"AUDIT: {action} user={user_hash[:8]}…")
+
+
+audit_logger = AuditLogger(storage)
+
+
+# ─── Document Search V1: Signed URL + Search Helpers ─────
+def generate_signed_url(gcs_object_path: str, expiry_seconds: int = SIGNED_URL_EXPIRY) -> str | None:
+    """สร้าง signed URL สำหรับเข้าถึงไฟล์ใน GCS อย่างปลอดภัย.
+
+    ต้องใช้ Service Account JSON Key (ไม่รองรับ Workload Identity)
+    signed URL หมดอายุตาม SIGNED_URL_EXPIRY (default 15 นาที)
+    """
+    if not storage.is_ready or not hasattr(storage, '_bucket'):
+        return None
+    try:
+        blob = storage._bucket.blob(gcs_object_path)
+        if not blob.exists():
+            return None
+        url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(seconds=expiry_seconds),
+            method="GET",
+        )
+        return url
+    except Exception as e:
+        logger.error(f"Signed URL generation ล้มเหลว: {type(e).__name__}")
+        return None
+
+
+def is_authorized_user(user_hash: str) -> bool:
+    """ตรวจสอบว่า user hash อยู่ใน Allowlist."""
+    if not AUTHORIZED_USERS:
+        return False  # ถ้าไม่ตั้งค่า = ปิดระบบค้นหา
+    return user_hash in AUTHORIZED_USERS
+
+
+def format_search_results(results: list[dict]) -> str:
+    """จัดรูปแบบผลค้นหาเป็นข้อความ LINE."""
+    if not results:
+        return "ไม่พบเอกสารที่ตรงกับคำค้น"
+
+    cat_names = {
+        "bills": "ใบเสร็จ/บิล",
+        "rx": "ใบสั่งยา",
+        "lab": "ผลตรวจแล็บ",
+        "dialysis": "เอกสารฟอกเลือด",
+        "review": "รอตรวจสอบ",
+    }
+    lines = [f"พบ {len(results)} เอกสาร:\n"]
+    for i, doc in enumerate(results, 1):
+        cat = cat_names.get(doc.get("category", ""), doc.get("category", ""))
+        date = doc.get("upload_date", "ไม่ทราบ")
+        doc_id = doc.get("document_id", "")[:8]
+        lines.append(
+            f"{i}. [{cat}] {date}\n"
+            f"   รหัส: {doc_id}…"
+        )
+    lines.append("\nพิมพ์ 'ขอไฟล์ [รหัส]' เพื่อเรียกดู")
+    return "\n".join(lines)
+
+
+def handle_search_command(text: str, user_hash: str) -> str | None:
+    """ประมวลผลคำสั่งค้นหาเอกสาร — คืนข้อความตอบกลับ หรือ None ถ้าไม่ใช่คำสั่ง."""
+    text_stripped = text.strip()
+
+    # ช่วยเหลือ / help
+    if text_stripped in ("ช่วยเหลือ", "help", "คำสั่ง"):
+        return (
+            "📋 คำสั่งค้นหาเอกสาร:\n\n"
+            "🔍 ค้นหา [คำค้น]\n"
+            "  ค้นหาด้วยประเภท วันที่ หรือเนื้อหา\n"
+            "  เช่น: ค้นหา ผลแล็บ\n\n"
+            "📄 รายการล่าสุด\n"
+            "  แสดง 5 เอกสารล่าสุด\n\n"
+            "📎 ขอไฟล์ [รหัส]\n"
+            "  ขอลิงก์ดาวน์โหลดเอกสาร\n\n"
+            "ℹ️ สถานะ\n"
+            "  ตรวจสอบระบบ"
+        )
+
+    # Authorization check — ต้องผ่านก่อนใช้คำสั่งค้นหา
+    if not is_authorized_user(user_hash):
+        # ค้นหา / รายการล่าสุด / ขอไฟล์ → ต้อง authorized
+        if (text_stripped.startswith("ค้นหา ")
+                or text_stripped == "รายการล่าสุด"
+                or text_stripped.startswith("ขอไฟล์ ")):
+            audit_logger.log("unauthorized_access", user_hash, {
+                "command": text_stripped[:20]
+            })
+            return "ขออภัย คุณไม่มีสิทธิ์ใช้งานระบบค้นหาเอกสาร\nกรุณาติดต่อผู้ดูแลระบบ"
+        return None  # ไม่ใช่คำสั่งค้นหา
+
+    # ค้นหา [คำค้น]
+    if text_stripped.startswith("ค้นหา "):
+        query = text_stripped[len("ค้นหา "):].strip()
+        if not query:
+            return "กรุณาระบุคำค้น เช่น: ค้นหา ผลแล็บ"
+        results = doc_index.search(query)
+        audit_logger.log("search", user_hash, {
+            "query": query[:50],
+            "results_count": len(results),
+        })
+        return format_search_results(results)
+
+    # รายการล่าสุด
+    if text_stripped == "รายการล่าสุด":
+        results = doc_index.recent(5)
+        audit_logger.log("list_recent", user_hash, {
+            "results_count": len(results),
+        })
+        if not results:
+            return "ยังไม่มีเอกสารในระบบ"
+        return format_search_results(results)
+
+    # ขอไฟล์ [document_id]
+    if text_stripped.startswith("ขอไฟล์ "):
+        doc_id_query = text_stripped[len("ขอไฟล์ "):].strip()
+        if not doc_id_query:
+            return "กรุณาระบุรหัสเอกสาร เช่น: ขอไฟล์ a1b2c3d4"
+
+        # ค้นหา doc_id ที่ขึ้นต้นด้วย query (รองรับ partial ID)
+        doc = None
+        for d in doc_index._docs:
+            if d.get("document_id", "").startswith(doc_id_query):
+                doc = d
+                break
+
+        if not doc:
+            audit_logger.log("file_request_not_found", user_hash, {
+                "query": doc_id_query[:8],
+            })
+            return "ไม่พบเอกสารที่ตรงกับรหัสนี้\nลองใช้คำสั่ง 'ค้นหา' หรือ 'รายการล่าสุด' ก่อน"
+
+        gcs_path = doc.get("gcs_object_path", "")
+        if not gcs_path:
+            return "ไม่สามารถเข้าถึงไฟล์นี้ได้ — ไม่มี path ใน GCS"
+
+        signed_url = generate_signed_url(gcs_path)
+        if not signed_url:
+            audit_logger.log("file_request_failed", user_hash, {
+                "doc_id": doc.get("document_id", "")[:8],
+            })
+            return "ขออภัย ไม่สามารถสร้างลิงก์ดาวน์โหลดได้ในขณะนี้\nกรุณาลองใหม่ในอีกสักครู่"
+
+        audit_logger.log("file_request", user_hash, {
+            "doc_id": doc.get("document_id", "")[:8],
+            "category": doc.get("category", ""),
+        })
+
+        cat_names = {
+            "bills": "ใบเสร็จ/บิล", "rx": "ใบสั่งยา",
+            "lab": "ผลตรวจแล็บ", "dialysis": "เอกสารฟอกเลือด",
+            "review": "รอตรวจสอบ",
+        }
+        cat = cat_names.get(doc.get("category", ""), doc.get("category", ""))
+        return (
+            f"📎 เอกสาร: [{cat}]\n"
+            f"วันที่: {doc.get('upload_date', 'ไม่ทราบ')}\n"
+            f"ลิงก์ดาวน์โหลด (หมดอายุใน 15 นาที):\n{signed_url}"
+        )
+
+    return None  # ไม่ใช่คำสั่งค้นหา
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1462,13 +1846,63 @@ def process_file_async(
                 size_bytes=size_now,
                 sha256_hex=sha256_hex or "",
             )
+
+            # ── Document Search V1: extract text for indexing ──
+            extracted_text = ""
+            ocr_status = "none"
+            try:
+                if ext_now == ".pdf":
+                    extracted_text = extract_pdf_text(filepath)
+                    if len(extracted_text.strip()) < 50:
+                        # scanned PDF → OCR
+                        extracted_text = extract_text_with_ocr(filepath)
+                        ocr_status = "ocr"
+                    else:
+                        ocr_status = "native"
+                elif ext_now in (".jpg", ".jpeg", ".png"):
+                    extracted_text = extract_text_with_ocr(filepath)
+                    ocr_status = "ocr"
+            except Exception as ocr_err:
+                logger.warning(
+                    f"Text extraction ล้มเหลว: {type(ocr_err).__name__} "
+                    f"(doc_id={_doc_id})"
+                )
+                ocr_status = "failed"
+            extracted_text = extracted_text[:MAX_INDEX_TEXT_LENGTH]
+
             dest = copy_to_category(filepath, category, metadata=metadata)
+
+            # ── Document Search V1: add to index after GCS upload ──
+            stored_in_gcs = bool(dest and dest.startswith("gs://"))
+            if stored_in_gcs:
+                # Extract GCS object path from gs:// URI
+                gcs_object_path = dest.replace(
+                    f"gs://{STORAGE_BUCKET}/", ""
+                ) if STORAGE_BUCKET else ""
+                mime_map = {
+                    ".pdf": "application/pdf",
+                    ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".png": "image/png",
+                    ".txt": "text/plain",
+                }
+                doc_meta = {
+                    "document_id": _doc_id,
+                    "original_filename": f"document{ext_now}",
+                    "gcs_object_path": gcs_object_path,
+                    "category": category,
+                    "upload_date": datetime.now().strftime("%Y-%m-%d"),
+                    "mime_type": mime_map.get(ext_now, "application/octet-stream"),
+                    "file_size": size_now,
+                    "ocr_status": ocr_status,
+                    "extracted_text": extracted_text,
+                }
+                doc_index.add(doc_meta)
 
             # บันทึก log — ไม่เก็บ path หรือชื่อไฟล์ต้นฉบับ
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
                 "doc_id": _doc_id,
-                "stored": bool(dest and dest.startswith("gs://")),
+                "stored": stored_in_gcs,
                 "category": category,
                 "file_size": size_now,
                 "file_type": ext_now,
@@ -1747,13 +2181,20 @@ def webhook():
             elif msg_type == "text":
                 text = msg.get("text", "")
                 logger.info(f"รับข้อความ: {len(text)} chars")
-                if text.strip().lower() in ("สถานะ", "status"):
+
+                # ── Document Search V1: ตรวจคำสั่งค้นหาก่อน ──
+                search_response = handle_search_command(text, user_hash)
+                if search_response:
+                    reply_message(reply_token, search_response)
+                elif text.strip().lower() in ("สถานะ", "status"):
                     inbox_path = os.path.join(BASE_DIR, FOLDERS["inbox"])
                     inbox_count = len(os.listdir(inbox_path)) if os.path.exists(inbox_path) else 0
+                    doc_count = doc_index.count()
                     reply_message(
                         reply_token,
                         f"ระบบระนอง รักษ์ไต (Cloud) ทำงานปกติ\n"
                         f"เอกสารใน inbox: {inbox_count} ไฟล์\n"
+                        f"เอกสารในดัชนี: {doc_count} รายการ\n"
                         f"AI classify: {'เปิด' if ENABLE_AI_CLASSIFY else 'ปิด'}\n"
                         f"Storage: {STORAGE_BACKEND}\n"
                         f"รองรับ: TXT, PDF, JPG, PNG",
@@ -1762,8 +2203,13 @@ def webhook():
                     reply_message(
                         reply_token,
                         "ส่งภาพหรือไฟล์เอกสาร (PDF, TXT, JPG, PNG)\n"
-                        "เพื่อจำแนกประเภทอัตโนมัติ\n"
-                        "พิมพ์ 'สถานะ' เพื่อตรวจสอบระบบ",
+                        "เพื่อจำแนกประเภทอัตโนมัติ\n\n"
+                        "📋 คำสั่งค้นหา:\n"
+                        "  ค้นหา [คำค้น]\n"
+                        "  รายการล่าสุด\n"
+                        "  ขอไฟล์ [รหัส]\n"
+                        "  ช่วยเหลือ\n"
+                        "  สถานะ",
                     )
             else:
                 logger.info(f"ข้าม message type: {msg_type}")
@@ -1852,6 +2298,11 @@ def health():
             ),
             "external_ai_locked": not EXTERNAL_AI_CLASSIFICATION_ALLOWED,
         }
+        health_info["document_search"] = {
+            "indexed_documents": doc_index.count(),
+            "authorized_users": len(AUTHORIZED_USERS),
+            "admin_secret_set": bool(ADMIN_SECRET),
+        }
 
     return jsonify(health_info), http_status
 
@@ -1865,6 +2316,108 @@ def index():
         "health_check": "/health",
         "webhook": "/webhook",
     }), 200
+
+
+# ─── Document Search V1: Backfill Endpoint ───────────────
+
+@app.route("/admin/backfill", methods=["POST"])
+def admin_backfill():
+    """Backfill job: สร้าง index จากไฟล์ที่มีอยู่แล้วใน GCS.
+
+    ต้องมี ADMIN_SECRET header เพื่อป้องกันการเข้าถึง
+    Idempotent — ไฟล์ที่มี doc_id ใน index แล้วจะข้าม
+    ไม่แก้ไขไฟล์ต้นฉบับใน GCS
+    """
+    # Auth check
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or auth_header != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if not storage.is_ready or not hasattr(storage, '_bucket'):
+        return jsonify({"error": "GCS not ready"}), 503
+
+    try:
+        # List all blobs in bucket (skip _index/ and _audit/)
+        blobs = storage._bucket.list_blobs()
+        processed = 0
+        skipped = 0
+        errors = 0
+
+        for blob in blobs:
+            # Skip index and audit files
+            if blob.name.startswith("_index/") or blob.name.startswith("_audit/"):
+                continue
+
+            # Extract doc_id from filename (UUID before extension)
+            filename = os.path.basename(blob.name)
+            doc_id = os.path.splitext(filename)[0]
+
+            # Idempotent: skip if already indexed
+            if doc_index.get(doc_id):
+                skipped += 1
+                continue
+
+            # Extract metadata from blob path: folder/YYYY-MM/uuid.ext
+            parts = blob.name.split("/")
+            category = parts[0] if parts else "review"
+            ext = os.path.splitext(blob.name)[1].lower()
+
+            # Map folder names back to categories
+            folder_to_cat = {v: k for k, v in FOLDERS.items()}
+            category = folder_to_cat.get(category, "review")
+
+            mime_map = {
+                ".pdf": "application/pdf",
+                ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".txt": "text/plain",
+            }
+
+            # Note: OCR during backfill would be too slow for inline HTTP
+            # This creates the index entry with ocr_status="pending"
+            # A separate OCR pass can be done later
+            doc_meta = {
+                "document_id": doc_id,
+                "original_filename": f"document{ext}",
+                "gcs_object_path": blob.name,
+                "category": category,
+                "upload_date": (
+                    blob.time_created.strftime("%Y-%m-%d")
+                    if blob.time_created else "unknown"
+                ),
+                "mime_type": mime_map.get(ext, "application/octet-stream"),
+                "file_size": blob.size or 0,
+                "ocr_status": "pending",
+                "extracted_text": "",
+            }
+
+            try:
+                doc_index.add(doc_meta)
+                processed += 1
+            except Exception:
+                errors += 1
+
+        # Save full index to GCS
+        doc_index._save_full()
+
+        audit_logger.log("backfill", "admin", {
+            "processed": processed,
+            "skipped": skipped,
+            "errors": errors,
+            "total_indexed": doc_index.count(),
+        })
+
+        return jsonify({
+            "status": "ok",
+            "processed": processed,
+            "skipped": skipped,
+            "errors": errors,
+            "total_indexed": doc_index.count(),
+        }), 200
+
+    except Exception as e:
+        logger.error(f"Backfill ล้มเหลว: {type(e).__name__}")
+        return jsonify({"error": "Backfill failed"}), 500
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1899,6 +2452,12 @@ logger.info(f"BASE_DIR: {BASE_DIR}")
 logger.info(f"AI Classification: {'เปิด' if ENABLE_AI_CLASSIFY else 'ปิด'}")
 logger.info(f"OCR (Tesseract): {'พร้อม' if HAS_TESSERACT and HAS_PIL else 'ไม่พร้อม'}")
 logger.info(f"PyMuPDF: {'พร้อม' if HAS_PYMUPDF else 'ไม่พร้อม'}")
+
+# ── Document Search V1: โหลด index ตอน startup ──
+doc_index._ensure_loaded()
+logger.info(f"Document Index: {doc_index.count()} เอกสาร")
+logger.info(f"Authorized Users: {len(AUTHORIZED_USERS)} users")
+logger.info(f"Admin Secret: {'ตั้งค่าแล้ว' if ADMIN_SECRET else 'ไม่ได้ตั้งค่า'}")
 
 if ANTHROPIC_API_KEY:
     logger.info(f"ANTHROPIC_API_KEY: ตั้งค่าแล้ว (len={len(ANTHROPIC_API_KEY)})")
