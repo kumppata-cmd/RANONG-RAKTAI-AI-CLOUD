@@ -24,12 +24,7 @@ services:
 
       # ระบบ
       - key: APP_ENV
-        value: "testing"  # เปลี่ยนเป็น "production" เมื่อพร้อมรับเอกสารจริง
-        # Production mode:
-        #   - ต้องตั้ง STORAGE_BACKEND=gcs
-        #   - GCS ต้องเชื่อมต่อได้ มิฉะนั้นจะปฏิเสธเอกสาร
-        #   - ห้าม fallback ไป local storage
-        #   - Health check คืน 503 ถ้า GCS ไม่พร้อม
+        value: "production"  # Production — รับเอกสารจริง, GCS-only, ไม่มี local fallback
       - key: ENABLE_AI_CLASSIFY
         value: "true"
       - key: STORAGE_BACKEND

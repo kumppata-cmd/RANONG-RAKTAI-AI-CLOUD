@@ -90,7 +90,12 @@ ENABLE_AI_CLASSIFY = os.getenv("ENABLE_AI_CLASSIFY", "true").lower() == "true"
 #   "local"  = เก็บบน disk ชั่วคราว (ค่าเริ่มต้น, สำหรับทดสอบ)
 #   "s3"     = Amazon S3 (ต้องตั้ง AWS_* env vars)
 #   "gcs"    = Google Cloud Storage (ต้องตั้ง GCS_* env vars)
-STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "local")
+_storage_backend_env = os.getenv("STORAGE_BACKEND", "local")
+# Production: บังคับใช้ GCS เท่านั้น — ถ้าไม่ได้ตั้ง STORAGE_BACKEND จะใช้ gcs อัตโนมัติ
+if IS_PRODUCTION and _storage_backend_env == "local":
+    STORAGE_BACKEND = "gcs"
+else:
+    STORAGE_BACKEND = _storage_backend_env
 # รองรับทั้ง GCS_BUCKET_NAME (แนะนำ) และ STORAGE_BUCKET (backward-compatible)
 STORAGE_BUCKET = os.getenv("GCS_BUCKET_NAME") or os.getenv("STORAGE_BUCKET", "")
 
@@ -424,7 +429,9 @@ class StorageGCS:
             self._bucket.reload()
             return {"status": "connected", "bucket": self.bucket_name}
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            # ไม่เปิดเผย exception detail — อาจมี internal GCS URL หรือ project ID
+            logger.error(f"GCS check_connection ล้มเหลว: {type(e).__name__}")
+            return {"status": "error", "error": type(e).__name__}
 
 
 def get_storage():
