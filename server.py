@@ -21,6 +21,7 @@ Deploy บน Render Managed Cloud ด้วย Gunicorn
   - ไม่มี ngrok, batch files, Windows-specific code
 """
 
+import fcntl
 import os
 import secrets
 import sys
@@ -221,85 +222,135 @@ app = Flask(__name__)
 class EnrollmentTokenStore:
     """จัดการ One-Time Enrollment Token สำหรับลงทะเบียนผู้ดูแล.
 
+    ใช้ file-based storage + fcntl.flock เพื่อแชร์ token ข้าม Gunicorn workers
+    บน Render instance เดียวกัน — ป้องกันปัญหา token สร้างใน worker A
+    แต่ validate ใน worker B
+
     - Token สุ่มด้วย secrets.token_hex (cryptographically secure)
-    - อายุ 5 นาที, ใช้ได้ครั้งเดียว
+    - อายุ 5 นาที, ใช้ได้ครั้งเดียว (atomic single-use consumption)
     - ป้องกัน replay attack: ใช้แล้วลบทันที
     - Rate limiting: จำกัดจำนวนครั้งที่พิมพ์ token ผิดต่อ user ต่อชั่วโมง
     - Token ไม่ถูกบันทึกลง log
+    - Restart-safe: token หมดอายุตามธรรมชาติ (5 นาที TTL)
     """
 
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        # token → {"created_at": float, "used": bool}
-        self._tokens: dict[str, dict] = {}
-        # rate limit: user_hash → [timestamps of failed attempts]
-        self._failed_attempts: dict[str, list[float]] = {}
+    def __init__(self, store_path: str | None = None) -> None:
+        self._store_path = store_path or os.path.join(
+            tempfile.gettempdir(), "ranong_enrollment_tokens.json"
+        )
+        # Fallback in-process lock สำหรับ thread safety ภายใน worker
+        self._thread_lock = threading.Lock()
+
+    def _read_store(self, fd: int) -> dict:
+        """อ่าน store จากไฟล์ — เรียกภายใต้ file lock เท่านั้น."""
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            data = os.read(fd, 1024 * 1024)  # max 1 MB
+            if not data:
+                return {"tokens": {}, "failed_attempts": {}}
+            return json.loads(data.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return {"tokens": {}, "failed_attempts": {}}
+
+    def _write_store(self, fd: int, store: dict) -> None:
+        """เขียน store ลงไฟล์ — เรียกภายใต้ file lock เท่านั้น."""
+        raw = json.dumps(store, separators=(",", ":")).encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, raw)
+
+    def _cleanup_expired(self, store: dict, now: float) -> None:
+        """ลบ token หมดอายุ และ failed attempts เก่ากว่า 1 ชั่วโมง."""
+        # ลบ token หมดอายุ
+        expired = [
+            t for t, info in store["tokens"].items()
+            if now - info["created_at"] > ENROLLMENT_TOKEN_TTL
+        ]
+        for t in expired:
+            del store["tokens"][t]
+        # ลบ failed attempts เก่ากว่า 1 ชั่วโมง
+        for user_hash in list(store["failed_attempts"].keys()):
+            attempts = store["failed_attempts"][user_hash]
+            fresh = [ts for ts in attempts if now - ts < 3600]
+            if fresh:
+                store["failed_attempts"][user_hash] = fresh
+            else:
+                del store["failed_attempts"][user_hash]
+
+    def _with_lock(self, operation):
+        """เปิดไฟล์ + exclusive lock → ทำ operation → ปิด.
+
+        ใช้ fcntl.flock (LOCK_EX) เพื่อ atomic access ข้าม worker.
+        """
+        with self._thread_lock:
+            fd = os.open(
+                self._store_path,
+                os.O_RDWR | os.O_CREAT,
+                0o600,  # owner-only permissions
+            )
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                try:
+                    store = self._read_store(fd)
+                    result = operation(store)
+                    self._write_store(fd, store)
+                    return result
+                finally:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
 
     def generate_token(self) -> str:
         """สร้าง token ใหม่ — เรียกจาก admin endpoint เท่านั้น."""
         token = secrets.token_hex(ENROLLMENT_TOKEN_LENGTH)
-        with self._lock:
-            # ลบ token หมดอายุก่อน
-            self._cleanup_expired()
-            self._tokens[token] = {
-                "created_at": time.time(),
-                "used": False,
-            }
+
+        def _op(store: dict) -> str:
+            now = time.time()
+            self._cleanup_expired(store, now)
+            store["tokens"][token] = {"created_at": now}
+            return token
+
+        self._with_lock(_op)
         return token
 
     def validate_and_consume(self, token: str, user_hash: str) -> str | None:
-        """ตรวจสอบ token — คืน None หาก token ไม่ถูกต้อง/หมดอายุ/ใช้แล้ว.
+        """ตรวจสอบ token — atomic single-use consumption ข้าม workers.
 
-        คืน error message (str) หาก rate-limited.
-        คืน True หาก token ถูกต้อง — caller ต้องตรวจ isinstance.
+        คืน "VALID" หาก token ถูกต้อง
+        คืน "RATE_LIMITED" หาก rate-limited
+        คืน None หาก token ไม่ถูกต้อง/หมดอายุ/ใช้แล้ว
         """
-        with self._lock:
-            # ── Rate limit check ──
+        def _op(store: dict) -> str | None:
             now = time.time()
-            attempts = self._failed_attempts.get(user_hash, [])
-            # ลบ attempt เก่ากว่า 1 ชั่วโมง
-            attempts = [t for t in attempts if now - t < 3600]
-            self._failed_attempts[user_hash] = attempts
+            self._cleanup_expired(store, now)
 
+            # ── Rate limit check ──
+            attempts = store["failed_attempts"].get(user_hash, [])
             if len(attempts) >= ENROLLMENT_MAX_FAILED:
                 return "RATE_LIMITED"
 
-            # ── ลบ token หมดอายุ ──
-            self._cleanup_expired()
-
             # ── ตรวจ token ──
-            entry = self._tokens.get(token)
+            entry = store["tokens"].get(token)
             if entry is None:
                 # token ไม่มี/หมดอายุ → นับ failed attempt
                 attempts.append(now)
-                self._failed_attempts[user_hash] = attempts
+                store["failed_attempts"][user_hash] = attempts
                 return None
 
-            if entry["used"]:
-                # ใช้แล้ว → replay attack → นับ failed attempt
-                attempts.append(now)
-                self._failed_attempts[user_hash] = attempts
-                return None
-
-            # ── Token ถูกต้อง → ใช้ครั้งเดียวแล้วลบ ──
-            del self._tokens[token]
+            # ── Token ถูกต้อง → ลบทันที (atomic single-use) ──
+            del store["tokens"][token]
             return "VALID"
 
-    def _cleanup_expired(self) -> None:
-        """ลบ token หมดอายุ — เรียกภายใต้ lock เท่านั้น."""
-        now = time.time()
-        expired = [
-            t for t, info in self._tokens.items()
-            if now - info["created_at"] > ENROLLMENT_TOKEN_TTL
-        ]
-        for t in expired:
-            del self._tokens[t]
+        return self._with_lock(_op)
 
     def get_active_count(self) -> int:
         """จำนวน token ที่ยังใช้ได้ (สำหรับ testing)."""
-        with self._lock:
-            self._cleanup_expired()
-            return len(self._tokens)
+        def _op(store: dict) -> int:
+            now = time.time()
+            self._cleanup_expired(store, now)
+            return len(store["tokens"])
+
+        return self._with_lock(_op)
 
 
 # Singleton instance

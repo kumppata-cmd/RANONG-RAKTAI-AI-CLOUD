@@ -2900,7 +2900,9 @@ def test_signed_url_not_ready():
 
 def test_enroll_token_generate_and_validate():
     """ทดสอบสร้าง token แล้วยืนยันสำเร็จ — คืน hash ไม่คืน userId."""
-    store = server.EnrollmentTokenStore()
+    store = server.EnrollmentTokenStore(
+        store_path=os.path.join(tempfile.gettempdir(), "test_enroll_gen.json")
+    )
     token = store.generate_token()
     assert len(token) == 64, "token ต้องยาว 64 hex chars (32 bytes)"
     # ยืนยัน token
@@ -2914,11 +2916,24 @@ def test_enroll_token_generate_and_validate():
 
 def test_enroll_token_expired():
     """ทดสอบ token หมดอายุ — ปฏิเสธ."""
-    store = server.EnrollmentTokenStore()
+    store_path = os.path.join(tempfile.gettempdir(), "test_enroll_exp.json")
+    store = server.EnrollmentTokenStore(store_path=store_path)
     token = store.generate_token()
-    # จำลอง token หมดอายุโดยแก้ created_at
-    with store._lock:
-        store._tokens[token]["created_at"] = time.time() - 301  # เกิน 5 นาที
+    # จำลอง token หมดอายุโดยแก้ created_at ในไฟล์
+    import fcntl
+    fd = os.open(store_path, os.O_RDWR)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.lseek(fd, 0, os.SEEK_SET)
+        data = json.loads(os.read(fd, 1024 * 1024).decode("utf-8"))
+        data["tokens"][token]["created_at"] = time.time() - 301  # เกิน 5 นาที
+        raw = json.dumps(data, separators=(",", ":")).encode("utf-8")
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        os.write(fd, raw)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
     result = store.validate_and_consume(token, "test_user_hash")
     assert result is None, "token หมดอายุต้องคืน None"
     print("PASS: test_enroll_token_expired")
@@ -2926,7 +2941,9 @@ def test_enroll_token_expired():
 
 def test_enroll_token_wrong_token():
     """ทดสอบ token ที่ไม่ถูกต้อง — ปฏิเสธ."""
-    store = server.EnrollmentTokenStore()
+    store = server.EnrollmentTokenStore(
+        store_path=os.path.join(tempfile.gettempdir(), "test_enroll_wrong.json")
+    )
     _valid_token = store.generate_token()  # สร้าง token จริง
     result = store.validate_and_consume("invalid-token-abc123", "test_user_hash")
     assert result is None, "token ผิดต้องคืน None"
@@ -2935,7 +2952,9 @@ def test_enroll_token_wrong_token():
 
 def test_enroll_token_rate_limiting():
     """ทดสอบ rate limiting — ปฏิเสธหลังพิมพ์ผิดเกินกำหนด."""
-    store = server.EnrollmentTokenStore()
+    store = server.EnrollmentTokenStore(
+        store_path=os.path.join(tempfile.gettempdir(), "test_enroll_rate.json")
+    )
     user_hash = "rate_limit_test_user"
     # พิมพ์ token ผิดจนเกิน limit
     for i in range(server.ENROLLMENT_MAX_FAILED):
@@ -2944,6 +2963,22 @@ def test_enroll_token_rate_limiting():
     result = store.validate_and_consume("another-wrong", user_hash)
     assert result == "RATE_LIMITED", "ต้องคืน RATE_LIMITED หลังพิมพ์ผิดเกินกำหนด"
     print("PASS: test_enroll_token_rate_limiting")
+
+
+def test_enroll_token_cross_worker_shared():
+    """ทดสอบว่า token แชร์ข้าม store instance (จำลอง multi-worker)."""
+    store_path = os.path.join(tempfile.gettempdir(), "test_enroll_shared.json")
+    # Worker A สร้าง token
+    store_a = server.EnrollmentTokenStore(store_path=store_path)
+    token = store_a.generate_token()
+    # Worker B ตรวจสอบ token — ต้องใช้ได้
+    store_b = server.EnrollmentTokenStore(store_path=store_path)
+    result = store_b.validate_and_consume(token, "user_hash_b")
+    assert result == "VALID", "token จาก worker A ต้องใช้ได้ใน worker B"
+    # Worker A ลองใช้ซ้ำ — ต้องไม่ได้ (ถูกใช้แล้ว)
+    result2 = store_a.validate_and_consume(token, "user_hash_a")
+    assert result2 is None, "token ที่ใช้แล้วใน worker B ต้องไม่ใช้ได้ใน worker A"
+    print("PASS: test_enroll_token_cross_worker_shared")
 
 
 def test_enroll_line_command_success():
@@ -3193,6 +3228,7 @@ def main():
         test_enroll_token_expired,
         test_enroll_token_wrong_token,
         test_enroll_token_rate_limiting,
+        test_enroll_token_cross_worker_shared,
         test_enroll_line_command_success,
         test_enroll_line_command_wrong_token,
         test_enroll_line_command_empty_token,
