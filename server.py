@@ -314,10 +314,25 @@ class StorageGCS:
                 logger.info("GCS Storage: ลอง default credentials")
 
             self._bucket = self._client.bucket(self.bucket_name)
-            logger.info(
-                f"GCS Storage: bucket={self.bucket_name}, "
-                f"auth={self._auth_method} — เชื่อมต่อสำเร็จ"
-            )
+
+            # ตรวจสอบการเชื่อมต่อจริงตอน init — ไม่รอ health check
+            # ใช้ list_blobs(max_results=1) เพราะต้องการแค่ storage.objects.list
+            try:
+                _ = list(self._client.list_blobs(self.bucket_name, max_results=1))
+                logger.info(
+                    f"GCS Storage: bucket={self.bucket_name}, "
+                    f"auth={self._auth_method} — เชื่อมต่อสำเร็จ (verified)"
+                )
+            except Exception as verify_err:
+                # Credential หรือ permission มีปัญหา — เก็บ error แต่ยังไม่ล้ม
+                # เพราะอาจเป็น transient error ตอน startup
+                self._init_error = f"GCS verify failed: {type(verify_err).__name__}"
+                self._client = None
+                self._bucket = None
+                logger.error(
+                    f"GCS Storage: bucket={self.bucket_name}, "
+                    f"auth={self._auth_method} — {self._init_error}"
+                )
         except Exception as e:
             self._init_error = f"GCS init error: {type(e).__name__}"
             logger.error(f"GCS Storage: {self._init_error}")
@@ -422,11 +437,21 @@ class StorageGCS:
             return []
 
     def check_connection(self) -> dict:
-        """ตรวจสอบการเชื่อมต่อ GCS — ใช้ใน health check."""
+        """ตรวจสอบการเชื่อมต่อ GCS — ใช้ใน health check.
+
+        ใช้ list_blobs(max_results=1) แทน bucket.reload() เพราะ:
+        - bucket.reload() ต้องการ storage.buckets.get (ซึ่ง objectAdmin ไม่มี)
+        - list_blobs ใช้แค่ storage.objects.list ซึ่ง objectAdmin มีอยู่แล้ว
+        - ตรวจสอบ credential + bucket + network ได้ครบในคำสั่งเดียว
+        """
         if not self.is_ready:
             return {"status": "not_ready", "error": self._init_error}
         try:
-            self._bucket.reload()
+            # list 1 object — ใช้ permission น้อยที่สุด (storage.objects.list)
+            # iterator ยังไม่ fetch จนกว่าจะ iterate
+            blobs = self._client.list_blobs(self.bucket_name, max_results=1)
+            # Force API call by consuming iterator
+            _ = list(blobs)
             return {"status": "connected", "bucket": self.bucket_name}
         except Exception as e:
             # ไม่เปิดเผย exception detail — อาจมี internal GCS URL หรือ project ID
