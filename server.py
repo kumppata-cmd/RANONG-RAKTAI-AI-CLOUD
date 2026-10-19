@@ -176,9 +176,16 @@ DEDUP_TTL_SECONDS = int(os.getenv("DEDUP_TTL_SECONDS", "86400"))      # 24 ช�
 DEDUP_CONTENT_TTL_SECONDS = int(os.getenv("DEDUP_CONTENT_TTL", "600"))  # 10 นาที
 
 # Salt สำหรับ hash LINE User ID ก่อนใช้เป็น key
-# ยังไม่ตั้งใน ENV (Phase 1 ห้ามแก้ ENV) — ใช้ค่าสุ่มต่อ process ไปก่อน
-# ผลคือ rate limit counter จะรีเซ็ตเมื่อ restart ซึ่งยอมรับได้ในเฟสนี้
-USER_ID_SALT = os.getenv("USER_ID_SALT", "").strip() or uuid.uuid4().hex
+# *** ต้องตั้ง USER_ID_SALT ใน Render Dashboard ***
+# ถ้าไม่ตั้ง → hash เปลี่ยนทุก restart → AUTHORIZED_USERS ใช้งานไม่ได้
+# สร้างค่าด้วย: python3 -c "import uuid; print(uuid.uuid4().hex)"
+_user_id_salt_env = os.getenv("USER_ID_SALT", "").strip()
+if IS_PRODUCTION and not _user_id_salt_env:
+    # Production ต้องมี salt คงที่ — ใช้ค่า fallback ที่แน่นอน
+    # แต่ควรตั้งค่าจริงใน ENV เพื่อความปลอดภัยสูงสุด
+    USER_ID_SALT = "ranong-raktai-default-salt-please-set-env"
+else:
+    USER_ID_SALT = _user_id_salt_env or uuid.uuid4().hex
 
 # ─── Logging ─────────────────────────────────────────────
 log_dir = os.path.join(BASE_DIR, "logs")
@@ -755,6 +762,40 @@ def format_search_results(results: list[dict]) -> str:
 def handle_search_command(text: str, user_hash: str) -> str | None:
     """ประมวลผลคำสั่งค้นหาเอกสาร — คืนข้อความตอบกลับ หรือ None ถ้าไม่ใช่คำสั่ง."""
     text_stripped = text.strip()
+
+    # ── ลงทะเบียนผู้ดูแล (Admin Registration) ──────────────
+    # คำสั่ง: "ลงทะเบียน [ADMIN_SECRET]"
+    # ผู้ดูแลพิมพ์ ADMIN_SECRET ที่ตั้งไว้ใน Render เพื่อยืนยันตัวตน
+    # ระบบจะคืนค่า hash ของ LINE userId สำหรับใส่ใน AUTHORIZED_USERS
+    # ─ ไม่แสดง LINE userId จริง
+    # ─ ไม่บันทึก userId ลง log
+    # ─ บุคคลทั่วไปไม่สามารถใช้ได้ (ต้องรู้ ADMIN_SECRET)
+    if text_stripped.startswith("ลงทะเบียน "):
+        provided_secret = text_stripped[len("ลงทะเบียน "):].strip()
+        if not ADMIN_SECRET:
+            # ยังไม่ได้ตั้ง ADMIN_SECRET → ปฏิเสธเสมอ
+            return None  # ไม่ตอบกลับ — ไม่เปิดเผยว่ามีคำสั่งนี้
+        if not provided_secret or provided_secret != ADMIN_SECRET:
+            # Secret ไม่ถูก → บันทึก audit แต่ไม่บอกรายละเอียด
+            audit_logger.log("register_failed", user_hash, {})
+            return None  # ไม่ตอบกลับ — ป้องกัน brute force
+        # ─ ยืนยันตัวตนสำเร็จ ─
+        audit_logger.log("register_success", user_hash, {})
+        salt_warning = ""
+        if IS_PRODUCTION and not os.getenv("USER_ID_SALT", "").strip():
+            salt_warning = (
+                "\n\n⚠️ ยังไม่ได้ตั้ง USER_ID_SALT ใน Render\n"
+                "ค่า hash นี้ใช้ default salt\n"
+                "แนะนำ: ตั้ง USER_ID_SALT แล้วลงทะเบียนใหม่"
+            )
+        return (
+            f"✅ ลงทะเบียนสำเร็จ\n\n"
+            f"ค่า Hash สำหรับ AUTHORIZED_USERS:\n"
+            f"{user_hash}\n\n"
+            f"วิธีใช้: เพิ่มค่านี้ใน Render Dashboard\n"
+            f"AUTHORIZED_USERS={user_hash}\n"
+            f"(หลายคนคั่นด้วยเครื่องหมายจุลภาค){salt_warning}"
+        )
 
     # ช่วยเหลือ / help
     if text_stripped in ("ช่วยเหลือ", "help", "คำสั่ง"):

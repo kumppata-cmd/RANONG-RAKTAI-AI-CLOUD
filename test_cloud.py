@@ -2894,6 +2894,91 @@ def test_signed_url_not_ready():
     print("PASS: test_signed_url_not_ready")
 
 
+# ── Admin Registration Tests ──────────────────────────────────
+
+
+def test_register_command_success():
+    """ทดสอบลงทะเบียนด้วย ADMIN_SECRET ที่ถูกต้อง — คืน hash ไม่คืน userId."""
+    original_secret = server.ADMIN_SECRET
+    try:
+        server.ADMIN_SECRET = "test-secret-12345"
+        test_hash = "abc123def456"
+        result = server.handle_search_command("ลงทะเบียน test-secret-12345", test_hash)
+        assert result is not None, "ควรคืนข้อความ"
+        assert "✅" in result, "ควรมีเครื่องหมายสำเร็จ"
+        assert test_hash in result, "ควรแสดง hash"
+        assert "AUTHORIZED_USERS" in result, "ควรมีคำแนะนำ"
+        # ห้ามมี userId จริงในผลลัพธ์ — test_hash เป็น hash แล้ว
+        print("PASS: test_register_command_success")
+    finally:
+        server.ADMIN_SECRET = original_secret
+
+
+def test_register_command_wrong_secret():
+    """ทดสอบลงทะเบียนด้วย secret ที่ผิด — ไม่ตอบกลับ (ป้องกัน brute force)."""
+    original_secret = server.ADMIN_SECRET
+    try:
+        server.ADMIN_SECRET = "correct-secret"
+        result = server.handle_search_command("ลงทะเบียน wrong-secret", "somehash")
+        assert result is None, "ต้องคืน None เมื่อ secret ผิด (ไม่เปิดเผยว่ามีคำสั่งนี้)"
+        print("PASS: test_register_command_wrong_secret")
+    finally:
+        server.ADMIN_SECRET = original_secret
+
+
+def test_register_command_no_admin_secret_set():
+    """ทดสอบลงทะเบียนเมื่อยังไม่ตั้ง ADMIN_SECRET — ไม่ตอบกลับ."""
+    original_secret = server.ADMIN_SECRET
+    try:
+        server.ADMIN_SECRET = ""
+        result = server.handle_search_command("ลงทะเบียน any-value", "somehash")
+        assert result is None, "ต้องคืน None เมื่อไม่ได้ตั้ง ADMIN_SECRET"
+        print("PASS: test_register_command_no_admin_secret_set")
+    finally:
+        server.ADMIN_SECRET = original_secret
+
+
+def test_register_command_no_userid_in_response():
+    """ทดสอบว่าผลลัพธ์ไม่มี LINE userId จริง — มีแต่ hash."""
+    original_secret = server.ADMIN_SECRET
+    try:
+        server.ADMIN_SECRET = "mysecret"
+        # สมมติ userId จริงคือ "U1234567890abcdef" → hash_user_id จะแปลงเป็น hash
+        fake_user_id = "U1234567890abcdef"
+        user_hash = server.hash_user_id(fake_user_id)
+        result = server.handle_search_command("ลงทะเบียน mysecret", user_hash)
+        assert result is not None
+        # userId จริงต้องไม่ปรากฏ
+        assert fake_user_id not in result, "userId จริงต้องไม่อยู่ในผลลัพธ์"
+        # hash ต้องปรากฏ
+        assert user_hash in result, "hash ต้องอยู่ในผลลัพธ์"
+        print("PASS: test_register_command_no_userid_in_response")
+    finally:
+        server.ADMIN_SECRET = original_secret
+
+
+def test_register_command_empty_secret():
+    """ทดสอบพิมพ์ 'ลงทะเบียน ' โดยไม่ใส่ secret — ไม่ตอบกลับ."""
+    original_secret = server.ADMIN_SECRET
+    try:
+        server.ADMIN_SECRET = "valid-secret"
+        result = server.handle_search_command("ลงทะเบียน ", "somehash")
+        assert result is None, "ต้องคืน None เมื่อไม่ใส่ secret"
+        print("PASS: test_register_command_empty_secret")
+    finally:
+        server.ADMIN_SECRET = original_secret
+
+
+def test_user_id_salt_production_stable():
+    """ทดสอบว่า Production ใช้ salt คงที่เมื่อไม่ตั้ง USER_ID_SALT."""
+    # ตรวจว่าโค้ดมี fallback salt สำหรับ production
+    import inspect
+    source = inspect.getsource(server)
+    assert "ranong-raktai-default-salt-please-set-env" in source, \
+        "Production ต้องมี fallback salt คงที่"
+    print("PASS: test_user_id_salt_production_stable")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -3037,6 +3122,13 @@ def main():
         test_status_shows_doc_count,
         test_no_patient_data_in_index,
         test_signed_url_not_ready,
+        # ── Admin Registration ──
+        test_register_command_success,
+        test_register_command_wrong_secret,
+        test_register_command_no_admin_secret_set,
+        test_register_command_no_userid_in_response,
+        test_register_command_empty_secret,
+        test_user_id_salt_production_stable,
     ]
 
     passed = 0
