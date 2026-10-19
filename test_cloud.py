@@ -12,6 +12,7 @@ import base64
 import os
 import sys
 import tempfile
+import time
 
 # ตั้ง ENV จำลองก่อน import server
 os.environ["LINE_CHANNEL_SECRET"] = "test_secret_for_unit_test"
@@ -2894,84 +2895,149 @@ def test_signed_url_not_ready():
     print("PASS: test_signed_url_not_ready")
 
 
-# ── Admin Registration Tests ──────────────────────────────────
+# ── One-Time Enrollment Token Tests ──────────────────────────
 
 
-def test_register_command_success():
-    """ทดสอบลงทะเบียนด้วย ADMIN_SECRET ที่ถูกต้อง — คืน hash ไม่คืน userId."""
-    original_secret = server.ADMIN_SECRET
-    try:
-        server.ADMIN_SECRET = "test-secret-12345"
-        test_hash = "abc123def456"
-        result = server.handle_search_command("ลงทะเบียน test-secret-12345", test_hash)
-        assert result is not None, "ควรคืนข้อความ"
-        assert "✅" in result, "ควรมีเครื่องหมายสำเร็จ"
-        assert test_hash in result, "ควรแสดง hash"
-        assert "AUTHORIZED_USERS" in result, "ควรมีคำแนะนำ"
-        # ห้ามมี userId จริงในผลลัพธ์ — test_hash เป็น hash แล้ว
-        print("PASS: test_register_command_success")
-    finally:
-        server.ADMIN_SECRET = original_secret
+def test_enroll_token_generate_and_validate():
+    """ทดสอบสร้าง token แล้วยืนยันสำเร็จ — คืน hash ไม่คืน userId."""
+    store = server.EnrollmentTokenStore()
+    token = store.generate_token()
+    assert len(token) == 64, "token ต้องยาว 64 hex chars (32 bytes)"
+    # ยืนยัน token
+    result = store.validate_and_consume(token, "test_user_hash")
+    assert result == "VALID", "token ที่ถูกต้องต้องคืน VALID"
+    # ใช้ซ้ำไม่ได้ (single-use)
+    result2 = store.validate_and_consume(token, "test_user_hash")
+    assert result2 is None, "token ที่ใช้แล้วต้องคืน None (single-use)"
+    print("PASS: test_enroll_token_generate_and_validate")
 
 
-def test_register_command_wrong_secret():
-    """ทดสอบลงทะเบียนด้วย secret ที่ผิด — ไม่ตอบกลับ (ป้องกัน brute force)."""
-    original_secret = server.ADMIN_SECRET
-    try:
-        server.ADMIN_SECRET = "correct-secret"
-        result = server.handle_search_command("ลงทะเบียน wrong-secret", "somehash")
-        assert result is None, "ต้องคืน None เมื่อ secret ผิด (ไม่เปิดเผยว่ามีคำสั่งนี้)"
-        print("PASS: test_register_command_wrong_secret")
-    finally:
-        server.ADMIN_SECRET = original_secret
+def test_enroll_token_expired():
+    """ทดสอบ token หมดอายุ — ปฏิเสธ."""
+    store = server.EnrollmentTokenStore()
+    token = store.generate_token()
+    # จำลอง token หมดอายุโดยแก้ created_at
+    with store._lock:
+        store._tokens[token]["created_at"] = time.time() - 301  # เกิน 5 นาที
+    result = store.validate_and_consume(token, "test_user_hash")
+    assert result is None, "token หมดอายุต้องคืน None"
+    print("PASS: test_enroll_token_expired")
 
 
-def test_register_command_no_admin_secret_set():
-    """ทดสอบลงทะเบียนเมื่อยังไม่ตั้ง ADMIN_SECRET — ไม่ตอบกลับ."""
-    original_secret = server.ADMIN_SECRET
-    try:
-        server.ADMIN_SECRET = ""
-        result = server.handle_search_command("ลงทะเบียน any-value", "somehash")
-        assert result is None, "ต้องคืน None เมื่อไม่ได้ตั้ง ADMIN_SECRET"
-        print("PASS: test_register_command_no_admin_secret_set")
-    finally:
-        server.ADMIN_SECRET = original_secret
+def test_enroll_token_wrong_token():
+    """ทดสอบ token ที่ไม่ถูกต้อง — ปฏิเสธ."""
+    store = server.EnrollmentTokenStore()
+    _valid_token = store.generate_token()  # สร้าง token จริง
+    result = store.validate_and_consume("invalid-token-abc123", "test_user_hash")
+    assert result is None, "token ผิดต้องคืน None"
+    print("PASS: test_enroll_token_wrong_token")
 
 
-def test_register_command_no_userid_in_response():
+def test_enroll_token_rate_limiting():
+    """ทดสอบ rate limiting — ปฏิเสธหลังพิมพ์ผิดเกินกำหนด."""
+    store = server.EnrollmentTokenStore()
+    user_hash = "rate_limit_test_user"
+    # พิมพ์ token ผิดจนเกิน limit
+    for i in range(server.ENROLLMENT_MAX_FAILED):
+        store.validate_and_consume(f"wrong-token-{i}", user_hash)
+    # ครั้งถัดไปต้องถูก rate limit
+    result = store.validate_and_consume("another-wrong", user_hash)
+    assert result == "RATE_LIMITED", "ต้องคืน RATE_LIMITED หลังพิมพ์ผิดเกินกำหนด"
+    print("PASS: test_enroll_token_rate_limiting")
+
+
+def test_enroll_line_command_success():
+    """ทดสอบคำสั่ง LINE 'ยืนยัน [TOKEN]' สำเร็จ — คืน hash."""
+    # สร้าง token ผ่าน store จริง
+    token = server.enrollment_store.generate_token()
+    test_hash = "abc123def456"
+    result = server.handle_search_command(f"ยืนยัน {token}", test_hash)
+    assert result is not None, "ควรคืนข้อความ"
+    assert "✅" in result, "ควรมีเครื่องหมายสำเร็จ"
+    assert test_hash in result, "ควรแสดง hash"
+    assert "AUTHORIZED_USERS" in result, "ควรมีคำแนะนำ"
+    print("PASS: test_enroll_line_command_success")
+
+
+def test_enroll_line_command_wrong_token():
+    """ทดสอบคำสั่ง LINE 'ยืนยัน [TOKEN]' ด้วย token ผิด — ไม่ตอบกลับ."""
+    result = server.handle_search_command("ยืนยัน wrong-token-xyz", "somehash")
+    assert result is None, "ต้องคืน None เมื่อ token ผิด"
+    print("PASS: test_enroll_line_command_wrong_token")
+
+
+def test_enroll_line_command_empty_token():
+    """ทดสอบพิมพ์ 'ยืนยัน ' โดยไม่ใส่ token — ไม่ตอบกลับ."""
+    result = server.handle_search_command("ยืนยัน ", "somehash")
+    assert result is None, "ต้องคืน None เมื่อไม่ใส่ token"
+    print("PASS: test_enroll_line_command_empty_token")
+
+
+def test_enroll_line_command_no_userid_in_response():
     """ทดสอบว่าผลลัพธ์ไม่มี LINE userId จริง — มีแต่ hash."""
+    token = server.enrollment_store.generate_token()
+    fake_user_id = "U1234567890abcdef"
+    user_hash = server.hash_user_id(fake_user_id)
+    result = server.handle_search_command(f"ยืนยัน {token}", user_hash)
+    assert result is not None
+    assert fake_user_id not in result, "userId จริงต้องไม่อยู่ในผลลัพธ์"
+    assert user_hash in result, "hash ต้องอยู่ในผลลัพธ์"
+    print("PASS: test_enroll_line_command_no_userid_in_response")
+
+
+def test_enroll_endpoint_auth():
+    """ทดสอบ /admin/enroll ต้องมี ADMIN_SECRET — ไม่มีคืน 401."""
     original_secret = server.ADMIN_SECRET
     try:
-        server.ADMIN_SECRET = "mysecret"
-        # สมมติ userId จริงคือ "U1234567890abcdef" → hash_user_id จะแปลงเป็น hash
-        fake_user_id = "U1234567890abcdef"
-        user_hash = server.hash_user_id(fake_user_id)
-        result = server.handle_search_command("ลงทะเบียน mysecret", user_hash)
-        assert result is not None
-        # userId จริงต้องไม่ปรากฏ
-        assert fake_user_id not in result, "userId จริงต้องไม่อยู่ในผลลัพธ์"
-        # hash ต้องปรากฏ
-        assert user_hash in result, "hash ต้องอยู่ในผลลัพธ์"
-        print("PASS: test_register_command_no_userid_in_response")
+        server.ADMIN_SECRET = "test-enroll-secret"
+        with server.app.test_client() as client:
+            # ไม่ส่ง header → 401
+            resp = client.post("/admin/enroll")
+            assert resp.status_code == 401, "ต้องคืน 401 เมื่อไม่มี header"
+            # ส่ง header ผิด → 401
+            resp = client.post("/admin/enroll",
+                               headers={"X-Admin-Secret": "wrong"})
+            assert resp.status_code == 401, "ต้องคืน 401 เมื่อ secret ผิด"
+            # ส่ง header ถูก → 200 + มี token
+            resp = client.post("/admin/enroll",
+                               headers={"X-Admin-Secret": "test-enroll-secret"})
+            assert resp.status_code == 200, "ต้องคืน 200 เมื่อ secret ถูก"
+            data = resp.get_json()
+            assert "token" in data, "ต้องมี token ใน response"
+            assert len(data["token"]) == 64, "token ต้องยาว 64 hex chars"
+            assert data["expires_in_seconds"] == 300, "TTL ต้องเป็น 300 วินาที"
+        print("PASS: test_enroll_endpoint_auth")
     finally:
         server.ADMIN_SECRET = original_secret
 
 
-def test_register_command_empty_secret():
-    """ทดสอบพิมพ์ 'ลงทะเบียน ' โดยไม่ใส่ secret — ไม่ตอบกลับ."""
+def test_enroll_replay_attack_prevention():
+    """ทดสอบป้องกัน replay attack — token ใช้ได้ครั้งเดียว."""
+    token = server.enrollment_store.generate_token()
+    # ใช้ครั้งแรก → สำเร็จ
+    result1 = server.handle_search_command(f"ยืนยัน {token}", "user1hash")
+    assert result1 is not None, "ครั้งแรกต้องสำเร็จ"
+    assert "✅" in result1
+    # ใช้ครั้งที่สอง → ปฏิเสธ (replay attack)
+    result2 = server.handle_search_command(f"ยืนยัน {token}", "user2hash")
+    assert result2 is None, "ต้องคืน None เมื่อใช้ token ซ้ำ (replay attack)"
+    print("PASS: test_enroll_replay_attack_prevention")
+
+
+def test_enroll_old_register_command_removed():
+    """ทดสอบว่าคำสั่ง 'ลงทะเบียน' ถูกลบแล้ว — ไม่ทำงาน."""
     original_secret = server.ADMIN_SECRET
     try:
-        server.ADMIN_SECRET = "valid-secret"
-        result = server.handle_search_command("ลงทะเบียน ", "somehash")
-        assert result is None, "ต้องคืน None เมื่อไม่ใส่ secret"
-        print("PASS: test_register_command_empty_secret")
+        server.ADMIN_SECRET = "test-secret"
+        result = server.handle_search_command("ลงทะเบียน test-secret", "somehash")
+        assert result is None, "คำสั่ง 'ลงทะเบียน' ต้องถูกลบแล้ว"
+        print("PASS: test_enroll_old_register_command_removed")
     finally:
         server.ADMIN_SECRET = original_secret
 
 
 def test_user_id_salt_production_stable():
     """ทดสอบว่า Production ใช้ salt คงที่เมื่อไม่ตั้ง USER_ID_SALT."""
-    # ตรวจว่าโค้ดมี fallback salt สำหรับ production
     import inspect
     source = inspect.getsource(server)
     assert "ranong-raktai-default-salt-please-set-env" in source, \
@@ -3122,12 +3188,18 @@ def main():
         test_status_shows_doc_count,
         test_no_patient_data_in_index,
         test_signed_url_not_ready,
-        # ── Admin Registration ──
-        test_register_command_success,
-        test_register_command_wrong_secret,
-        test_register_command_no_admin_secret_set,
-        test_register_command_no_userid_in_response,
-        test_register_command_empty_secret,
+        # ── One-Time Enrollment Token ──
+        test_enroll_token_generate_and_validate,
+        test_enroll_token_expired,
+        test_enroll_token_wrong_token,
+        test_enroll_token_rate_limiting,
+        test_enroll_line_command_success,
+        test_enroll_line_command_wrong_token,
+        test_enroll_line_command_empty_token,
+        test_enroll_line_command_no_userid_in_response,
+        test_enroll_endpoint_auth,
+        test_enroll_replay_attack_prevention,
+        test_enroll_old_register_command_removed,
         test_user_id_salt_production_stable,
     ]
 

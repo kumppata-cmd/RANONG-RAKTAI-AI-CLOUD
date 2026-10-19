@@ -22,6 +22,7 @@ Deploy บน Render Managed Cloud ด้วย Gunicorn
 """
 
 import os
+import secrets
 import sys
 import hmac
 import hashlib
@@ -187,6 +188,11 @@ if IS_PRODUCTION and not _user_id_salt_env:
 else:
     USER_ID_SALT = _user_id_salt_env or uuid.uuid4().hex
 
+# ─── One-Time Enrollment Token ─────────────────────────────
+ENROLLMENT_TOKEN_TTL = 300       # 5 นาที
+ENROLLMENT_TOKEN_LENGTH = 32     # 32 bytes → 64 hex chars
+ENROLLMENT_MAX_FAILED = 5        # จำกัดครั้งที่พิมพ์ token ผิดต่อ user ต่อชั่วโมง
+
 # ─── Logging ─────────────────────────────────────────────
 log_dir = os.path.join(BASE_DIR, "logs")
 os.makedirs(log_dir, exist_ok=True)
@@ -206,6 +212,98 @@ logger = logging.getLogger(__name__)
 
 # ─── Flask App ───────────────────────────────────────────
 app = Flask(__name__)
+
+
+# ═══════════════════════════════════════════════════════════
+# One-Time Enrollment Token Store
+# ═══════════════════════════════════════════════════════════
+
+class EnrollmentTokenStore:
+    """จัดการ One-Time Enrollment Token สำหรับลงทะเบียนผู้ดูแล.
+
+    - Token สุ่มด้วย secrets.token_hex (cryptographically secure)
+    - อายุ 5 นาที, ใช้ได้ครั้งเดียว
+    - ป้องกัน replay attack: ใช้แล้วลบทันที
+    - Rate limiting: จำกัดจำนวนครั้งที่พิมพ์ token ผิดต่อ user ต่อชั่วโมง
+    - Token ไม่ถูกบันทึกลง log
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        # token → {"created_at": float, "used": bool}
+        self._tokens: dict[str, dict] = {}
+        # rate limit: user_hash → [timestamps of failed attempts]
+        self._failed_attempts: dict[str, list[float]] = {}
+
+    def generate_token(self) -> str:
+        """สร้าง token ใหม่ — เรียกจาก admin endpoint เท่านั้น."""
+        token = secrets.token_hex(ENROLLMENT_TOKEN_LENGTH)
+        with self._lock:
+            # ลบ token หมดอายุก่อน
+            self._cleanup_expired()
+            self._tokens[token] = {
+                "created_at": time.time(),
+                "used": False,
+            }
+        return token
+
+    def validate_and_consume(self, token: str, user_hash: str) -> str | None:
+        """ตรวจสอบ token — คืน None หาก token ไม่ถูกต้อง/หมดอายุ/ใช้แล้ว.
+
+        คืน error message (str) หาก rate-limited.
+        คืน True หาก token ถูกต้อง — caller ต้องตรวจ isinstance.
+        """
+        with self._lock:
+            # ── Rate limit check ──
+            now = time.time()
+            attempts = self._failed_attempts.get(user_hash, [])
+            # ลบ attempt เก่ากว่า 1 ชั่วโมง
+            attempts = [t for t in attempts if now - t < 3600]
+            self._failed_attempts[user_hash] = attempts
+
+            if len(attempts) >= ENROLLMENT_MAX_FAILED:
+                return "RATE_LIMITED"
+
+            # ── ลบ token หมดอายุ ──
+            self._cleanup_expired()
+
+            # ── ตรวจ token ──
+            entry = self._tokens.get(token)
+            if entry is None:
+                # token ไม่มี/หมดอายุ → นับ failed attempt
+                attempts.append(now)
+                self._failed_attempts[user_hash] = attempts
+                return None
+
+            if entry["used"]:
+                # ใช้แล้ว → replay attack → นับ failed attempt
+                attempts.append(now)
+                self._failed_attempts[user_hash] = attempts
+                return None
+
+            # ── Token ถูกต้อง → ใช้ครั้งเดียวแล้วลบ ──
+            del self._tokens[token]
+            return "VALID"
+
+    def _cleanup_expired(self) -> None:
+        """ลบ token หมดอายุ — เรียกภายใต้ lock เท่านั้น."""
+        now = time.time()
+        expired = [
+            t for t, info in self._tokens.items()
+            if now - info["created_at"] > ENROLLMENT_TOKEN_TTL
+        ]
+        for t in expired:
+            del self._tokens[t]
+
+    def get_active_count(self) -> int:
+        """จำนวน token ที่ยังใช้ได้ (สำหรับ testing)."""
+        with self._lock:
+            self._cleanup_expired()
+            return len(self._tokens)
+
+
+# Singleton instance
+enrollment_store = EnrollmentTokenStore()
 
 
 # ═══════════════════════════════════════════════════════════
@@ -763,24 +861,32 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
     """ประมวลผลคำสั่งค้นหาเอกสาร — คืนข้อความตอบกลับ หรือ None ถ้าไม่ใช่คำสั่ง."""
     text_stripped = text.strip()
 
-    # ── ลงทะเบียนผู้ดูแล (Admin Registration) ──────────────
-    # คำสั่ง: "ลงทะเบียน [ADMIN_SECRET]"
-    # ผู้ดูแลพิมพ์ ADMIN_SECRET ที่ตั้งไว้ใน Render เพื่อยืนยันตัวตน
-    # ระบบจะคืนค่า hash ของ LINE userId สำหรับใส่ใน AUTHORIZED_USERS
+    # ── ยืนยันตัวตน (One-Time Enrollment Token) ──────────────
+    # คำสั่ง: "ยืนยัน [TOKEN]"
+    # ผู้ดูแลได้รับ Token จาก POST /admin/enroll (ต้องยืนยัน ADMIN_SECRET)
+    # แล้วพิมพ์ Token ผ่าน LINE — ระบบตรวจสอบและคืน hash ของ LINE userId
+    # ─ Token ใช้ได้ครั้งเดียว อายุ 5 นาที
     # ─ ไม่แสดง LINE userId จริง
-    # ─ ไม่บันทึก userId ลง log
-    # ─ บุคคลทั่วไปไม่สามารถใช้ได้ (ต้องรู้ ADMIN_SECRET)
-    if text_stripped.startswith("ลงทะเบียน "):
-        provided_secret = text_stripped[len("ลงทะเบียน "):].strip()
-        if not ADMIN_SECRET:
-            # ยังไม่ได้ตั้ง ADMIN_SECRET → ปฏิเสธเสมอ
+    # ─ ไม่บันทึก Token หรือ userId ลง log
+    # ─ ป้องกัน replay attack และ rate limiting
+    if text_stripped.startswith("ยืนยัน "):
+        provided_token = text_stripped[len("ยืนยัน "):].strip()
+        if not provided_token:
             return None  # ไม่ตอบกลับ — ไม่เปิดเผยว่ามีคำสั่งนี้
-        if not provided_secret or provided_secret != ADMIN_SECRET:
-            # Secret ไม่ถูก → บันทึก audit แต่ไม่บอกรายละเอียด
-            audit_logger.log("register_failed", user_hash, {})
+
+        result = enrollment_store.validate_and_consume(provided_token, user_hash)
+
+        if result == "RATE_LIMITED":
+            audit_logger.log("enroll_rate_limited", user_hash, {})
+            return "⚠️ คุณพิมพ์รหัสผิดหลายครั้ง\nกรุณารอ 1 ชั่วโมงแล้วลองใหม่"
+
+        if result != "VALID":
+            # Token ไม่ถูก/หมดอายุ/ใช้แล้ว → บันทึก audit แต่ไม่บอกรายละเอียด
+            audit_logger.log("enroll_failed", user_hash, {})
             return None  # ไม่ตอบกลับ — ป้องกัน brute force
-        # ─ ยืนยันตัวตนสำเร็จ ─
-        audit_logger.log("register_success", user_hash, {})
+
+        # ─ Token ถูกต้อง → ลงทะเบียนสำเร็จ ─
+        audit_logger.log("enroll_success", user_hash, {})
         salt_warning = ""
         if IS_PRODUCTION and not os.getenv("USER_ID_SALT", "").strip():
             salt_warning = (
@@ -2356,6 +2462,36 @@ def index():
         "status": "running",
         "health_check": "/health",
         "webhook": "/webhook",
+    }), 200
+
+
+# ─── Document Search V1: Admin Enrollment Endpoint ───────
+
+@app.route("/admin/enroll", methods=["POST"])
+def admin_enroll():
+    """สร้าง One-Time Enrollment Token สำหรับลงทะเบียนผู้ดูแลผ่าน LINE.
+
+    ต้องมี X-Admin-Secret header เพื่อยืนยันตัวตน
+    Token ใช้ได้ครั้งเดียว อายุ 5 นาที
+    ไม่บันทึก token ลง log
+
+    ตัวอย่างการใช้:
+      curl -X POST https://your-app.onrender.com/admin/enroll \\
+           -H "X-Admin-Secret: YOUR_ADMIN_SECRET"
+
+    แล้วส่ง token ที่ได้ผ่าน LINE: "ยืนยัน [TOKEN]"
+    """
+    # Auth check
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or auth_header != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    token = enrollment_store.generate_token()
+    # ไม่บันทึก token ลง log — ส่งกลับทาง HTTPS เท่านั้น
+    return jsonify({
+        "token": token,
+        "expires_in_seconds": ENROLLMENT_TOKEN_TTL,
+        "instruction": "ส่ง token ผ่าน LINE: พิมพ์ 'ยืนยัน [TOKEN]' ภายใน 5 นาที",
     }), 200
 
 
