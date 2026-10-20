@@ -646,7 +646,30 @@ class StorageGCS:
             blobs = self._client.list_blobs(self.bucket_name, max_results=1)
             # Force API call by consuming iterator
             _ = list(blobs)
-            return {"status": "connected", "bucket": self.bucket_name}
+            result = {"status": "connected", "bucket": self.bucket_name}
+            # ตรวจ storage.objects.get ที่จำเป็นสำหรับ Document Index
+            # ทดสอบด้วย blob.reload() บน index file (ถ้ามี)
+            try:
+                idx_blob = self._bucket.blob(INDEX_OBJECT_PATH)
+                idx_blob.reload()  # ต้องใช้ storage.objects.get
+                result["index_writable"] = True
+            except Exception as perm_err:
+                perm_code = getattr(perm_err, "code", None)
+                if perm_code == 403:
+                    result["index_writable"] = False
+                    result["permission_warning"] = (
+                        "storage.objects.get missing — "
+                        "document index จะเขียนไม่ได้"
+                    )
+                    logger.warning(
+                        "GCS permission gap: storage.objects.get "
+                        "ไม่มี — document index write จะล้มเหลว"
+                    )
+                elif perm_code == 404:
+                    # index ยังไม่มี — ปกติสำหรับระบบใหม่
+                    result["index_writable"] = True
+                # อื่นๆ ไม่บล็อก health check
+            return result
         except Exception as e:
             # ไม่เปิดเผย exception detail — อาจมี internal GCS URL หรือ project ID
             logger.error(f"GCS check_connection ล้มเหลว: {type(e).__name__}")
@@ -734,7 +757,17 @@ class DocumentIndex:
                 self._cache_ts = time.time()
             return True
         except Exception as e:
-            logger.error(f"Document index reload ล้มเหลว: {type(e).__name__}")
+            err_code = getattr(e, "code", None)
+            if err_code == 403:
+                logger.error(
+                    "Document index reload ล้มเหลว: Forbidden (403) — "
+                    "service account ขาด storage.objects.get permission"
+                )
+            else:
+                logger.error(
+                    f"Document index reload ล้มเหลว: "
+                    f"{type(e).__name__} (code={err_code})"
+                )
             return False
 
     def _ensure_fresh(self):
@@ -809,9 +842,26 @@ class DocumentIndex:
                     )
                     continue
                 else:
-                    logger.error(f"Document index GCS write ล้มเหลว: {type(e).__name__}")
+                    # แยก Forbidden (403) ออกจากข้อผิดพลาดทั่วไป
+                    # เพื่อวินิจฉัย permission ที่ขาด
+                    err_code = getattr(e, "code", None)
+                    if err_code == 403:
+                        logger.error(
+                            "Document index GCS write ล้มเหลว: Forbidden (403) — "
+                            "service account อาจขาด storage.objects.get "
+                            "หรือ storage.objects.update permission"
+                        )
+                        raise RuntimeError(
+                            "Document index: GCS permission denied (403) — "
+                            "service account ต้องมี Storage Object Admin role"
+                        )
+                    logger.error(
+                        f"Document index GCS write ล้มเหลว: "
+                        f"{type(e).__name__} (code={err_code})"
+                    )
                     raise RuntimeError(
-                        f"Document index: บันทึก metadata ลง GCS ล้มเหลว: {type(e).__name__}"
+                        f"Document index: บันทึก metadata ลง GCS ล้มเหลว: "
+                        f"{type(e).__name__}"
                     )
             # สำเร็จ — ออกจาก retry loop
             logger.info(f"Document index: เพิ่ม doc_id={doc_id[:8]}… ลง GCS สำเร็จ")
@@ -2610,9 +2660,11 @@ def process_file_async(
                 )
         except RuntimeError as e:
             # Production mode — GCS ล้มเหลว ต้องแจ้งผู้ใช้
+            # บันทึก error message เต็ม (ไม่มี path/ข้อมูลผู้ป่วย
+            # เพราะ RuntimeError message มาจากโค้ดเราเอง)
             logger.error(
-                f"จัดเก็บเอกสารล้มเหลว (Production): {type(e).__name__} "
-                f"(doc_id={_doc_id})"
+                f"จัดเก็บเอกสารล้มเหลว (Production): {type(e).__name__}: "
+                f"{e} (doc_id={_doc_id})"
             )
             if reply_token:
                 reply_message(
