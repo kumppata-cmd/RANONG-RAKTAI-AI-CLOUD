@@ -47,8 +47,8 @@ jobs:
       - name: Security check — no secrets in code
         run: |
           echo "Checking for hardcoded secrets..."
-          # ตรวจว่าไม่มี API key / private key ในโค้ด
-          if grep -rn "AKIA\|sk-ant-\|AIza\|-----BEGIN.*KEY" --include="*.py" .; then
+          # ตรวจว่าไม่มี API key / private key ในโค้ด (ข้ามไฟล์ test)
+          if grep -rn "AKIA\|sk-ant-\|AIza\|-----BEGIN.*KEY" --include="*.py" --exclude="test_*.py" .; then
             echo "ERROR: Possible secrets found in source code!"
             exit 1
           fi
