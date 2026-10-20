@@ -155,7 +155,8 @@ SIGNED_URL_EXPIRY = 900  # 15 นาที
 MAX_INDEX_TEXT_LENGTH = 5000
 
 # GCS paths for index/audit data
-INDEX_OBJECT_PATH = "_index/documents.jsonl"
+INDEX_OBJECT_PATH = "_index/documents.jsonl"  # legacy — อ่านอย่างเดียว (backward compat)
+INDEX_DOC_PREFIX = "_index/docs/"  # per-document JSON files (ใช้แทน JSONL)
 AUDIT_PREFIX = "_audit/"
 INDEX_CACHE_TTL = 5  # วินาที — reload index จาก GCS ทุก 5 วินาที (multi-worker safe)
 
@@ -647,27 +648,33 @@ class StorageGCS:
             # Force API call by consuming iterator
             _ = list(blobs)
             result = {"status": "connected", "bucket": self.bucket_name}
-            # ตรวจ storage.objects.get ที่จำเป็นสำหรับ Document Index
-            # ทดสอบด้วย blob.reload() บน index file (ถ้ามี)
+            # ตรวจ per-doc index architecture:
+            # - storage.objects.create (Object Creator) → เขียน per-doc files
+            # - storage.objects.list (Object Viewer) → list blobs (ตรวจด้านบนแล้ว)
+            # - storage.objects.get (Object Viewer) → อ่าน per-doc files
+            # ทดสอบ objects.get ด้วย blob.reload() บน test blob
             try:
-                idx_blob = self._bucket.blob(INDEX_OBJECT_PATH)
-                idx_blob.reload()  # ต้องใช้ storage.objects.get
+                # ทดสอบ objects.get — ลองอ่าน legacy index หรือ docs prefix
+                test_blob = self._bucket.blob(INDEX_OBJECT_PATH)
+                test_blob.reload()  # ต้องใช้ storage.objects.get
                 result["index_writable"] = True
+                result["index_architecture"] = "per-document"
             except Exception as perm_err:
                 perm_code = getattr(perm_err, "code", None)
                 if perm_code == 403:
                     result["index_writable"] = False
                     result["permission_warning"] = (
                         "storage.objects.get missing — "
-                        "document index จะเขียนไม่ได้"
+                        "document index อ่านไม่ได้"
                     )
                     logger.warning(
                         "GCS permission gap: storage.objects.get "
-                        "ไม่มี — document index write จะล้มเหลว"
+                        "ไม่มี — document index read จะล้มเหลว"
                     )
                 elif perm_code == 404:
-                    # index ยังไม่มี — ปกติสำหรับระบบใหม่
+                    # legacy index ไม่มี — ลอง list per-doc files แทน
                     result["index_writable"] = True
+                    result["index_architecture"] = "per-document"
                 # อื่นๆ ไม่บล็อก health check
             return result
         except Exception as e:
@@ -703,13 +710,20 @@ storage = get_storage()
 # ═══════════════════════════════════════════════════════════
 
 class DocumentIndex:
-    """Persistent document index stored in GCS as JSONL.
+    """Persistent document index stored in GCS as per-document JSON files.
+
+    สถาปัตยกรรม: ใช้ per-document JSON files แทน single JSONL เพื่อ:
+    - ไม่ต้องใช้ storage.objects.delete (ซึ่ง Object Creator + Viewer ไม่มี)
+    - ไม่มี concurrent append conflict (แต่ละ doc เป็นไฟล์แยก)
+    - ใช้แค่ storage.objects.create + list + get (least privilege)
+
+    แต่ละเอกสารเก็บเป็น _index/docs/{doc_id}.json
+    อ่าน legacy _index/documents.jsonl ด้วย (backward compatibility)
 
     ออกแบบสำหรับ Gunicorn multi-worker:
-    - ทุก read operation (search, recent, get) โหลดจาก GCS ใหม่
-      ผ่าน short-lived cache (INDEX_CACHE_TTL วินาที)
-    - add() เขียน GCS ก่อน แล้วจึงอัพเดท memory — ถ้า GCS ล้มเหลว raise error
-    - ป้องกัน concurrent append ด้วย GCS generation match (optimistic locking)
+    - ทุก read operation โหลดจาก GCS ใหม่ผ่าน short-lived cache
+    - add() เขียน GCS ก่อน แล้วจึงอัพเดท memory
+    - ป้องกัน duplicate ด้วย if_generation_match=0 (create-only)
     """
 
     def __init__(self, storage_instance):
@@ -723,34 +737,90 @@ class DocumentIndex:
     def _reload_from_gcs(self) -> bool:
         """โหลด index จาก GCS เข้า memory ใหม่ทั้งหมด.
 
-        เรียกเมื่อ cache หมดอายุ หรือหลัง add() สำเร็จ
+        อ่านจาก 2 แหล่ง:
+        1. Legacy _index/documents.jsonl (backward compatibility)
+        2. Per-document files _index/docs/{doc_id}.json
+
+        Deduplicate ด้วย doc_id — per-doc files มีความสำคัญกว่า legacy
+
         Return True ถ้าโหลดสำเร็จ
         """
         if not hasattr(self._storage, '_client') or not self._storage.is_ready:
             return False
         try:
-            blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
-            if not blob.exists():
-                with self._lock:
-                    self._docs = []
-                    self._doc_map = {}
-                    self._cache_ts = time.time()
-                return True
-            content = blob.download_as_text(encoding="utf-8")
             new_docs = []
             new_map = {}
-            for line in content.strip().split("\n"):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    doc = json.loads(line)
-                    doc_id = doc.get("document_id", "")
-                    if doc_id and doc_id not in new_map:
-                        new_docs.append(doc)
-                        new_map[doc_id] = doc
-                except json.JSONDecodeError:
-                    continue
+
+            # 1. อ่าน legacy JSONL (backward compatibility)
+            try:
+                legacy_blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
+                if legacy_blob.exists():
+                    content = legacy_blob.download_as_text(encoding="utf-8")
+                    for line in content.strip().split("\n"):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            doc = json.loads(line)
+                            doc_id = doc.get("document_id", "")
+                            if doc_id and doc_id not in new_map:
+                                new_docs.append(doc)
+                                new_map[doc_id] = doc
+                        except json.JSONDecodeError:
+                            continue
+            except Exception as legacy_err:
+                err_code = getattr(legacy_err, "code", None)
+                if err_code == 403:
+                    logger.warning(
+                        "Legacy index JSONL อ่านไม่ได้ (403) — "
+                        "ข้ามไป ใช้ per-doc files แทน"
+                    )
+                elif err_code != 404:
+                    logger.warning(
+                        f"Legacy index JSONL อ่านไม่ได้: "
+                        f"{type(legacy_err).__name__} (code={err_code})"
+                    )
+
+            # 2. อ่าน per-document JSON files
+            try:
+                blobs = self._storage._client.list_blobs(
+                    self._storage.bucket_name,
+                    prefix=INDEX_DOC_PREFIX,
+                )
+                for blob in blobs:
+                    try:
+                        content = blob.download_as_text(encoding="utf-8")
+                        doc = json.loads(content)
+                        doc_id = doc.get("document_id", "")
+                        if doc_id:
+                            if doc_id in new_map:
+                                # per-doc file overrides legacy entry
+                                old_doc = new_map[doc_id]
+                                idx = new_docs.index(old_doc)
+                                new_docs[idx] = doc
+                            else:
+                                new_docs.append(doc)
+                            new_map[doc_id] = doc
+                    except (json.JSONDecodeError, Exception) as blob_err:
+                        logger.warning(
+                            f"Per-doc index file อ่านไม่ได้: "
+                            f"{blob.name} — {type(blob_err).__name__}"
+                        )
+                        continue
+            except Exception as list_err:
+                err_code = getattr(list_err, "code", None)
+                if err_code == 403:
+                    logger.error(
+                        "Per-doc index list ล้มเหลว: Forbidden (403) — "
+                        "service account ขาด storage.objects.list permission"
+                    )
+                else:
+                    logger.error(
+                        f"Per-doc index list ล้มเหลว: "
+                        f"{type(list_err).__name__} (code={err_code})"
+                    )
+                # ถ้า list ล้มเหลว แต่ legacy สำเร็จ ก็ยังใช้ legacy data ได้
+
             with self._lock:
                 self._docs = new_docs
                 self._doc_map = new_map
@@ -758,16 +828,10 @@ class DocumentIndex:
             return True
         except Exception as e:
             err_code = getattr(e, "code", None)
-            if err_code == 403:
-                logger.error(
-                    "Document index reload ล้มเหลว: Forbidden (403) — "
-                    "service account ขาด storage.objects.get permission"
-                )
-            else:
-                logger.error(
-                    f"Document index reload ล้มเหลว: "
-                    f"{type(e).__name__} (code={err_code})"
-                )
+            logger.error(
+                f"Document index reload ล้มเหลว: "
+                f"{type(e).__name__} (code={err_code})"
+            )
             return False
 
     def _ensure_fresh(self):
@@ -777,11 +841,12 @@ class DocumentIndex:
             self._reload_from_gcs()
 
     def add(self, doc_meta: dict) -> bool:
-        """เพิ่มเอกสารใหม่ลง index — เขียน GCS ก่อน แล้วจึงอัพเดท memory.
+        """เพิ่มเอกสารใหม่ลง index — เขียน per-doc JSON file ใน GCS.
 
-        ถ้า GCS เขียนไม่ได้ → raise RuntimeError (ป้องกันการตอบว่าสำเร็จ
-        แต่ metadata ไม่ถูกบันทึก)
+        ใช้ if_generation_match=0 → สร้างไฟล์ใหม่เท่านั้น (ไม่ overwrite)
+        ต้องการแค่ storage.objects.create — ไม่ต้องใช้ objects.delete
 
+        ถ้า GCS เขียนไม่ได้ → raise RuntimeError
         Return True ถ้าเพิ่มสำเร็จ, False ถ้า idempotent (มีอยู่แล้ว)
         """
         doc_id = doc_meta.get("document_id", "")
@@ -798,84 +863,50 @@ class DocumentIndex:
                 "Document index: GCS ไม่พร้อม — ไม่สามารถบันทึก metadata"
             )
 
-        line = json.dumps(doc_meta, ensure_ascii=False) + "\n"
-        # Retry loop กัน concurrent append ด้วย GCS generation precondition
-        # ถ้า 2 worker เขียนพร้อมกัน จะเกิด 412 Precondition Failed
-        # worker ที่แพ้จะ retry โดยโหลด content ใหม่แล้ว append อีกครั้ง
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
-                blob.reload()  # โหลด generation ปัจจุบัน
-                existing = blob.download_as_text(encoding="utf-8")
-                generation = blob.generation
-                # ตรวจ idempotent อีกครั้งจาก GCS content (ป้องกัน race)
-                if f'"document_id": "{doc_id}"' in existing or f'"document_id":"{doc_id}"' in existing:
-                    logger.info(f"Document index: doc_id={doc_id[:8]}… มีใน GCS แล้ว (idempotent)")
-                    self._reload_from_gcs()
-                    return False
-                blob.upload_from_string(
-                    existing + line,
-                    content_type="application/jsonl",
-                    if_generation_match=generation,
+        # สร้าง per-document JSON file: _index/docs/{doc_id}.json
+        doc_json = json.dumps(doc_meta, ensure_ascii=False)
+        blob_path = f"{INDEX_DOC_PREFIX}{doc_id}.json"
+        try:
+            blob = self._storage._bucket.blob(blob_path)
+            blob.upload_from_string(
+                doc_json,
+                content_type="application/json",
+                if_generation_match=0,  # create-only — ไม่ overwrite
+            )
+        except Exception as e:
+            err_code = getattr(e, "code", None)
+            if err_code == 412:
+                # ไฟล์มีอยู่แล้ว — idempotent (worker อื่นสร้างไปก่อน)
+                logger.info(
+                    f"Document index: doc_id={doc_id[:8]}… "
+                    f"มีใน GCS แล้ว (idempotent, 412)"
                 )
-            except Exception as e:
-                if getattr(e, "code", None) == 404:
-                    # blob ยังไม่มี — สร้างใหม่ด้วย if_generation_match=0
-                    try:
-                        blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
-                        blob.upload_from_string(
-                            line,
-                            content_type="application/jsonl",
-                            if_generation_match=0,
-                        )
-                    except Exception as create_err:
-                        if getattr(create_err, "code", None) == 412:
-                            # worker อื่นสร้างไปแล้ว → retry append
-                            continue
-                        raise
-                elif getattr(e, "code", None) == 412:
-                    # Generation mismatch — worker อื่นเขียนก่อน → retry
-                    logger.info(
-                        f"Document index: generation conflict "
-                        f"(attempt {attempt + 1}/{max_retries}), retrying…"
-                    )
-                    continue
-                else:
-                    # แยก Forbidden (403) ออกจากข้อผิดพลาดทั่วไป
-                    # เพื่อวินิจฉัย permission ที่ขาด
-                    err_code = getattr(e, "code", None)
-                    if err_code == 403:
-                        logger.error(
-                            "Document index GCS write ล้มเหลว: Forbidden (403) — "
-                            "service account อาจขาด storage.objects.get "
-                            "หรือ storage.objects.update permission"
-                        )
-                        raise RuntimeError(
-                            "Document index: GCS permission denied (403) — "
-                            "service account ต้องมี Storage Object Admin role"
-                        )
-                    logger.error(
-                        f"Document index GCS write ล้มเหลว: "
-                        f"{type(e).__name__} (code={err_code})"
-                    )
-                    raise RuntimeError(
-                        f"Document index: บันทึก metadata ลง GCS ล้มเหลว: "
-                        f"{type(e).__name__}"
-                    )
-            # สำเร็จ — ออกจาก retry loop
-            logger.info(f"Document index: เพิ่ม doc_id={doc_id[:8]}… ลง GCS สำเร็จ")
-            break
-        else:
-            # หมด retry
-            logger.error(
-                f"Document index: concurrent write conflict "
-                f"หลัง {max_retries} ครั้ง (doc_id={doc_id[:8]}…)"
-            )
-            raise RuntimeError(
-                "Document index: บันทึก metadata ล้มเหลว — "
-                "concurrent write conflict (กรุณาลองใหม่)"
-            )
+                self._reload_from_gcs()
+                return False
+            elif err_code == 403:
+                logger.error(
+                    "Document index GCS write ล้มเหลว: Forbidden (403) — "
+                    "service account ขาด storage.objects.create permission"
+                )
+                raise RuntimeError(
+                    "Document index: GCS permission denied (403) — "
+                    "ตรวจสอบว่า service account มี "
+                    "Storage Object Creator role"
+                )
+            else:
+                logger.error(
+                    f"Document index GCS write ล้มเหลว: "
+                    f"{type(e).__name__} (code={err_code})"
+                )
+                raise RuntimeError(
+                    f"Document index: บันทึก metadata ลง GCS ล้มเหลว: "
+                    f"{type(e).__name__}"
+                )
+
+        logger.info(
+            f"Document index: เพิ่ม doc_id={doc_id[:8]}… "
+            f"ลง GCS สำเร็จ ({blob_path})"
+        )
 
         # GCS เขียนสำเร็จ → อัพเดท memory cache
         with self._lock:
