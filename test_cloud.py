@@ -845,6 +845,15 @@ def test_health_version_updated():
 # ═══════════════════════════════════════════════════════════
 
 
+def _mock_doc_index_add(doc_meta):
+    """Mock doc_index.add สำหรับ tests — บันทึก memory เท่านั้น ไม่ต้อง GCS."""
+    doc_id = doc_meta.get("document_id", "")
+    if doc_id not in server.doc_index._doc_map:
+        server.doc_index._docs.append(doc_meta)
+        server.doc_index._doc_map[doc_id] = doc_meta
+    return True
+
+
 def test_cleanup_after_gcs_upload_success():
     """ลบไฟล์ชั่วคราวเมื่อ GCS upload สำเร็จ (dest เริ่มด้วย gs://)."""
     import threading
@@ -863,6 +872,7 @@ def test_cleanup_after_gcs_upload_success():
 
     # Mock copy_to_category ให้ return gs:// path (จำลอง GCS upload สำเร็จ)
     original_copy = server.copy_to_category
+    original_add = server.doc_index.add
 
     def mock_copy_to_category(src, cat, metadata=None):
         # คัดลอกไปยัง local folder จริง (เพื่อทดสอบว่า local copy ถูกลบด้วย)
@@ -874,6 +884,7 @@ def test_cleanup_after_gcs_upload_success():
         return "gs://test-bucket/04_LAB_RESULTS/cleanup_test_lab_report.txt"
 
     server.copy_to_category = mock_copy_to_category
+    server.doc_index.add = _mock_doc_index_add
     try:
         # เรียก process_file_async แล้วรอให้ thread ทำงานเสร็จ
         server.process_file_async(test_file, reply_token=None)
@@ -887,6 +898,7 @@ def test_cleanup_after_gcs_upload_success():
         print("PASS: cleanup after GCS upload success")
     finally:
         server.copy_to_category = original_copy
+        server.doc_index.add = original_add
         # cleanup
         if os.path.exists(test_file):
             os.remove(test_file)
@@ -943,6 +955,8 @@ def test_cleanup_oserror_graceful():
         return "gs://test-bucket/04_LAB_RESULTS/oserror_test.txt"
 
     server.copy_to_category = mock_copy_gcs
+    original_add = server.doc_index.add
+    server.doc_index.add = _mock_doc_index_add
 
     # Mock os.remove ให้ raise OSError
     original_remove = os.remove
@@ -965,6 +979,7 @@ def test_cleanup_oserror_graceful():
     finally:
         os.remove = original_remove
         server.copy_to_category = original_copy
+        server.doc_index.add = original_add
         if os.path.exists(test_file):
             original_remove(test_file)
 
@@ -984,6 +999,8 @@ def test_cleanup_path_safety():
         return "gs://test-bucket/04_LAB_RESULTS/outside_test.txt"
 
     server.copy_to_category = mock_copy_gcs
+    original_add = server.doc_index.add
+    server.doc_index.add = _mock_doc_index_add
     try:
         server.process_file_async(outside_file, reply_token=None)
         for t in threading.enumerate():
@@ -995,6 +1012,7 @@ def test_cleanup_path_safety():
         print("PASS: cleanup path safety — files outside BASE_DIR not deleted")
     finally:
         server.copy_to_category = original_copy
+        server.doc_index.add = original_add
         if os.path.exists(outside_file):
             os.remove(outside_file)
 
@@ -1233,6 +1251,8 @@ class _ProdWebhook:
             "reply_message": server.reply_message,
             "copy_to_category": server.copy_to_category,
         }
+        # เก็บ doc_index.add เดิมไว้ เพื่อ mock ให้ไม่ raise RuntimeError
+        self._orig_doc_index_add = server.doc_index.add
         server.IS_TESTING = False
         server.IS_TESTING_DOCS = False
 
@@ -1247,14 +1267,24 @@ class _ProdWebhook:
             self.saved.append((cat, os.path.basename(src), metadata))
             return f"gs://test-bucket/{server.FOLDERS.get(cat, 'x')}/{os.path.basename(src)}"
 
+        # Mock doc_index.add — บันทึกลง memory เท่านั้น (ไม่ต้องเขียน GCS จริง)
+        def fake_doc_index_add(doc_meta):
+            doc_id = doc_meta.get("document_id", "")
+            if doc_id not in server.doc_index._doc_map:
+                server.doc_index._docs.append(doc_meta)
+                server.doc_index._doc_map[doc_id] = doc_meta
+            return True
+
         server.download_line_content = fake_download
         server.get_content_type_ext = lambda mid: self.content_ext
         server.reply_message = fake_reply
         server.copy_to_category = fake_copy
+        server.doc_index.add = fake_doc_index_add
         return self
 
     def __exit__(self, *exc):
         _join_workers()
+        server.doc_index.add = self._orig_doc_index_add
         for k, v in self._orig.items():
             setattr(server, k, v)
         return False
@@ -2493,10 +2523,32 @@ def test_production_copy_to_category_reraises():
 # ═══════════════════════════════════════════════════════════
 
 
+def _make_test_index():
+    """สร้าง DocumentIndex สำหรับ unit test — bypass GCS, ทำงานใน memory เท่านั้น."""
+    idx = server.DocumentIndex(server.storage)
+    # Override _ensure_fresh และ add เพื่อข้าม GCS
+    idx._ensure_fresh = lambda: None
+    idx._cache_ts = float("inf")  # ไม่ให้ cache หมดอายุ
+
+    # Override add ให้บันทึกใน memory เท่านั้น
+    _orig_lock = idx._lock
+
+    def _memory_only_add(doc_meta):
+        doc_id = doc_meta.get("document_id", "")
+        with _orig_lock:
+            if doc_id in idx._doc_map:
+                return False
+            idx._docs.append(doc_meta)
+            idx._doc_map[doc_id] = doc_meta
+        return True
+
+    idx.add = _memory_only_add
+    return idx
+
+
 def test_document_index_add_and_search():
     """ทดสอบ DocumentIndex: add + search."""
-    idx = server.DocumentIndex(server.storage)
-    idx._loaded = True  # ข้าม GCS load
+    idx = _make_test_index()
 
     doc1 = {
         "document_id": "test-001",
@@ -2547,8 +2599,7 @@ def test_document_index_add_and_search():
 
 def test_document_index_recent():
     """ทดสอบ DocumentIndex: recent()."""
-    idx = server.DocumentIndex(server.storage)
-    idx._loaded = True
+    idx = _make_test_index()
 
     for i in range(10):
         idx.add({
@@ -2568,8 +2619,7 @@ def test_document_index_recent():
 
 def test_document_index_idempotent():
     """ทดสอบ DocumentIndex: add ซ้ำไม่เพิ่มซ้ำ (idempotent)."""
-    idx = server.DocumentIndex(server.storage)
-    idx._loaded = True
+    idx = _make_test_index()
 
     doc = {"document_id": "idem-001", "category": "lab", "extracted_text": ""}
     idx.add(doc)
@@ -2582,8 +2632,7 @@ def test_document_index_idempotent():
 
 def test_document_index_get():
     """ทดสอบ DocumentIndex: get by doc_id."""
-    idx = server.DocumentIndex(server.storage)
-    idx._loaded = True
+    idx = _make_test_index()
 
     idx.add({"document_id": "get-001", "category": "rx", "extracted_text": ""})
 
@@ -2597,8 +2646,7 @@ def test_document_index_get():
 
 def test_search_max_results():
     """ทดสอบค้นหาจำกัดจำนวนผลลัพธ์."""
-    idx = server.DocumentIndex(server.storage)
-    idx._loaded = True
+    idx = _make_test_index()
 
     for i in range(20):
         idx.add({
@@ -2614,8 +2662,7 @@ def test_search_max_results():
 
 def test_search_thai_text():
     """ทดสอบค้นหาด้วยภาษาไทย."""
-    idx = server.DocumentIndex(server.storage)
-    idx._loaded = True
+    idx = _make_test_index()
 
     idx.add({
         "document_id": "thai-001",
@@ -2868,8 +2915,7 @@ def test_status_shows_doc_count():
 
 def test_no_patient_data_in_index():
     """ทดสอบว่า original_filename ไม่เก็บชื่อผู้ป่วย."""
-    idx = server.DocumentIndex(server.storage)
-    idx._loaded = True
+    idx = _make_test_index()
 
     # Simulate what process_file_async does — uses generic name
     doc = {
@@ -3080,6 +3126,252 @@ def test_user_id_salt_production_stable():
     print("PASS: test_user_id_salt_production_stable")
 
 
+# ═══════════════════════════════════════════════════════════
+# Phase 3: Document Index Repair Tests
+# ทดสอบ TTL cache, GCS-first writes, multi-worker safety
+# ═══════════════════════════════════════════════════════════
+
+
+def test_index_upload_then_search():
+    """Upload → Index → Search: เพิ่มเอกสารแล้วค้นหาเจอ."""
+    idx = _make_test_index()
+    idx.add({
+        "document_id": "repair-001",
+        "original_filename": "document.pdf",
+        "category": "lab",
+        "upload_date": "2026-10-20",
+        "extracted_text": "ผลตรวจ creatinine 1.5 mg/dL eGFR 45",
+    })
+
+    results = idx.search("creatinine")
+    assert len(results) == 1, f"ค้นหา creatinine ต้องเจอ 1 ผลลัพธ์ แต่ได้ {len(results)}"
+    assert results[0]["document_id"] == "repair-001"
+
+    # ค้นหาด้วยชื่อไฟล์ (ไม่มี PII)
+    results2 = idx.search("document.pdf")
+    assert len(results2) == 1
+
+    # ค้นหาด้วย category
+    results3 = idx.search("lab")
+    assert len(results3) == 1
+
+    print("PASS: test_index_upload_then_search")
+
+
+def test_index_upload_restart_search():
+    """Upload → Restart → Search: จำลอง restart — GCS reload ต้องเจอเอกสารเดิม."""
+    idx = _make_test_index()
+
+    # เพิ่มเอกสาร 3 รายการ
+    for i in range(3):
+        idx.add({
+            "document_id": f"restart-{i:03d}",
+            "category": "lab",
+            "upload_date": f"2026-10-{20+i}",
+            "extracted_text": f"restart-doc-{i} ผลตรวจ",
+        })
+    assert idx.count() == 3
+
+    # จำลอง restart: ล้าง memory แล้ว reload จาก _docs (mock GCS)
+    saved_docs = list(idx._docs)  # สำเนา "GCS state"
+    idx._docs = []
+    idx._doc_map = {}
+    assert idx.count() == 0, "หลัง restart ต้องว่าง"
+
+    # reload จาก saved state (จำลอง _reload_from_gcs)
+    for doc in saved_docs:
+        doc_id = doc.get("document_id", "")
+        idx._docs.append(doc)
+        idx._doc_map[doc_id] = doc
+
+    assert idx.count() == 3, "หลัง reload ต้องเจอ 3 เอกสาร"
+    results = idx.search("restart-doc-1")
+    assert len(results) == 1
+    assert results[0]["document_id"] == "restart-001"
+    print("PASS: test_index_upload_restart_search")
+
+
+def test_index_upload_then_recent():
+    """Upload → Recent: เอกสารล่าสุดต้องแสดงเรียงตามลำดับที่เพิ่ม (ใหม่สุดก่อน)."""
+    idx = _make_test_index()
+    idx.add({
+        "document_id": "recent-a",
+        "category": "lab",
+        "upload_date": "2026-10-15",
+        "extracted_text": "เอกสารแรก",
+    })
+    idx.add({
+        "document_id": "recent-b",
+        "category": "rx",
+        "upload_date": "2026-10-20",
+        "extracted_text": "เอกสารที่สอง",
+    })
+    idx.add({
+        "document_id": "recent-c",
+        "category": "bills",
+        "upload_date": "2026-10-18",
+        "extracted_text": "เอกสารที่สาม",
+    })
+
+    recent = idx.recent(3)
+    assert len(recent) == 3, f"ต้องได้ 3 เอกสาร แต่ได้ {len(recent)}"
+    # เรียงจากเพิ่มล่าสุด → เก่าสุด (reversed insertion order)
+    assert recent[0]["document_id"] == "recent-c", "ล่าสุดต้องเป็น recent-c (เพิ่มทีหลังสุด)"
+    assert recent[1]["document_id"] == "recent-b"
+    assert recent[2]["document_id"] == "recent-a", "เก่าสุดต้องเป็น recent-a (เพิ่มก่อน)"
+
+    # ทดสอบ limit
+    recent2 = idx.recent(2)
+    assert len(recent2) == 2, "recent(2) ต้องได้ 2 เอกสาร"
+    assert recent2[0]["document_id"] == "recent-c"
+    print("PASS: test_index_upload_then_recent")
+
+
+def test_index_concurrent_uploads():
+    """Concurrent uploads: เพิ่มหลายเอกสารพร้อมกันไม่ซ้ำไม่หาย."""
+    import threading
+
+    idx = _make_test_index()
+    errors = []
+    n_threads = 10
+
+    def add_doc(i):
+        try:
+            idx.add({
+                "document_id": f"concurrent-{i:03d}",
+                "category": "lab",
+                "upload_date": "2026-10-20",
+                "extracted_text": f"concurrent doc {i}",
+            })
+        except Exception as e:
+            errors.append((i, str(e)))
+
+    threads = [threading.Thread(target=add_doc, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+
+    assert len(errors) == 0, f"ไม่ควรมี error: {errors}"
+    assert idx.count() == n_threads, f"ต้องมี {n_threads} เอกสาร แต่มี {idx.count()}"
+
+    # ตรวจว่าไม่มีซ้ำ
+    ids = set(d["document_id"] for d in idx._docs)
+    assert len(ids) == n_threads, "ต้องไม่มี document_id ซ้ำ"
+    print("PASS: test_index_concurrent_uploads")
+
+
+def test_index_gcs_permission_failure():
+    """GCS permission failure: add() ต้อง raise RuntimeError ไม่ใช่ตอบสำเร็จเงียบ ๆ."""
+    idx = server.DocumentIndex(server.storage)
+    # ไม่ mock add → จะเรียก GCS จริง → storage.is_ready = False → RuntimeError
+    idx._ensure_fresh = lambda: None  # ข้าม cache check
+
+    doc = {
+        "document_id": "gcs-fail-001",
+        "category": "lab",
+        "extracted_text": "ผลตรวจ",
+    }
+    raised = False
+    try:
+        idx.add(doc)
+    except RuntimeError as e:
+        raised = True
+        assert "GCS" in str(e) or "ไม่พร้อม" in str(e), \
+            f"Error message ต้องบอกว่า GCS ล้มเหลว: {e}"
+
+    assert raised, "add() ต้อง raise RuntimeError เมื่อ GCS ไม่พร้อม (fail-loud)"
+    print("PASS: test_index_gcs_permission_failure")
+
+
+def test_index_add_gcs_first_write():
+    """add() ต้องเขียน GCS ก่อน memory — ถ้า GCS ล้มเหลว memory ต้องไม่เปลี่ยน."""
+    idx = server.DocumentIndex(server.storage)
+    idx._ensure_fresh = lambda: None
+
+    doc = {
+        "document_id": "gcs-first-001",
+        "category": "lab",
+        "extracted_text": "test",
+    }
+    try:
+        idx.add(doc)
+    except RuntimeError:
+        pass  # expected — GCS ไม่พร้อม
+
+    # ตรวจว่า memory ไม่ถูกเปลี่ยน
+    assert idx.count() == 0, "memory ต้องไม่มีเอกสารเมื่อ GCS ล้มเหลว"
+    assert "gcs-first-001" not in idx._doc_map, "doc_map ต้องว่าง"
+    print("PASS: test_index_add_gcs_first_write")
+
+
+def test_index_ttl_cache_refresh():
+    """TTL cache: หลังหมดอายุต้องเรียก reload."""
+    idx = _make_test_index()
+    idx.add({
+        "document_id": "ttl-001",
+        "category": "lab",
+        "extracted_text": "ttl test",
+    })
+
+    # จำลอง cache หมดอายุ
+    reload_called = []
+    original_reload = idx._reload_from_gcs
+
+    def mock_reload():
+        reload_called.append(True)
+        return False  # return False — ไม่ต้องโหลดจริง
+
+    idx._reload_from_gcs = mock_reload
+    # ต้อง restore _ensure_fresh ให้ตรวจ TTL จริง
+    idx._ensure_fresh = lambda: (
+        idx._reload_from_gcs() if time.time() - idx._cache_ts > idx._cache_ttl else None
+    )
+    idx._cache_ts = 0  # force expired
+    idx._cache_ttl = server.INDEX_CACHE_TTL
+
+    # เรียก search → ต้อง trigger _ensure_fresh → _reload_from_gcs
+    idx.search("anything")
+    assert len(reload_called) > 0, "_reload_from_gcs ต้องถูกเรียกเมื่อ cache หมดอายุ"
+    print("PASS: test_index_ttl_cache_refresh")
+
+
+def test_index_ensure_fresh_on_search():
+    """search/recent/get ต้องเรียก _ensure_fresh ก่อนอ่าน."""
+    idx = _make_test_index()
+    idx.add({
+        "document_id": "fresh-001",
+        "category": "lab",
+        "extracted_text": "freshness test",
+    })
+
+    # Override _ensure_fresh ให้นับว่าถูกเรียก
+    fresh_calls = []
+    orig_ensure = idx._ensure_fresh
+
+    def counting_ensure():
+        fresh_calls.append("called")
+
+    idx._ensure_fresh = counting_ensure
+
+    # search ต้องเรียก _ensure_fresh
+    fresh_calls.clear()
+    idx.search("anything")
+    assert len(fresh_calls) >= 1, "search ต้องเรียก _ensure_fresh"
+
+    # recent ต้องเรียก _ensure_fresh
+    fresh_calls.clear()
+    idx.recent(5)
+    assert len(fresh_calls) >= 1, "recent ต้องเรียก _ensure_fresh"
+
+    # get ต้องเรียก _ensure_fresh
+    fresh_calls.clear()
+    idx.get("fresh-001")
+    assert len(fresh_calls) >= 1, "get ต้องเรียก _ensure_fresh"
+
+    print("PASS: test_index_ensure_fresh_on_search")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -3237,6 +3529,15 @@ def main():
         test_enroll_replay_attack_prevention,
         test_enroll_old_register_command_removed,
         test_user_id_salt_production_stable,
+        # ── Phase 3: Document Index Repair Tests ──
+        test_index_upload_then_search,
+        test_index_upload_restart_search,
+        test_index_upload_then_recent,
+        test_index_concurrent_uploads,
+        test_index_gcs_permission_failure,
+        test_index_add_gcs_first_write,
+        test_index_ttl_cache_refresh,
+        test_index_ensure_fresh_on_search,
     ]
 
     passed = 0

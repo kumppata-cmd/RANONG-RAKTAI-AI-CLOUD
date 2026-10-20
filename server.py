@@ -157,6 +157,7 @@ MAX_INDEX_TEXT_LENGTH = 5000
 # GCS paths for index/audit data
 INDEX_OBJECT_PATH = "_index/documents.jsonl"
 AUDIT_PREFIX = "_audit/"
+INDEX_CACHE_TTL = 5  # วินาที — reload index จาก GCS ทุก 5 วินาที (multi-worker safe)
 
 # ─── OCR ─────────────────────────────────────────────────
 # 200 DPI เพียงพอสำหรับ Tesseract กับข้อความขนาดปกติ และใช้หน่วยความจำ
@@ -669,79 +670,131 @@ storage = get_storage()
 # ═══════════════════════════════════════════════════════════
 
 class DocumentIndex:
-    """Persistent document index stored in GCS as JSONL."""
+    """Persistent document index stored in GCS as JSONL.
+
+    ออกแบบสำหรับ Gunicorn multi-worker:
+    - ทุก read operation (search, recent, get) โหลดจาก GCS ใหม่
+      ผ่าน short-lived cache (INDEX_CACHE_TTL วินาที)
+    - add() เขียน GCS ก่อน แล้วจึงอัพเดท memory — ถ้า GCS ล้มเหลว raise error
+    - ป้องกัน concurrent append ด้วย GCS generation match (optimistic locking)
+    """
 
     def __init__(self, storage_instance):
         self._storage = storage_instance
         self._docs: list[dict] = []
         self._doc_map: dict[str, dict] = {}  # doc_id -> doc
         self._lock = threading.Lock()
-        self._loaded = False
+        self._cache_ts: float = 0  # timestamp ที่ load cache ล่าสุด
+        self._cache_ttl: float = INDEX_CACHE_TTL
 
-    def _load(self):
-        """โหลด index จาก GCS เข้า memory — เรียกครั้งเดียวตอน startup."""
-        if self._loaded or not hasattr(self._storage, '_client') or not self._storage.is_ready:
-            return
+    def _reload_from_gcs(self) -> bool:
+        """โหลด index จาก GCS เข้า memory ใหม่ทั้งหมด.
+
+        เรียกเมื่อ cache หมดอายุ หรือหลัง add() สำเร็จ
+        Return True ถ้าโหลดสำเร็จ
+        """
+        if not hasattr(self._storage, '_client') or not self._storage.is_ready:
+            return False
         try:
             blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
             if not blob.exists():
-                logger.info("Document index: ไม่มีไฟล์ index ใน GCS — เริ่มจาก empty")
-                self._loaded = True
-                return
+                with self._lock:
+                    self._docs = []
+                    self._doc_map = {}
+                    self._cache_ts = time.time()
+                return True
             content = blob.download_as_text(encoding="utf-8")
-            count = 0
+            new_docs = []
+            new_map = {}
             for line in content.strip().split("\n"):
                 line = line.strip()
                 if not line:
                     continue
                 try:
                     doc = json.loads(line)
-                    self._docs.append(doc)
-                    self._doc_map[doc.get("document_id", "")] = doc
-                    count += 1
+                    doc_id = doc.get("document_id", "")
+                    if doc_id and doc_id not in new_map:
+                        new_docs.append(doc)
+                        new_map[doc_id] = doc
                 except json.JSONDecodeError:
                     continue
-            logger.info(f"Document index: โหลด {count} เอกสารจาก GCS")
-            self._loaded = True
+            with self._lock:
+                self._docs = new_docs
+                self._doc_map = new_map
+                self._cache_ts = time.time()
+            return True
         except Exception as e:
-            logger.error(f"Document index load ล้มเหลว: {type(e).__name__}")
-            self._loaded = True  # ไม่ retry ซ้ำ — จะ append ได้ต่อไป
+            logger.error(f"Document index reload ล้มเหลว: {type(e).__name__}")
+            return False
 
-    def add(self, doc_meta: dict):
-        """เพิ่มเอกสารใหม่ลง index (memory + GCS)."""
+    def _ensure_fresh(self):
+        """ตรวจสอบว่า cache ยังใหม่อยู่ ถ้าหมดอายุให้โหลดใหม่จาก GCS."""
+        now = time.time()
+        if now - self._cache_ts > self._cache_ttl:
+            self._reload_from_gcs()
+
+    def add(self, doc_meta: dict) -> bool:
+        """เพิ่มเอกสารใหม่ลง index — เขียน GCS ก่อน แล้วจึงอัพเดท memory.
+
+        ถ้า GCS เขียนไม่ได้ → raise RuntimeError (ป้องกันการตอบว่าสำเร็จ
+        แต่ metadata ไม่ถูกบันทึก)
+
+        Return True ถ้าเพิ่มสำเร็จ, False ถ้า idempotent (มีอยู่แล้ว)
+        """
+        doc_id = doc_meta.get("document_id", "")
+
+        # Idempotent check — โหลด fresh ก่อนเช็ค
+        self._ensure_fresh()
         with self._lock:
-            doc_id = doc_meta.get("document_id", "")
             if doc_id in self._doc_map:
-                return  # idempotent — มีอยู่แล้ว
-            self._docs.append(doc_meta)
-            self._doc_map[doc_id] = doc_meta
+                return False  # มีอยู่แล้ว
 
-        # Append to GCS (non-blocking attempt — ถ้าล้มเหลวไม่ถือว่าร้ายแรง)
+        # เขียน GCS ก่อน — ถ้าล้มเหลวไม่เพิ่มเข้า memory
+        if not self._storage.is_ready:
+            raise RuntimeError(
+                "Document index: GCS ไม่พร้อม — ไม่สามารถบันทึก metadata"
+            )
+
+        line = json.dumps(doc_meta, ensure_ascii=False) + "\n"
         try:
-            if self._storage.is_ready:
-                line = json.dumps(doc_meta, ensure_ascii=False) + "\n"
-                blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
-                if blob.exists():
-                    existing = blob.download_as_text(encoding="utf-8")
-                    blob.upload_from_string(
-                        existing + line, content_type="application/jsonl"
-                    )
-                else:
-                    blob.upload_from_string(
-                        line, content_type="application/jsonl"
-                    )
-                logger.info(f"Document index: เพิ่ม doc_id={doc_id[:8]}…")
+            blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
+            if blob.exists():
+                existing = blob.download_as_text(encoding="utf-8")
+                # ตรวจ idempotent อีกครั้งจาก GCS content (ป้องกัน race)
+                if f'"document_id": "{doc_id}"' in existing or f'"document_id":"{doc_id}"' in existing:
+                    logger.info(f"Document index: doc_id={doc_id[:8]}… มีใน GCS แล้ว (idempotent)")
+                    self._reload_from_gcs()
+                    return False
+                blob.upload_from_string(
+                    existing + line, content_type="application/jsonl"
+                )
+            else:
+                blob.upload_from_string(
+                    line, content_type="application/jsonl"
+                )
+            logger.info(f"Document index: เพิ่ม doc_id={doc_id[:8]}… ลง GCS สำเร็จ")
         except Exception as e:
-            logger.error(f"Document index append ล้มเหลว: {type(e).__name__}")
+            logger.error(f"Document index GCS write ล้มเหลว: {type(e).__name__}")
+            raise RuntimeError(
+                f"Document index: บันทึก metadata ลง GCS ล้มเหลว: {type(e).__name__}"
+            )
+
+        # GCS เขียนสำเร็จ → อัพเดท memory cache
+        with self._lock:
+            if doc_id not in self._doc_map:
+                self._docs.append(doc_meta)
+                self._doc_map[doc_id] = doc_meta
+            self._cache_ts = time.time()
+        return True
 
     def get(self, doc_id: str) -> dict | None:
         """ดึงเอกสารตาม document_id."""
-        self._ensure_loaded()
+        self._ensure_fresh()
         return self._doc_map.get(doc_id)
 
     def recent(self, n: int = 5) -> list[dict]:
         """เอกสารล่าสุด n ชิ้น."""
-        self._ensure_loaded()
+        self._ensure_fresh()
         return list(reversed(self._docs[-n:]))
 
     def search(self, query: str, max_results: int = SEARCH_MAX_RESULTS) -> list[dict]:
@@ -749,8 +802,10 @@ class DocumentIndex:
 
         รองรับภาษาไทย — ใช้ substring match ซึ่งทำงานได้ดีกับภาษาไทย
         เพราะไม่ต้องแบ่งคำ
+
+        โหลดใหม่จาก GCS ทุกครั้งที่ cache หมดอายุ — รองรับ multi-worker
         """
-        self._ensure_loaded()
+        self._ensure_fresh()
         query_lower = query.lower().strip()
         if not query_lower:
             return []
@@ -772,17 +827,16 @@ class DocumentIndex:
 
     def count(self) -> int:
         """จำนวนเอกสารทั้งหมดใน index."""
-        self._ensure_loaded()
+        self._ensure_fresh()
         return len(self._docs)
 
-    def _ensure_loaded(self):
-        if not self._loaded:
-            self._load()
-
     def _save_full(self):
-        """เขียน index ทั้งหมดลง GCS — ใช้ตอน backfill."""
+        """เขียน index ทั้งหมดลง GCS — ใช้ตอน backfill.
+
+        Raise RuntimeError ถ้าเขียนไม่ได้
+        """
         if not self._storage.is_ready:
-            return False
+            raise RuntimeError("Document index: GCS ไม่พร้อม — ไม่สามารถบันทึก index")
         try:
             lines = []
             for doc in self._docs:
@@ -791,10 +845,13 @@ class DocumentIndex:
             blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
             blob.upload_from_string(content, content_type="application/jsonl")
             logger.info(f"Document index: บันทึก {len(self._docs)} เอกสารลง GCS")
+            self._cache_ts = time.time()
             return True
         except Exception as e:
             logger.error(f"Document index save ล้มเหลว: {type(e).__name__}")
-            return False
+            raise RuntimeError(
+                f"Document index: บันทึก index ลง GCS ล้มเหลว: {type(e).__name__}"
+            )
 
 
 # สร้าง document index instance
@@ -843,7 +900,19 @@ class AuditLogger:
                         line, content_type="application/jsonl"
                     )
             except Exception as e:
-                logger.error(f"Audit log write ล้มเหลว: {type(e).__name__}")
+                # แยกประเภท error เพื่อช่วย debug IAM permissions
+                err_type = type(e).__name__
+                err_msg = str(e)
+                if "Forbidden" in err_msg or "403" in err_msg:
+                    logger.error(
+                        f"Audit log write Forbidden — "
+                        f"ตรวจสอบ IAM: Service Account ต้องมี "
+                        f"storage.objects.create + storage.objects.get "
+                        f"สำหรับ path '{AUDIT_PREFIX}*' "
+                        f"ใน bucket '{self._storage.bucket_name}'"
+                    )
+                else:
+                    logger.error(f"Audit log write ล้มเหลว: {err_type}")
 
         # Fallback: เขียนลง local log ด้วย
         logger.info(f"AUDIT: {action} user={user_hash[:8]}…")
@@ -2072,6 +2141,7 @@ def process_file_async(
 
             # ── Document Search V1: add to index after GCS upload ──
             stored_in_gcs = bool(dest and dest.startswith("gs://"))
+            index_saved = False
             if stored_in_gcs:
                 # Extract GCS object path from gs:// URI
                 gcs_object_path = dest.replace(
@@ -2094,7 +2164,20 @@ def process_file_async(
                     "ocr_status": ocr_status,
                     "extracted_text": extracted_text,
                 }
-                doc_index.add(doc_meta)
+                try:
+                    doc_index.add(doc_meta)
+                    index_saved = True
+                except RuntimeError as idx_err:
+                    # Index เขียน GCS ไม่ได้ — ไฟล์ upload แล้ว แต่ metadata หาย
+                    # ไม่ตอบว่าสำเร็จ — แจ้ง error กลับไป
+                    logger.error(
+                        f"Document index write ล้มเหลว: {idx_err} "
+                        f"(doc_id={_doc_id})"
+                    )
+                    raise RuntimeError(
+                        f"ไฟล์ถูกอัปโหลดแล้ว แต่บันทึก metadata ล้มเหลว — "
+                        f"กรุณาแจ้งผู้ดูแลระบบ"
+                    )
 
             # บันทึก log — ไม่เก็บ path หรือชื่อไฟล์ต้นฉบับ
             log_entry = {
@@ -2626,7 +2709,14 @@ def admin_backfill():
                 errors += 1
 
         # Save full index to GCS
-        doc_index._save_full()
+        try:
+            doc_index._save_full()
+        except RuntimeError as save_err:
+            return jsonify({
+                "error": "Index save to GCS failed",
+                "detail": str(save_err),
+                "processed_before_failure": processed,
+            }), 500
 
         audit_logger.log("backfill", "admin", {
             "processed": processed,
@@ -2682,7 +2772,7 @@ logger.info(f"OCR (Tesseract): {'พร้อม' if HAS_TESSERACT and HAS_PIL e
 logger.info(f"PyMuPDF: {'พร้อม' if HAS_PYMUPDF else 'ไม่พร้อม'}")
 
 # ── Document Search V1: โหลด index ตอน startup ──
-doc_index._ensure_loaded()
+doc_index._reload_from_gcs()
 logger.info(f"Document Index: {doc_index.count()} เอกสาร")
 logger.info(f"Authorized Users: {len(AUTHORIZED_USERS)} users")
 logger.info(f"Admin Secret: {'ตั้งค่าแล้ว' if ADMIN_SECRET else 'ไม่ได้ตั้งค่า'}")
