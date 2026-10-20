@@ -2947,9 +2947,10 @@ def test_signed_url_not_ready():
 
 def test_enroll_token_generate_and_validate():
     """ทดสอบสร้าง token แล้วยืนยันสำเร็จ — คืน hash ไม่คืน userId."""
-    store = server.EnrollmentTokenStore(
-        store_path=os.path.join(tempfile.gettempdir(), "test_enroll_gen.json")
-    )
+    store_path = os.path.join(tempfile.gettempdir(), "test_enroll_gen.json")
+    if os.path.exists(store_path):
+        os.remove(store_path)
+    store = server.EnrollmentTokenStore(store_path=store_path)
     token = store.generate_token()
     assert len(token) == 64, "token ต้องยาว 64 hex chars (32 bytes)"
     # ยืนยัน token
@@ -2964,6 +2965,8 @@ def test_enroll_token_generate_and_validate():
 def test_enroll_token_expired():
     """ทดสอบ token หมดอายุ — ปฏิเสธ."""
     store_path = os.path.join(tempfile.gettempdir(), "test_enroll_exp.json")
+    if os.path.exists(store_path):
+        os.remove(store_path)
     store = server.EnrollmentTokenStore(store_path=store_path)
     token = store.generate_token()
     # จำลอง token หมดอายุโดยแก้ created_at ในไฟล์
@@ -2988,9 +2991,10 @@ def test_enroll_token_expired():
 
 def test_enroll_token_wrong_token():
     """ทดสอบ token ที่ไม่ถูกต้อง — ปฏิเสธ."""
-    store = server.EnrollmentTokenStore(
-        store_path=os.path.join(tempfile.gettempdir(), "test_enroll_wrong.json")
-    )
+    store_path = os.path.join(tempfile.gettempdir(), "test_enroll_wrong.json")
+    if os.path.exists(store_path):
+        os.remove(store_path)
+    store = server.EnrollmentTokenStore(store_path=store_path)
     _valid_token = store.generate_token()  # สร้าง token จริง
     result = store.validate_and_consume("invalid-token-abc123", "test_user_hash")
     assert result is None, "token ผิดต้องคืน None"
@@ -3015,6 +3019,8 @@ def test_enroll_token_rate_limiting():
 def test_enroll_token_cross_worker_shared():
     """ทดสอบว่า token แชร์ข้าม store instance (จำลอง multi-worker)."""
     store_path = os.path.join(tempfile.gettempdir(), "test_enroll_shared.json")
+    if os.path.exists(store_path):
+        os.remove(store_path)
     # Worker A สร้าง token
     store_a = server.EnrollmentTokenStore(store_path=store_path)
     token = store_a.generate_token()
@@ -3043,6 +3049,9 @@ def test_enroll_line_command_success():
 
 def test_enroll_line_command_wrong_token():
     """ทดสอบคำสั่ง LINE 'ยืนยัน [TOKEN]' ด้วย token ผิด — ไม่ตอบกลับ."""
+    # Reset global store to avoid rate limiting from previous runs
+    if os.path.exists(server.enrollment_store._store_path):
+        os.remove(server.enrollment_store._store_path)
     result = server.handle_search_command("ยืนยัน wrong-token-xyz", "somehash")
     assert result is None, "ต้องคืน None เมื่อ token ผิด"
     print("PASS: test_enroll_line_command_wrong_token")
@@ -3095,6 +3104,9 @@ def test_enroll_endpoint_auth():
 
 def test_enroll_replay_attack_prevention():
     """ทดสอบป้องกัน replay attack — token ใช้ได้ครั้งเดียว."""
+    # Reset global store to avoid rate limiting from previous runs
+    if os.path.exists(server.enrollment_store._store_path):
+        os.remove(server.enrollment_store._store_path)
     token = server.enrollment_store.generate_token()
     # ใช้ครั้งแรก → สำเร็จ
     result1 = server.handle_search_command(f"ยืนยัน {token}", "user1hash")
@@ -3541,7 +3553,7 @@ def test_get_with_owner_check_unauthorized():
 
 
 def test_get_with_owner_check_legacy():
-    """get_with_owner_check ต้องอนุญาต legacy docs (ไม่มี owner_hash)."""
+    """get_with_owner_check ต้องปฏิเสธ legacy docs (ไม่มี owner_hash) — Fail Closed."""
     idx = server.DocumentIndex(server.storage)
     idx._docs = [
         {"document_id": "d1", "category": "lab"},  # ไม่มี owner_hash
@@ -3551,8 +3563,8 @@ def test_get_with_owner_check_legacy():
 
     doc, authorized = idx.get_with_owner_check("d1", "anyUser")
     assert doc is not None
-    assert authorized is True  # legacy → อนุญาต (backward compatible)
-    print("PASS: test_get_with_owner_check_legacy")
+    assert authorized is False  # Fail Closed — legacy ถูกปฏิเสธ
+    print("PASS: test_get_with_owner_check_legacy (fail-closed)")
 
 
 def test_get_with_owner_check_not_found():
@@ -3737,6 +3749,413 @@ def test_max_content_read_size_reasonable():
     assert server.MAX_CONTENT_READ_SIZE >= 1 * 1024 * 1024  # >= 1 MB
     assert server.MAX_CONTENT_READ_SIZE <= 50 * 1024 * 1024  # <= 50 MB
     print("PASS: test_max_content_read_size_reasonable")
+
+
+def test_count_legacy():
+    """count_legacy ต้องนับเฉพาะเอกสารที่ไม่มี owner_hash."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1", "owner_hash": "userA"},
+        {"document_id": "d2", "owner_hash": ""},
+        {"document_id": "d3"},  # ไม่มี field owner_hash เลย
+        {"document_id": "d4", "owner_hash": "userB"},
+    ]
+    idx._doc_map = {d["document_id"]: d for d in idx._docs}
+    idx._cache_ts = time.time()
+
+    assert idx.count_legacy() == 2  # d2 (empty) + d3 (missing)
+    assert idx.count() == 4
+    print("PASS: test_count_legacy")
+
+
+def test_assign_owner():
+    """assign_owner ต้องกำหนด owner_hash ให้ legacy doc ได้."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1"},  # legacy — ไม่มี owner
+        {"document_id": "d2", "owner_hash": "userA"},  # มีเจ้าของแล้ว
+    ]
+    idx._doc_map = {d["document_id"]: d for d in idx._docs}
+    idx._cache_ts = time.time()
+
+    # กำหนด owner ให้ legacy doc สำเร็จ
+    assert idx.assign_owner("d1", "newOwner") is True
+    assert idx._docs[0]["owner_hash"] == "newOwner"
+
+    # ห้าม reassign — doc ที่มี owner แล้ว
+    assert idx.assign_owner("d2", "anotherUser") is False
+    assert idx._docs[1]["owner_hash"] == "userA"  # ไม่เปลี่ยน
+
+    # doc ที่ assign แล้ว ก็ห้าม reassign
+    assert idx.assign_owner("d1", "yetAnother") is False
+    assert idx._docs[0]["owner_hash"] == "newOwner"  # ไม่เปลี่ยน
+
+    # doc ไม่มีอยู่
+    assert idx.assign_owner("nonexistent", "user") is False
+
+    print("PASS: test_assign_owner")
+
+
+def test_assign_owner_partial_id():
+    """assign_owner ต้องรองรับ partial doc_id."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "abc123def456"},
+    ]
+    idx._doc_map = {"abc123def456": idx._docs[0]}
+    idx._cache_ts = time.time()
+
+    assert idx.assign_owner("abc123", "ownerX") is True
+    assert idx._docs[0]["owner_hash"] == "ownerX"
+    print("PASS: test_assign_owner_partial_id")
+
+
+def test_search_by_owner_excludes_legacy():
+    """search_by_owner ต้องไม่แสดง legacy docs — Fail Closed."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1", "owner_hash": "userA", "category": "lab",
+         "extracted_text": "ผลเลือด WBC", "upload_date": "2026-01-01",
+         "original_filename": "doc.pdf", "mime_type": "application/pdf"},
+        {"document_id": "d2", "category": "lab",
+         "extracted_text": "ผลเลือด RBC", "upload_date": "2026-01-02",
+         "original_filename": "legacy.pdf", "mime_type": "application/pdf"},
+    ]
+    idx._doc_map = {d["document_id"]: d for d in idx._docs}
+    idx._cache_ts = time.time()
+
+    results = idx.search_by_owner("ผลเลือด", "userA")
+    doc_ids = [r["document_id"] for r in results]
+    assert "d1" in doc_ids
+    assert "d2" not in doc_ids  # legacy ถูกซ่อน
+    print("PASS: test_search_by_owner_excludes_legacy")
+
+
+def test_recent_by_owner_excludes_legacy():
+    """recent_by_owner ต้องไม่แสดง legacy docs — Fail Closed."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1", "owner_hash": "userA",
+         "upload_date": "2026-01-01"},
+        {"document_id": "d2",  # legacy
+         "upload_date": "2026-01-02"},
+        {"document_id": "d3", "owner_hash": "",  # empty = legacy
+         "upload_date": "2026-01-03"},
+    ]
+    idx._doc_map = {d["document_id"]: d for d in idx._docs}
+    idx._cache_ts = time.time()
+
+    results = idx.recent_by_owner("userA", 10)
+    doc_ids = [r["document_id"] for r in results]
+    assert "d1" in doc_ids
+    assert "d2" not in doc_ids
+    assert "d3" not in doc_ids
+    print("PASS: test_recent_by_owner_excludes_legacy")
+
+
+def test_admin_assign_owner_endpoint():
+    """POST /admin/assign-owner ต้องตรวจ auth และกำหนด owner ได้."""
+    original_secret = server.ADMIN_SECRET
+    server.ADMIN_SECRET = "test-secret-for-admin"
+    try:
+        with server.app.test_client() as client:
+            # ไม่มี auth → 401
+            resp = client.post("/admin/assign-owner",
+                               json={"doc_id": "d1", "owner_hash": "u1"})
+            assert resp.status_code == 401
+
+            # Auth ผิด → 401
+            resp = client.post("/admin/assign-owner",
+                               json={"doc_id": "d1", "owner_hash": "u1"},
+                               headers={"X-Admin-Secret": "wrong"})
+            assert resp.status_code == 401
+
+            # Auth ถูกต้อง แต่ doc ไม่มี
+            resp = client.post("/admin/assign-owner",
+                               json={"doc_id": "nonexistent", "owner_hash": "u1"},
+                               headers={"X-Admin-Secret": "test-secret-for-admin"})
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert data["not_found"] == 1
+            assert data["assigned"] == 0
+    finally:
+        server.ADMIN_SECRET = original_secret
+
+    print("PASS: test_admin_assign_owner_endpoint")
+
+
+def test_admin_legacy_docs_endpoint():
+    """GET /admin/legacy-docs ต้องตรวจ auth และแสดงจำนวน legacy."""
+    original_secret = server.ADMIN_SECRET
+    server.ADMIN_SECRET = "test-secret-for-admin"
+    try:
+        with server.app.test_client() as client:
+            # ไม่มี auth → 401
+            resp = client.get("/admin/legacy-docs")
+            assert resp.status_code == 401
+
+            # Auth ถูกต้อง
+            resp = client.get("/admin/legacy-docs",
+                              headers={"X-Admin-Secret": "test-secret-for-admin"})
+            assert resp.status_code == 200
+            data = resp.get_json()
+            assert "legacy_count" in data
+            assert "total_count" in data
+            assert "legacy_docs" in data
+    finally:
+        server.ADMIN_SECRET = original_secret
+
+    print("PASS: test_admin_legacy_docs_endpoint")
+
+
+def test_admin_assign_owner_no_json():
+    """POST /admin/assign-owner ต้องปฏิเสธ non-JSON body."""
+    original_secret = server.ADMIN_SECRET
+    server.ADMIN_SECRET = "test-secret-for-admin"
+    try:
+        with server.app.test_client() as client:
+            resp = client.post("/admin/assign-owner",
+                               data="not json",
+                               headers={"X-Admin-Secret": "test-secret-for-admin"})
+            assert resp.status_code == 400
+    finally:
+        server.ADMIN_SECRET = original_secret
+    print("PASS: test_admin_assign_owner_no_json")
+
+
+def test_webhook_missing_source_userid():
+    """webhook ต้องจัดการ event ที่ไม่มี source.userId ได้อย่างปลอดภัย."""
+    payload = {
+        "events": [{
+            "type": "message",
+            "message": {"type": "text", "text": "สถานะ", "id": "m-no-user"},
+            "replyToken": "rt1",
+            "source": {},  # ไม่มี userId
+        }]
+    }
+    body = json.dumps(payload).encode()
+    sig = make_signature(body)
+    with server.app.test_client() as client:
+        resp = client.post("/webhook", data=body,
+                           headers={"X-Line-Signature": sig,
+                                    "Content-Type": "application/json"})
+        assert resp.status_code == 200
+    print("PASS: test_webhook_missing_source_userid")
+
+
+def test_admin_endpoints_reject_empty_secret():
+    """admin endpoints ต้องปฏิเสธเมื่อ ADMIN_SECRET ว่าง (default)."""
+    original_secret = server.ADMIN_SECRET
+    server.ADMIN_SECRET = ""  # simulate ไม่ได้ตั้ง
+    try:
+        with server.app.test_client() as client:
+            # ส่ง empty header → ต้อง 401 (ไม่ใช่ match กับ empty secret)
+            resp = client.post("/admin/enroll",
+                               headers={"X-Admin-Secret": ""})
+            assert resp.status_code == 401
+
+            resp = client.post("/admin/backfill",
+                               headers={"X-Admin-Secret": ""})
+            assert resp.status_code == 401
+
+            resp = client.post("/admin/assign-owner",
+                               json={"doc_id": "x", "owner_hash": "y"},
+                               headers={"X-Admin-Secret": ""})
+            assert resp.status_code == 401
+
+            resp = client.get("/admin/legacy-docs",
+                              headers={"X-Admin-Secret": ""})
+            assert resp.status_code == 401
+    finally:
+        server.ADMIN_SECRET = original_secret
+    print("PASS: test_admin_endpoints_reject_empty_secret")
+
+
+def test_external_ai_hardcoded_off():
+    """EXTERNAL_AI_CLASSIFICATION_ALLOWED ต้องเป็น False ที่ระดับโค้ด."""
+    assert server.EXTERNAL_AI_CLASSIFICATION_ALLOWED is False
+    # ห้ามเปลี่ยนจาก env var
+    os.environ["EXTERNAL_AI_CLASSIFICATION_ALLOWED"] = "true"
+    try:
+        # Re-check: ค่าในโค้ดยังเป็น False
+        assert server.EXTERNAL_AI_CLASSIFICATION_ALLOWED is False
+    finally:
+        del os.environ["EXTERNAL_AI_CLASSIFICATION_ALLOWED"]
+    print("PASS: test_external_ai_hardcoded_off")
+
+
+def test_hash_user_id_deterministic_with_salt():
+    """hash_user_id ต้อง deterministic และใช้ salt."""
+    h1 = server.hash_user_id("Uf1234567890abcdef")
+    h2 = server.hash_user_id("Uf1234567890abcdef")
+    assert h1 == h2  # deterministic
+    assert len(h1) == 32  # truncated
+    # Different user → different hash
+    h3 = server.hash_user_id("Uf9999999999999999")
+    assert h1 != h3
+    print("PASS: test_hash_user_id_deterministic_with_salt")
+
+
+def test_signed_url_expiry_15min():
+    """SIGNED_URL_EXPIRY ต้องเป็น 15 นาที (900 วินาที)."""
+    assert server.SIGNED_URL_EXPIRY == 900
+    print("PASS: test_signed_url_expiry_15min")
+
+
+def test_no_public_bucket_access():
+    """ห้ามมี make_public หรือ public access ในโค้ด."""
+    import inspect
+    source = inspect.getsource(server)
+    assert "make_public" not in source
+    assert "allUsers" not in source
+    assert "allAuthenticatedUsers" not in source
+    print("PASS: test_no_public_bucket_access")
+
+
+def test_enrollment_token_not_in_audit_log():
+    """Enrollment token ต้องไม่ปรากฏใน audit log."""
+    import inspect
+    # Check that generate_token and validate_and_consume don't call logger with token
+    gen_src = inspect.getsource(server.EnrollmentTokenStore.generate_token)
+    assert "logger" not in gen_src or "token" not in gen_src.split("logger")[1].split("\n")[0]
+    print("PASS: test_enrollment_token_not_in_audit_log")
+
+
+def test_error_responses_no_data_leak():
+    """ข้อความ error ของ อ่านเอกสาร / ขอไฟล์ ต้องไม่มีข้อมูลเอกสาร."""
+    # Simulate authorized user
+    original = server.AUTHORIZED_USERS
+    test_user = server.hash_user_id("leak-test-user")
+    server.AUTHORIZED_USERS = {test_user}
+    try:
+        # อ่านเอกสาร ที่เป็นของผู้อื่น
+        idx = server.doc_index
+        old_docs = idx._docs
+        old_map = idx._doc_map
+        old_ts = idx._cache_ts
+
+        idx._docs = [
+            {"document_id": "secret123", "owner_hash": "other_owner",
+             "category": "lab", "extracted_text": "SECRET PATIENT DATA",
+             "gcs_object_path": "06_AI_REVIEW/secret.pdf"},
+        ]
+        idx._doc_map = {"secret123": idx._docs[0]}
+        idx._cache_ts = time.time()
+
+        result = server.handle_search_command("อ่านเอกสาร secret123", test_user)
+        assert result is not None
+        assert "SECRET PATIENT DATA" not in result
+        assert "secret.pdf" not in result
+        assert "other_owner" not in result
+        assert "ไม่มีสิทธิ์" in result
+
+        result2 = server.handle_search_command("ขอไฟล์ secret123", test_user)
+        assert result2 is not None
+        assert "SECRET PATIENT DATA" not in result2
+        assert "secret.pdf" not in result2
+        assert "ไม่มีสิทธิ์" in result2
+
+        # Restore
+        idx._docs = old_docs
+        idx._doc_map = old_map
+        idx._cache_ts = old_ts
+    finally:
+        server.AUTHORIZED_USERS = original
+    print("PASS: test_error_responses_no_data_leak")
+
+
+def test_admin_legacy_docs_no_content_leak():
+    """GET /admin/legacy-docs ต้องไม่แสดงเนื้อหาเอกสาร."""
+    original_secret = server.ADMIN_SECRET
+    server.ADMIN_SECRET = "test-secret"
+    idx = server.doc_index
+    old_docs = idx._docs
+    old_map = idx._doc_map
+    old_ts = idx._cache_ts
+
+    idx._docs = [
+        {"document_id": "abc123def456", "category": "lab",
+         "extracted_text": "SENSITIVE MEDICAL DATA",
+         "gcs_object_path": "06_AI_REVIEW/secret.pdf"},
+    ]
+    idx._doc_map = {"abc123def456": idx._docs[0]}
+    idx._cache_ts = time.time()
+
+    try:
+        with server.app.test_client() as client:
+            resp = client.get("/admin/legacy-docs",
+                              headers={"X-Admin-Secret": "test-secret"})
+            data = resp.get_json()
+            body_str = json.dumps(data)
+            assert "SENSITIVE MEDICAL DATA" not in body_str
+            assert "secret.pdf" not in body_str
+            # doc_id should be truncated
+            assert data["legacy_docs"][0]["doc_id"] == "abc123def456"[:12]
+    finally:
+        server.ADMIN_SECRET = original_secret
+        idx._docs = old_docs
+        idx._doc_map = old_map
+        idx._cache_ts = old_ts
+    print("PASS: test_admin_legacy_docs_no_content_leak")
+
+
+def test_batch_assign_owner():
+    """POST /admin/assign-owner ต้องรองรับ batch assignments."""
+    original_secret = server.ADMIN_SECRET
+    server.ADMIN_SECRET = "test-secret"
+    idx = server.doc_index
+    old_docs = idx._docs
+    old_map = idx._doc_map
+    old_ts = idx._cache_ts
+
+    idx._docs = [
+        {"document_id": "b1"},
+        {"document_id": "b2"},
+        {"document_id": "b3", "owner_hash": "existing"},
+    ]
+    idx._doc_map = {d["document_id"]: d for d in idx._docs}
+    idx._cache_ts = time.time()
+
+    try:
+        with server.app.test_client() as client:
+            resp = client.post("/admin/assign-owner",
+                               json={"assignments": [
+                                   {"doc_id": "b1", "owner_hash": "ownerA"},
+                                   {"doc_id": "b2", "owner_hash": "ownerB"},
+                                   {"doc_id": "b3", "owner_hash": "ownerC"},  # already owned
+                                   {"doc_id": "b9", "owner_hash": "ownerD"},  # not found
+                               ]},
+                               headers={"X-Admin-Secret": "test-secret"})
+            # In local mode, _save_full() fails → 500 with assigned_in_memory
+            # In GCS mode, → 200 with assigned count
+            if resp.status_code == 500:
+                data = resp.get_json()
+                assert data["assigned_in_memory"] == 2  # assignments happened in-memory
+            else:
+                assert resp.status_code == 200
+                data = resp.get_json()
+                assert data["assigned"] == 2
+                assert data["already_owned"] == 1
+                assert data["not_found"] == 1
+    finally:
+        server.ADMIN_SECRET = original_secret
+        idx._docs = old_docs
+        idx._doc_map = old_map
+        idx._cache_ts = old_ts
+    print("PASS: test_batch_assign_owner")
+
+
+def test_authorized_users_empty_denies_all():
+    """AUTHORIZED_USERS ว่าง → ปฏิเสธทุก user (fail-closed)."""
+    original = server.AUTHORIZED_USERS
+    server.AUTHORIZED_USERS = set()
+    try:
+        assert server.is_authorized_user("any_hash") is False
+        result = server.handle_search_command("ค้นหา test", "any_hash")
+        assert "ไม่มีสิทธิ์" in result
+    finally:
+        server.AUTHORIZED_USERS = original
+    print("PASS: test_authorized_users_empty_denies_all")
 
 
 def main():
@@ -3927,6 +4346,27 @@ def main():
         test_process_file_async_has_owner_param,
         test_ocr_from_bytes_function_exists,
         test_max_content_read_size_reasonable,
+        # ── Phase 5: Fail-Closed + Admin Tools ──
+        test_count_legacy,
+        test_assign_owner,
+        test_assign_owner_partial_id,
+        test_search_by_owner_excludes_legacy,
+        test_recent_by_owner_excludes_legacy,
+        test_admin_assign_owner_endpoint,
+        test_admin_legacy_docs_endpoint,
+        test_admin_assign_owner_no_json,
+        # ── Phase 6: Integration & Security Tests ──
+        test_webhook_missing_source_userid,
+        test_admin_endpoints_reject_empty_secret,
+        test_external_ai_hardcoded_off,
+        test_hash_user_id_deterministic_with_salt,
+        test_signed_url_expiry_15min,
+        test_no_public_bucket_access,
+        test_enrollment_token_not_in_audit_log,
+        test_error_responses_no_data_leak,
+        test_admin_legacy_docs_no_content_leak,
+        test_batch_assign_owner,
+        test_authorized_users_empty_denies_all,
     ]
 
     passed = 0

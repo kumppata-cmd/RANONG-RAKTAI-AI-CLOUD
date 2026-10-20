@@ -878,10 +878,10 @@ class DocumentIndex:
 
         results = []
         for doc in reversed(self._docs):  # ใหม่ก่อน
-            # ตรวจ owner — เอกสารที่ไม่มี owner_hash ถือว่าเป็น legacy
+            # ตรวจ owner — Fail Closed: เอกสารที่ไม่มี owner_hash ถูกซ่อน
             doc_owner = doc.get("owner_hash", "")
-            if doc_owner and doc_owner != owner_hash:
-                continue  # ข้ามเอกสารของผู้อื่น
+            if not doc_owner or doc_owner != owner_hash:
+                continue  # ข้ามเอกสารที่ไม่มีเจ้าของยืนยัน หรือเป็นของผู้อื่น
 
             searchable = " ".join([
                 doc.get("category", ""),
@@ -897,13 +897,13 @@ class DocumentIndex:
         return results
 
     def recent_by_owner(self, owner_hash: str, n: int = 5) -> list[dict]:
-        """เอกสารล่าสุด n ชิ้นของ owner — ป้องกัน cross-patient access."""
+        """เอกสารล่าสุด n ชิ้นของ owner — Fail Closed."""
         self._ensure_fresh()
         results = []
         for doc in reversed(self._docs):
             doc_owner = doc.get("owner_hash", "")
-            if doc_owner and doc_owner != owner_hash:
-                continue
+            if not doc_owner or doc_owner != owner_hash:
+                continue  # ข้ามเอกสารไม่มีเจ้าของ หรือเป็นของผู้อื่น
             results.append(doc)
             if len(results) >= n:
                 break
@@ -912,11 +912,11 @@ class DocumentIndex:
     def get_with_owner_check(
         self, doc_id: str, owner_hash: str
     ) -> tuple[dict | None, bool]:
-        """ดึงเอกสารตาม document_id พร้อมตรวจ owner.
+        """ดึงเอกสารตาม document_id พร้อมตรวจ owner — Fail Closed.
 
         คืน (doc, authorized):
-        - (doc, True) ถ้าเป็นเจ้าของ หรือ legacy doc (ไม่มี owner_hash)
-        - (doc, False) ถ้าเอกสารมีอยู่แต่ไม่ใช่เจ้าของ
+        - (doc, True) ถ้าเป็นเจ้าของที่ยืนยันแล้ว
+        - (doc, False) ถ้าเอกสารไม่มี owner หรือเป็นของผู้อื่น
         - (None, False) ถ้าไม่พบเอกสาร
         """
         self._ensure_fresh()
@@ -932,8 +932,8 @@ class DocumentIndex:
 
         doc_owner = doc.get("owner_hash", "")
         if not doc_owner:
-            # Legacy document — ไม่มี owner → อนุญาต (backward compatible)
-            return doc, True
+            # Fail Closed — เอกสาร legacy ไม่มี owner → ปฏิเสธ
+            return doc, False
         if doc_owner == owner_hash:
             return doc, True
         return doc, False
@@ -942,6 +942,31 @@ class DocumentIndex:
         """จำนวนเอกสารทั้งหมดใน index."""
         self._ensure_fresh()
         return len(self._docs)
+
+    def count_legacy(self) -> int:
+        """จำนวนเอกสารที่ไม่มี owner_hash (legacy, fail-closed)."""
+        self._ensure_fresh()
+        return sum(1 for d in self._docs if not d.get("owner_hash", ""))
+
+    def assign_owner(self, doc_id: str, owner_hash: str) -> bool:
+        """กำหนด owner_hash ให้เอกสาร — สำหรับ admin เท่านั้น.
+
+        คืน True ถ้าพบและกำหนดสำเร็จ, False ถ้าไม่พบ
+        ไม่เปลี่ยน owner_hash ที่มีอยู่แล้ว (ป้องกันการ reassign)
+        """
+        self._ensure_fresh()
+        doc = self._doc_map.get(doc_id)
+        if doc is None:
+            for d in self._docs:
+                if d.get("document_id", "").startswith(doc_id):
+                    doc = d
+                    break
+        if doc is None:
+            return False
+        if doc.get("owner_hash", ""):
+            return False  # ห้าม reassign — ต้องลบ owner เดิมก่อน
+        doc["owner_hash"] = owner_hash
+        return True
 
     def _save_full(self):
         """เขียน index ทั้งหมดลง GCS — ใช้ตอน backfill.
@@ -3017,6 +3042,10 @@ def admin_backfill():
             # Note: OCR during backfill would be too slow for inline HTTP
             # This creates the index entry with ocr_status="pending"
             # A separate OCR pass can be done later
+
+            # owner_hash จาก request body — ถ้าไม่ระบุจะเป็น "" (legacy, fail-closed)
+            backfill_owner = request.json.get("owner_hash", "") if request.is_json else ""
+
             doc_meta = {
                 "document_id": doc_id,
                 "original_filename": f"document{ext}",
@@ -3030,6 +3059,7 @@ def admin_backfill():
                 "file_size": blob.size or 0,
                 "ocr_status": "pending",
                 "extracted_text": "",
+                "owner_hash": backfill_owner,
             }
 
             try:
@@ -3066,6 +3096,113 @@ def admin_backfill():
     except Exception as e:
         logger.error(f"Backfill ล้มเหลว: {type(e).__name__}")
         return jsonify({"error": "Backfill failed"}), 500
+
+
+@app.route("/admin/assign-owner", methods=["POST"])
+def admin_assign_owner():
+    """กำหนด owner_hash ให้เอกสาร legacy — Fail Closed recovery.
+
+    ต้องมี ADMIN_SECRET header
+    Body JSON: {"doc_id": "...", "owner_hash": "..."}
+    หรือ batch: {"assignments": [{"doc_id": "...", "owner_hash": "..."}, ...]}
+    ไม่เปลี่ยน owner_hash ที่มีอยู่แล้ว (ป้องกัน reassign)
+    """
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or auth_header != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if not request.is_json:
+        return jsonify({"error": "JSON body required"}), 400
+
+    data = request.json
+
+    # Single assignment
+    if "doc_id" in data and "owner_hash" in data:
+        assignments = [{"doc_id": data["doc_id"], "owner_hash": data["owner_hash"]}]
+    elif "assignments" in data:
+        assignments = data["assignments"]
+    else:
+        return jsonify({"error": "doc_id+owner_hash or assignments required"}), 400
+
+    assigned = 0
+    not_found = 0
+    already_owned = 0
+
+    for item in assignments:
+        doc_id = item.get("doc_id", "")
+        owner = item.get("owner_hash", "")
+        if not doc_id or not owner:
+            continue
+
+        doc = doc_index._doc_map.get(doc_id)
+        if doc is None:
+            for d in doc_index._docs:
+                if d.get("document_id", "").startswith(doc_id):
+                    doc = d
+                    break
+
+        if doc is None:
+            not_found += 1
+        elif doc.get("owner_hash", ""):
+            already_owned += 1
+        else:
+            result = doc_index.assign_owner(doc_id, owner)
+            if result:
+                assigned += 1
+            else:
+                not_found += 1
+
+    # Save to GCS if any changes
+    if assigned > 0:
+        try:
+            doc_index._save_full()
+        except RuntimeError as e:
+            return jsonify({
+                "error": "Index save failed after assignment",
+                "assigned_in_memory": assigned,
+            }), 500
+
+    audit_logger.log("assign_owner", "admin", {
+        "assigned": assigned,
+        "not_found": not_found,
+        "already_owned": already_owned,
+        "legacy_remaining": doc_index.count_legacy(),
+    })
+
+    return jsonify({
+        "status": "ok",
+        "assigned": assigned,
+        "not_found": not_found,
+        "already_owned": already_owned,
+        "legacy_remaining": doc_index.count_legacy(),
+    }), 200
+
+
+@app.route("/admin/legacy-docs", methods=["GET"])
+def admin_legacy_docs():
+    """แสดงจำนวนเอกสาร legacy ที่ยังไม่มี owner — สำหรับ admin."""
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or auth_header != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    legacy_count = doc_index.count_legacy()
+    total_count = doc_index.count()
+
+    # แสดง doc_id ของ legacy docs (ไม่แสดงเนื้อหา)
+    legacy_ids = []
+    for doc in doc_index._docs:
+        if not doc.get("owner_hash", ""):
+            legacy_ids.append({
+                "doc_id": doc.get("document_id", "")[:12],
+                "category": doc.get("category", ""),
+                "upload_date": doc.get("upload_date", ""),
+            })
+
+    return jsonify({
+        "legacy_count": legacy_count,
+        "total_count": total_count,
+        "legacy_docs": legacy_ids,
+    }), 200
 
 
 # ═══════════════════════════════════════════════════════════
