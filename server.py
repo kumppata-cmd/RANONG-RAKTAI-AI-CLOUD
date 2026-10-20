@@ -183,10 +183,15 @@ DEDUP_CONTENT_TTL_SECONDS = int(os.getenv("DEDUP_CONTENT_TTL", "600"))  # 10 น
 # ถ้าไม่ตั้ง → hash เปลี่ยนทุก restart → AUTHORIZED_USERS ใช้งานไม่ได้
 # สร้างค่าด้วย: python3 -c "import uuid; print(uuid.uuid4().hex)"
 _user_id_salt_env = os.getenv("USER_ID_SALT", "").strip()
+_USER_ID_SALT_MISSING = False  # Flag สำหรับ fail-closed ถ้า salt ไม่ได้ตั้ง
 if IS_PRODUCTION and not _user_id_salt_env:
     # Production ต้องมี salt คงที่ — ห้ามใช้ค่า default
-    raise RuntimeError(
+    # ไม่ crash แต่ fail-closed: ปฏิเสธทุก request ที่ต้องใช้ hash
+    _USER_ID_SALT_MISSING = True
+    USER_ID_SALT = "MISSING-SALT-DO-NOT-USE"
+    logger.critical(
         "CRITICAL: USER_ID_SALT ต้องตั้งค่าใน Production ENV — "
+        "ระบบจะปฏิเสธทุก request จนกว่าจะตั้งค่า — "
         "ใช้ค่าสุ่มที่ไม่ซ้ำ เช่น: python3 -c \"import secrets; print(secrets.token_hex(32))\""
     )
 elif not _user_id_salt_env:
@@ -2711,6 +2716,14 @@ def webhook():
     if IS_TESTING_DOCS:
         logger.info("TESTING-DOCS MODE: อนุญาตรับเอกสาร — ไม่เรียก Claude API")
 
+    # Production guard: ตรวจว่า USER_ID_SALT ตั้งค่าแล้ว
+    if _USER_ID_SALT_MISSING:
+        logger.error("PRODUCTION: USER_ID_SALT ไม่ได้ตั้งค่า — ปฏิเสธ webhook (fail-closed)")
+        return jsonify({
+            "status": "error",
+            "reason": "configuration_incomplete",
+        }), 503
+
     # Production guard: ตรวจว่า GCS พร้อมก่อนรับเอกสาร
     # ถ้า GCS ไม่พร้อม ปฏิเสธ webhook ทั้งหมดเพื่อไม่ให้เอกสารหายตอน redeploy
     if IS_PRODUCTION and STORAGE_BACKEND == "gcs":
@@ -2938,7 +2951,13 @@ def health():
                 hasattr(storage, "is_ready") and storage.is_ready
             ),
             "external_ai_locked": not EXTERNAL_AI_CLASSIFICATION_ALLOWED,
+            "user_id_salt_set": not _USER_ID_SALT_MISSING,
         }
+        if _USER_ID_SALT_MISSING:
+            health_info["status"] = "misconfigured"
+            health_info["accepting_documents"] = False
+            health_info["critical_error"] = "USER_ID_SALT ไม่ได้ตั้งค่า"
+            http_status = 503
         health_info["document_search"] = {
             "indexed_documents": doc_index.count(),
             "authorized_users": len(AUTHORIZED_USERS),
@@ -3266,6 +3285,13 @@ if IS_PRODUCTION:
     logger.info("=" * 40)
     logger.info("PRODUCTION MODE — ตรวจสอบความพร้อม")
     _prod_ok = True
+
+    if _USER_ID_SALT_MISSING:
+        logger.critical(
+            "PRODUCTION CRITICAL: USER_ID_SALT ไม่ได้ตั้งค่า — "
+            "ระบบจะปฏิเสธทุก webhook (fail-closed)"
+        )
+        _prod_ok = False
 
     if STORAGE_BACKEND != "gcs":
         logger.error(
