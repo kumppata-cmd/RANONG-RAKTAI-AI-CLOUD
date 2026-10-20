@@ -184,11 +184,16 @@ DEDUP_CONTENT_TTL_SECONDS = int(os.getenv("DEDUP_CONTENT_TTL", "600"))  # 10 น
 # สร้างค่าด้วย: python3 -c "import uuid; print(uuid.uuid4().hex)"
 _user_id_salt_env = os.getenv("USER_ID_SALT", "").strip()
 if IS_PRODUCTION and not _user_id_salt_env:
-    # Production ต้องมี salt คงที่ — ใช้ค่า fallback ที่แน่นอน
-    # แต่ควรตั้งค่าจริงใน ENV เพื่อความปลอดภัยสูงสุด
-    USER_ID_SALT = "ranong-raktai-default-salt-please-set-env"
+    # Production ต้องมี salt คงที่ — ห้ามใช้ค่า default
+    raise RuntimeError(
+        "CRITICAL: USER_ID_SALT ต้องตั้งค่าใน Production ENV — "
+        "ใช้ค่าสุ่มที่ไม่ซ้ำ เช่น: python3 -c \"import secrets; print(secrets.token_hex(32))\""
+    )
+elif not _user_id_salt_env:
+    # Non-production: ใช้ random salt (เปลี่ยนทุก restart — ปลอดภัยสำหรับ testing)
+    USER_ID_SALT = uuid.uuid4().hex
 else:
-    USER_ID_SALT = _user_id_salt_env or uuid.uuid4().hex
+    USER_ID_SALT = _user_id_salt_env
 
 # ─── One-Time Enrollment Token ─────────────────────────────
 ENROLLMENT_TOKEN_TTL = 300       # 5 นาที
@@ -863,10 +868,110 @@ class DocumentIndex:
                     break
         return results
 
+    def search_by_owner(
+        self, query: str, owner_hash: str, max_results: int = SEARCH_MAX_RESULTS
+    ) -> list[dict]:
+        """ค้นหาเอกสารเฉพาะของ owner — ป้องกัน cross-patient access.
+
+        เอกสารที่ไม่มี owner_hash (เก่า) จะไม่ปรากฏในผลค้นหาแบบ owner-aware
+        ยกเว้นผู้ดูแลระบบเรียกดูผ่าน admin endpoint
+        """
+        self._ensure_fresh()
+        query_lower = query.lower().strip()
+        if not query_lower:
+            return []
+
+        results = []
+        for doc in reversed(self._docs):  # ใหม่ก่อน
+            # ตรวจ owner — Fail Closed: เอกสารที่ไม่มี owner_hash ถูกซ่อน
+            doc_owner = doc.get("owner_hash", "")
+            if not doc_owner or doc_owner != owner_hash:
+                continue  # ข้ามเอกสารที่ไม่มีเจ้าของยืนยัน หรือเป็นของผู้อื่น
+
+            searchable = " ".join([
+                doc.get("category", ""),
+                doc.get("original_filename", ""),
+                doc.get("extracted_text", ""),
+                doc.get("upload_date", ""),
+                doc.get("mime_type", ""),
+            ]).lower()
+            if query_lower in searchable:
+                results.append(doc)
+                if len(results) >= max_results:
+                    break
+        return results
+
+    def recent_by_owner(self, owner_hash: str, n: int = 5) -> list[dict]:
+        """เอกสารล่าสุด n ชิ้นของ owner — Fail Closed."""
+        self._ensure_fresh()
+        results = []
+        for doc in reversed(self._docs):
+            doc_owner = doc.get("owner_hash", "")
+            if not doc_owner or doc_owner != owner_hash:
+                continue  # ข้ามเอกสารไม่มีเจ้าของ หรือเป็นของผู้อื่น
+            results.append(doc)
+            if len(results) >= n:
+                break
+        return results
+
+    def get_with_owner_check(
+        self, doc_id: str, owner_hash: str
+    ) -> tuple[dict | None, bool]:
+        """ดึงเอกสารตาม document_id พร้อมตรวจ owner — Fail Closed.
+
+        คืน (doc, authorized):
+        - (doc, True) ถ้าเป็นเจ้าของที่ยืนยันแล้ว
+        - (doc, False) ถ้าเอกสารไม่มี owner หรือเป็นของผู้อื่น
+        - (None, False) ถ้าไม่พบเอกสาร
+        """
+        self._ensure_fresh()
+        doc = self._doc_map.get(doc_id)
+        if doc is None:
+            # ลอง partial match
+            for d in self._docs:
+                if d.get("document_id", "").startswith(doc_id):
+                    doc = d
+                    break
+        if doc is None:
+            return None, False
+
+        doc_owner = doc.get("owner_hash", "")
+        if not doc_owner:
+            # Fail Closed — เอกสาร legacy ไม่มี owner → ปฏิเสธ
+            return doc, False
+        if doc_owner == owner_hash:
+            return doc, True
+        return doc, False
+
     def count(self) -> int:
         """จำนวนเอกสารทั้งหมดใน index."""
         self._ensure_fresh()
         return len(self._docs)
+
+    def count_legacy(self) -> int:
+        """จำนวนเอกสารที่ไม่มี owner_hash (legacy, fail-closed)."""
+        self._ensure_fresh()
+        return sum(1 for d in self._docs if not d.get("owner_hash", ""))
+
+    def assign_owner(self, doc_id: str, owner_hash: str) -> bool:
+        """กำหนด owner_hash ให้เอกสาร — สำหรับ admin เท่านั้น.
+
+        คืน True ถ้าพบและกำหนดสำเร็จ, False ถ้าไม่พบ
+        ไม่เปลี่ยน owner_hash ที่มีอยู่แล้ว (ป้องกันการ reassign)
+        """
+        self._ensure_fresh()
+        doc = self._doc_map.get(doc_id)
+        if doc is None:
+            for d in self._docs:
+                if d.get("document_id", "").startswith(doc_id):
+                    doc = d
+                    break
+        if doc is None:
+            return False
+        if doc.get("owner_hash", ""):
+            return False  # ห้าม reassign — ต้องลบ owner เดิมก่อน
+        doc["owner_hash"] = owner_hash
+        return True
 
     def _save_full(self):
         """เขียน index ทั้งหมดลง GCS — ใช้ตอน backfill.
@@ -957,6 +1062,166 @@ class AuditLogger:
 
 
 audit_logger = AuditLogger(storage)
+
+
+# ─── Document Content Reading from GCS ────────────────────
+# อ่านเนื้อหาเอกสารโดยตรงจาก GCS — ไม่ต้องส่ง signed URL ให้ผู้ใช้
+
+# ขีดจำกัดขนาดสำหรับอ่านเนื้อหา (ป้องกัน memory overflow)
+MAX_CONTENT_READ_SIZE = 10 * 1024 * 1024  # 10 MB
+# ขีดจำกัดข้อความสรุปที่ส่งกลับทาง LINE
+MAX_LINE_RESPONSE_TEXT = 4000  # LINE message limit ~5000 chars
+
+
+def read_document_content(gcs_object_path: str, user_hash: str) -> dict:
+    """อ่านเนื้อหาเอกสารจาก GCS โดยตรง.
+
+    คืน dict:
+        success: bool
+        content_type: str (mime type)
+        text: str (extracted text สำหรับ text-based docs)
+        binary: bytes | None (raw bytes สำหรับ image/PDF)
+        error: str | None (ถ้าล้มเหลว)
+        size: int (ขนาดไฟล์)
+
+    Security:
+    - ต้องตรวจ is_authorized_user() ก่อนเรียก
+    - ต้องตรวจ document owner ก่อนเรียก (ป้องกันข้ามผู้ป่วย)
+    - ไม่ log เนื้อหาเอกสาร
+    - ไม่ log gcs_object_path เต็ม
+    """
+    if not storage.is_ready or not hasattr(storage, '_bucket'):
+        return {"success": False, "error": "GCS ไม่พร้อมใช้งาน"}
+
+    try:
+        blob = storage._bucket.blob(gcs_object_path)
+        if not blob.exists():
+            return {"success": False, "error": "ไม่พบไฟล์ใน GCS"}
+
+        # ตรวจขนาดไฟล์ก่อนดาวน์โหลด
+        blob.reload()
+        file_size = blob.size or 0
+        if file_size > MAX_CONTENT_READ_SIZE:
+            return {
+                "success": False,
+                "error": f"ไฟล์ใหญ่เกินไป ({file_size:,} bytes, จำกัด {MAX_CONTENT_READ_SIZE:,})",
+            }
+
+        # ดาวน์โหลดเนื้อหา
+        content_bytes = blob.download_as_bytes()
+        content_type = blob.content_type or "application/octet-stream"
+
+        result = {
+            "success": True,
+            "content_type": content_type,
+            "size": len(content_bytes),
+            "text": "",
+            "binary": None,
+        }
+
+        # แยกข้อความจาก text-based content
+        if content_type.startswith("text/"):
+            try:
+                result["text"] = content_bytes.decode("utf-8")
+            except UnicodeDecodeError:
+                result["text"] = content_bytes.decode("utf-8", errors="replace")
+
+        elif content_type == "application/pdf":
+            # ดึงข้อความจาก PDF ด้วย PyMuPDF
+            result["binary"] = content_bytes
+            if HAS_PYMUPDF:
+                try:
+                    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=True) as tmp:
+                        tmp.write(content_bytes)
+                        tmp.flush()
+                        pdf_doc = pymupdf.open(tmp.name)
+                        pages_text = []
+                        for page_num in range(min(len(pdf_doc), MAX_PDF_PAGES)):
+                            page_text = pdf_doc[page_num].get_text()
+                            if page_text.strip():
+                                pages_text.append(
+                                    f"[หน้า {page_num + 1}]\n{page_text.strip()}"
+                                )
+                        pdf_doc.close()
+                        result["text"] = "\n\n".join(pages_text)
+                except Exception as pdf_err:
+                    logger.warning(f"PDF text extraction ล้มเหลว: {type(pdf_err).__name__}")
+
+            # ถ้าไม่มีข้อความ → ลอง OCR
+            if not result["text"].strip() and HAS_TESSERACT and HAS_PIL:
+                try:
+                    result["text"] = _ocr_from_bytes(content_bytes, "pdf")
+                except Exception:
+                    pass
+
+        elif content_type.startswith("image/"):
+            result["binary"] = content_bytes
+            # OCR สำหรับรูปภาพ
+            if HAS_TESSERACT and HAS_PIL:
+                try:
+                    result["text"] = _ocr_from_bytes(content_bytes, "image")
+                except Exception:
+                    pass
+
+        # ไม่ log เนื้อหาเอกสาร — เฉพาะ metadata เท่านั้น
+        logger.info(f"Document read: size={len(content_bytes)}, type={content_type}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Document read ล้มเหลว: {type(e).__name__}")
+        return {"success": False, "error": f"อ่านเอกสารล้มเหลว: {type(e).__name__}"}
+
+
+def _ocr_from_bytes(data: bytes, file_type: str) -> str:
+    """OCR จาก raw bytes — ใช้ภายในเท่านั้น."""
+    with tempfile.NamedTemporaryFile(
+        suffix=".pdf" if file_type == "pdf" else ".png", delete=True
+    ) as tmp:
+        tmp.write(data)
+        tmp.flush()
+        if file_type == "pdf" and HAS_PYMUPDF:
+            pdf_doc = pymupdf.open(tmp.name)
+            texts = []
+            for page_num in range(min(len(pdf_doc), MAX_PDF_PAGES_VISION)):
+                pix = pdf_doc[page_num].get_pixmap(dpi=200)
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                page_text = pytesseract.image_to_string(img, lang="tha+eng")
+                if page_text.strip():
+                    texts.append(page_text.strip())
+            pdf_doc.close()
+            return "\n\n".join(texts)
+        else:
+            img = Image.open(tmp.name)
+            return pytesseract.image_to_string(img, lang="tha+eng")
+
+
+def format_document_text_for_line(text: str, doc_meta: dict) -> str:
+    """จัดรูปแบบเนื้อหาเอกสารสำหรับส่งทาง LINE.
+
+    ตัดข้อความถ้ายาวเกิน LINE limit
+    """
+    cat_names = {
+        "bills": "ใบเสร็จ/บิล", "rx": "ใบสั่งยา",
+        "lab": "ผลตรวจแล็บ", "dialysis": "เอกสารฟอกเลือด",
+        "review": "รอตรวจสอบ",
+    }
+    cat = cat_names.get(doc_meta.get("category", ""), doc_meta.get("category", ""))
+    header = (
+        f"📄 เอกสาร: [{cat}]\n"
+        f"วันที่: {doc_meta.get('upload_date', 'ไม่ทราบ')}\n"
+        f"รหัส: {doc_meta.get('document_id', '')[:8]}…\n"
+        f"{'─' * 20}\n"
+    )
+
+    if not text or not text.strip():
+        return header + "⚠️ ไม่สามารถดึงข้อความจากเอกสารนี้ได้\nลองใช้ 'ขอไฟล์ [รหัส]' เพื่อดาวน์โหลดแทน"
+
+    # ตัดข้อความไม่ให้เกิน LINE limit
+    max_text = MAX_LINE_RESPONSE_TEXT - len(header) - 50
+    if len(text) > max_text:
+        text = text[:max_text] + "\n\n…(ข้อความถูกตัดเนื่องจากยาวเกินไป)\nใช้ 'ขอไฟล์ [รหัส]' เพื่อดาวน์โหลดฉบับเต็ม"
+
+    return header + text
 
 
 # ─── Document Search V1: Signed URL + Search Helpers ─────
@@ -1069,18 +1334,21 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             "  ค้นหาด้วยประเภท วันที่ หรือเนื้อหา\n"
             "  เช่น: ค้นหา ผลแล็บ\n\n"
             "📄 รายการล่าสุด\n"
-            "  แสดง 5 เอกสารล่าสุด\n\n"
+            "  แสดง 5 เอกสารล่าสุดของคุณ\n\n"
+            "📖 อ่านเอกสาร [รหัส]\n"
+            "  อ่านเนื้อหาเอกสารโดยตรง\n\n"
             "📎 ขอไฟล์ [รหัส]\n"
             "  ขอลิงก์ดาวน์โหลดเอกสาร\n\n"
             "ℹ️ สถานะ\n"
             "  ตรวจสอบระบบ"
         )
 
-    # Authorization check — ต้องผ่านก่อนใช้คำสั่งค้นหา
+    # Authorization check — ต้องผ่านก่อนใช้คำสั่งค้นหา/อ่าน
     if not is_authorized_user(user_hash):
-        # ค้นหา / รายการล่าสุด / ขอไฟล์ → ต้อง authorized
+        # ค้นหา / รายการล่าสุด / อ่านเอกสาร / ขอไฟล์ → ต้อง authorized
         if (text_stripped.startswith("ค้นหา ")
                 or text_stripped == "รายการล่าสุด"
+                or text_stripped.startswith("อ่านเอกสาร ")
                 or text_stripped.startswith("ขอไฟล์ ")):
             audit_logger.log("unauthorized_access", user_hash, {
                 "command": text_stripped[:20]
@@ -1088,21 +1356,21 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             return "ขออภัย คุณไม่มีสิทธิ์ใช้งานระบบค้นหาเอกสาร\nกรุณาติดต่อผู้ดูแลระบบ"
         return None  # ไม่ใช่คำสั่งค้นหา
 
-    # ค้นหา [คำค้น]
+    # ค้นหา [คำค้น] — owner-aware
     if text_stripped.startswith("ค้นหา "):
         query = text_stripped[len("ค้นหา "):].strip()
         if not query:
             return "กรุณาระบุคำค้น เช่น: ค้นหา ผลแล็บ"
-        results = doc_index.search(query)
+        results = doc_index.search_by_owner(query, user_hash)
         audit_logger.log("search", user_hash, {
             "query": query[:50],
             "results_count": len(results),
         })
         return format_search_results(results)
 
-    # รายการล่าสุด
+    # รายการล่าสุด — owner-aware
     if text_stripped == "รายการล่าสุด":
-        results = doc_index.recent(5)
+        results = doc_index.recent_by_owner(user_hash, 5)
         audit_logger.log("list_recent", user_hash, {
             "results_count": len(results),
         })
@@ -1110,24 +1378,70 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             return "ยังไม่มีเอกสารในระบบ"
         return format_search_results(results)
 
-    # ขอไฟล์ [document_id]
+    # อ่านเอกสาร [document_id] — อ่านเนื้อหาจาก GCS โดยตรง
+    if text_stripped.startswith("อ่านเอกสาร "):
+        doc_id_query = text_stripped[len("อ่านเอกสาร "):].strip()
+        if not doc_id_query:
+            return "กรุณาระบุรหัสเอกสาร เช่น: อ่านเอกสาร a1b2c3d4"
+
+        doc, authorized = doc_index.get_with_owner_check(doc_id_query, user_hash)
+
+        if doc is None:
+            audit_logger.log("read_not_found", user_hash, {"query": doc_id_query[:8]})
+            return "ไม่พบเอกสารที่ตรงกับรหัสนี้\nลองใช้คำสั่ง 'ค้นหา' หรือ 'รายการล่าสุด' ก่อน"
+
+        if not authorized:
+            audit_logger.log("read_unauthorized", user_hash, {
+                "doc_id": doc.get("document_id", "")[:8],
+            })
+            return "ขออภัย คุณไม่มีสิทธิ์เข้าถึงเอกสารนี้"
+
+        gcs_path = doc.get("gcs_object_path", "")
+        if not gcs_path:
+            return "ไม่สามารถเข้าถึงไฟล์นี้ได้ — ไม่มี path ใน GCS"
+
+        # ลองใช้ extracted_text จาก index ก่อน (เร็วกว่าดาวน์โหลด)
+        idx_text = doc.get("extracted_text", "").strip()
+        if idx_text and len(idx_text) > 50:
+            audit_logger.log("read_from_index", user_hash, {
+                "doc_id": doc.get("document_id", "")[:8],
+            })
+            return format_document_text_for_line(idx_text, doc)
+
+        # ถ้าไม่มี extracted_text → อ่านจาก GCS โดยตรง
+        content = read_document_content(gcs_path, user_hash)
+        if not content["success"]:
+            audit_logger.log("read_failed", user_hash, {
+                "doc_id": doc.get("document_id", "")[:8],
+                "error": content.get("error", "")[:50],
+            })
+            return f"ขออภัย ไม่สามารถอ่านเอกสารได้: {content.get('error', 'ไม่ทราบสาเหตุ')}"
+
+        audit_logger.log("read_from_gcs", user_hash, {
+            "doc_id": doc.get("document_id", "")[:8],
+            "size": content.get("size", 0),
+        })
+        return format_document_text_for_line(content.get("text", ""), doc)
+
+    # ขอไฟล์ [document_id] — owner-aware
     if text_stripped.startswith("ขอไฟล์ "):
         doc_id_query = text_stripped[len("ขอไฟล์ "):].strip()
         if not doc_id_query:
             return "กรุณาระบุรหัสเอกสาร เช่น: ขอไฟล์ a1b2c3d4"
 
-        # ค้นหา doc_id ที่ขึ้นต้นด้วย query (รองรับ partial ID)
-        doc = None
-        for d in doc_index._docs:
-            if d.get("document_id", "").startswith(doc_id_query):
-                doc = d
-                break
+        doc, authorized = doc_index.get_with_owner_check(doc_id_query, user_hash)
 
-        if not doc:
+        if doc is None:
             audit_logger.log("file_request_not_found", user_hash, {
                 "query": doc_id_query[:8],
             })
             return "ไม่พบเอกสารที่ตรงกับรหัสนี้\nลองใช้คำสั่ง 'ค้นหา' หรือ 'รายการล่าสุด' ก่อน"
+
+        if not authorized:
+            audit_logger.log("file_request_unauthorized", user_hash, {
+                "doc_id": doc.get("document_id", "")[:8],
+            })
+            return "ขออภัย คุณไม่มีสิทธิ์เข้าถึงเอกสารนี้"
 
         gcs_path = doc.get("gcs_object_path", "")
         if not gcs_path:
@@ -2118,11 +2432,15 @@ def process_file_async(
     reply_token: str | None = None,
     doc_id: str | None = None,
     sha256_hex: str | None = None,
+    owner_hash: str | None = None,
 ):
     """ประมวลผลไฟล์ในเธรดแยก.
 
     doc_id และ sha256_hex มาจากตอนรับไฟล์ ถ้าไม่ส่งมาจะอนุมานจากชื่อไฟล์
     (ชื่อไฟล์เป็น UUID อยู่แล้ว) เพื่อให้เรียกใช้แบบเดิมได้
+
+    owner_hash: SHA-256 hash ของ LINE user ID ของผู้ส่ง — ใช้สำหรับ
+    cross-patient access prevention (ผู้ใช้เห็นเฉพาะเอกสารที่ตัวเองส่ง)
     """
     _doc_id = doc_id or os.path.splitext(os.path.basename(filepath))[0]
 
@@ -2201,6 +2519,9 @@ def process_file_async(
                     "file_size": size_now,
                     "ocr_status": ocr_status,
                     "extracted_text": extracted_text,
+                    # Owner tracking — ป้องกัน cross-patient access
+                    # ผู้ใช้เห็นเฉพาะเอกสารที่ตัวเองส่ง
+                    "owner_hash": owner_hash or "",
                 }
                 try:
                     doc_index.add(doc_meta)
@@ -2336,7 +2657,8 @@ def _handle_incoming_document(
     doc_id, filename = build_storage_filename(ext)
     filepath = save_to_inbox(data, filename)
     process_file_async(
-        filepath, reply_token, doc_id=doc_id, sha256_hex=sha256_hex
+        filepath, reply_token, doc_id=doc_id, sha256_hex=sha256_hex,
+        owner_hash=user_hash,
     )
 
 
@@ -2725,6 +3047,10 @@ def admin_backfill():
             # Note: OCR during backfill would be too slow for inline HTTP
             # This creates the index entry with ocr_status="pending"
             # A separate OCR pass can be done later
+
+            # owner_hash จาก request body — ถ้าไม่ระบุจะเป็น "" (legacy, fail-closed)
+            backfill_owner = request.json.get("owner_hash", "") if request.is_json else ""
+
             doc_meta = {
                 "document_id": doc_id,
                 "original_filename": f"document{ext}",
@@ -2738,6 +3064,7 @@ def admin_backfill():
                 "file_size": blob.size or 0,
                 "ocr_status": "pending",
                 "extracted_text": "",
+                "owner_hash": backfill_owner,
             }
 
             try:
@@ -2774,6 +3101,113 @@ def admin_backfill():
     except Exception as e:
         logger.error(f"Backfill ล้มเหลว: {type(e).__name__}")
         return jsonify({"error": "Backfill failed"}), 500
+
+
+@app.route("/admin/assign-owner", methods=["POST"])
+def admin_assign_owner():
+    """กำหนด owner_hash ให้เอกสาร legacy — Fail Closed recovery.
+
+    ต้องมี ADMIN_SECRET header
+    Body JSON: {"doc_id": "...", "owner_hash": "..."}
+    หรือ batch: {"assignments": [{"doc_id": "...", "owner_hash": "..."}, ...]}
+    ไม่เปลี่ยน owner_hash ที่มีอยู่แล้ว (ป้องกัน reassign)
+    """
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or auth_header != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if not request.is_json:
+        return jsonify({"error": "JSON body required"}), 400
+
+    data = request.json
+
+    # Single assignment
+    if "doc_id" in data and "owner_hash" in data:
+        assignments = [{"doc_id": data["doc_id"], "owner_hash": data["owner_hash"]}]
+    elif "assignments" in data:
+        assignments = data["assignments"]
+    else:
+        return jsonify({"error": "doc_id+owner_hash or assignments required"}), 400
+
+    assigned = 0
+    not_found = 0
+    already_owned = 0
+
+    for item in assignments:
+        doc_id = item.get("doc_id", "")
+        owner = item.get("owner_hash", "")
+        if not doc_id or not owner:
+            continue
+
+        doc = doc_index._doc_map.get(doc_id)
+        if doc is None:
+            for d in doc_index._docs:
+                if d.get("document_id", "").startswith(doc_id):
+                    doc = d
+                    break
+
+        if doc is None:
+            not_found += 1
+        elif doc.get("owner_hash", ""):
+            already_owned += 1
+        else:
+            result = doc_index.assign_owner(doc_id, owner)
+            if result:
+                assigned += 1
+            else:
+                not_found += 1
+
+    # Save to GCS if any changes
+    if assigned > 0:
+        try:
+            doc_index._save_full()
+        except RuntimeError as e:
+            return jsonify({
+                "error": "Index save failed after assignment",
+                "assigned_in_memory": assigned,
+            }), 500
+
+    audit_logger.log("assign_owner", "admin", {
+        "assigned": assigned,
+        "not_found": not_found,
+        "already_owned": already_owned,
+        "legacy_remaining": doc_index.count_legacy(),
+    })
+
+    return jsonify({
+        "status": "ok",
+        "assigned": assigned,
+        "not_found": not_found,
+        "already_owned": already_owned,
+        "legacy_remaining": doc_index.count_legacy(),
+    }), 200
+
+
+@app.route("/admin/legacy-docs", methods=["GET"])
+def admin_legacy_docs():
+    """แสดงจำนวนเอกสาร legacy ที่ยังไม่มี owner — สำหรับ admin."""
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or auth_header != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    legacy_count = doc_index.count_legacy()
+    total_count = doc_index.count()
+
+    # แสดง doc_id ของ legacy docs (ไม่แสดงเนื้อหา)
+    legacy_ids = []
+    for doc in doc_index._docs:
+        if not doc.get("owner_hash", ""):
+            legacy_ids.append({
+                "doc_id": doc.get("document_id", "")[:12],
+                "category": doc.get("category", ""),
+                "upload_date": doc.get("upload_date", ""),
+            })
+
+    return jsonify({
+        "legacy_count": legacy_count,
+        "total_count": total_count,
+        "legacy_docs": legacy_ids,
+    }), 200
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2854,6 +3288,18 @@ if IS_PRODUCTION:
     if not LINE_CHANNEL_ACCESS_TOKEN:
         logger.error("PRODUCTION ERROR: LINE_CHANNEL_ACCESS_TOKEN ไม่ได้ตั้งค่า")
         _prod_ok = False
+
+    if not ADMIN_SECRET:
+        logger.warning(
+            "PRODUCTION WARNING: ADMIN_SECRET ไม่ได้ตั้งค่า — "
+            "admin endpoints จะปฏิเสธทุก request"
+        )
+
+    if not AUTHORIZED_USERS:
+        logger.warning(
+            "PRODUCTION WARNING: AUTHORIZED_USERS ว่าง — "
+            "ระบบจะปฏิเสธผู้ใช้ทุกคน (fail-closed)"
+        )
 
     if EXTERNAL_AI_CLASSIFICATION_ALLOWED:
         logger.warning(
