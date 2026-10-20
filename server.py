@@ -756,27 +756,65 @@ class DocumentIndex:
             )
 
         line = json.dumps(doc_meta, ensure_ascii=False) + "\n"
-        try:
-            blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
-            if blob.exists():
+        # Retry loop กัน concurrent append ด้วย GCS generation precondition
+        # ถ้า 2 worker เขียนพร้อมกัน จะเกิด 412 Precondition Failed
+        # worker ที่แพ้จะ retry โดยโหลด content ใหม่แล้ว append อีกครั้ง
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
+                blob.reload()  # โหลด generation ปัจจุบัน
                 existing = blob.download_as_text(encoding="utf-8")
+                generation = blob.generation
                 # ตรวจ idempotent อีกครั้งจาก GCS content (ป้องกัน race)
                 if f'"document_id": "{doc_id}"' in existing or f'"document_id":"{doc_id}"' in existing:
                     logger.info(f"Document index: doc_id={doc_id[:8]}… มีใน GCS แล้ว (idempotent)")
                     self._reload_from_gcs()
                     return False
                 blob.upload_from_string(
-                    existing + line, content_type="application/jsonl"
+                    existing + line,
+                    content_type="application/jsonl",
+                    if_generation_match=generation,
                 )
-            else:
-                blob.upload_from_string(
-                    line, content_type="application/jsonl"
-                )
+            except Exception as e:
+                if getattr(e, "code", None) == 404:
+                    # blob ยังไม่มี — สร้างใหม่ด้วย if_generation_match=0
+                    try:
+                        blob = self._storage._bucket.blob(INDEX_OBJECT_PATH)
+                        blob.upload_from_string(
+                            line,
+                            content_type="application/jsonl",
+                            if_generation_match=0,
+                        )
+                    except Exception as create_err:
+                        if getattr(create_err, "code", None) == 412:
+                            # worker อื่นสร้างไปแล้ว → retry append
+                            continue
+                        raise
+                elif getattr(e, "code", None) == 412:
+                    # Generation mismatch — worker อื่นเขียนก่อน → retry
+                    logger.info(
+                        f"Document index: generation conflict "
+                        f"(attempt {attempt + 1}/{max_retries}), retrying…"
+                    )
+                    continue
+                else:
+                    logger.error(f"Document index GCS write ล้มเหลว: {type(e).__name__}")
+                    raise RuntimeError(
+                        f"Document index: บันทึก metadata ลง GCS ล้มเหลว: {type(e).__name__}"
+                    )
+            # สำเร็จ — ออกจาก retry loop
             logger.info(f"Document index: เพิ่ม doc_id={doc_id[:8]}… ลง GCS สำเร็จ")
-        except Exception as e:
-            logger.error(f"Document index GCS write ล้มเหลว: {type(e).__name__}")
+            break
+        else:
+            # หมด retry
+            logger.error(
+                f"Document index: concurrent write conflict "
+                f"หลัง {max_retries} ครั้ง (doc_id={doc_id[:8]}…)"
+            )
             raise RuntimeError(
-                f"Document index: บันทึก metadata ลง GCS ล้มเหลว: {type(e).__name__}"
+                "Document index: บันทึก metadata ล้มเหลว — "
+                "concurrent write conflict (กรุณาลองใหม่)"
             )
 
         # GCS เขียนสำเร็จ → อัพเดท memory cache

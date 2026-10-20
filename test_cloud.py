@@ -13,6 +13,7 @@ import os
 import sys
 import tempfile
 import time
+import inspect
 
 # ตั้ง ENV จำลองก่อน import server
 os.environ["LINE_CHANNEL_SECRET"] = "test_secret_for_unit_test"
@@ -3305,6 +3306,23 @@ def test_index_add_gcs_first_write():
     print("PASS: test_index_add_gcs_first_write")
 
 
+def test_index_add_uses_generation_precondition():
+    """add() ต้องใช้ if_generation_match เพื่อป้องกัน concurrent write conflict."""
+    # ตรวจว่า docstring ของ DocumentIndex.add ระบุเรื่อง generation precondition
+    add_source = inspect.getsource(server.DocumentIndex.add)
+    assert "if_generation_match" in add_source, (
+        "add() ต้องใช้ if_generation_match สำหรับ GCS concurrent write protection"
+    )
+    assert "generation" in add_source, (
+        "add() ต้องอ่าน blob.generation ก่อนเขียน"
+    )
+    # ตรวจว่ามี retry logic สำหรับ 412 Precondition Failed
+    assert "412" in add_source or "retry" in add_source.lower(), (
+        "add() ต้องมี retry logic สำหรับ generation conflict (412)"
+    )
+    print("PASS: test_index_add_uses_generation_precondition")
+
+
 def test_index_ttl_cache_refresh():
     """TTL cache: หลังหมดอายุต้องเรียก reload."""
     idx = _make_test_index()
@@ -3536,6 +3554,7 @@ def main():
         test_index_concurrent_uploads,
         test_index_gcs_permission_failure,
         test_index_add_gcs_first_write,
+        test_index_add_uses_generation_precondition,
         test_index_ttl_cache_refresh,
         test_index_ensure_fresh_on_search,
     ]
