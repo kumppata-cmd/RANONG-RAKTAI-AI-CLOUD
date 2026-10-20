@@ -3390,6 +3390,355 @@ def test_index_ensure_fresh_on_search():
     print("PASS: test_index_ensure_fresh_on_search")
 
 
+# ═══════════════════════════════════════════════════════════
+# Phase 4: Document Content Reading + Owner Tracking Tests
+# ═══════════════════════════════════════════════════════════
+
+def test_read_document_content_not_ready():
+    """read_document_content ต้องคืน error เมื่อ GCS ไม่พร้อม."""
+    result = server.read_document_content("some/path.pdf", "test_hash")
+    assert not result["success"], "Expected failure when GCS not ready"
+    assert "ไม่พร้อม" in result["error"]
+    print("PASS: test_read_document_content_not_ready")
+
+
+def test_format_document_text_for_line_normal():
+    """format_document_text_for_line ต้องจัดรูปแบบปกติได้."""
+    doc = {"category": "lab", "upload_date": "2026-01-15", "document_id": "abc12345"}
+    result = server.format_document_text_for_line("ผลตรวจเลือด WBC 5000", doc)
+    assert "ผลตรวจแล็บ" in result
+    assert "2026-01-15" in result
+    assert "abc12345" in result[:100]  # ใน header
+    assert "ผลตรวจเลือด WBC 5000" in result
+    print("PASS: test_format_document_text_for_line_normal")
+
+
+def test_format_document_text_for_line_truncate():
+    """format_document_text_for_line ต้องตัดข้อความยาวเกินไป."""
+    doc = {"category": "lab", "upload_date": "2026-01-15", "document_id": "abc12345"}
+    long_text = "A" * 10000
+    result = server.format_document_text_for_line(long_text, doc)
+    assert len(result) <= server.MAX_LINE_RESPONSE_TEXT + 200  # header + margin
+    assert "ข้อความถูกตัด" in result
+    print("PASS: test_format_document_text_for_line_truncate")
+
+
+def test_format_document_text_for_line_empty():
+    """format_document_text_for_line ต้องแจ้งเมื่อไม่มีข้อความ."""
+    doc = {"category": "rx", "upload_date": "2026-02-01", "document_id": "def56789"}
+    result = server.format_document_text_for_line("", doc)
+    assert "ไม่สามารถดึงข้อความ" in result
+    print("PASS: test_format_document_text_for_line_empty")
+
+
+def test_owner_tracking_in_doc_meta():
+    """document index entry ต้องมี owner_hash."""
+    # สร้าง index ใหม่สำหรับทดสอบ
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = []
+    idx._doc_map = {}
+    idx._cache_ts = time.time()
+
+    doc_meta = {
+        "document_id": "owner_test_001",
+        "category": "lab",
+        "upload_date": "2026-03-01",
+        "owner_hash": "user_hash_abc",
+        "extracted_text": "test content",
+    }
+    # เพิ่มโดยตรงใน memory (ไม่ต้องใช้ GCS)
+    idx._docs.append(doc_meta)
+    idx._doc_map["owner_test_001"] = doc_meta
+
+    doc = idx.get("owner_test_001")
+    assert doc is not None
+    assert doc["owner_hash"] == "user_hash_abc"
+    print("PASS: test_owner_tracking_in_doc_meta")
+
+
+def test_search_by_owner_filters():
+    """search_by_owner ต้องกรองเฉพาะเอกสารของ owner."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1", "category": "lab", "owner_hash": "userA",
+         "extracted_text": "blood test", "upload_date": "2026-01-01",
+         "original_filename": "doc.pdf", "mime_type": "application/pdf"},
+        {"document_id": "d2", "category": "lab", "owner_hash": "userB",
+         "extracted_text": "blood test", "upload_date": "2026-01-02",
+         "original_filename": "doc.pdf", "mime_type": "application/pdf"},
+        {"document_id": "d3", "category": "rx", "owner_hash": "userA",
+         "extracted_text": "medicine", "upload_date": "2026-01-03",
+         "original_filename": "doc.pdf", "mime_type": "application/pdf"},
+    ]
+    idx._doc_map = {d["document_id"]: d for d in idx._docs}
+    idx._cache_ts = time.time()
+
+    # userA ค้นหา "blood" → ต้องเจอ d1 เท่านั้น (ไม่เจอ d2 ของ userB)
+    results = idx.search_by_owner("blood", "userA")
+    assert len(results) == 1
+    assert results[0]["document_id"] == "d1"
+
+    # userB ค้นหา "blood" → ต้องเจอ d2 เท่านั้น
+    results = idx.search_by_owner("blood", "userB")
+    assert len(results) == 1
+    assert results[0]["document_id"] == "d2"
+
+    # userA ค้นหา "medicine" → ต้องเจอ d3
+    results = idx.search_by_owner("medicine", "userA")
+    assert len(results) == 1
+    assert results[0]["document_id"] == "d3"
+
+    print("PASS: test_search_by_owner_filters")
+
+
+def test_recent_by_owner():
+    """recent_by_owner ต้องแสดงเฉพาะเอกสารของ owner."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1", "owner_hash": "userA", "category": "lab"},
+        {"document_id": "d2", "owner_hash": "userB", "category": "lab"},
+        {"document_id": "d3", "owner_hash": "userA", "category": "rx"},
+        {"document_id": "d4", "owner_hash": "userA", "category": "bills"},
+    ]
+    idx._doc_map = {d["document_id"]: d for d in idx._docs}
+    idx._cache_ts = time.time()
+
+    results = idx.recent_by_owner("userA", 5)
+    assert len(results) == 3
+    ids = [r["document_id"] for r in results]
+    assert "d2" not in ids  # d2 เป็นของ userB
+    print("PASS: test_recent_by_owner")
+
+
+def test_get_with_owner_check_authorized():
+    """get_with_owner_check ต้องอนุญาตเจ้าของ."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1", "owner_hash": "userA", "category": "lab"},
+    ]
+    idx._doc_map = {"d1": idx._docs[0]}
+    idx._cache_ts = time.time()
+
+    doc, authorized = idx.get_with_owner_check("d1", "userA")
+    assert doc is not None
+    assert authorized is True
+    print("PASS: test_get_with_owner_check_authorized")
+
+
+def test_get_with_owner_check_unauthorized():
+    """get_with_owner_check ต้องปฏิเสธผู้อื่น."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1", "owner_hash": "userA", "category": "lab"},
+    ]
+    idx._doc_map = {"d1": idx._docs[0]}
+    idx._cache_ts = time.time()
+
+    doc, authorized = idx.get_with_owner_check("d1", "userB")
+    assert doc is not None  # เอกสารมีอยู่
+    assert authorized is False  # แต่ไม่ใช่เจ้าของ
+    print("PASS: test_get_with_owner_check_unauthorized")
+
+
+def test_get_with_owner_check_legacy():
+    """get_with_owner_check ต้องอนุญาต legacy docs (ไม่มี owner_hash)."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1", "category": "lab"},  # ไม่มี owner_hash
+    ]
+    idx._doc_map = {"d1": idx._docs[0]}
+    idx._cache_ts = time.time()
+
+    doc, authorized = idx.get_with_owner_check("d1", "anyUser")
+    assert doc is not None
+    assert authorized is True  # legacy → อนุญาต (backward compatible)
+    print("PASS: test_get_with_owner_check_legacy")
+
+
+def test_get_with_owner_check_not_found():
+    """get_with_owner_check ต้องคืน None เมื่อไม่พบ."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = []
+    idx._doc_map = {}
+    idx._cache_ts = time.time()
+
+    doc, authorized = idx.get_with_owner_check("nonexistent", "userA")
+    assert doc is None
+    assert authorized is False
+    print("PASS: test_get_with_owner_check_not_found")
+
+
+def test_get_with_owner_check_partial_id():
+    """get_with_owner_check ต้องรองรับ partial ID."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "abc12345-full-uuid", "owner_hash": "userA", "category": "lab"},
+    ]
+    idx._doc_map = {"abc12345-full-uuid": idx._docs[0]}
+    idx._cache_ts = time.time()
+
+    doc, authorized = idx.get_with_owner_check("abc12345", "userA")
+    assert doc is not None
+    assert authorized is True
+    print("PASS: test_get_with_owner_check_partial_id")
+
+
+def test_handle_search_command_read_document():
+    """คำสั่ง 'อ่านเอกสาร' ต้องตรวจ authorization."""
+    # unauthorized user
+    result = server.handle_search_command("อ่านเอกสาร abc123", "unauthorized_hash")
+    assert result is not None
+    assert "ไม่มีสิทธิ์" in result
+    print("PASS: test_handle_search_command_read_document")
+
+
+def test_handle_search_command_read_with_index_text():
+    """คำสั่ง 'อ่านเอกสาร' ต้องใช้ extracted_text จาก index ถ้ามี."""
+    # ตั้งค่า authorized user
+    old_users = server.AUTHORIZED_USERS.copy()
+    server.AUTHORIZED_USERS.add("test_reader_hash")
+
+    # เพิ่มเอกสารใน index
+    old_docs = server.doc_index._docs
+    old_map = server.doc_index._doc_map
+    old_ts = server.doc_index._cache_ts
+
+    test_doc = {
+        "document_id": "read_test_001",
+        "category": "lab",
+        "upload_date": "2026-05-20",
+        "owner_hash": "test_reader_hash",
+        "extracted_text": "WBC 5500 RBC 4.5 Hgb 13.2 Hct 42% Plt 250000 BUN 18 Cr 1.2 สรุป: ผลตรวจปกติทั้งหมด",
+        "gcs_object_path": "04_LAB_RESULTS/2026-05/test.pdf",
+    }
+    server.doc_index._docs = [test_doc]
+    server.doc_index._doc_map = {"read_test_001": test_doc}
+    server.doc_index._cache_ts = time.time()
+
+    try:
+        result = server.handle_search_command("อ่านเอกสาร read_test", "test_reader_hash")
+        assert result is not None
+        assert "WBC 5500" in result or "Cr 1.2" in result
+        assert "ผลตรวจแล็บ" in result
+    finally:
+        server.doc_index._docs = old_docs
+        server.doc_index._doc_map = old_map
+        server.doc_index._cache_ts = old_ts
+        server.AUTHORIZED_USERS = old_users
+
+    print("PASS: test_handle_search_command_read_with_index_text")
+
+
+def test_handle_search_command_read_cross_patient_blocked():
+    """คำสั่ง 'อ่านเอกสาร' ต้องบล็อก cross-patient access."""
+    old_users = server.AUTHORIZED_USERS.copy()
+    server.AUTHORIZED_USERS.add("user_patient_A")
+    server.AUTHORIZED_USERS.add("user_patient_B")
+
+    old_docs = server.doc_index._docs
+    old_map = server.doc_index._doc_map
+    old_ts = server.doc_index._cache_ts
+
+    test_doc = {
+        "document_id": "cross_test_001",
+        "category": "lab",
+        "upload_date": "2026-06-10",
+        "owner_hash": "user_patient_A",
+        "extracted_text": "ข้อมูลของผู้ป่วย A",
+        "gcs_object_path": "04_LAB_RESULTS/2026-06/test.pdf",
+    }
+    server.doc_index._docs = [test_doc]
+    server.doc_index._doc_map = {"cross_test_001": test_doc}
+    server.doc_index._cache_ts = time.time()
+
+    try:
+        # Patient B พยายามอ่านเอกสารของ Patient A
+        result = server.handle_search_command("อ่านเอกสาร cross_test", "user_patient_B")
+        assert result is not None
+        assert "ไม่มีสิทธิ์" in result
+        assert "ข้อมูลของผู้ป่วย A" not in result  # ต้องไม่รั่วข้อมูล
+    finally:
+        server.doc_index._docs = old_docs
+        server.doc_index._doc_map = old_map
+        server.doc_index._cache_ts = old_ts
+        server.AUTHORIZED_USERS = old_users
+
+    print("PASS: test_handle_search_command_read_cross_patient_blocked")
+
+
+def test_handle_search_command_file_cross_patient_blocked():
+    """คำสั่ง 'ขอไฟล์' ต้องบล็อก cross-patient access."""
+    old_users = server.AUTHORIZED_USERS.copy()
+    server.AUTHORIZED_USERS.add("user_file_A")
+    server.AUTHORIZED_USERS.add("user_file_B")
+
+    old_docs = server.doc_index._docs
+    old_map = server.doc_index._doc_map
+    old_ts = server.doc_index._cache_ts
+
+    test_doc = {
+        "document_id": "file_cross_001",
+        "category": "rx",
+        "upload_date": "2026-06-15",
+        "owner_hash": "user_file_A",
+        "gcs_object_path": "03_PRESCRIPTIONS/2026-06/test.pdf",
+    }
+    server.doc_index._docs = [test_doc]
+    server.doc_index._doc_map = {"file_cross_001": test_doc}
+    server.doc_index._cache_ts = time.time()
+
+    try:
+        # Patient B พยายามขอไฟล์ของ Patient A
+        result = server.handle_search_command("ขอไฟล์ file_cross", "user_file_B")
+        assert result is not None
+        assert "ไม่มีสิทธิ์" in result
+    finally:
+        server.doc_index._docs = old_docs
+        server.doc_index._doc_map = old_map
+        server.doc_index._cache_ts = old_ts
+        server.AUTHORIZED_USERS = old_users
+
+    print("PASS: test_handle_search_command_file_cross_patient_blocked")
+
+
+def test_search_by_owner_empty_query():
+    """search_by_owner ต้องคืนผลว่างเมื่อ query ว่าง."""
+    idx = server.DocumentIndex(server.storage)
+    idx._docs = [
+        {"document_id": "d1", "owner_hash": "userA", "category": "lab",
+         "extracted_text": "test", "upload_date": "2026-01-01",
+         "original_filename": "doc.pdf", "mime_type": "application/pdf"},
+    ]
+    idx._doc_map = {"d1": idx._docs[0]}
+    idx._cache_ts = time.time()
+
+    results = idx.search_by_owner("", "userA")
+    assert len(results) == 0
+    print("PASS: test_search_by_owner_empty_query")
+
+
+def test_process_file_async_has_owner_param():
+    """process_file_async ต้องรับ owner_hash parameter."""
+    import inspect
+    sig = inspect.signature(server.process_file_async)
+    assert "owner_hash" in sig.parameters
+    print("PASS: test_process_file_async_has_owner_param")
+
+
+def test_ocr_from_bytes_function_exists():
+    """_ocr_from_bytes ต้องมีอยู่ในระบบ."""
+    assert hasattr(server, "_ocr_from_bytes")
+    assert callable(server._ocr_from_bytes)
+    print("PASS: test_ocr_from_bytes_function_exists")
+
+
+def test_max_content_read_size_reasonable():
+    """MAX_CONTENT_READ_SIZE ต้องอยู่ในช่วงที่เหมาะสม."""
+    assert server.MAX_CONTENT_READ_SIZE >= 1 * 1024 * 1024  # >= 1 MB
+    assert server.MAX_CONTENT_READ_SIZE <= 50 * 1024 * 1024  # <= 50 MB
+    print("PASS: test_max_content_read_size_reasonable")
+
+
 def main():
     """รันการทดสอบทั้งหมด."""
     print("=" * 60)
@@ -3557,6 +3906,27 @@ def main():
         test_index_add_uses_generation_precondition,
         test_index_ttl_cache_refresh,
         test_index_ensure_fresh_on_search,
+        # ── Phase 4: Document Content Reading + Owner Tracking ──
+        test_read_document_content_not_ready,
+        test_format_document_text_for_line_normal,
+        test_format_document_text_for_line_truncate,
+        test_format_document_text_for_line_empty,
+        test_owner_tracking_in_doc_meta,
+        test_search_by_owner_filters,
+        test_recent_by_owner,
+        test_get_with_owner_check_authorized,
+        test_get_with_owner_check_unauthorized,
+        test_get_with_owner_check_legacy,
+        test_get_with_owner_check_not_found,
+        test_get_with_owner_check_partial_id,
+        test_handle_search_command_read_document,
+        test_handle_search_command_read_with_index_text,
+        test_handle_search_command_read_cross_patient_blocked,
+        test_handle_search_command_file_cross_patient_blocked,
+        test_search_by_owner_empty_query,
+        test_process_file_async_has_owner_param,
+        test_ocr_from_bytes_function_exists,
+        test_max_content_read_size_reasonable,
     ]
 
     passed = 0
