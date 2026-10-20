@@ -3131,11 +3131,12 @@ def test_enroll_old_register_command_removed():
 
 
 def test_user_id_salt_production_stable():
-    """ทดสอบว่า Production ใช้ salt คงที่เมื่อไม่ตั้ง USER_ID_SALT."""
+    """ทดสอบว่า Production บังคับตั้ง USER_ID_SALT — ไม่ใช้ค่า default."""
     import inspect
     source = inspect.getsource(server)
-    assert "ranong-raktai-default-salt-please-set-env" in source, \
-        "Production ต้องมี fallback salt คงที่"
+    # Production ต้อง raise RuntimeError ถ้าไม่ตั้ง USER_ID_SALT
+    assert "USER_ID_SALT ต้องตั้งค่าใน Production" in source, \
+        "Production ต้องบังคับตั้ง USER_ID_SALT — ห้ามใช้ค่า default"
     print("PASS: test_user_id_salt_production_stable")
 
 

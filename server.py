@@ -184,11 +184,16 @@ DEDUP_CONTENT_TTL_SECONDS = int(os.getenv("DEDUP_CONTENT_TTL", "600"))  # 10 น
 # สร้างค่าด้วย: python3 -c "import uuid; print(uuid.uuid4().hex)"
 _user_id_salt_env = os.getenv("USER_ID_SALT", "").strip()
 if IS_PRODUCTION and not _user_id_salt_env:
-    # Production ต้องมี salt คงที่ — ใช้ค่า fallback ที่แน่นอน
-    # แต่ควรตั้งค่าจริงใน ENV เพื่อความปลอดภัยสูงสุด
-    USER_ID_SALT = "ranong-raktai-default-salt-please-set-env"
+    # Production ต้องมี salt คงที่ — ห้ามใช้ค่า default
+    raise RuntimeError(
+        "CRITICAL: USER_ID_SALT ต้องตั้งค่าใน Production ENV — "
+        "ใช้ค่าสุ่มที่ไม่ซ้ำ เช่น: python3 -c \"import secrets; print(secrets.token_hex(32))\""
+    )
+elif not _user_id_salt_env:
+    # Non-production: ใช้ random salt (เปลี่ยนทุก restart — ปลอดภัยสำหรับ testing)
+    USER_ID_SALT = uuid.uuid4().hex
 else:
-    USER_ID_SALT = _user_id_salt_env or uuid.uuid4().hex
+    USER_ID_SALT = _user_id_salt_env
 
 # ─── One-Time Enrollment Token ─────────────────────────────
 ENROLLMENT_TOKEN_TTL = 300       # 5 นาที
@@ -3283,6 +3288,18 @@ if IS_PRODUCTION:
     if not LINE_CHANNEL_ACCESS_TOKEN:
         logger.error("PRODUCTION ERROR: LINE_CHANNEL_ACCESS_TOKEN ไม่ได้ตั้งค่า")
         _prod_ok = False
+
+    if not ADMIN_SECRET:
+        logger.warning(
+            "PRODUCTION WARNING: ADMIN_SECRET ไม่ได้ตั้งค่า — "
+            "admin endpoints จะปฏิเสธทุก request"
+        )
+
+    if not AUTHORIZED_USERS:
+        logger.warning(
+            "PRODUCTION WARNING: AUTHORIZED_USERS ว่าง — "
+            "ระบบจะปฏิเสธผู้ใช้ทุกคน (fail-closed)"
+        )
 
     if EXTERNAL_AI_CLASSIFICATION_ALLOWED:
         logger.warning(
