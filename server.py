@@ -2883,8 +2883,10 @@ def webhook():
 def health():
     """Health check endpoint — ทำงานได้โดยไม่ต้องใช้ API Key.
 
-    Production mode: คืน HTTP 503 ถ้า GCS ไม่พร้อม
-    เพื่อให้ Render ตรวจจับปัญหาและรายงาน
+    คืน HTTP 200 เสมอเมื่อ app process ทำงาน (ให้ Render ยอมรับ deploy)
+    แต่รายงานสถานะจริงใน body: status = running / degraded / misconfigured
+    accepting_documents = False ถ้ายังไม่พร้อมรับข้อมูล
+    Webhook ยังคง fail-closed (503) จนกว่า config จะครบ
     """
     health_info = {
         "status": "running",
@@ -2925,19 +2927,18 @@ def health():
             gcs_status["auth_method"] = storage._auth_method
         health_info["gcs"] = gcs_status
 
-        # Production: ถ้า GCS ไม่พร้อม → health check fail
+        # Production: ถ้า GCS ไม่พร้อม → รายงานสถานะ แต่ไม่ block deploy
+        # Webhook ยังคง fail-closed (503) — ไม่รับข้อมูลจนกว่า GCS จะพร้อม
         if IS_PRODUCTION and gcs_status.get("status") != "connected":
             health_info["status"] = "degraded"
             health_info["accepting_documents"] = False
-            http_status = 503
         else:
             health_info["accepting_documents"] = True
     elif IS_PRODUCTION and STORAGE_BACKEND != "gcs":
-        # Production ต้องใช้ GCS เท่านั้น
+        # Production ต้องใช้ GCS เท่านั้น — รายงานแต่ไม่ block deploy
         health_info["status"] = "misconfigured"
         health_info["accepting_documents"] = False
         health_info["error"] = "Production ต้องตั้ง STORAGE_BACKEND=gcs"
-        http_status = 503
     else:
         health_info["accepting_documents"] = not IS_TESTING or IS_TESTING_DOCS
 
@@ -2957,7 +2958,6 @@ def health():
             health_info["status"] = "misconfigured"
             health_info["accepting_documents"] = False
             health_info["critical_error"] = "USER_ID_SALT ไม่ได้ตั้งค่า"
-            http_status = 503
         health_info["document_search"] = {
             "indexed_documents": doc_index.count(),
             "authorized_users": len(AUTHORIZED_USERS),

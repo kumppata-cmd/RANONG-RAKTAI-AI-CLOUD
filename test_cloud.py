@@ -2380,8 +2380,10 @@ def test_production_health_503_without_gcs():
 
         with server.app.test_client() as client:
             resp = client.get("/health")
-            assert resp.status_code == 503, \
-                f"Production GCS down ต้องคืน 503 แต่ได้ {resp.status_code}"
+            # HTTP 200 เพื่อให้ Render deploy ได้ — body รายงานสถานะจริง
+            # Webhook ยังคง fail-closed (503) — ไม่รับข้อมูลจนกว่า GCS จะพร้อม
+            assert resp.status_code == 200, \
+                f"Health check ต้องคืน 200 (deploy-friendly) แต่ได้ {resp.status_code}"
             data = resp.get_json()
             assert data["status"] == "degraded"
             assert data["accepting_documents"] is False
@@ -2405,8 +2407,9 @@ def test_production_health_503_without_gcs_backend():
 
         with server.app.test_client() as client:
             resp = client.get("/health")
-            assert resp.status_code == 503, \
-                f"Production local storage ต้องคืน 503 แต่ได้ {resp.status_code}"
+            # HTTP 200 เพื่อให้ Render deploy ได้ — body รายงานสถานะจริง
+            assert resp.status_code == 200, \
+                f"Health check ต้องคืน 200 (deploy-friendly) แต่ได้ {resp.status_code}"
             data = resp.get_json()
             assert data["status"] == "misconfigured"
             assert data["accepting_documents"] is False
