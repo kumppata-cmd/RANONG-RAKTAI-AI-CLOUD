@@ -160,6 +160,17 @@ INDEX_DOC_PREFIX = "_index/docs/"  # per-document JSON files (ใช้แทน
 AUDIT_PREFIX = "_audit/"
 INDEX_CACHE_TTL = 5  # วินาที — reload index จาก GCS ทุก 5 วินาที (multi-worker safe)
 
+# ─── Lab Extraction V1 ────────────────────────────────────
+# GCS path สำหรับเก็บผล Lab ที่ดึงจากเอกสาร
+LAB_RESULTS_PREFIX = "_lab_results/"  # _lab_results/{doc_id}.json
+
+# Admin users — ใช้สำหรับยืนยันผลแล็บ
+# ตั้งค่าใน Render Dashboard: ADMIN_USERS=hash1,hash2,...
+_admin_env = os.getenv("ADMIN_USERS", "").strip()
+ADMIN_USERS: set[str] = {
+    u.strip() for u in _admin_env.split(",") if u.strip()
+}
+
 # ─── OCR ─────────────────────────────────────────────────
 # 200 DPI เพียงพอสำหรับ Tesseract กับข้อความขนาดปกติ และใช้หน่วยความจำ
 # น้อยกว่า 300 DPI ราว 56% (A4: ~26 MB → ~11.6 MB ต่อหน้า)
@@ -1623,17 +1634,23 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             "  อ่านเนื้อหาเอกสารโดยตรง\n\n"
             "📎 ขอไฟล์ [รหัส]\n"
             "  ขอลิงก์ดาวน์โหลดเอกสาร\n\n"
+            "🔬 ผลแล็บ [รหัส]\n"
+            "  ดูผลตรวจ Lab ที่ดึงจากเอกสาร\n\n"
+            "✅ ยืนยันผลแล็บ [รหัส] (เฉพาะผู้ดูแล)\n"
+            "  ยืนยันผลแล็บก่อนนำไปใช้\n\n"
             "ℹ️ สถานะ\n"
             "  ตรวจสอบระบบ"
         )
 
     # Authorization check — ต้องผ่านก่อนใช้คำสั่งค้นหา/อ่าน
     if not is_authorized_user(user_hash):
-        # ค้นหา / รายการล่าสุด / อ่านเอกสาร / ขอไฟล์ → ต้อง authorized
+        # ค้นหา / รายการล่าสุด / อ่านเอกสาร / ขอไฟล์ / ผลแล็บ / ยืนยันผลแล็บ → ต้อง authorized
         if (text_stripped.startswith("ค้นหา ")
                 or text_stripped == "รายการล่าสุด"
                 or text_stripped.startswith("อ่านเอกสาร ")
-                or text_stripped.startswith("ขอไฟล์ ")):
+                or text_stripped.startswith("ขอไฟล์ ")
+                or text_stripped.startswith("ผลแล็บ ")
+                or text_stripped.startswith("ยืนยันผลแล็บ ")):
             audit_logger.log("unauthorized_access", user_hash, {
                 "command": text_stripped[:20]
             })
@@ -1747,6 +1764,111 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
 
         # คืน Flex Message dict → caller จะส่งเป็น Flex แทน text
         return build_file_flex_message(doc, download_url)
+
+    # ── ผลแล็บ [document_id] — ดูผล Lab ที่ดึงจากเอกสาร ──
+    if text_stripped == "ผลแล็บ":
+        return "กรุณาระบุรหัสเอกสาร เช่น: ผลแล็บ a1b2c3d4"
+    if text_stripped.startswith("ผลแล็บ "):
+        doc_id_query = text_stripped[len("ผลแล็บ "):].strip()
+        if not doc_id_query:
+            return "กรุณาระบุรหัสเอกสาร เช่น: ผลแล็บ a1b2c3d4"
+
+        # ตรวจสอบ ownership ผ่าน document index
+        doc, authorized = doc_index.get_with_owner_check(doc_id_query, user_hash)
+        if doc is None:
+            audit_logger.log("lab_result_not_found", user_hash, {
+                "query": doc_id_query[:8],
+            })
+            return "ไม่พบเอกสารที่ตรงกับรหัสนี้"
+        if not authorized:
+            audit_logger.log("lab_result_unauthorized", user_hash, {
+                "doc_id": doc.get("document_id", "")[:8],
+            })
+            return "ขออภัย คุณไม่มีสิทธิ์เข้าถึงเอกสารนี้"
+
+        # อ่านผลแล็บจาก GCS
+        full_doc_id = doc.get("document_id", doc_id_query)
+        lab_path = f"{LAB_RESULTS_PREFIX}{full_doc_id}.json"
+        try:
+            lab_data = storage.get(lab_path)
+            if lab_data is None:
+                audit_logger.log("lab_result_none", user_hash, {
+                    "doc_id": full_doc_id[:8],
+                })
+                return (
+                    "ยังไม่มีผลแล็บสำหรับเอกสารนี้\n"
+                    "เอกสารอาจไม่ใช่ผลตรวจ Lab หรือยังไม่ได้ประมวลผล"
+                )
+            from lab_models import LabReport
+            lab_report = LabReport.from_dict(json.loads(lab_data))
+            audit_logger.log("lab_result_view", user_hash, {
+                "doc_id": full_doc_id[:8],
+                "result_count": len(lab_report.results),
+                "status": lab_report.status,
+            })
+            return lab_report.summary_text()
+        except Exception as e:
+            logger.warning(f"Lab result read error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถอ่านผลแล็บได้ในขณะนี้"
+
+    # ── ยืนยันผลแล็บ [document_id] — Admin only ──
+    if text_stripped == "ยืนยันผลแล็บ":
+        return "กรุณาระบุรหัสเอกสาร เช่น: ยืนยันผลแล็บ a1b2c3d4"
+    if text_stripped.startswith("ยืนยันผลแล็บ "):
+        doc_id_query = text_stripped[len("ยืนยันผลแล็บ "):].strip()
+        if not doc_id_query:
+            return "กรุณาระบุรหัสเอกสาร เช่น: ยืนยันผลแล็บ a1b2c3d4"
+
+        # ต้องเป็น Admin เท่านั้น
+        if user_hash not in ADMIN_USERS:
+            audit_logger.log("lab_approve_not_admin", user_hash, {
+                "doc_id": doc_id_query[:8],
+            })
+            return "ขออภัย เฉพาะผู้ดูแลระบบเท่านั้นที่สามารถยืนยันผลแล็บได้"
+
+        # ตรวจสอบเอกสาร (admin เห็นทุกเอกสาร)
+        doc = doc_index.get(doc_id_query)
+        if doc is None:
+            return "ไม่พบเอกสารที่ตรงกับรหัสนี้"
+
+        full_doc_id = doc.get("document_id", doc_id_query)
+        lab_path = f"{LAB_RESULTS_PREFIX}{full_doc_id}.json"
+        try:
+            lab_data = storage.get(lab_path)
+            if lab_data is None:
+                return "ยังไม่มีผลแล็บสำหรับเอกสารนี้"
+
+            from lab_models import LabReport, ReviewStatus
+            lab_report = LabReport.from_dict(json.loads(lab_data))
+
+            if lab_report.status == ReviewStatus.APPROVED.value:
+                return f"ผลแล็บ {full_doc_id[:8]} ได้รับการยืนยันแล้ว"
+
+            # อัพเดทสถานะเป็น approved
+            lab_report.status = ReviewStatus.APPROVED.value
+            lab_report.reviewed_by = user_hash[:8]  # เก็บเฉพาะ prefix
+            lab_report.reviewed_at = datetime.now().isoformat()
+
+            # บันทึกกลับ GCS
+            storage.put(
+                lab_path,
+                lab_report.to_json().encode("utf-8"),
+                content_type="application/json",
+            )
+
+            audit_logger.log("lab_approve", user_hash, {
+                "doc_id": full_doc_id[:8],
+                "result_count": len(lab_report.results),
+            })
+
+            return (
+                f"✅ ยืนยันผลแล็บ {full_doc_id[:8]} สำเร็จ\n"
+                f"จำนวนผลตรวจ: {len(lab_report.results)} รายการ\n"
+                f"สถานะ: approved"
+            )
+        except Exception as e:
+            logger.warning(f"Lab approve error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถยืนยันผลแล็บได้ในขณะนี้"
 
     return None  # ไม่ใช่คำสั่งค้นหา
 
@@ -2853,6 +2975,42 @@ def process_file_async(
                         f"กรุณาแจ้งผู้ดูแลระบบ"
                     )
 
+            # ── Lab Extraction V1: ดึงผลแล็บอัตโนมัติ ──
+            lab_extracted = False
+            if category == "lab" and stored_in_gcs and extracted_text:
+                try:
+                    from lab_extractor import extract_lab_results_from_text
+                    from lab_models import ExtractionMethod
+
+                    _lab_method = (
+                        ExtractionMethod.REGEX_OCR.value
+                        if ocr_status == "ocr"
+                        else ExtractionMethod.REGEX_PDF_TEXT.value
+                    )
+                    lab_report = extract_lab_results_from_text(
+                        extracted_text, _doc_id, _lab_method
+                    )
+                    if lab_report.results:
+                        # บันทึกผลแล็บลง GCS — create-only
+                        _lab_json = lab_report.to_json()
+                        _lab_path = f"{LAB_RESULTS_PREFIX}{_doc_id}.json"
+                        storage.put(
+                            _lab_path,
+                            _lab_json.encode("utf-8"),
+                            content_type="application/json",
+                        )
+                        lab_extracted = True
+                        logger.info(
+                            f"Lab extraction สำเร็จ: doc={_doc_id[:8]}, "
+                            f"results={len(lab_report.results)}"
+                        )
+                except Exception as lab_err:
+                    # Lab extraction ล้มเหลวไม่ทำให้ upload ล้มเหลว
+                    logger.warning(
+                        f"Lab extraction ล้มเหลว: {type(lab_err).__name__} "
+                        f"(doc_id={_doc_id[:8]})"
+                    )
+
             # บันทึก log — ไม่เก็บ path หรือชื่อไฟล์ต้นฉบับ
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
@@ -2862,6 +3020,7 @@ def process_file_async(
                 "file_size": size_now,
                 "file_type": ext_now,
                 "classification": result,
+                "lab_extracted": lab_extracted,
             }
             log_file = os.path.join(BASE_DIR, "logs", "classification_log.jsonl")
             with open(log_file, "a", encoding="utf-8") as f:
