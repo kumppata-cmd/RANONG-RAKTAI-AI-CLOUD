@@ -38,7 +38,7 @@ import uuid
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from flask import Flask, request, abort, jsonify
+from flask import Flask, request, abort, jsonify, redirect
 import requests as http_requests
 
 # ─── OCR (Tesseract) ────────────────────────────────────────
@@ -1334,6 +1334,204 @@ def generate_signed_url(gcs_object_path: str, expiry_seconds: int = SIGNED_URL_E
         return None
 
 
+# ─── Download Proxy: Stateless HMAC Token ─────────────────
+# ใช้เมื่อ Signed URL ยาวเกิน LINE URI action limit (1000 chars)
+# Token = base64url(gcs_path|expiry_ts).HMAC_signature
+# ทำงานข้าม workers (stateless), หมดอายุตาม SIGNED_URL_EXPIRY
+# ─────────────────────────────────────────────────────────────
+
+_DOWNLOAD_TOKEN_KEY = (USER_ID_SALT + "::dl").encode("utf-8")
+
+LINE_URI_ACTION_MAX_LENGTH = 1000  # LINE Messaging API limit
+
+
+def generate_download_token(gcs_path: str, expiry_seconds: int = SIGNED_URL_EXPIRY) -> str:
+    """สร้าง stateless HMAC download token (ไม่ต้องเก็บ state ข้าม workers)."""
+    expiry = int(time.time()) + expiry_seconds
+    payload = f"{gcs_path}|{expiry}"
+    payload_b64 = base64.urlsafe_b64encode(payload.encode()).decode()
+    sig = hmac.new(
+        _DOWNLOAD_TOKEN_KEY, payload.encode(), hashlib.sha256
+    ).hexdigest()[:32]
+    return f"{payload_b64}.{sig}"
+
+
+def validate_download_token(token: str) -> str | None:
+    """ตรวจสอบ token — คืน gcs_path ถ้าถูกต้องและยังไม่หมดอายุ, None ถ้าไม่ผ่าน."""
+    try:
+        parts = token.split(".", 1)
+        if len(parts) != 2:
+            return None
+        payload = base64.urlsafe_b64decode(parts[0]).decode()
+        expected_sig = hmac.new(
+            _DOWNLOAD_TOKEN_KEY, payload.encode(), hashlib.sha256
+        ).hexdigest()[:32]
+        if not hmac.compare_digest(expected_sig, parts[1]):
+            return None
+        gcs_path, expiry_str = payload.rsplit("|", 1)
+        if int(expiry_str) < time.time():
+            return None
+        return gcs_path
+    except Exception:
+        return None
+
+
+def get_download_url(gcs_path: str) -> str | None:
+    """สร้าง URL สำหรับดาวน์โหลด — ใช้ Signed URL ตรงถ้าสั้นพอ, ไม่งั้นใช้ proxy."""
+    signed_url = generate_signed_url(gcs_path)
+    if not signed_url:
+        return None
+
+    if len(signed_url) <= LINE_URI_ACTION_MAX_LENGTH:
+        return signed_url
+
+    # Signed URL ยาวเกิน → ใช้ proxy endpoint
+    token = generate_download_token(gcs_path)
+    # RENDER_EXTERNAL_URL อาจตั้งไว้ หรือใช้ request context
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    if not base_url:
+        # Fallback: ใช้ Signed URL ตรงแม้จะยาว (LINE อาจ truncate)
+        logger.warning("RENDER_EXTERNAL_URL ไม่ได้ตั้ง — ใช้ Signed URL ตรง")
+        return signed_url
+    return f"{base_url}/dl/{token}"
+
+
+# ─── LINE Flex Message: ปุ่มเปิดเอกสาร ──────────────────────
+# แทนที่การส่ง URL เป็นข้อความยาว → ส่ง Flex Message พร้อมปุ่ม
+# ─────────────────────────────────────────────────────────────
+
+_CAT_NAMES = {
+    "bills": "ใบเสร็จ/บิล",
+    "rx": "ใบสั่งยา",
+    "lab": "ผลตรวจแล็บ",
+    "dialysis": "เอกสารฟอกเลือด",
+    "review": "รอตรวจสอบ",
+}
+
+
+def build_file_flex_message(doc: dict, download_url: str) -> dict:
+    """สร้าง LINE Flex Message สำหรับดาวน์โหลดเอกสาร."""
+    cat = _CAT_NAMES.get(doc.get("category", ""), doc.get("category", ""))
+    date = doc.get("upload_date", "ไม่ทราบ")
+    doc_id = doc.get("document_id", "")[:8]
+    expiry_min = SIGNED_URL_EXPIRY // 60
+
+    flex_contents = {
+        "type": "bubble",
+        "body": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "text",
+                    "text": "📎 เอกสาร",
+                    "weight": "bold",
+                    "size": "lg",
+                },
+                {"type": "separator", "margin": "md"},
+                {
+                    "type": "box",
+                    "layout": "vertical",
+                    "margin": "md",
+                    "contents": [
+                        {
+                            "type": "box",
+                            "layout": "horizontal",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "ประเภท:",
+                                    "size": "sm",
+                                    "color": "#555555",
+                                    "flex": 0,
+                                },
+                                {
+                                    "type": "text",
+                                    "text": cat,
+                                    "size": "sm",
+                                    "color": "#111111",
+                                    "align": "end",
+                                },
+                            ],
+                        },
+                        {
+                            "type": "box",
+                            "layout": "horizontal",
+                            "margin": "sm",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "วันที่:",
+                                    "size": "sm",
+                                    "color": "#555555",
+                                    "flex": 0,
+                                },
+                                {
+                                    "type": "text",
+                                    "text": date,
+                                    "size": "sm",
+                                    "color": "#111111",
+                                    "align": "end",
+                                },
+                            ],
+                        },
+                        {
+                            "type": "box",
+                            "layout": "horizontal",
+                            "margin": "sm",
+                            "contents": [
+                                {
+                                    "type": "text",
+                                    "text": "รหัส:",
+                                    "size": "sm",
+                                    "color": "#555555",
+                                    "flex": 0,
+                                },
+                                {
+                                    "type": "text",
+                                    "text": f"{doc_id}…",
+                                    "size": "sm",
+                                    "color": "#111111",
+                                    "align": "end",
+                                },
+                            ],
+                        },
+                    ],
+                },
+                {
+                    "type": "text",
+                    "text": f"⏱️ ลิงก์หมดอายุใน {expiry_min} นาที",
+                    "size": "xxs",
+                    "color": "#999999",
+                    "margin": "md",
+                },
+            ],
+        },
+        "footer": {
+            "type": "box",
+            "layout": "vertical",
+            "contents": [
+                {
+                    "type": "button",
+                    "style": "primary",
+                    "color": "#1DB446",
+                    "action": {
+                        "type": "uri",
+                        "label": "เปิด PDF",
+                        "uri": download_url,
+                    },
+                },
+            ],
+        },
+    }
+
+    return {
+        "type": "flex",
+        "altText": f"📎 เอกสาร [{cat}] — กดเพื่อเปิด",
+        "contents": flex_contents,
+    }
+
+
 def is_authorized_user(user_hash: str) -> bool:
     """ตรวจสอบว่า user hash อยู่ใน Allowlist."""
     if not AUTHORIZED_USERS:
@@ -1509,7 +1707,9 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         })
         return format_document_text_for_line(content.get("text", ""), doc)
 
-    # ขอไฟล์ [document_id] — owner-aware
+    # ขอไฟล์ [document_id] — owner-aware → ตอบด้วย Flex Message
+    if text_stripped == "ขอไฟล์":
+        return "กรุณาระบุรหัสเอกสาร เช่น: ขอไฟล์ a1b2c3d4"
     if text_stripped.startswith("ขอไฟล์ "):
         doc_id_query = text_stripped[len("ขอไฟล์ "):].strip()
         if not doc_id_query:
@@ -1533,8 +1733,8 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         if not gcs_path:
             return "ไม่สามารถเข้าถึงไฟล์นี้ได้ — ไม่มี path ใน GCS"
 
-        signed_url = generate_signed_url(gcs_path)
-        if not signed_url:
+        download_url = get_download_url(gcs_path)
+        if not download_url:
             audit_logger.log("file_request_failed", user_hash, {
                 "doc_id": doc.get("document_id", "")[:8],
             })
@@ -1545,17 +1745,8 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             "category": doc.get("category", ""),
         })
 
-        cat_names = {
-            "bills": "ใบเสร็จ/บิล", "rx": "ใบสั่งยา",
-            "lab": "ผลตรวจแล็บ", "dialysis": "เอกสารฟอกเลือด",
-            "review": "รอตรวจสอบ",
-        }
-        cat = cat_names.get(doc.get("category", ""), doc.get("category", ""))
-        return (
-            f"📎 เอกสาร: [{cat}]\n"
-            f"วันที่: {doc.get('upload_date', 'ไม่ทราบ')}\n"
-            f"ลิงก์ดาวน์โหลด (หมดอายุใน 15 นาที):\n{signed_url}"
-        )
+        # คืน Flex Message dict → caller จะส่งเป็น Flex แทน text
+        return build_file_flex_message(doc, download_url)
 
     return None  # ไม่ใช่คำสั่งค้นหา
 
@@ -2078,6 +2269,44 @@ def reply_message(reply_token: str, text: str):
         status = getattr(getattr(e, "response", None), "status_code", "-")
         logger.error(
             f"ตอบกลับ LINE ไม่สำเร็จ: {type(e).__name__} (status={status})"
+        )
+
+
+def reply_line_message(reply_token: str, message: dict):
+    """ส่ง message object (Flex, Image ฯลฯ) ตอบกลับไปยัง LINE.
+
+    ใช้สำหรับ non-text messages เช่น Flex Message
+    ไม่ log เนื้อหา message เพื่อไม่เปิดเผย URL หรือข้อมูลผู้ป่วย
+    """
+    if IS_TESTING and not IS_TESTING_DOCS:
+        logger.info("TESTING MODE: ไม่ส่งข้อความตอบกลับ LINE")
+        return
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        return
+    url = "https://api.line.me/v2/bot/message/reply"
+    request_body = json.dumps(
+        {
+            "replyToken": reply_token,
+            "messages": [message],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        resp = http_requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            data=request_body,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        logger.info(f"ตอบกลับ LINE (flex) สำเร็จ (status={resp.status_code})")
+    except Exception as e:
+        status = getattr(getattr(e, "response", None), "status_code", "-")
+        logger.error(
+            f"ตอบกลับ LINE (flex) ไม่สำเร็จ: {type(e).__name__} (status={status})"
         )
 
 
@@ -2922,7 +3151,11 @@ def webhook():
                 # ── Document Search V1: ตรวจคำสั่งค้นหาก่อน ──
                 search_response = handle_search_command(text, user_hash)
                 if search_response:
-                    reply_message(reply_token, search_response)
+                    if isinstance(search_response, dict) and search_response.get("type") == "flex":
+                        # Flex Message (เช่น ขอไฟล์ → ปุ่มเปิด PDF)
+                        reply_line_message(reply_token, search_response)
+                    else:
+                        reply_message(reply_token, search_response)
                 elif text.strip().lower() in ("สถานะ", "status"):
                     inbox_path = os.path.join(BASE_DIR, FOLDERS["inbox"])
                     inbox_count = len(os.listdir(inbox_path)) if os.path.exists(inbox_path) else 0
@@ -2960,6 +3193,40 @@ def webhook():
             )
 
     return jsonify({"status": "ok"}), 200
+
+
+# ─── Download Proxy Endpoint ─────────────────────────────────
+# ใช้เมื่อ Signed URL ยาวเกิน LINE URI action limit
+# Stateless — ตรวจ HMAC token แล้ว redirect ไปยัง Signed URL
+# ไม่ log URL, ไม่ log gcs_path, ไม่ cache
+# ─────────────────────────────────────────────────────────────
+
+@app.route("/dl/<token>", methods=["GET"])
+def download_proxy(token):
+    """Proxy download — validate HMAC token แล้ว redirect ไป Signed URL."""
+    gcs_path = validate_download_token(token)
+    if gcs_path is None:
+        logger.info("Download proxy: token ไม่ถูกต้องหรือหมดอายุ")
+        return (
+            "<html><body style='font-family:sans-serif;text-align:center;padding:40px'>"
+            "<h2>ลิงก์หมดอายุ</h2>"
+            "<p>กรุณาขอลิงก์ใหม่ผ่าน LINE<br>"
+            "พิมพ์: <b>ขอไฟล์ [รหัส]</b></p>"
+            "</body></html>"
+        ), 403
+
+    signed_url = generate_signed_url(gcs_path, expiry_seconds=300)
+    if not signed_url:
+        logger.error("Download proxy: สร้าง Signed URL ไม่ได้")
+        return (
+            "<html><body style='font-family:sans-serif;text-align:center;padding:40px'>"
+            "<h2>ไม่สามารถดาวน์โหลดได้</h2>"
+            "<p>กรุณาลองใหม่ในอีกสักครู่</p>"
+            "</body></html>"
+        ), 500
+
+    # 302 redirect → ไม่ cache, Signed URL มีอายุ 5 นาที
+    return redirect(signed_url)
 
 
 @app.route("/health", methods=["GET"])
