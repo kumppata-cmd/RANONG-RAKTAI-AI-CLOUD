@@ -23,6 +23,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # คัดลอก source code
 COPY server.py .
+COPY lab_models.py .
+COPY lab_extractor.py .
+COPY lab_rules.py .
 
 # สร้างโฟลเดอร์ชั่วคราว
 RUN mkdir -p /tmp/ranong_raktai/logs
