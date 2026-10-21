@@ -163,6 +163,7 @@ INDEX_CACHE_TTL = 5  # วินาที — reload index จาก GCS ทุ�
 # ─── Lab Extraction V1 ────────────────────────────────────
 # GCS path สำหรับเก็บผล Lab ที่ดึงจากเอกสาร
 LAB_RESULTS_PREFIX = "_lab_results/"  # _lab_results/{doc_id}.json
+CLINICAL_ANALYSIS_PREFIX = "_clinical_analysis/"  # _clinical_analysis/{doc_id}.json
 
 # Admin users — ใช้สำหรับยืนยันผลแล็บ
 # ตั้งค่าใน Render Dashboard: ADMIN_USERS=hash1,hash2,...
@@ -1870,6 +1871,57 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             logger.warning(f"Lab approve error: {type(e).__name__}")
             return "ขออภัย ไม่สามารถยืนยันผลแล็บได้ในขณะนี้"
 
+    # ── วิเคราะห์แล็บ [document_id] — ดูผลวิเคราะห์ทางคลินิก ──
+    if text_stripped == "วิเคราะห์แล็บ":
+        return "กรุณาระบุรหัสเอกสาร เช่น: วิเคราะห์แล็บ a1b2c3d4"
+    if text_stripped.startswith("วิเคราะห์แล็บ "):
+        doc_id_query = text_stripped[len("วิเคราะห์แล็บ "):].strip()
+        if not doc_id_query:
+            return "กรุณาระบุรหัสเอกสาร เช่น: วิเคราะห์แล็บ a1b2c3d4"
+
+        # ตรวจสอบสิทธิ์ — ต้องเป็นเจ้าของเอกสาร
+        doc = doc_index.get(doc_id_query)
+        if doc is None:
+            return "ไม่พบเอกสารที่ตรงกับรหัสนี้"
+
+        doc_owner = doc.get("owner_hash", "")
+        if doc_owner and doc_owner != user_hash:
+            audit_logger.log("clinical_access_denied", user_hash, {
+                "doc_id": doc.get("document_id", "")[:8],
+            })
+            return "ขออภัย คุณไม่มีสิทธิ์เข้าถึงเอกสารนี้"
+
+        full_doc_id = doc.get("document_id", doc_id_query)
+        clinical_path = f"{CLINICAL_ANALYSIS_PREFIX}{full_doc_id}.json"
+        try:
+            clinical_data = storage.get(clinical_path)
+            if clinical_data is None:
+                audit_logger.log("clinical_analysis_none", user_hash, {
+                    "doc_id": full_doc_id[:8],
+                })
+                return (
+                    "ยังไม่มีผลวิเคราะห์ทางคลินิกสำหรับเอกสารนี้\n"
+                    "กรุณาตรวจสอบว่า:\n"
+                    "1. เอกสารเป็นผลตรวจ Lab\n"
+                    "2. ระบบได้ประมวลผลเรียบร้อยแล้ว"
+                )
+            clinical_dict = json.loads(clinical_data)
+            audit_logger.log("clinical_analysis_view", user_hash, {
+                "doc_id": full_doc_id[:8],
+                "finding_count": clinical_dict.get("finding_count", 0),
+                "ckd_stage": clinical_dict.get("ckd_stage", "UNKNOWN"),
+            })
+            # แสดงข้อความสรุปที่สร้างไว้
+            summary = clinical_dict.get("summary_text_th", "")
+            if summary:
+                return summary
+            return "มีผลวิเคราะห์แต่ไม่สามารถแสดงสรุปได้"
+        except Exception as e:
+            logger.warning(
+                f"Clinical analysis read error: {type(e).__name__}"
+            )
+            return "ขออภัย ไม่สามารถอ่านผลวิเคราะห์ได้ในขณะนี้"
+
     return None  # ไม่ใช่คำสั่งค้นหา
 
 
@@ -3011,6 +3063,38 @@ def process_file_async(
                         f"(doc_id={_doc_id[:8]})"
                     )
 
+            # ── Clinical Analysis V1: วิเคราะห์ผลแล็บด้วย Rule-based Engine ──
+            clinical_analyzed = False
+            if lab_extracted and lab_report and lab_report.results:
+                try:
+                    from clinical_analyzer import analyze_lab_report as run_clinical
+                    clinical_result = run_clinical(lab_report)
+                    if clinical_result.findings:
+                        _clinical_json = json.dumps(
+                            clinical_result.to_dict(), ensure_ascii=False
+                        )
+                        _clinical_path = (
+                            f"{CLINICAL_ANALYSIS_PREFIX}{_doc_id}.json"
+                        )
+                        storage.put(
+                            _clinical_path,
+                            _clinical_json.encode("utf-8"),
+                            content_type="application/json",
+                        )
+                        clinical_analyzed = True
+                        logger.info(
+                            f"Clinical analysis สำเร็จ: doc={_doc_id[:8]}, "
+                            f"findings={len(clinical_result.findings)}, "
+                            f"ckd_stage={clinical_result.ckd_stage}"
+                        )
+                except Exception as ca_err:
+                    # Clinical analysis ล้มเหลวไม่ทำให้ upload ล้มเหลว
+                    logger.warning(
+                        f"Clinical analysis ล้มเหลว: "
+                        f"{type(ca_err).__name__} "
+                        f"(doc_id={_doc_id[:8]})"
+                    )
+
             # บันทึก log — ไม่เก็บ path หรือชื่อไฟล์ต้นฉบับ
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
@@ -3021,6 +3105,7 @@ def process_file_async(
                 "file_type": ext_now,
                 "classification": result,
                 "lab_extracted": lab_extracted,
+                "clinical_analyzed": clinical_analyzed,
             }
             log_file = os.path.join(BASE_DIR, "logs", "classification_log.jsonl")
             with open(log_file, "a", encoding="utf-8") as f:
@@ -3071,12 +3156,26 @@ def process_file_async(
             }.get(ext, ext)
 
             if reply_token:
-                reply_message(
-                    reply_token,
-                    f"รับเอกสารแล้ว ({file_type_name})\n"
-                    f"ประเภท: {cat_name}\n"
+                _reply_lines = [
+                    f"รับเอกสารแล้ว ({file_type_name})",
+                    f"ประเภท: {cat_name}",
                     f"จัดเก็บใน: {FOLDERS.get(category, FOLDERS['review'])}",
-                )
+                ]
+                if lab_extracted:
+                    _reply_lines.append(
+                        f"📋 พบผลตรวจ {len(lab_report.results)} รายการ"
+                    )
+                    _reply_lines.append(
+                        f"พิมพ์ 'ผลแล็บ {_doc_id[:8]}' เพื่อดูผลตรวจ"
+                    )
+                if clinical_analyzed:
+                    _reply_lines.append(
+                        f"🔬 วิเคราะห์ทางคลินิกเสร็จสิ้น"
+                    )
+                    _reply_lines.append(
+                        f"พิมพ์ 'วิเคราะห์แล็บ {_doc_id[:8]}' เพื่อดูผลวิเคราะห์"
+                    )
+                reply_message(reply_token, "\n".join(_reply_lines))
         except RuntimeError as e:
             # Production mode — GCS ล้มเหลว ต้องแจ้งผู้ใช้
             # บันทึก error message เต็ม (ไม่มี path/ข้อมูลผู้ป่วย
