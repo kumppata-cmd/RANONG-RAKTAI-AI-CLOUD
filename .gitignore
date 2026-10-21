@@ -50,3 +50,4 @@ desktop.ini
 
 # ── ngrok (ไม่ใช้บน Cloud) ──────────────────────
 ngrok*
+server.py.backup.*
