@@ -999,6 +999,24 @@ class DocumentIndex:
                     break
         return results
 
+    def list_by_owner(self, owner_hash: str, limit: int = 100) -> list[dict]:
+        """รายการเอกสารทั้งหมดของ owner — Fail Closed."""
+        self._ensure_fresh()
+        results = []
+        for doc in self._docs:
+            doc_owner = doc.get("owner_hash", "")
+            if not doc_owner or doc_owner != owner_hash:
+                continue
+            results.append(doc)
+            if len(results) >= limit:
+                break
+        return results
+
+    def list_all(self, limit: int = 1000) -> list[dict]:
+        """รายการเอกสารทั้งหมด — สำหรับ admin KPI เท่านั้น."""
+        self._ensure_fresh()
+        return self._docs[:limit]
+
     def recent_by_owner(self, owner_hash: str, n: int = 5) -> list[dict]:
         """เอกสารล่าสุด n ชิ้นของ owner — Fail Closed."""
         self._ensure_fresh()
@@ -1641,6 +1659,10 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             "  ยืนยันผลแล็บก่อนนำไปใช้\n\n"
             "📊 แนวโน้มแล็บ [เดือน/3เดือน/6เดือน/ปี]\n"
             "  ดูแนวโน้มผลตรวจ Lab ตามช่วงเวลา\n\n"
+            "📋 รายงานแล็บ\n"
+            "  ดูรายงานสรุป KPI ผลตรวจของคุณ\n\n"
+            "📊 KPI (เฉพาะผู้ดูแล)\n"
+            "  ดูรายงาน KPI รวมของคลินิก\n\n"
             "ℹ️ สถานะ\n"
             "  ตรวจสอบระบบ"
         )
@@ -1655,7 +1677,9 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 or text_stripped.startswith("ผลแล็บ ")
                 or text_stripped.startswith("ยืนยันผลแล็บ ")
                 or text_stripped.startswith("แนวโน้มแล็บ")
-                or text_stripped == "แนวโน้มแล็บ"):
+                or text_stripped == "แนวโน้มแล็บ"
+                or text_stripped == "รายงานแล็บ"
+                or text_stripped == "KPI"):
             audit_logger.log("unauthorized_access", user_hash, {
                 "command": text_stripped[:20]
             })
@@ -2008,6 +2032,136 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         except Exception as e:
             logger.warning(f"Trend analysis error: {type(e).__name__}")
             return "ขออภัย ไม่สามารถวิเคราะห์แนวโน้มได้ในขณะนี้"
+
+    # ── รายงานแล็บ — สรุป KPI ผลตรวจรายบุคคล ──
+    if text_stripped == "รายงานแล็บ":
+        try:
+            from clinical_reports import (
+                generate_patient_report,
+                patient_report_text_th,
+            )
+
+            # ดึงรายการเอกสารของผู้ใช้
+            user_docs = doc_index.list_by_owner(user_hash, limit=200)
+            doc_count = len(user_docs) if user_docs else 0
+
+            # ดึงผลแล็บและผลวิเคราะห์จาก GCS
+            lab_reports = []
+            clinical_analyses = []
+            for doc_meta in (user_docs or []):
+                did = doc_meta.get("document_id", "")
+                if not did:
+                    continue
+                # Lab results
+                lab_path = f"{LAB_RESULTS_PREFIX}{did}.json"
+                try:
+                    lab_data = storage.get(lab_path)
+                    if lab_data:
+                        lab_reports.append(json.loads(lab_data))
+                except Exception:
+                    pass
+                # Clinical analyses
+                ca_path = f"{CLINICAL_ANALYSIS_PREFIX}{did}.json"
+                try:
+                    ca_data = storage.get(ca_path)
+                    if ca_data:
+                        clinical_analyses.append(json.loads(ca_data))
+                except Exception:
+                    pass
+
+            if not lab_reports and not clinical_analyses:
+                return (
+                    "ไม่พบข้อมูลผลตรวจ Lab หรือผลวิเคราะห์ของคุณ\n"
+                    "กรุณาอัปโหลดเอกสารผลตรวจ Lab ก่อน"
+                )
+
+            kpi = generate_patient_report(
+                lab_reports=lab_reports,
+                clinical_analyses=clinical_analyses,
+                doc_count=doc_count,
+                owner_hash=user_hash,
+            )
+
+            audit_logger.log("patient_report_view", user_hash, {
+                "total_documents": doc_count,
+                "total_lab_reports": len(lab_reports),
+                "total_clinical_analyses": len(clinical_analyses),
+                "ckd_stage": kpi.latest_ckd_stage,
+            })
+
+            return patient_report_text_th(kpi)
+
+        except Exception as e:
+            logger.warning(f"Patient report error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถสร้างรายงานได้ในขณะนี้"
+
+    # ── KPI — รายงาน KPI รวมคลินิก (admin only) ──
+    if text_stripped == "KPI":
+        if user_hash not in ADMIN_USERS:
+            return "คำสั่งนี้สำหรับผู้ดูแลระบบเท่านั้น"
+
+        try:
+            from clinical_reports import (
+                generate_patient_report,
+                generate_clinic_summary,
+                clinic_summary_text_th,
+            )
+
+            # ดึงรายชื่อ owner ทั้งหมดจาก index
+            all_docs = doc_index.list_all(limit=1000)
+            total_docs = len(all_docs) if all_docs else 0
+
+            # จัดกลุ่มเอกสารตาม owner
+            owner_docs: dict[str, list] = {}
+            for doc_meta in (all_docs or []):
+                oh = doc_meta.get("owner_hash", "")
+                if oh:
+                    owner_docs.setdefault(oh, []).append(doc_meta)
+
+            # สร้าง PatientKPI ต่อ owner (ไม่เก็บ identity)
+            all_kpis = []
+            for oh, docs in owner_docs.items():
+                lab_reports = []
+                clinical_analyses = []
+                for doc_meta in docs:
+                    did = doc_meta.get("document_id", "")
+                    if not did:
+                        continue
+                    lab_path = f"{LAB_RESULTS_PREFIX}{did}.json"
+                    try:
+                        lab_data = storage.get(lab_path)
+                        if lab_data:
+                            lab_reports.append(json.loads(lab_data))
+                    except Exception:
+                        pass
+                    ca_path = f"{CLINICAL_ANALYSIS_PREFIX}{did}.json"
+                    try:
+                        ca_data = storage.get(ca_path)
+                        if ca_data:
+                            clinical_analyses.append(json.loads(ca_data))
+                    except Exception:
+                        pass
+
+                pkpi = generate_patient_report(
+                    lab_reports=lab_reports,
+                    clinical_analyses=clinical_analyses,
+                    doc_count=len(docs),
+                    owner_hash=oh,
+                )
+                all_kpis.append(pkpi)
+
+            clinic = generate_clinic_summary(all_kpis, total_docs)
+
+            audit_logger.log("clinic_kpi_view", user_hash, {
+                "total_patients": clinic.total_patients,
+                "total_documents": clinic.total_documents,
+            })
+
+            return clinic_summary_text_th(clinic)
+
+        except Exception as e:
+            logger.warning(f"Clinic KPI error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถสร้างรายงาน KPI ได้ในขณะนี้"
 
     return None  # ไม่ใช่คำสั่งค้นหา
 
