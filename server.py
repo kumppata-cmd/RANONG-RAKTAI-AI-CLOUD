@@ -2887,6 +2887,46 @@ def verify_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def push_message(user_id: str, text: str):
+    """ส่งข้อความ Push ไปยัง LINE user.
+
+    ใช้สำหรับแจ้งเตือนผลตรวจผิดปกติ
+    ไม่ log user_id หรือเนื้อหาข้อความ
+    """
+    if IS_TESTING and not IS_TESTING_DOCS:
+        logger.info("TESTING MODE: ไม่ส่ง push message")
+        return
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        return
+    if not user_id:
+        return
+    url = "https://api.line.me/v2/bot/message/push"
+    request_body = json.dumps(
+        {
+            "to": user_id,
+            "messages": [{"type": "text", "text": text[:5000]}],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        resp = http_requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            data=request_body,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        logger.info(f"Push message สำเร็จ (status={resp.status_code})")
+    except Exception as e:
+        status = getattr(getattr(e, "response", None), "status_code", "-")
+        logger.error(
+            f"Push message ไม่สำเร็จ: {type(e).__name__} (status={status})"
+        )
+
+
 def reply_message(reply_token: str, text: str):
     """ส่งข้อความตอบกลับไปยัง LINE."""
     if IS_TESTING and not IS_TESTING_DOCS:
@@ -3532,6 +3572,73 @@ def process_file_async(
                             f"Lab extraction สำเร็จ: doc={_doc_id[:8]}, "
                             f"results={len(lab_report.results)}"
                         )
+
+                        # ── Lab Alert V1: แจ้งเตือนผลตรวจผิดปกติ ──
+                        try:
+                            from lab_alert import (
+                                check_lab_alerts,
+                                format_user_alert_th,
+                                format_admin_alert_th,
+                            )
+                            _alert_summary = check_lab_alerts(lab_report)
+
+                            # แจ้งเตือนผู้ใช้ (critical + warning)
+                            if _alert_summary.should_notify_user and _line_user_id:
+                                _user_alert_text = format_user_alert_th(
+                                    _alert_summary
+                                )
+                                if _user_alert_text:
+                                    push_message(_line_user_id, _user_alert_text)
+                                    logger.info(
+                                        f"Lab alert sent to user: "
+                                        f"doc={_doc_id[:8]}, "
+                                        f"critical={_alert_summary.critical_count}, "
+                                        f"warning={_alert_summary.warning_count}"
+                                    )
+
+                            # แจ้งเตือน admin (เฉพาะ critical)
+                            if _alert_summary.should_notify_admin:
+                                _admin_alert_text = format_admin_alert_th(
+                                    _alert_summary,
+                                    owner_hash_prefix=user_hash[:8],
+                                )
+                                if _admin_alert_text:
+                                    # ส่งให้ admin ทุกคนที่ลงทะเบียน
+                                    # ใช้ push_message กับ admin user_id
+                                    # หมายเหตุ: ADMIN_USERS เก็บเป็น hash
+                                    # ไม่สามารถ push กลับไปยัง admin ได้
+                                    # เก็บ alert ไว้ใน GCS แทน
+                                    _alert_path = (
+                                        f"_alerts/{_doc_id}.json"
+                                    )
+                                    import json as _json_alert
+                                    _alert_data = {
+                                        "document_id": _doc_id[:8],
+                                        "specimen_date": lab_report.specimen_date,
+                                        "critical_count": _alert_summary.critical_count,
+                                        "warning_count": _alert_summary.warning_count,
+                                        "created_at": datetime.now().isoformat(),
+                                        "notified_user": bool(_line_user_id),
+                                    }
+                                    storage.put(
+                                        _alert_path,
+                                        _json_alert.dumps(
+                                            _alert_data, ensure_ascii=False
+                                        ).encode("utf-8"),
+                                        content_type="application/json",
+                                    )
+                                    logger.info(
+                                        f"Critical alert stored: "
+                                        f"doc={_doc_id[:8]}"
+                                    )
+                        except Exception as alert_err:
+                            # Alert ล้มเหลวไม่ทำให้ upload ล้มเหลว
+                            logger.warning(
+                                f"Lab alert ล้มเหลว: "
+                                f"{type(alert_err).__name__} "
+                                f"(doc_id={_doc_id[:8]})"
+                            )
+
                 except Exception as lab_err:
                     # Lab extraction ล้มเหลวไม่ทำให้ upload ล้มเหลว
                     logger.warning(
@@ -3818,7 +3925,8 @@ def webhook():
         if is_redelivery:
             logger.info(f"event นี้เป็น redelivery (id={event_id[:8]}…)")
 
-        user_hash = hash_user_id(event.get("source", {}).get("userId", ""))
+        _line_user_id = event.get("source", {}).get("userId", "")
+        user_hash = hash_user_id(_line_user_id)
 
         if event_type == "message":
             msg = event.get("message", {})
