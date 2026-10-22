@@ -28,6 +28,7 @@ COPY lab_extractor.py .
 COPY lab_rules.py .
 COPY clinical_analyzer.py .
 COPY lab_tracker.py .
+COPY clinical_reports.py .
 
 # สร้างโฟลเดอร์ชั่วคราว
 RUN mkdir -p /tmp/ranong_raktai/logs
