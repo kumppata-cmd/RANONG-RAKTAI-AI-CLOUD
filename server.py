@@ -1640,39 +1640,40 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             f"(หลายคนคั่นด้วยเครื่องหมายจุลภาค){salt_warning}"
         )
 
-    # ช่วยเหลือ / help
-    if text_stripped in ("ช่วยเหลือ", "help", "คำสั่ง"):
-        return (
-            "📋 คำสั่งค้นหาเอกสาร:\n\n"
-            "🔍 ค้นหา [คำค้น]\n"
-            "  ค้นหาด้วยประเภท วันที่ หรือเนื้อหา\n"
-            "  เช่น: ค้นหา ผลแล็บ\n\n"
-            "📄 รายการล่าสุด\n"
-            "  แสดง 5 เอกสารล่าสุดของคุณ\n\n"
-            "📖 อ่านเอกสาร [รหัส]\n"
-            "  อ่านเนื้อหาเอกสารโดยตรง\n\n"
-            "📎 ขอไฟล์ [รหัส]\n"
-            "  ขอลิงก์ดาวน์โหลดเอกสาร\n\n"
-            "🔬 ผลแล็บ [รหัส]\n"
-            "  ดูผลตรวจ Lab ที่ดึงจากเอกสาร\n\n"
-            "✅ ยืนยันผลแล็บ [รหัส] (เฉพาะผู้ดูแล)\n"
-            "  ยืนยันผลแล็บก่อนนำไปใช้\n\n"
-            "📊 แนวโน้มแล็บ [เดือน/3เดือน/6เดือน/ปี]\n"
-            "  ดูแนวโน้มผลตรวจ Lab ตามช่วงเวลา\n\n"
-            "📋 รายงานแล็บ\n"
-            "  ดูรายงานสรุป KPI ผลตรวจของคุณ\n\n"
-            "📊 KPI (เฉพาะผู้ดูแล)\n"
-            "  ดูรายงาน KPI รวมของคลินิก\n\n"
-            "💊 ตรวจยา [รายการยา]\n"
-            "  ตรวจสอบยาที่เป็นพิษต่อไตและปรับขนาดยาตาม eGFR\n"
-            "  เช่น: ตรวจยา Metformin, Ibuprofen, Losartan\n\n"
-            "ℹ️ สถานะ\n"
-            "  ตรวจสอบระบบ"
-        )
+    # ── Parse command ด้วย line_bot_enhancer ──
+    from line_bot_enhancer import (
+        parse_command as _parse_cmd, CommandType,
+        parse_search_query, smart_search,
+        format_search_results_enhanced,
+        generate_help_text,
+        compute_user_stats, user_stats_text_th,
+        find_latest_lab_doc,
+    )
+    parsed = _parse_cmd(text_stripped)
+
+    # ช่วยเหลือ / help / เมนู
+    if parsed.command_type == CommandType.HELP:
+        is_admin = user_hash in ADMIN_USERS
+        has_docs = doc_index.count_by_owner(user_hash) > 0 if hasattr(doc_index, 'count_by_owner') else True
+        return generate_help_text(is_admin=is_admin, has_docs=has_docs)
 
     # Authorization check — ต้องผ่านก่อนใช้คำสั่งค้นหา/อ่าน
+    # ใช้ parsed command แทนการเช็คทีละคำสั่ง
+    PROTECTED_COMMANDS = {
+        CommandType.SEARCH, CommandType.RECENT, CommandType.READ_DOC,
+        CommandType.REQUEST_FILE, CommandType.LAB_RESULT,
+        CommandType.APPROVE_LAB, CommandType.CLINICAL_ANALYSIS,
+        CommandType.TREND, CommandType.PATIENT_REPORT,
+        CommandType.CLINIC_KPI, CommandType.MEDICATION_REVIEW,
+        CommandType.MY_STATS,
+    }
     if not is_authorized_user(user_hash):
-        # ค้นหา / รายการล่าสุด / อ่านเอกสาร / ขอไฟล์ / ผลแล็บ / ยืนยันผลแล็บ → ต้อง authorized
+        if parsed.command_type in PROTECTED_COMMANDS:
+            audit_logger.log("unauthorized_access", user_hash, {
+                "command": text_stripped[:20]
+            })
+            return "ขออภัย คุณไม่มีสิทธิ์ใช้งานระบบค้นหาเอกสาร\nกรุณาติดต่อผู้ดูแลระบบ"
+        # ตรวจสอบคำสั่งเดิมที่อาจยังไม่ถูก parse
         if (text_stripped.startswith("ค้นหา ")
                 or text_stripped == "รายการล่าสุด"
                 or text_stripped.startswith("อ่านเอกสาร ")
@@ -1690,31 +1691,99 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             return "ขออภัย คุณไม่มีสิทธิ์ใช้งานระบบค้นหาเอกสาร\nกรุณาติดต่อผู้ดูแลระบบ"
         return None  # ไม่ใช่คำสั่งค้นหา
 
-    # ค้นหา [คำค้น] — owner-aware
+    # ── สถิติ — แสดงสรุปเอกสารของผู้ใช้ ──
+    if parsed.command_type == CommandType.MY_STATS:
+        try:
+            user_docs = doc_index.list_by_owner(user_hash, limit=200)
+            # นับผลแล็บและผลวิเคราะห์จาก GCS
+            lab_count = 0
+            approved_count = 0
+            pending_count = 0
+            clinical_count = 0
+            for d in user_docs:
+                did = d.get("document_id", "")
+                lab_path = f"{LAB_RESULTS_PREFIX}{did}.json"
+                lab_data = storage.get(lab_path)
+                if lab_data:
+                    lab_count += 1
+                    ld = json.loads(lab_data)
+                    if ld.get("approved"):
+                        approved_count += 1
+                    else:
+                        pending_count += 1
+                clinical_path = f"{CLINICAL_ANALYSIS_PREFIX}{did}.json"
+                if storage.get(clinical_path):
+                    clinical_count += 1
+            stats = compute_user_stats(
+                user_docs,
+                lab_report_count=lab_count,
+                clinical_analysis_count=clinical_count,
+                approved_count=approved_count,
+                pending_count=pending_count,
+            )
+            audit_logger.log("user_stats", user_hash, {
+                "total_docs": stats.total_documents,
+            })
+            return user_stats_text_th(stats)
+        except Exception as e:
+            logger.warning(f"Stats error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถแสดงสถิติได้ในขณะนี้"
+
+    # ค้นหา [คำค้น] — owner-aware + smart search
+    if parsed.command_type == CommandType.SEARCH:
+        query = parsed.args
+        if not query:
+            return "กรุณาระบุคำค้น เช่น: ค้นหา ผลแล็บ"
+        # ใช้ smart search ที่รองรับ multi-keyword + category + date filter
+        search_filter = parse_search_query(query)
+        all_docs = doc_index.list_by_owner(user_hash, limit=200)
+        results = smart_search(
+            all_docs, search_filter, user_hash,
+            max_results=SEARCH_MAX_RESULTS,
+        )
+        audit_logger.log("search", user_hash, {
+            "query": query[:50],
+            "results_count": len(results),
+            "category_filter": search_filter.category or "",
+            "date_filter": search_filter.date_range_days or 0,
+        })
+        return format_search_results_enhanced(results, query=query)
+    # รองรับคำสั่งเดิม "ค้นหา ..." ที่ parser อาจไม่จับ
     if text_stripped.startswith("ค้นหา "):
         query = text_stripped[len("ค้นหา "):].strip()
         if not query:
             return "กรุณาระบุคำค้น เช่น: ค้นหา ผลแล็บ"
-        results = doc_index.search_by_owner(query, user_hash)
+        search_filter = parse_search_query(query)
+        all_docs = doc_index.list_by_owner(user_hash, limit=200)
+        results = smart_search(
+            all_docs, search_filter, user_hash,
+            max_results=SEARCH_MAX_RESULTS,
+        )
         audit_logger.log("search", user_hash, {
             "query": query[:50],
             "results_count": len(results),
         })
-        return format_search_results(results)
+        return format_search_results_enhanced(results, query=query)
 
     # รายการล่าสุด — owner-aware
-    if text_stripped == "รายการล่าสุด":
+    if parsed.command_type == CommandType.RECENT or text_stripped == "รายการล่าสุด":
         results = doc_index.recent_by_owner(user_hash, 5)
         audit_logger.log("list_recent", user_hash, {
             "results_count": len(results),
         })
         if not results:
             return "ยังไม่มีเอกสารในระบบ"
-        return format_search_results(results)
+        return format_search_results_enhanced(results)
 
     # อ่านเอกสาร [document_id] — อ่านเนื้อหาจาก GCS โดยตรง
-    if text_stripped.startswith("อ่านเอกสาร "):
-        doc_id_query = text_stripped[len("อ่านเอกสาร "):].strip()
+    # รองรับ alias: อ่าน [รหัส]
+    _read_doc_id = None
+    if parsed.command_type == CommandType.READ_DOC:
+        _read_doc_id = parsed.args
+    elif text_stripped.startswith("อ่านเอกสาร "):
+        _read_doc_id = text_stripped[len("อ่านเอกสาร "):].strip()
+    if _read_doc_id is not None:
+        doc_id_query = _read_doc_id
         if not doc_id_query:
             return "กรุณาระบุรหัสเอกสาร เช่น: อ่านเอกสาร a1b2c3d4"
 
@@ -1758,10 +1827,16 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         return format_document_text_for_line(content.get("text", ""), doc)
 
     # ขอไฟล์ [document_id] — owner-aware → ตอบด้วย Flex Message
-    if text_stripped == "ขอไฟล์":
-        return "กรุณาระบุรหัสเอกสาร เช่น: ขอไฟล์ a1b2c3d4"
-    if text_stripped.startswith("ขอไฟล์ "):
-        doc_id_query = text_stripped[len("ขอไฟล์ "):].strip()
+    # รองรับ alias: ดาวน์โหลด [รหัส]
+    _file_doc_id = None
+    if parsed.command_type == CommandType.REQUEST_FILE:
+        _file_doc_id = parsed.args
+    elif text_stripped == "ขอไฟล์":
+        _file_doc_id = ""
+    elif text_stripped.startswith("ขอไฟล์ "):
+        _file_doc_id = text_stripped[len("ขอไฟล์ "):].strip()
+    if _file_doc_id is not None:
+        doc_id_query = _file_doc_id
         if not doc_id_query:
             return "กรุณาระบุรหัสเอกสาร เช่น: ขอไฟล์ a1b2c3d4"
 
@@ -1799,10 +1874,25 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         return build_file_flex_message(doc, download_url)
 
     # ── ผลแล็บ [document_id] — ดูผล Lab ที่ดึงจากเอกสาร ──
-    if text_stripped == "ผลแล็บ":
-        return "กรุณาระบุรหัสเอกสาร เช่น: ผลแล็บ a1b2c3d4"
-    if text_stripped.startswith("ผลแล็บ "):
-        doc_id_query = text_stripped[len("ผลแล็บ "):].strip()
+    # รองรับ alias: ผลตรวจ, ผลเลือด, ผลแล็บล่าสุด
+    _lab_doc_id = None
+    if parsed.command_type == CommandType.LAB_RESULT:
+        if parsed.args:
+            _lab_doc_id = parsed.args
+        else:
+            # "ผลแล็บล่าสุด" — ค้นหา lab doc ล่าสุดของผู้ใช้
+            all_docs = doc_index.list_by_owner(user_hash, limit=100)
+            latest = find_latest_lab_doc(all_docs, user_hash)
+            if latest:
+                _lab_doc_id = latest.get("document_id", "")
+            else:
+                return "ไม่พบผลตรวจ Lab ในระบบ\nกรุณาอัปโหลดเอกสารผลตรวจก่อน"
+    elif text_stripped == "ผลแล็บ":
+        return "กรุณาระบุรหัสเอกสาร เช่น: ผลแล็บ a1b2c3d4\nหรือพิมพ์ 'ผลแล็บล่าสุด'"
+    elif text_stripped.startswith("ผลแล็บ "):
+        _lab_doc_id = text_stripped[len("ผลแล็บ "):].strip()
+    if _lab_doc_id is not None:
+        doc_id_query = _lab_doc_id
         if not doc_id_query:
             return "กรุณาระบุรหัสเอกสาร เช่น: ผลแล็บ a1b2c3d4"
 
@@ -1845,12 +1935,19 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             return "ขออภัย ไม่สามารถอ่านผลแล็บได้ในขณะนี้"
 
     # ── ยืนยันผลแล็บ [document_id] — Admin only ──
-    if text_stripped == "ยืนยันผลแล็บ":
-        return "กรุณาระบุรหัสเอกสาร เช่น: ยืนยันผลแล็บ a1b2c3d4"
-    if text_stripped.startswith("ยืนยันผลแล็บ "):
-        doc_id_query = text_stripped[len("ยืนยันผลแล็บ "):].strip()
-        if not doc_id_query:
+    # รองรับ alias: approve [id]
+    _approve_doc_id = None
+    if parsed.command_type == CommandType.APPROVE_LAB:
+        _approve_doc_id = parsed.args if parsed.args else None
+    elif text_stripped == "ยืนยันผลแล็บ":
+        _approve_doc_id = None  # will prompt for ID
+    elif text_stripped.startswith("ยืนยันผลแล็บ "):
+        _approve_doc_id = text_stripped[len("ยืนยันผลแล็บ "):].strip()
+
+    if parsed.command_type == CommandType.APPROVE_LAB or text_stripped == "ยืนยันผลแล็บ" or text_stripped.startswith("ยืนยันผลแล็บ "):
+        if not _approve_doc_id:
             return "กรุณาระบุรหัสเอกสาร เช่น: ยืนยันผลแล็บ a1b2c3d4"
+        doc_id_query = _approve_doc_id
 
         # ต้องเป็น Admin เท่านั้น
         if user_hash not in ADMIN_USERS:
@@ -1904,10 +2001,25 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             return "ขออภัย ไม่สามารถยืนยันผลแล็บได้ในขณะนี้"
 
     # ── วิเคราะห์แล็บ [document_id] — ดูผลวิเคราะห์ทางคลินิก ──
-    if text_stripped == "วิเคราะห์แล็บ":
-        return "กรุณาระบุรหัสเอกสาร เช่น: วิเคราะห์แล็บ a1b2c3d4"
-    if text_stripped.startswith("วิเคราะห์แล็บ "):
-        doc_id_query = text_stripped[len("วิเคราะห์แล็บ "):].strip()
+    # รองรับ alias: วิเคราะห์, วิเคราะห์แล็บล่าสุด
+    _analyze_doc_id = None
+    if parsed.command_type == CommandType.CLINICAL_ANALYSIS:
+        if parsed.args:
+            _analyze_doc_id = parsed.args
+        else:
+            # "วิเคราะห์แล็บล่าสุด" — ค้นหา lab doc ล่าสุด
+            all_docs = doc_index.list_by_owner(user_hash, limit=100)
+            latest = find_latest_lab_doc(all_docs, user_hash)
+            if latest:
+                _analyze_doc_id = latest.get("document_id", "")
+            else:
+                return "ไม่พบผลตรวจ Lab ในระบบ\nกรุณาอัปโหลดเอกสารผลตรวจก่อน"
+    elif text_stripped == "วิเคราะห์แล็บ":
+        return "กรุณาระบุรหัสเอกสาร เช่น: วิเคราะห์แล็บ a1b2c3d4\nหรือพิมพ์ 'วิเคราะห์แล็บล่าสุด'"
+    elif text_stripped.startswith("วิเคราะห์แล็บ "):
+        _analyze_doc_id = text_stripped[len("วิเคราะห์แล็บ "):].strip()
+    if _analyze_doc_id is not None:
+        doc_id_query = _analyze_doc_id
         if not doc_id_query:
             return "กรุณาระบุรหัสเอกสาร เช่น: วิเคราะห์แล็บ a1b2c3d4"
 
@@ -1955,6 +2067,7 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             return "ขออภัย ไม่สามารถอ่านผลวิเคราะห์ได้ในขณะนี้"
 
     # ── แนวโน้มแล็บ [period] — ดูแนวโน้ม Lab ตามช่วงเวลา ──
+    # รองรับ alias: แนวโน้ม, trend
     PERIOD_MAP = {
         "เดือน": "monthly",
         "รายเดือน": "monthly",
@@ -1965,17 +2078,25 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         "ปี": "annual",
         "รายปี": "annual",
     }
-    if text_stripped == "แนวโน้มแล็บ":
-        return (
-            "📊 ดูแนวโน้มผลตรวจ Lab\n"
-            "กรุณาระบุช่วงเวลา:\n"
-            "  แนวโน้มแล็บ เดือน\n"
-            "  แนวโน้มแล็บ 3เดือน\n"
-            "  แนวโน้มแล็บ 6เดือน\n"
-            "  แนวโน้มแล็บ ปี"
-        )
-    if text_stripped.startswith("แนวโน้มแล็บ "):
-        period_input = text_stripped[len("แนวโน้มแล็บ "):].strip()
+    _trend_help = (
+        "📊 ดูแนวโน้มผลตรวจ Lab\n"
+        "กรุณาระบุช่วงเวลา:\n"
+        "  แนวโน้มแล็บ เดือน\n"
+        "  แนวโน้มแล็บ 3เดือน\n"
+        "  แนวโน้มแล็บ 6เดือน\n"
+        "  แนวโน้มแล็บ ปี"
+    )
+    _trend_input = None
+    if parsed.command_type == CommandType.TREND:
+        _trend_input = parsed.args if parsed.args else None
+        if _trend_input is None:
+            return _trend_help
+    elif text_stripped == "แนวโน้มแล็บ":
+        return _trend_help
+    elif text_stripped.startswith("แนวโน้มแล็บ "):
+        _trend_input = text_stripped[len("แนวโน้มแล็บ "):].strip()
+    if _trend_input is not None:
+        period_input = _trend_input
         period = PERIOD_MAP.get(period_input)
         if period is None:
             return (
@@ -2038,7 +2159,8 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             return "ขออภัย ไม่สามารถวิเคราะห์แนวโน้มได้ในขณะนี้"
 
     # ── รายงานแล็บ — สรุป KPI ผลตรวจรายบุคคล ──
-    if text_stripped == "รายงานแล็บ":
+    # รองรับ alias: รายงาน, สรุปผลตรวจ, report
+    if text_stripped == "รายงานแล็บ" or parsed.command_type == CommandType.PATIENT_REPORT:
         try:
             from clinical_reports import (
                 generate_patient_report,
@@ -2168,20 +2290,26 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             return "ขออภัย ไม่สามารถสร้างรายงาน KPI ได้ในขณะนี้"
 
     # ── ตรวจยา [medication_list] — ตรวจสอบยาเพื่อไต ──
-    if text_stripped == "ตรวจยา":
-        return (
-            "กรุณาระบุรายการยา เช่น:\n"
-            "ตรวจยา Metformin, Ibuprofen, Losartan\n\n"
-            "ระบบจะตรวจสอบ:\n"
-            "• ยาที่เป็นพิษต่อไต\n"
-            "• การปรับขนาดยาตาม eGFR\n"
-            "• ปฏิกิริยายากับผลแล็บ\n"
-            "• ภาวะน้ำในร่างกาย"
-        )
-    if text_stripped.startswith("ตรวจยา "):
-        med_input = text_stripped[len("ตรวจยา "):].strip()
+    # รองรับ alias: เช็คยา, ตรวจสอบยา, med
+    _med_input = None
+    if parsed.command_type == CommandType.MEDICATION_REVIEW:
+        _med_input = parsed.args
+    elif text_stripped == "ตรวจยา":
+        _med_input = ""
+    elif text_stripped.startswith("ตรวจยา "):
+        _med_input = text_stripped[len("ตรวจยา "):].strip()
+    if _med_input is not None:
+        med_input = _med_input
         if not med_input:
-            return "กรุณาระบุรายการยา เช่น: ตรวจยา Metformin, Ibuprofen"
+            return (
+                "กรุณาระบุรายการยา เช่น:\n"
+                "ตรวจยา Metformin, Ibuprofen, Losartan\n\n"
+                "ระบบจะตรวจสอบ:\n"
+                "• ยาที่เป็นพิษต่อไต\n"
+                "• การปรับขนาดยาตาม eGFR\n"
+                "• ปฏิกิริยายากับผลแล็บ\n"
+                "• ภาวะน้ำในร่างกาย"
+            )
 
         try:
             from medication_review import (
@@ -3778,14 +3906,12 @@ def webhook():
                 else:
                     reply_message(
                         reply_token,
-                        "ส่งภาพหรือไฟล์เอกสาร (PDF, TXT, JPG, PNG)\n"
-                        "เพื่อจำแนกประเภทอัตโนมัติ\n\n"
-                        "📋 คำสั่งค้นหา:\n"
-                        "  ค้นหา [คำค้น]\n"
-                        "  รายการล่าสุด\n"
-                        "  ขอไฟล์ [รหัส]\n"
-                        "  ช่วยเหลือ\n"
-                        "  สถานะ",
+                        "📄 ส่งภาพหรือไฟล์เพื่อจำแนกประเภทอัตโนมัติ\n\n"
+                        "คำสั่งที่ใช้บ่อย:\n"
+                        "  ค้นหา [คำค้น] — ค้นหาเอกสาร\n"
+                        "  ผลแล็บล่าสุด — ดูผลตรวจล่าสุด\n"
+                        "  สถิติ — ดูสถิติเอกสาร\n"
+                        "  ช่วยเหลือ — ดูคำสั่งทั้งหมด",
                     )
             else:
                 logger.info(f"ข้าม message type: {msg_type}")
@@ -3793,9 +3919,10 @@ def webhook():
         elif event_type == "follow":
             reply_message(
                 reply_token,
-                "ยินดีต้อนรับสู่ระบบจัดการเอกสาร คลินิกระนอง รักษ์ไต\n"
-                "ส่งภาพหรือไฟล์ (PDF, TXT, JPG, PNG)\n"
-                "เพื่อจำแนกประเภทอัตโนมัติ",
+                "🏥 ยินดีต้อนรับสู่ระบบจัดการเอกสาร คลินิกระนอง รักษ์ไต\n\n"
+                "📄 ส่งภาพหรือไฟล์เพื่อจำแนกประเภทอัตโนมัติ\n"
+                "🔍 พิมพ์ 'ค้นหา' ตามด้วยคำค้น เพื่อค้นหาเอกสาร\n"
+                "❓ พิมพ์ 'ช่วยเหลือ' เพื่อดูคำสั่งทั้งหมด",
             )
 
     return jsonify({"status": "ok"}), 200
