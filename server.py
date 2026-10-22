@@ -2077,13 +2077,54 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         try:
             lab_data = storage.get(lab_path)
             if lab_data is None:
-                audit_logger.log("lab_result_none", user_hash, {
-                    "doc_id": full_doc_id[:8],
-                })
-                return (
-                    "ยังไม่มีผลแล็บสำหรับเอกสารนี้\n"
-                    "เอกสารอาจไม่ใช่ผลตรวจ Lab หรือยังไม่ได้ประมวลผล"
-                )
+                # ── On-demand re-extraction ──
+                # ถ้า lab JSON ไม่มี แต่เอกสารเป็น lab และมี extracted_text
+                # ให้ลอง extract ใหม่อัตโนมัติ (แก้ปัญหา silent failure)
+                _reextracted = False
+                _doc_cat = doc.get("category", "")
+                _doc_text = doc.get("extracted_text", "")
+                if _doc_cat == "lab" and _doc_text and len(_doc_text.strip()) >= 50:
+                    try:
+                        from lab_extractor import extract_lab_results_from_text
+                        from lab_models import ExtractionMethod
+                        _re_method = ExtractionMethod.REGEX_PDF_TEXT.value
+                        _re_report = extract_lab_results_from_text(
+                            _doc_text, full_doc_id, _re_method
+                        )
+                        if _re_report.results:
+                            _re_json = _re_report.to_json()
+                            storage.put(
+                                lab_path,
+                                _re_json.encode("utf-8"),
+                                content_type="application/json",
+                                create_only=True,
+                            )
+                            lab_data = _re_json.encode("utf-8")
+                            _reextracted = True
+                            logger.info(
+                                f"On-demand lab re-extraction สำเร็จ: "
+                                f"doc={full_doc_id[:8]}, "
+                                f"results={len(_re_report.results)}"
+                            )
+                            audit_logger.log(
+                                "lab_reextraction_success", user_hash,
+                                {"doc_id": full_doc_id[:8],
+                                 "result_count": len(_re_report.results)},
+                            )
+                    except Exception as reext_err:
+                        logger.warning(
+                            f"On-demand lab re-extraction ล้มเหลว: "
+                            f"{type(reext_err).__name__} "
+                            f"(doc_id={full_doc_id[:8]})"
+                        )
+                if lab_data is None:
+                    audit_logger.log("lab_result_none", user_hash, {
+                        "doc_id": full_doc_id[:8],
+                    })
+                    return (
+                        "ยังไม่มีผลแล็บสำหรับเอกสารนี้\n"
+                        "เอกสารอาจไม่ใช่ผลตรวจ Lab หรือยังไม่ได้ประมวลผล"
+                    )
             from lab_models import LabReport
             lab_report = LabReport.from_dict(json.loads(lab_data))
             audit_logger.log("lab_result_view", user_hash, {
@@ -3818,9 +3859,23 @@ def process_file_async(
 
                 except Exception as lab_err:
                     # Lab extraction ล้มเหลวไม่ทำให้ upload ล้มเหลว
-                    logger.warning(
-                        f"Lab extraction ล้มเหลว: {type(lab_err).__name__} "
-                        f"(doc_id={_doc_id[:8]})"
+                    # แต่ต้อง log รายละเอียดให้เพียงพอสำหรับ debug
+                    import traceback as _tb_mod
+                    _lab_tb = _tb_mod.format_exc()
+                    # sanitize: ไม่ log doc_id เต็ม, ไม่ log ข้อมูลผู้ป่วย
+                    _lab_err_msg = str(lab_err)
+                    # ตัด path ที่อาจมี doc_id เต็ม
+                    if _doc_id and len(_doc_id) > 8 and _doc_id in _lab_err_msg:
+                        _lab_err_msg = _lab_err_msg.replace(
+                            _doc_id, _doc_id[:8] + "…"
+                        )
+                    logger.error(
+                        f"Lab extraction ล้มเหลว: {type(lab_err).__name__}: "
+                        f"{_lab_err_msg} (doc_id={_doc_id[:8]})"
+                    )
+                    logger.error(
+                        f"Lab extraction traceback (doc_id={_doc_id[:8]}):\n"
+                        f"{_lab_tb}"
                     )
 
             # ── Clinical Analysis V1: วิเคราะห์ผลแล็บด้วย Rule-based Engine ──
