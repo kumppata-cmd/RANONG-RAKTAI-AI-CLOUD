@@ -226,9 +226,10 @@ class TestDownloadProxyEndpoint(unittest.TestCase):
 class TestHandleSearchFlexDispatch(unittest.TestCase):
     """ทดสอบว่า handle_search_command คืน Flex Message dict สำหรับ 'ขอไฟล์'."""
 
+    @patch("server.is_authorized_user", return_value=True)
     @patch.object(server.doc_index, "get_with_owner_check")
     @patch("server.get_download_url")
-    def test_file_request_returns_flex_dict(self, mock_url, mock_get):
+    def test_file_request_returns_flex_dict(self, mock_url, mock_get, mock_auth):
         """คำสั่ง 'ขอไฟล์' ต้องคืน dict ไม่ใช่ string."""
         mock_get.return_value = (DEMO_DOC, True)
         mock_url.return_value = "https://example.com/download.pdf"
@@ -240,8 +241,9 @@ class TestHandleSearchFlexDispatch(unittest.TestCase):
         self.assertIn("contents", result)
         self.assertIn("altText", result)
 
+    @patch("server.is_authorized_user", return_value=True)
     @patch.object(server.doc_index, "get_with_owner_check")
-    def test_file_not_found_returns_string(self, mock_get):
+    def test_file_not_found_returns_string(self, mock_get, mock_auth):
         """เอกสารไม่พบ → คืน string (ข้อความ error)."""
         mock_get.return_value = (None, False)
         result = server.handle_search_command("ขอไฟล์ nonexist", "testhash123")
@@ -256,9 +258,10 @@ class TestHandleSearchFlexDispatch(unittest.TestCase):
         self.assertIsInstance(result, str)
         self.assertIn("ไม่มีสิทธิ์", result)
 
+    @patch("server.is_authorized_user", return_value=True)
     @patch.object(server.doc_index, "get_with_owner_check")
     @patch("server.get_download_url")
-    def test_url_generation_fails_returns_string(self, mock_url, mock_get):
+    def test_url_generation_fails_returns_string(self, mock_url, mock_get, mock_auth):
         """สร้าง URL ไม่ได้ → คืน string."""
         mock_get.return_value = (DEMO_DOC, True)
         mock_url.return_value = None
@@ -267,13 +270,15 @@ class TestHandleSearchFlexDispatch(unittest.TestCase):
         self.assertIsInstance(result, str)
         self.assertIn("ไม่สามารถ", result)
 
-    def test_search_command_returns_string(self):
+    @patch("server.is_authorized_user", return_value=True)
+    def test_search_command_returns_string(self, mock_auth):
         """คำสั่งค้นหาปกติยังคืน string."""
         with patch.object(server.doc_index, "search", return_value=[]):
             result = server.handle_search_command("ค้นหา test", "testhash123")
         self.assertIsInstance(result, str)
 
-    def test_empty_doc_id_returns_string(self):
+    @patch("server.is_authorized_user", return_value=True)
+    def test_empty_doc_id_returns_string(self, mock_auth):
         """ขอไฟล์ โดยไม่ระบุรหัส → คืน string."""
         result = server.handle_search_command("ขอไฟล์ ", "testhash123")
         self.assertIsInstance(result, str)
