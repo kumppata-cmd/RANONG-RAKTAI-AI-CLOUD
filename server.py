@@ -3483,7 +3483,14 @@ def process_file_async(
             extracted_text = ""
             ocr_status = "none"
             try:
-                if ext_now == ".pdf":
+                if ext_now == ".txt":
+                    try:
+                        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                            extracted_text = f.read()
+                        ocr_status = "native"
+                    except OSError:
+                        ocr_status = "failed"
+                elif ext_now == ".pdf":
                     extracted_text = extract_pdf_text(filepath)
                     if len(extracted_text.strip()) < 50:
                         # scanned PDF → OCR
@@ -3625,7 +3632,7 @@ def process_file_async(
                                     }
                                     storage.put(
                                         _alert_path,
-                                        _json_alert.dumps(
+                                        json.dumps(
                                             _alert_data, ensure_ascii=False
                                         ).encode("utf-8"),
                                         content_type="application/json",
