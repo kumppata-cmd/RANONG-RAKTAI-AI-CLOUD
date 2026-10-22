@@ -1663,6 +1663,9 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             "  ดูรายงานสรุป KPI ผลตรวจของคุณ\n\n"
             "📊 KPI (เฉพาะผู้ดูแล)\n"
             "  ดูรายงาน KPI รวมของคลินิก\n\n"
+            "💊 ตรวจยา [รายการยา]\n"
+            "  ตรวจสอบยาที่เป็นพิษต่อไตและปรับขนาดยาตาม eGFR\n"
+            "  เช่น: ตรวจยา Metformin, Ibuprofen, Losartan\n\n"
             "ℹ️ สถานะ\n"
             "  ตรวจสอบระบบ"
         )
@@ -1679,7 +1682,8 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 or text_stripped.startswith("แนวโน้มแล็บ")
                 or text_stripped == "แนวโน้มแล็บ"
                 or text_stripped == "รายงานแล็บ"
-                or text_stripped == "KPI"):
+                or text_stripped == "KPI"
+                or text_stripped.startswith("ตรวจยา")):
             audit_logger.log("unauthorized_access", user_hash, {
                 "command": text_stripped[:20]
             })
@@ -2162,6 +2166,109 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         except Exception as e:
             logger.warning(f"Clinic KPI error: {type(e).__name__}")
             return "ขออภัย ไม่สามารถสร้างรายงาน KPI ได้ในขณะนี้"
+
+    # ── ตรวจยา [medication_list] — ตรวจสอบยาเพื่อไต ──
+    if text_stripped == "ตรวจยา":
+        return (
+            "กรุณาระบุรายการยา เช่น:\n"
+            "ตรวจยา Metformin, Ibuprofen, Losartan\n\n"
+            "ระบบจะตรวจสอบ:\n"
+            "• ยาที่เป็นพิษต่อไต\n"
+            "• การปรับขนาดยาตาม eGFR\n"
+            "• ปฏิกิริยายากับผลแล็บ\n"
+            "• ภาวะน้ำในร่างกาย"
+        )
+    if text_stripped.startswith("ตรวจยา "):
+        med_input = text_stripped[len("ตรวจยา "):].strip()
+        if not med_input:
+            return "กรุณาระบุรายการยา เช่น: ตรวจยา Metformin, Ibuprofen"
+
+        try:
+            from medication_review import (
+                review_medications,
+                review_text_th,
+            )
+
+            # แยกรายการยาจาก comma / space
+            medications = [
+                m.strip() for m in med_input.replace(",", " ").replace("、", " ").replace("，", " ").split()
+                if m.strip()
+            ]
+            if not medications:
+                return "กรุณาระบุชื่อยาอย่างน้อย 1 รายการ"
+
+            # ดึงผลแล็บล่าสุดของผู้ใช้เพื่อประกอบการตรวจ
+            lab_values: dict[str, float] = {}
+            ckd_stage = ""
+            egfr_val = None
+
+            user_docs = doc_index.list_by_owner(user_hash, limit=50)
+            if user_docs:
+                # หาผลแล็บล่าสุด
+                for doc_meta in user_docs:
+                    did = doc_meta.get("document_id", "")
+                    if not did:
+                        continue
+                    lab_path = f"{LAB_RESULTS_PREFIX}{did}.json"
+                    try:
+                        lab_data = storage.get(lab_path)
+                        if lab_data:
+                            lr = json.loads(lab_data)
+                            # ดึง analyte values ล่าสุด
+                            results = lr.get("results", [])
+                            for r in results:
+                                name = r.get("analyte", "")
+                                val = r.get("value")
+                                if name and val is not None:
+                                    try:
+                                        lab_values[name] = float(val)
+                                    except (ValueError, TypeError):
+                                        pass
+                    except Exception:
+                        pass
+
+                    # ดึง CKD stage และ eGFR จากผลวิเคราะห์
+                    ca_path = f"{CLINICAL_ANALYSIS_PREFIX}{did}.json"
+                    try:
+                        ca_data = storage.get(ca_path)
+                        if ca_data:
+                            ca = json.loads(ca_data)
+                            if not ckd_stage:
+                                ckd_stage = ca.get("ckd_stage", "")
+                            if egfr_val is None:
+                                egfr_val = ca.get("egfr")
+                                if egfr_val is not None:
+                                    try:
+                                        egfr_val = float(egfr_val)
+                                    except (ValueError, TypeError):
+                                        egfr_val = None
+                    except Exception:
+                        pass
+
+                    # หยุดเมื่อได้ข้อมูลพอแล้ว
+                    if lab_values and ckd_stage and egfr_val is not None:
+                        break
+
+            result = review_medications(
+                medications=medications,
+                lab_values=lab_values,
+                ckd_stage=ckd_stage,
+                egfr=egfr_val,
+            )
+
+            audit_logger.log("medication_review", user_hash, {
+                "medication_count": len(medications),
+                "alert_count": len(result.alerts),
+                "critical_count": len(result.critical_alerts()),
+                "has_lab_data": bool(lab_values),
+                "ckd_stage": ckd_stage or "UNKNOWN",
+            })
+
+            return review_text_th(result)
+
+        except Exception as e:
+            logger.warning(f"Medication review error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถตรวจสอบยาได้ในขณะนี้"
 
     return None  # ไม่ใช่คำสั่งค้นหา
 
