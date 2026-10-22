@@ -1639,6 +1639,8 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             "  ดูผลตรวจ Lab ที่ดึงจากเอกสาร\n\n"
             "✅ ยืนยันผลแล็บ [รหัส] (เฉพาะผู้ดูแล)\n"
             "  ยืนยันผลแล็บก่อนนำไปใช้\n\n"
+            "📊 แนวโน้มแล็บ [เดือน/3เดือน/6เดือน/ปี]\n"
+            "  ดูแนวโน้มผลตรวจ Lab ตามช่วงเวลา\n\n"
             "ℹ️ สถานะ\n"
             "  ตรวจสอบระบบ"
         )
@@ -1651,7 +1653,9 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 or text_stripped.startswith("อ่านเอกสาร ")
                 or text_stripped.startswith("ขอไฟล์ ")
                 or text_stripped.startswith("ผลแล็บ ")
-                or text_stripped.startswith("ยืนยันผลแล็บ ")):
+                or text_stripped.startswith("ยืนยันผลแล็บ ")
+                or text_stripped.startswith("แนวโน้มแล็บ")
+                or text_stripped == "แนวโน้มแล็บ"):
             audit_logger.log("unauthorized_access", user_hash, {
                 "command": text_stripped[:20]
             })
@@ -1879,13 +1883,13 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         if not doc_id_query:
             return "กรุณาระบุรหัสเอกสาร เช่น: วิเคราะห์แล็บ a1b2c3d4"
 
-        # ตรวจสอบสิทธิ์ — ต้องเป็นเจ้าของเอกสาร
-        doc = doc_index.get(doc_id_query)
+        # ตรวจสอบ ownership ผ่าน document index
+        doc, authorized = doc_index.get_with_owner_check(
+            doc_id_query, user_hash
+        )
         if doc is None:
             return "ไม่พบเอกสารที่ตรงกับรหัสนี้"
-
-        doc_owner = doc.get("owner_hash", "")
-        if doc_owner and doc_owner != user_hash:
+        if not authorized:
             audit_logger.log("clinical_access_denied", user_hash, {
                 "doc_id": doc.get("document_id", "")[:8],
             })
@@ -1921,6 +1925,89 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 f"Clinical analysis read error: {type(e).__name__}"
             )
             return "ขออภัย ไม่สามารถอ่านผลวิเคราะห์ได้ในขณะนี้"
+
+    # ── แนวโน้มแล็บ [period] — ดูแนวโน้ม Lab ตามช่วงเวลา ──
+    PERIOD_MAP = {
+        "เดือน": "monthly",
+        "รายเดือน": "monthly",
+        "3เดือน": "quarterly",
+        "ราย3เดือน": "quarterly",
+        "6เดือน": "semi_annual",
+        "ราย6เดือน": "semi_annual",
+        "ปี": "annual",
+        "รายปี": "annual",
+    }
+    if text_stripped == "แนวโน้มแล็บ":
+        return (
+            "📊 ดูแนวโน้มผลตรวจ Lab\n"
+            "กรุณาระบุช่วงเวลา:\n"
+            "  แนวโน้มแล็บ เดือน\n"
+            "  แนวโน้มแล็บ 3เดือน\n"
+            "  แนวโน้มแล็บ 6เดือน\n"
+            "  แนวโน้มแล็บ ปี"
+        )
+    if text_stripped.startswith("แนวโน้มแล็บ "):
+        period_input = text_stripped[len("แนวโน้มแล็บ "):].strip()
+        period = PERIOD_MAP.get(period_input)
+        if period is None:
+            return (
+                "ไม่รู้จักช่วงเวลานี้ — กรุณาใช้:\n"
+                "  แนวโน้มแล็บ เดือน\n"
+                "  แนวโน้มแล็บ 3เดือน\n"
+                "  แนวโน้มแล็บ 6เดือน\n"
+                "  แนวโน้มแล็บ ปี"
+            )
+
+        # รวบรวมผลแล็บทั้งหมดของผู้ใช้จาก GCS
+        try:
+            from lab_tracker import analyze_trends, PERIOD_DAYS
+            from datetime import datetime as _dt, timedelta as _td
+
+            # ดึงรายการเอกสารของผู้ใช้
+            user_docs = doc_index.list_by_owner(user_hash, limit=100)
+            if not user_docs:
+                return "ไม่พบเอกสารของคุณ — กรุณาอัปโหลดผลตรวจ Lab ก่อน"
+
+            # ดึงผลแล็บจาก GCS สำหรับแต่ละเอกสาร
+            lab_reports = []
+            for doc_meta in user_docs:
+                did = doc_meta.get("document_id", "")
+                if not did:
+                    continue
+                lab_path = f"{LAB_RESULTS_PREFIX}{did}.json"
+                try:
+                    lab_data = storage.get(lab_path)
+                    if lab_data:
+                        report = json.loads(lab_data)
+                        lab_reports.append(report)
+                except Exception:
+                    continue
+
+            if not lab_reports:
+                return (
+                    "ไม่พบผลตรวจ Lab ในระบบ\n"
+                    "กรุณาอัปโหลดเอกสารผลตรวจ Lab ก่อน"
+                )
+
+            # วิเคราะห์แนวโน้ม
+            analysis = analyze_trends(
+                lab_reports=lab_reports,
+                period=period,
+                owner_hash=user_hash,
+            )
+
+            audit_logger.log("trend_analysis_view", user_hash, {
+                "period": period,
+                "trend_count": len(analysis.trends),
+                "alert_count": len(analysis.alerts),
+                "critical_count": len(analysis.critical_alerts()),
+            })
+
+            return analysis.summary_text_th()
+
+        except Exception as e:
+            logger.warning(f"Trend analysis error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถวิเคราะห์แนวโน้มได้ในขณะนี้"
 
     return None  # ไม่ใช่คำสั่งค้นหา
 
