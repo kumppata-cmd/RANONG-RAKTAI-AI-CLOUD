@@ -408,6 +408,42 @@ class StorageLocal:
             f.write(data)
         return dest
 
+    def put(
+        self,
+        path: str,
+        data: bytes,
+        content_type: str = "application/json",
+        create_only: bool = False,
+    ) -> str:
+        """เขียนไฟล์ไปที่ path ที่ระบุบน local disk.
+
+        Args:
+            path: path ปลายทาง เช่น _lab_results/doc123.json
+            data: ข้อมูลที่ต้องการเขียน
+            content_type: ไม่ใช้บน local — รับไว้ให้ interface ตรงกัน
+            create_only: ถ้า True จะไม่เขียนทับไฟล์ที่มีอยู่แล้ว
+        """
+        dest = os.path.join(BASE_DIR, path)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        if create_only and os.path.exists(dest):
+            logger.info(f"Local put: ไฟล์มีอยู่แล้ว ไม่เขียนทับ ({os.path.basename(path)})")
+            return dest
+        with open(dest, "wb") as f:
+            f.write(data)
+        return dest
+
+    def get(self, path: str) -> bytes | None:
+        """อ่านไฟล์จาก path ที่ระบุบน local disk.
+
+        Returns:
+            bytes ถ้าไฟล์มี, None ถ้าไม่มี
+        """
+        full = os.path.join(BASE_DIR, path)
+        if not os.path.exists(full):
+            return None
+        with open(full, "rb") as f:
+            return f.read()
+
     def list_files(self, category: str) -> list[str]:
         folder = os.path.join(BASE_DIR, FOLDERS.get(category, FOLDERS["review"]))
         if not os.path.exists(folder):
@@ -437,6 +473,22 @@ class StorageS3:
         # return f"s3://{self.bucket}/{key}"
         logger.warning("S3 Storage ยังไม่เชื่อมต่อ — fallback ไป local")
         return StorageLocal().save(data, category, filename, metadata)
+
+    def put(
+        self,
+        path: str,
+        data: bytes,
+        content_type: str = "application/json",
+        create_only: bool = False,
+    ) -> str:
+        """เขียนไฟล์ — S3 ยังไม่เชื่อมต่อ, fallback ไป local."""
+        logger.warning("S3 Storage ยังไม่เชื่อมต่อ — put() fallback ไป local")
+        return StorageLocal().put(path, data, content_type, create_only)
+
+    def get(self, path: str) -> bytes | None:
+        """อ่านไฟล์ — S3 ยังไม่เชื่อมต่อ."""
+        logger.warning("S3 Storage ยังไม่เชื่อมต่อ — get() return None")
+        return None
 
     def list_files(self, category: str) -> list[str]:
         logger.warning("S3 Storage ยังไม่เชื่อมต่อ")
@@ -627,6 +679,116 @@ class StorageGCS:
             # Testing mode: fallback ไป local
             logger.error("fallback ไป local storage")
             return self._fallback.save(data, category, filename)
+
+    def put(
+        self,
+        path: str,
+        data: bytes,
+        content_type: str = "application/json",
+        create_only: bool = False,
+    ) -> str:
+        """เขียนไฟล์ไปที่ path ที่ระบุบน GCS.
+
+        ใช้สำหรับ JSON metadata (lab results, clinical analysis, alerts)
+        ที่ต้องการเขียนไปยัง path เฉพาะ เช่น _lab_results/{doc_id}.json
+
+        Args:
+            path: blob path ใน bucket เช่น _lab_results/abc123.json
+            data: ข้อมูลที่ต้องการเขียน (bytes)
+            content_type: MIME type (default: application/json)
+            create_only: ถ้า True ใช้ if_generation_match=0 ป้องกันเขียนทับ
+
+        Returns:
+            gs:// URI ของ object ที่เขียน
+
+        Raises:
+            RuntimeError: ใน production mode เมื่อเขียนล้มเหลว
+
+        หมายเหตุ:
+            - path ต้องเป็น internal path (ไม่ใช่ข้อมูลจากผู้ใช้)
+            - ไม่ log path เต็ม — ใช้ prefix + basename เพื่อป้องกัน info leak
+        """
+        if not self.is_ready:
+            err_msg = (
+                f"GCS ไม่พร้อม ({self._init_error}) — "
+                f"ไม่สามารถเขียน metadata ได้"
+            )
+            logger.error(err_msg)
+            if IS_PRODUCTION:
+                raise RuntimeError(err_msg)
+            return self._fallback.put(path, data, content_type, create_only)
+
+        try:
+            blob = self._bucket.blob(path)
+            upload_kwargs = {
+                "content_type": content_type,
+            }
+            if create_only:
+                upload_kwargs["if_generation_match"] = 0
+
+            blob.upload_from_string(data, **upload_kwargs)
+            gcs_uri = f"gs://{self.bucket_name}/{path}"
+            # log เฉพาะ prefix ของ path — ไม่ log doc_id เต็ม
+            path_prefix = path.split("/")[0] if "/" in path else path
+            logger.info(
+                f"GCS put สำเร็จ: {path_prefix}/ "
+                f"({len(data):,} bytes, {content_type})"
+            )
+            return gcs_uri
+        except Exception as e:
+            err_code = getattr(e, "code", None)
+            # 412 = object มีอยู่แล้ว (create_only) — ถือว่าสำเร็จ
+            if err_code == 412:
+                gcs_uri = f"gs://{self.bucket_name}/{path}"
+                path_prefix = path.split("/")[0] if "/" in path else path
+                logger.info(
+                    f"GCS put: object มีอยู่แล้ว ไม่เขียนทับ ({path_prefix}/)"
+                )
+                return gcs_uri
+            # ไม่ log str(e) — อาจมี blob path หรือ project ID
+            path_prefix = path.split("/")[0] if "/" in path else path
+            logger.error(
+                f"GCS put ล้มเหลว: {type(e).__name__} ({path_prefix}/)"
+            )
+            if IS_PRODUCTION:
+                raise RuntimeError(
+                    f"GCS put ล้มเหลว — ไม่สามารถบันทึก metadata ได้"
+                )
+            return self._fallback.put(path, data, content_type, create_only)
+
+    def get(self, path: str) -> bytes | None:
+        """อ่านไฟล์จาก path ที่ระบุบน GCS.
+
+        Args:
+            path: blob path ใน bucket เช่น _lab_results/abc123.json
+
+        Returns:
+            bytes ถ้า object มี, None ถ้าไม่มีหรืออ่านไม่ได้
+
+        หมายเหตุ:
+            - ไม่ raise exception — คืน None เมื่อไม่พบหรือ error
+            - ไม่ log path เต็ม — ใช้ prefix เพื่อป้องกัน info leak
+        """
+        if not self.is_ready:
+            logger.warning(
+                f"GCS ไม่พร้อม — get() return None"
+            )
+            return None
+
+        try:
+            blob = self._bucket.blob(path)
+            return blob.download_as_bytes()
+        except Exception as e:
+            err_code = getattr(e, "code", None)
+            if err_code == 404:
+                # Object ไม่มี — ไม่ใช่ error ปกติ
+                return None
+            # Error อื่น — log แต่ไม่ raise
+            path_prefix = path.split("/")[0] if "/" in path else path
+            logger.warning(
+                f"GCS get ล้มเหลว: {type(e).__name__} ({path_prefix}/)"
+            )
+            return None
 
     def list_files(self, category: str) -> list[str]:
         """แสดงรายการไฟล์ใน GCS bucket ตามประเภท."""
@@ -1997,7 +2159,10 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 f"สถานะ: approved"
             )
         except Exception as e:
-            logger.warning(f"Lab approve error: {type(e).__name__}")
+            logger.warning(
+                f"Lab approve error: {type(e).__name__} "
+                f"(doc_id={doc_id_query[:8]})"
+            )
             return "ขออภัย ไม่สามารถยืนยันผลแล็บได้ในขณะนี้"
 
     # ── วิเคราะห์แล็บ [document_id] — ดูผลวิเคราะห์ทางคลินิก ──
@@ -3577,6 +3742,7 @@ def process_file_async(
                             _lab_path,
                             _lab_json.encode("utf-8"),
                             content_type="application/json",
+                            create_only=True,
                         )
                         lab_extracted = True
                         logger.info(
@@ -3636,6 +3802,7 @@ def process_file_async(
                                             _alert_data, ensure_ascii=False
                                         ).encode("utf-8"),
                                         content_type="application/json",
+                                        create_only=True,
                                     )
                                     logger.info(
                                         f"Critical alert stored: "
@@ -3673,6 +3840,7 @@ def process_file_async(
                             _clinical_path,
                             _clinical_json.encode("utf-8"),
                             content_type="application/json",
+                            create_only=True,
                         )
                         clinical_analyzed = True
                         logger.info(
