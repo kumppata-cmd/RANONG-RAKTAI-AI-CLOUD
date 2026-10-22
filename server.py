@@ -3438,6 +3438,7 @@ def process_file_async(
     doc_id: str | None = None,
     sha256_hex: str | None = None,
     owner_hash: str | None = None,
+    line_user_id: str = "",
 ):
     """ประมวลผลไฟล์ในเธรดแยก.
 
@@ -3446,6 +3447,9 @@ def process_file_async(
 
     owner_hash: SHA-256 hash ของ LINE user ID ของผู้ส่ง — ใช้สำหรับ
     cross-patient access prevention (ผู้ใช้เห็นเฉพาะเอกสารที่ตัวเองส่ง)
+
+    line_user_id: LINE user ID ดิบ — ใช้สำหรับ push_message กลับไปหาผู้ใช้
+    เมื่อพบผลตรวจผิดปกติ (Lab Alert) ไม่ถูกบันทึกลง log หรือ metadata
     """
     _doc_id = doc_id or os.path.splitext(os.path.basename(filepath))[0]
 
@@ -3479,7 +3483,14 @@ def process_file_async(
             extracted_text = ""
             ocr_status = "none"
             try:
-                if ext_now == ".pdf":
+                if ext_now == ".txt":
+                    try:
+                        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                            extracted_text = f.read()
+                        ocr_status = "native"
+                    except OSError:
+                        ocr_status = "failed"
+                elif ext_now == ".pdf":
                     extracted_text = extract_pdf_text(filepath)
                     if len(extracted_text.strip()) < 50:
                         # scanned PDF → OCR
@@ -3583,12 +3594,12 @@ def process_file_async(
                             _alert_summary = check_lab_alerts(lab_report)
 
                             # แจ้งเตือนผู้ใช้ (critical + warning)
-                            if _alert_summary.should_notify_user and _line_user_id:
+                            if _alert_summary.should_notify_user and line_user_id:
                                 _user_alert_text = format_user_alert_th(
                                     _alert_summary
                                 )
                                 if _user_alert_text:
-                                    push_message(_line_user_id, _user_alert_text)
+                                    push_message(line_user_id, _user_alert_text)
                                     logger.info(
                                         f"Lab alert sent to user: "
                                         f"doc={_doc_id[:8]}, "
@@ -3600,7 +3611,7 @@ def process_file_async(
                             if _alert_summary.should_notify_admin:
                                 _admin_alert_text = format_admin_alert_th(
                                     _alert_summary,
-                                    owner_hash_prefix=user_hash[:8],
+                                    owner_hash_prefix=(owner_hash or "")[:8],
                                 )
                                 if _admin_alert_text:
                                     # ส่งให้ admin ทุกคนที่ลงทะเบียน
@@ -3611,18 +3622,17 @@ def process_file_async(
                                     _alert_path = (
                                         f"_alerts/{_doc_id}.json"
                                     )
-                                    import json as _json_alert
                                     _alert_data = {
                                         "document_id": _doc_id[:8],
                                         "specimen_date": lab_report.specimen_date,
                                         "critical_count": _alert_summary.critical_count,
                                         "warning_count": _alert_summary.warning_count,
                                         "created_at": datetime.now().isoformat(),
-                                        "notified_user": bool(_line_user_id),
+                                        "notified_user": bool(line_user_id),
                                     }
                                     storage.put(
                                         _alert_path,
-                                        _json_alert.dumps(
+                                        json.dumps(
                                             _alert_data, ensure_ascii=False
                                         ).encode("utf-8"),
                                         content_type="application/json",
@@ -3691,6 +3701,7 @@ def process_file_async(
                 "clinical_analyzed": clinical_analyzed,
             }
             log_file = os.path.join(BASE_DIR, "logs", "classification_log.jsonl")
+            os.makedirs(os.path.dirname(log_file), exist_ok=True)
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(log_entry, ensure_ascii=False) + "\n")
 
@@ -3795,6 +3806,7 @@ def _handle_incoming_document(
     ext: str,
     user_hash: str,
     reply_token: str | None,
+    line_user_id: str = "",
 ):
     """ขั้นตอนร่วมของการรับเอกสารจาก LINE (ทั้งภาพและไฟล์).
 
@@ -3816,7 +3828,7 @@ def _handle_incoming_document(
     filepath = save_to_inbox(data, filename)
     process_file_async(
         filepath, reply_token, doc_id=doc_id, sha256_hex=sha256_hex,
-        owner_hash=user_hash,
+        owner_hash=user_hash, line_user_id=line_user_id,
     )
 
 
@@ -3958,7 +3970,7 @@ def webhook():
                 if not data:
                     reply_message(reply_token, "ไม่สามารถดาวน์โหลดภาพได้")
                     continue
-                _handle_incoming_document(data, ext, user_hash, reply_token)
+                _handle_incoming_document(data, ext, user_hash, reply_token, _line_user_id)
 
             elif msg_type == "file":
                 # ชื่อไฟล์จากผู้ใช้ใช้เพื่อดูนามสกุลเท่านั้น
@@ -3984,7 +3996,7 @@ def webhook():
                 if not data:
                     reply_message(reply_token, "ไม่สามารถดาวน์โหลดไฟล์ได้")
                     continue
-                _handle_incoming_document(data, file_ext, user_hash, reply_token)
+                _handle_incoming_document(data, file_ext, user_hash, reply_token, _line_user_id)
 
             elif msg_type == "text":
                 text = msg.get("text", "")

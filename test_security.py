@@ -364,17 +364,18 @@ class TestEnrollmentSecurity(unittest.TestCase):
 
     def test_invalid_token_silent_reject(self):
         """Token ไม่ถูกต้อง → ไม่ตอบกลับ (ป้องกัน brute force)."""
-        result = server.handle_search_command("ยืนยัน INVALID_TOKEN", "somehash")
+        # ใช้ hash เฉพาะต่อ test เพื่อหลีกเลี่ยง rate limit จาก test อื่น
+        result = server.handle_search_command("ยืนยัน INVALID_TOKEN", "hash_invalid_test_1")
         self.assertIsNone(result)
 
     def test_empty_token_no_response(self):
         """Token ว่าง → ไม่ตอบกลับ."""
-        result = server.handle_search_command("ยืนยัน ", "somehash")
+        result = server.handle_search_command("ยืนยัน ", "hash_empty_test_2")
         self.assertIsNone(result)
 
     def test_enrollment_does_not_reveal_token_format(self):
         """Response ไม่เปิดเผยรูปแบบ token."""
-        result = server.handle_search_command("ยืนยัน WRONG", "somehash")
+        result = server.handle_search_command("ยืนยัน WRONG", "hash_format_test_3")
         # ไม่ควรบอกว่า token ต้องเป็นรูปแบบอะไร
         self.assertIsNone(result)
 
