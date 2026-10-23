@@ -237,13 +237,16 @@ TABULAR_RE = re.compile(
 # Phase 14.9: Tabular pattern for Thai analyte names
 # e.g., "ครีอะตินีน     5.2     mg/dL     0.6-1.2"
 # e.g., "ครีอะตินีน (Cr)     5.2     mg/dL     0.6-1.2"
+# e.g., "ครีเอตินิน (Creatinine) 5.2 mg/dL 0.6-1.2"  (single-space — Phase 14.10 fix)
+# NOTE: Uses [^\S\n]+ (horizontal whitespace) to prevent cross-line matching.
+#       The name group requires ≥2 chars to reduce false positives.
 TABULAR_THAI_RE = re.compile(
-    r"(?P<name>[ก-๙A-Za-z/ ()]+?)"    # analyte name (Thai+English, no newline in spaces)
-    r":?\s{2,}"                         # optional colon + 2+ spaces (column separator)
-    r"(?P<value>\d+\.?\d*)"            # numeric value
-    r"\s+"
+    r"(?P<name>[ก-๙A-Za-z/ ()]{2,}?)"  # analyte name (Thai+English, ≥2 chars)
+    r":?[^\S\n]+"                        # optional colon + 1+ horizontal spaces (no newline)
+    r"(?P<value>\d+\.?\d*)"             # numeric value
+    r"[^\S\n]+"
     r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
-    r"(?:\s+"
+    r"(?:[^\S\n]+"
     r"(?P<ref>[<>]?\d+\.?\d*(?:\s*-\s*\d+\.?\d*)?))?",  # optional reference
     re.IGNORECASE,
 )
