@@ -70,6 +70,45 @@ class TestLabParserRegression(unittest.TestCase):
         self.assertGreaterEqual(len(report.results), 2,
             f"English tabular should extract ≥2 results, got {len(report.results)}")
 
+    def test_english_colon_3_analytes(self):
+        """Pure English colon format → MUST extract all 3 (Phase 14.11 fix)."""
+        text = (
+            "Lab Report\n"
+            "Creatinine: 5.2 mg/dL 0.6-1.2\n"
+            "Potassium: 4.5 mmol/L 3.5-5.0\n"
+            "Hemoglobin: 10.5 g/dL 12.0-17.0"
+        )
+        report = self._extract(text)
+        self.assertEqual(len(report.results), 3,
+            f"English colon must extract 3 results, got {len(report.results)}")
+        self._assert_analyte(report, "Creatinine", 5.2, "mg/dL")
+        self._assert_analyte(report, "Potassium", 4.5, "mmol/L")
+        self._assert_analyte(report, "Hemoglobin", 10.5, "g/dL")
+
+    def test_english_colon_single_space(self):
+        """English colon with single space → must still extract."""
+        text = (
+            "Creatinine: 5.2 mg/dL\n"
+            "Potassium: 4.5 mmol/L\n"
+            "Hemoglobin: 10.5 g/dL"
+        )
+        report = self._extract(text)
+        self.assertEqual(len(report.results), 3,
+            f"English colon single-space must extract 3, got {len(report.results)}")
+
+    def test_english_colon_no_cross_line(self):
+        """English colon regex must not match across newlines."""
+        text = (
+            "Patient Name:\n"
+            "5.2 mg/dL\n"
+            "Test Date:\n"
+            "4.5 mmol/L"
+        )
+        report = self._extract(text)
+        # "Patient Name" and "Test Date" are not in allowlist → 0 results
+        self.assertEqual(len(report.results), 0,
+            f"Cross-line non-analyte should produce 0 results, got {len(report.results)}")
+
     # ──────────────────────────────────────────
     # 2. Thai single-space format (ROOT CAUSE)
     # ──────────────────────────────────────────
@@ -334,6 +373,191 @@ class TestLabParserRegression(unittest.TestCase):
         report = self._extract(text, "test-original")
         self.assertGreaterEqual(len(report.results), 15,
             f"Original 18-analyte PDF should extract ≥15, got {len(report.results)}")
+
+
+class TestE2EStorageRetrievalIsolation(unittest.TestCase):
+    """E2E tests for lab storage, retrieval, and owner isolation (Phase 14.11).
+
+    Uses synthetic data only — ห้ามใช้ข้อมูลผู้ป่วยจริง
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from lab_extractor import extract_lab_results_from_text
+        from server import extract_pdf_text, DocumentIndex, StorageLocal
+        from line_bot_enhancer import find_latest_lab_doc
+
+        cls.extract = staticmethod(extract_lab_results_from_text)
+        cls.extract_pdf = staticmethod(extract_pdf_text)
+        cls.DocumentIndex = DocumentIndex
+        cls.StorageLocal = StorageLocal
+        cls.find_latest_lab_doc = staticmethod(find_latest_lab_doc)
+
+    def test_e2e_pdf_to_lab_json_roundtrip(self):
+        """Full roundtrip: PDF → extract text → parse → JSON → deserialize."""
+        pdf_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "test_data", "TEST-CKD-001-3analytes.pdf"
+        )
+        if not os.path.exists(pdf_path):
+            self.skipTest("3-analyte fixture not found")
+
+        # Step 1: Extract text from PDF
+        text = self.extract_pdf(pdf_path)
+        self.assertGreaterEqual(len(text), 100)
+
+        # Step 2: Parse lab results
+        report = self.extract(text, "e2e-roundtrip-test", "regex_pdf_text")
+        self.assertEqual(len(report.results), 3)
+        self.assertEqual(report.status, "pending_review")
+
+        # Step 3: Serialize to JSON
+        json_str = report.to_json()
+        parsed = json.loads(json_str)
+
+        # Step 4: Verify JSON structure
+        self.assertEqual(parsed["status"], "pending_review")
+        self.assertEqual(len(parsed["results"]), 3)
+        analyte_map = {r["analyte"]: r for r in parsed["results"]}
+        self.assertIn("Creatinine", analyte_map)
+        self.assertAlmostEqual(analyte_map["Creatinine"]["value"], 5.2)
+        self.assertEqual(analyte_map["Creatinine"]["unit"], "mg/dL")
+        self.assertIn("Potassium", analyte_map)
+        self.assertAlmostEqual(analyte_map["Potassium"]["value"], 4.5)
+        self.assertIn("Hemoglobin", analyte_map)
+        self.assertAlmostEqual(analyte_map["Hemoglobin"]["value"], 10.5)
+
+    def test_owner_isolation_different_hashes(self):
+        """Different owner_hashes must not see each other's documents."""
+        storage = self.StorageLocal()
+        idx = self.DocumentIndex(storage)
+        owner_a = "a" * 32  # synthetic hash
+        owner_b = "b" * 32  # synthetic hash
+
+        # Add docs directly to in-memory index (bypass GCS for unit test)
+        doc_a1 = {"document_id": "doc-owner-a-1", "owner_hash": owner_a,
+                  "category": "lab", "upload_date": "2025-01-01"}
+        doc_a2 = {"document_id": "doc-owner-a-2", "owner_hash": owner_a,
+                  "category": "lab", "upload_date": "2025-01-02"}
+        doc_b1 = {"document_id": "doc-owner-b-1", "owner_hash": owner_b,
+                  "category": "lab", "upload_date": "2025-01-01"}
+        with idx._lock:
+            idx._docs.extend([doc_a1, doc_a2, doc_b1])
+            idx._doc_map["doc-owner-a-1"] = doc_a1
+            idx._doc_map["doc-owner-a-2"] = doc_a2
+            idx._doc_map["doc-owner-b-1"] = doc_b1
+
+        # Owner A should only see their docs
+        docs_a = idx.list_by_owner(owner_a)
+        doc_ids_a = [d["document_id"] for d in docs_a]
+        self.assertIn("doc-owner-a-1", doc_ids_a)
+        self.assertIn("doc-owner-a-2", doc_ids_a)
+        self.assertNotIn("doc-owner-b-1", doc_ids_a,
+            "Owner A must NOT see Owner B's documents")
+
+        # Owner B should only see their doc
+        docs_b = idx.list_by_owner(owner_b)
+        doc_ids_b = [d["document_id"] for d in docs_b]
+        self.assertIn("doc-owner-b-1", doc_ids_b)
+        self.assertNotIn("doc-owner-a-1", doc_ids_b,
+            "Owner B must NOT see Owner A's documents")
+        self.assertNotIn("doc-owner-a-2", doc_ids_b)
+
+    def test_owner_isolation_empty_hash(self):
+        """Empty owner_hash must return no documents."""
+        storage = self.StorageLocal()
+        idx = self.DocumentIndex(storage)
+        owner = "c" * 32
+
+        doc_et = {"document_id": "doc-empty-test", "owner_hash": owner,
+                  "category": "lab", "upload_date": "2025-01-01"}
+        with idx._lock:
+            idx._docs.append(doc_et)
+            idx._doc_map["doc-empty-test"] = doc_et
+
+        docs = idx.list_by_owner("")
+        doc_ids = [d["document_id"] for d in docs]
+        self.assertNotIn("doc-empty-test", doc_ids,
+            "Empty owner_hash must not return any documents")
+
+    def test_storage_put_get_synthetic(self):
+        """Synthetic storage put/get roundtrip for lab JSON."""
+        # Build a synthetic lab report
+        text = (
+            "ผลตรวจ\n"
+            "ครีเอตินิน (Creatinine) 5.2 mg/dL 0.6-1.2\n"
+            "โพแทสเซียม (Potassium) 4.5 mmol/L 3.5-5.0\n"
+            "ฮีโมโกลบิน (Hemoglobin) 10.5 g/dL 12.0-17.0"
+        )
+        report = self.extract(text, "synthetic-storage-test", "regex_pdf_text")
+        json_str = report.to_json()
+
+        # Verify it's valid JSON with correct structure
+        parsed = json.loads(json_str)
+        self.assertEqual(parsed["status"], "pending_review")
+        self.assertEqual(len(parsed["results"]), 3)
+
+        # Verify each result has required fields
+        for r in parsed["results"]:
+            self.assertIn("analyte", r)
+            self.assertIn("value", r)
+            self.assertIn("unit", r)
+            self.assertIn("confidence", r)
+            self.assertIn("extraction_method", r)
+            self.assertIsInstance(r["value"], (int, float))
+            self.assertGreater(r["confidence"], 0)
+
+    def test_find_latest_lab_with_owner_isolation(self):
+        """find_latest_lab_doc must respect owner isolation."""
+        storage = self.StorageLocal()
+        idx = self.DocumentIndex(storage)
+        owner_x = "x" * 32
+        owner_y = "y" * 32
+
+        doc_xl = {"document_id": "doc-x-lab-old", "owner_hash": owner_x,
+                  "category": "lab", "upload_date": "2025-01-01"}
+        doc_xn = {"document_id": "doc-x-nonlab", "owner_hash": owner_x,
+                  "category": "prescription", "upload_date": "2025-01-05"}
+        doc_yl = {"document_id": "doc-y-lab-new", "owner_hash": owner_y,
+                  "category": "lab", "upload_date": "2025-01-03"}
+        with idx._lock:
+            idx._docs.extend([doc_xl, doc_xn, doc_yl])
+            idx._doc_map["doc-x-lab-old"] = doc_xl
+            idx._doc_map["doc-x-nonlab"] = doc_xn
+            idx._doc_map["doc-y-lab-new"] = doc_yl
+
+        # find_latest_lab_doc for owner X should return X's lab, not Y's
+        docs_x = idx.list_by_owner(owner_x)
+        latest_x = self.find_latest_lab_doc(docs_x, owner_x)
+        self.assertIsNotNone(latest_x, "Owner X should have a lab doc")
+        self.assertEqual(latest_x["document_id"], "doc-x-lab-old")
+
+        # find_latest_lab_doc for owner Y should return Y's lab
+        docs_y = idx.list_by_owner(owner_y)
+        latest_y = self.find_latest_lab_doc(docs_y, owner_y)
+        self.assertIsNotNone(latest_y, "Owner Y should have a lab doc")
+        self.assertEqual(latest_y["document_id"], "doc-y-lab-new")
+
+    def test_english_colon_e2e_extraction_and_serialize(self):
+        """E2E: English colon text → parse → JSON → verify values (Phase 14.11)."""
+        text = (
+            "Lab Report - Test Patient\n"
+            "Date: 2025-01-15\n"
+            "Creatinine: 5.2 mg/dL 0.6-1.2\n"
+            "Potassium: 4.5 mmol/L 3.5-5.0\n"
+            "Hemoglobin: 10.5 g/dL 12.0-17.0"
+        )
+        report = self.extract(text, "e2e-eng-colon", "regex_pdf_text")
+        self.assertEqual(report.status, "pending_review")
+        self.assertEqual(len(report.results), 3,
+            f"English colon E2E must extract 3, got {len(report.results)}")
+
+        parsed = json.loads(report.to_json())
+        analytes = {r["analyte"]: r for r in parsed["results"]}
+        self.assertAlmostEqual(analytes["Creatinine"]["value"], 5.2)
+        self.assertEqual(analytes["Creatinine"]["unit"], "mg/dL")
+        self.assertAlmostEqual(analytes["Potassium"]["value"], 4.5)
+        self.assertAlmostEqual(analytes["Hemoglobin"]["value"], 10.5)
 
 
 if __name__ == "__main__":

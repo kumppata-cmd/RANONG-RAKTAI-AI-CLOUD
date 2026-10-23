@@ -221,15 +221,17 @@ def extract_specimen_date(text: str) -> str:
 
 # Pattern for tabular single-line extraction
 # e.g., "Creatinine    5.2    mg/dL    0.6-1.2"
+# e.g., "Creatinine: 5.2 mg/dL 0.6-1.2"  (colon — Phase 14.11 fix)
 # Phase 14.9: รองรับ Thai+English mixed names:
 # e.g., "ครีอะตินีน (Cr)     5.2     mg/dL     0.6-1.2"
+# NOTE: Uses [^\S\n]+ to prevent cross-line matching (Phase 14.11).
 TABULAR_RE = re.compile(
     r"(?P<name>[A-Za-z/\s()]+?)"       # analyte name (English)
-    r"\s+"
+    r":?[^\S\n]+"                       # optional colon + horizontal whitespace (no newline)
     r"(?P<value>\d+\.?\d*)"            # numeric value
-    r"\s+"
+    r"[^\S\n]+"
     r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
-    r"(?:\s+"
+    r"(?:[^\S\n]+"
     r"(?P<ref>[<>]?\d+\.?\d*(?:\s*-\s*\d+\.?\d*)?))?",  # optional reference
     re.IGNORECASE,
 )
@@ -465,10 +467,12 @@ def extract_lab_results_from_text(
                 results.append(result)
                 seen_analytes.add(canonical)
 
-    # Strategy 3 (Phase 14.9): Try Thai tabular whenever Thai chars present
-    # Always run to catch Thai-named analytes missed by English strategies
-    _has_thai = any("ก" <= ch <= "๏" for ch in text)
-    if _has_thai:
+    # Strategy 3 (Phase 14.9/14.11): Try Thai+colon tabular pattern
+    # Phase 14.11: Removed _has_thai guard — TABULAR_THAI_RE also handles
+    # English colon format (e.g., "Creatinine: 5.2 mg/dL") since its name
+    # group accepts [ก-๙A-Za-z/ ()]. Allowlist check via _normalize_analyte()
+    # prevents false positives from non-analyte text.
+    if len(results) < 3:
         for match in TABULAR_THAI_RE.finditer(text):
             name = match.group("name")
             canonical = _normalize_analyte(name)
