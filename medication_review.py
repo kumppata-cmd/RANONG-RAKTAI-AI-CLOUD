@@ -58,9 +58,106 @@ class DrugCategory(str, Enum):
     ANTIHYPERTENSIVE = "antihypertensive"
 
 
+class MedicationRoute(str, Enum):
+    """ทางการให้ยา."""
+    ORAL = "oral"
+    IV = "iv"
+    IM = "im"
+    SC = "sc"
+    TOPICAL = "topical"
+    INHALED = "inhaled"
+    SUBLINGUAL = "sublingual"
+    RECTAL = "rectal"
+    OTHER = "other"
+
+
+class ReconciliationStatus(str, Enum):
+    """สถานะการ reconcile ยา."""
+    PENDING = "pending"              # รอตรวจสอบ
+    VERIFIED = "verified"            # ตรวจสอบแล้ว ถูกต้อง
+    DISCREPANCY = "discrepancy"      # พบความคลาดเคลื่อน
+    RESOLVED = "resolved"            # แก้ไขความคลาดเคลื่อนแล้ว
+    NOT_APPLICABLE = "not_applicable"
+
+
+class RenalDoseCategory(str, Enum):
+    """หมวดการปรับยาตามไต."""
+    NO_ADJUSTMENT = "no_adjustment"      # ไม่ต้องปรับ
+    REDUCE_DOSE = "reduce_dose"          # ลดขนาดยา
+    EXTEND_INTERVAL = "extend_interval"  # ยืดช่วงให้ยา
+    CONTRAINDICATED = "contraindicated"  # ห้ามใช้
+    MONITOR = "monitor"                  # ใช้ได้แต่ต้องติดตาม
+    UNKNOWN = "unknown"                  # ไม่มีข้อมูล
+
+
 # ═══════════════════════════════════════════════════════════
 # Data Classes
 # ═══════════════════════════════════════════════════════════
+
+@dataclass
+class MedicationEntry:
+    """รายการยาที่สมบูรณ์ — Phase 2B Medication Entry Model.
+
+    กฎความปลอดภัย:
+      - ห้ามสั่งยาหรือเปลี่ยนยาอัตโนมัติ
+      - เป็นข้อมูลบันทึกเท่านั้น ไม่ใช่ใบสั่งยา
+      - ต้องผ่าน Human Review ก่อนใช้ประกอบการรักษา
+    """
+    medication_id: str = ""            # internal ID
+    name: str = ""                     # ชื่อยา (generic)
+    brand_name: str = ""               # ชื่อการค้า (optional)
+    dose: str = ""                     # ขนาดยา (เช่น "500 mg")
+    dose_value: Optional[float] = None # ค่าตัวเลข (mg)
+    dose_unit: str = ""                # หน่วย (mg, mcg, unit, etc.)
+    route: str = MedicationRoute.ORAL.value  # ทางให้ยา
+    frequency: str = ""                # ความถี่ (เช่น "BID", "OD", "TID")
+    start_date: str = ""               # วันเริ่มยา (ISO date)
+    stop_date: str = ""                # วันหยุดยา (ISO date, empty=active)
+    prescribing_clinician_hash: str = ""  # hash ของแพทย์ผู้สั่ง
+    indication: str = ""               # ข้อบ่งชี้
+    is_active: bool = True             # ยังใช้อยู่หรือไม่
+    reconciliation_status: str = ReconciliationStatus.PENDING.value
+    reconciled_by_hash: str = ""       # hash ของผู้ reconcile
+    reconciled_date: str = ""          # วัน reconcile
+    renal_dose_category: str = RenalDoseCategory.UNKNOWN.value
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        d: dict = {
+            "medication_id": self.medication_id,
+            "name": self.name,
+            "dose": self.dose,
+            "route": self.route,
+            "frequency": self.frequency,
+            "start_date": self.start_date,
+            "is_active": self.is_active,
+            "reconciliation_status": self.reconciliation_status,
+            "renal_dose_category": self.renal_dose_category,
+        }
+        if self.brand_name:
+            d["brand_name"] = self.brand_name
+        if self.stop_date:
+            d["stop_date"] = self.stop_date
+        if self.prescribing_clinician_hash:
+            d["prescribing_clinician_hash"] = (
+                self.prescribing_clinician_hash[:8]
+            )
+        if self.indication:
+            d["indication"] = self.indication
+        if self.dose_value is not None:
+            d["dose_value"] = self.dose_value
+            d["dose_unit"] = self.dose_unit
+        if self.reconciled_by_hash:
+            d["reconciled_by_hash"] = self.reconciled_by_hash[:8]
+            d["reconciled_date"] = self.reconciled_date
+        return d
+
+    @classmethod
+    def from_dict(cls, data: dict) -> MedicationEntry:
+        """สร้าง MedicationEntry จาก dict."""
+        return cls(**{k: v for k, v in data.items()
+                      if k in cls.__dataclass_fields__})
+
 
 @dataclass
 class MedicationAlert:
@@ -774,4 +871,307 @@ def review_text_th(result: MedicationReviewResult) -> str:
         lines.append("")
 
     lines.append(f"⚠️ {result.disclaimer}")
+    return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
+# Phase 2B: Renal Dosing Rules
+# ═══════════════════════════════════════════════════════════
+
+# drug_pattern → list of { egfr_range: (min, max), category, dose_guidance_th }
+RENAL_DOSE_GUIDELINES: dict[str, list[dict]] = {
+    "metformin": [
+        {"egfr_range": (0, 30), "category": RenalDoseCategory.CONTRAINDICATED.value,
+         "guidance_th": "ห้ามใช้ — eGFR < 30"},
+        {"egfr_range": (30, 45), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — eGFR 30-45 ใช้ได้สูงสุด 1000 mg/d"},
+        {"egfr_range": (45, 999), "category": RenalDoseCategory.NO_ADJUSTMENT.value,
+         "guidance_th": "ใช้ได้ตามปกติ"},
+    ],
+    "allopurinol": [
+        {"egfr_range": (0, 15), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — สูงสุด 50 mg/d"},
+        {"egfr_range": (15, 30), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — สูงสุด 100 mg/d"},
+        {"egfr_range": (30, 60), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — สูงสุด 200 mg/d"},
+        {"egfr_range": (60, 999), "category": RenalDoseCategory.NO_ADJUSTMENT.value,
+         "guidance_th": "ใช้ได้ตามปกติ"},
+    ],
+    "gabapentin": [
+        {"egfr_range": (0, 15), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยามาก — สูงสุด 300 mg/d"},
+        {"egfr_range": (15, 30), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — สูงสุด 600 mg/d"},
+        {"egfr_range": (30, 60), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — สูงสุด 900 mg/d"},
+        {"egfr_range": (60, 999), "category": RenalDoseCategory.NO_ADJUSTMENT.value,
+         "guidance_th": "ใช้ได้ตามปกติ"},
+    ],
+    "pregabalin": [
+        {"egfr_range": (0, 15), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — สูงสุด 75 mg/d"},
+        {"egfr_range": (15, 30), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — สูงสุด 150 mg/d"},
+        {"egfr_range": (30, 60), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — สูงสุด 300 mg/d"},
+        {"egfr_range": (60, 999), "category": RenalDoseCategory.NO_ADJUSTMENT.value,
+         "guidance_th": "ใช้ได้ตามปกติ"},
+    ],
+    "dabigatran": [
+        {"egfr_range": (0, 30), "category": RenalDoseCategory.CONTRAINDICATED.value,
+         "guidance_th": "ห้ามใช้ — eGFR < 30"},
+        {"egfr_range": (30, 50), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — 110 mg BID"},
+        {"egfr_range": (50, 999), "category": RenalDoseCategory.NO_ADJUSTMENT.value,
+         "guidance_th": "ใช้ได้ตามปกติ"},
+    ],
+    "rivaroxaban": [
+        {"egfr_range": (0, 15), "category": RenalDoseCategory.CONTRAINDICATED.value,
+         "guidance_th": "ห้ามใช้ — eGFR < 15"},
+        {"egfr_range": (15, 50), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา — 15 mg OD"},
+        {"egfr_range": (50, 999), "category": RenalDoseCategory.NO_ADJUSTMENT.value,
+         "guidance_th": "ใช้ได้ตามปกติ"},
+    ],
+    "enoxaparin": [
+        {"egfr_range": (0, 30), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยา 50% — eGFR < 30"},
+        {"egfr_range": (30, 999), "category": RenalDoseCategory.NO_ADJUSTMENT.value,
+         "guidance_th": "ใช้ได้ตามปกติ"},
+    ],
+    "digoxin": [
+        {"egfr_range": (0, 30), "category": RenalDoseCategory.REDUCE_DOSE.value,
+         "guidance_th": "ลดขนาดยาและติดตามระดับยาในเลือด — eGFR < 30"},
+        {"egfr_range": (30, 60), "category": RenalDoseCategory.MONITOR.value,
+         "guidance_th": "ติดตามระดับยาในเลือด"},
+        {"egfr_range": (60, 999), "category": RenalDoseCategory.NO_ADJUSTMENT.value,
+         "guidance_th": "ใช้ได้ตามปกติ"},
+    ],
+    "gentamicin": [
+        {"egfr_range": (0, 30), "category": RenalDoseCategory.EXTEND_INTERVAL.value,
+         "guidance_th": "ยืดช่วงให้ยา — ติดตามระดับยาในเลือดทุกครั้ง"},
+        {"egfr_range": (30, 60), "category": RenalDoseCategory.EXTEND_INTERVAL.value,
+         "guidance_th": "ยืดช่วงให้ยา — ติดตามระดับยาในเลือด"},
+        {"egfr_range": (60, 999), "category": RenalDoseCategory.MONITOR.value,
+         "guidance_th": "ติดตามระดับยาในเลือด"},
+    ],
+    "amikacin": [
+        {"egfr_range": (0, 30), "category": RenalDoseCategory.EXTEND_INTERVAL.value,
+         "guidance_th": "ยืดช่วงให้ยา — ติดตามระดับยาในเลือดทุกครั้ง"},
+        {"egfr_range": (30, 60), "category": RenalDoseCategory.EXTEND_INTERVAL.value,
+         "guidance_th": "ยืดช่วงให้ยา — ติดตามระดับยาในเลือด"},
+        {"egfr_range": (60, 999), "category": RenalDoseCategory.MONITOR.value,
+         "guidance_th": "ติดตามระดับยาในเลือด"},
+    ],
+}
+
+
+def assess_renal_dosing(
+    medication: MedicationEntry,
+    egfr: Optional[float],
+) -> tuple[str, str]:
+    """ประเมินการปรับยาตามการทำงานของไต.
+
+    Args:
+        medication: รายการยา
+        egfr: ค่า eGFR ล่าสุด (None = ไม่มีข้อมูล)
+
+    Returns:
+        (RenalDoseCategory value, guidance_th)
+
+    กฎความปลอดภัย:
+      - ผลเป็นข้อมูลประกอบเท่านั้น ห้ามใช้สั่งยาอัตโนมัติ
+    """
+    if egfr is None:
+        return RenalDoseCategory.UNKNOWN.value, "ไม่มีค่า eGFR — ไม่สามารถประเมินได้"
+
+    med_lower = normalize_drug_name(medication.name)
+    if not med_lower:
+        return RenalDoseCategory.UNKNOWN.value, ""
+
+    for drug_key, rules in RENAL_DOSE_GUIDELINES.items():
+        if drug_key in med_lower or med_lower in drug_key:
+            for rule in rules:
+                low, high = rule["egfr_range"]
+                if low <= egfr < high:
+                    return rule["category"], rule["guidance_th"]
+
+    return RenalDoseCategory.UNKNOWN.value, ""
+
+
+# ═══════════════════════════════════════════════════════════
+# Phase 2B: Medication List Review
+# ═══════════════════════════════════════════════════════════
+
+@dataclass
+class MedicationListReview:
+    """ผลการทบทวนรายการยาทั้งหมด — Phase 2B.
+
+    กฎความปลอดภัย:
+      - ห้ามสั่งยาหรือเปลี่ยนยาอัตโนมัติ
+      - ผลเป็นข้อมูลประกอบการพิจารณาเท่านั้น
+    """
+    review_date: str = ""
+    total_medications: int = 0
+    active_medications: int = 0
+    stopped_medications: int = 0
+    reconciled_count: int = 0
+    pending_reconciliation: int = 0
+    renal_alerts: list[MedicationAlert] = field(default_factory=list)
+    drug_lab_alerts: list[MedicationAlert] = field(default_factory=list)
+    nephrotoxic_alerts: list[MedicationAlert] = field(default_factory=list)
+    medication_entries: list[MedicationEntry] = field(default_factory=list)
+    disclaimer: str = (
+        "⚠️ การทบทวนยานี้เป็นข้อมูลประกอบเท่านั้น — "
+        "ห้ามใช้แทนการตัดสินใจทางคลินิก"
+    )
+
+    def __post_init__(self):
+        if not self.review_date:
+            self.review_date = datetime.now().strftime("%Y-%m-%d")
+
+    def to_dict(self) -> dict:
+        return {
+            "review_date": self.review_date,
+            "total_medications": self.total_medications,
+            "active_medications": self.active_medications,
+            "stopped_medications": self.stopped_medications,
+            "reconciled_count": self.reconciled_count,
+            "pending_reconciliation": self.pending_reconciliation,
+            "renal_alert_count": len(self.renal_alerts),
+            "drug_lab_alert_count": len(self.drug_lab_alerts),
+            "nephrotoxic_alert_count": len(self.nephrotoxic_alerts),
+            "medications": [m.to_dict() for m in self.medication_entries],
+            "disclaimer": self.disclaimer,
+        }
+
+
+def review_medication_list(
+    medications: list[MedicationEntry],
+    lab_values: dict[str, float],
+    egfr: Optional[float] = None,
+    ckd_stage: str = "",
+) -> MedicationListReview:
+    """ทบทวนรายการยาทั้งหมดแบบครบวงจร — Phase 2B.
+
+    Args:
+        medications: list ของ MedicationEntry
+        lab_values: dict analyte → ค่า
+        egfr: ค่า eGFR ล่าสุด
+        ckd_stage: ระดับ CKD
+
+    Returns:
+        MedicationListReview
+
+    กฎความปลอดภัย:
+      - ห้ามสั่งยาหรือเปลี่ยนยาอัตโนมัติ
+    """
+    review = MedicationListReview()
+    review.medication_entries = list(medications)
+    review.total_medications = len(medications)
+
+    active_meds = [m for m in medications if m.is_active]
+    stopped_meds = [m for m in medications if not m.is_active]
+    review.active_medications = len(active_meds)
+    review.stopped_medications = len(stopped_meds)
+
+    # Reconciliation stats
+    review.reconciled_count = sum(
+        1 for m in medications
+        if m.reconciliation_status in (
+            ReconciliationStatus.VERIFIED.value,
+            ReconciliationStatus.RESOLVED.value,
+        )
+    )
+    review.pending_reconciliation = sum(
+        1 for m in medications
+        if m.reconciliation_status == ReconciliationStatus.PENDING.value
+    )
+
+    # Run safety checks on active medications
+    active_names = [m.name for m in active_meds if m.name]
+
+    # 1. Nephrotoxic screening
+    review.nephrotoxic_alerts = screen_nephrotoxic_drugs(
+        active_names, ckd_stage
+    )
+
+    # 2. Drug-lab interaction checks
+    review.drug_lab_alerts = check_drug_lab_interactions(
+        active_names, lab_values
+    )
+
+    # 3. Renal dosing review
+    for med in active_meds:
+        cat, guidance = assess_renal_dosing(med, egfr)
+        med.renal_dose_category = cat
+        if cat in (
+            RenalDoseCategory.CONTRAINDICATED.value,
+            RenalDoseCategory.REDUCE_DOSE.value,
+            RenalDoseCategory.EXTEND_INTERVAL.value,
+        ):
+            level = (AlertLevel.CRITICAL.value
+                     if cat == RenalDoseCategory.CONTRAINDICATED.value
+                     else AlertLevel.WARNING.value)
+            review.renal_alerts.append(MedicationAlert(
+                drug_name=med.name,
+                alert_level=level,
+                category=DrugCategory.DOSE_ADJUST.value,
+                message_th=f"การปรับยาตามไต: {guidance}",
+                recommendation_th="ปรึกษาแพทย์เพื่อพิจารณาปรับขนาดยา",
+            ))
+
+    return review
+
+
+def medication_list_text_th(review: MedicationListReview) -> str:
+    """สร้างข้อความสรุปการทบทวนยาภาษาไทย — Phase 2B."""
+    lines = [
+        "💊 สรุปการทบทวนรายการยา",
+        f"วันที่: {review.review_date}",
+        "",
+        f"📋 รายการยาทั้งหมด: {review.total_medications}",
+        f"  ✅ กำลังใช้: {review.active_medications}",
+        f"  ⏹️ หยุดแล้ว: {review.stopped_medications}",
+        "",
+    ]
+
+    # Reconciliation status
+    if review.total_medications > 0:
+        lines.append("🔄 สถานะ Reconciliation:")
+        lines.append(f"  ✅ ตรวจสอบแล้ว: {review.reconciled_count}")
+        lines.append(f"  ⏳ รอตรวจสอบ: {review.pending_reconciliation}")
+        lines.append("")
+
+    # Alerts
+    all_alerts = (
+        review.nephrotoxic_alerts
+        + review.drug_lab_alerts
+        + review.renal_alerts
+    )
+    critical = [a for a in all_alerts
+                if a.alert_level == AlertLevel.CRITICAL.value]
+    warnings = [a for a in all_alerts
+                if a.alert_level == AlertLevel.WARNING.value]
+
+    if critical:
+        lines.append(f"🔴 แจ้งเตือนสำคัญ ({len(critical)} รายการ):")
+        for a in critical:
+            lines.append(f"  ❌ {a.drug_name}: {a.message_th}")
+            lines.append(f"     → {a.recommendation_th}")
+        lines.append("")
+
+    if warnings:
+        lines.append(f"🟡 ข้อควรระวัง ({len(warnings)} รายการ):")
+        for a in warnings:
+            lines.append(f"  ⚠️ {a.drug_name}: {a.message_th}")
+            lines.append(f"     → {a.recommendation_th}")
+        lines.append("")
+
+    if not critical and not warnings:
+        lines.append("✅ ไม่พบข้อควรระวังจากรายการยาที่ใช้อยู่")
+        lines.append("")
+
+    lines.append(f"⚠️ {review.disclaimer}")
     return "\n".join(lines)

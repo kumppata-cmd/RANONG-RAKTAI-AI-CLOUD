@@ -362,6 +362,14 @@ class TestExternalAIProtection(unittest.TestCase):
 class TestEnrollmentSecurity(unittest.TestCase):
     """ทดสอบ Enrollment Token Security."""
 
+    def setUp(self):
+        """Reset enrollment store to ensure test isolation."""
+        import json
+        store_path = server.enrollment_store._store_path
+        if os.path.exists(store_path):
+            with open(store_path, 'w') as f:
+                json.dump({"tokens": {}, "failed_attempts": {}}, f)
+
     def test_invalid_token_silent_reject(self):
         """Token ไม่ถูกต้อง → ไม่ตอบกลับ (ป้องกัน brute force)."""
         # ใช้ hash เฉพาะต่อ test เพื่อหลีกเลี่ยง rate limit จาก test อื่น
