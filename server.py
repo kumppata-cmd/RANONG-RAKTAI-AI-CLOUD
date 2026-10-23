@@ -444,6 +444,58 @@ class StorageLocal:
         with open(full, "rb") as f:
             return f.read()
 
+    def get_with_generation(self, path: str) -> tuple:
+        """อ่านไฟล์พร้อม generation number สำหรับ CAS.
+
+        Returns:
+            (bytes, generation: int) ถ้าไฟล์มี
+            (None, None) ถ้าไฟล์ไม่มี
+
+        Local storage ใช้ file mtime (nanoseconds) เป็น generation แทน.
+        """
+        full = os.path.join(BASE_DIR, path)
+        if not os.path.exists(full):
+            return None, None
+        with open(full, "rb") as f:
+            data = f.read()
+        # ใช้ mtime * 1e9 เป็น pseudo-generation เพื่อตรวจจับการเปลี่ยนแปลง
+        generation = int(os.path.getmtime(full) * 1_000_000_000)
+        return data, generation
+
+    def put_conditional(
+        self,
+        path: str,
+        data: bytes,
+        if_generation_match: int,
+        content_type: str = "application/json",
+    ) -> tuple:
+        """เขียนไฟล์แบบ conditional (CAS) บน local disk.
+
+        Args:
+            path: path ปลายทาง
+            data: ข้อมูลที่ต้องการเขียน
+            if_generation_match: generation ที่คาดหวัง (จาก get_with_generation)
+            content_type: ไม่ใช้บน local
+
+        Returns:
+            (True, new_generation) ถ้าเขียนสำเร็จ
+            (False, current_generation) ถ้า generation ไม่ตรง (conflict)
+
+        Raises:
+            FileNotFoundError: ถ้าไฟล์ไม่มีอยู่ (ไม่ควรเกิดในการ approve)
+        """
+        full = os.path.join(BASE_DIR, path)
+        if not os.path.exists(full):
+            raise FileNotFoundError(f"ไม่พบไฟล์สำหรับ conditional write: {os.path.basename(path)}")
+        current_gen = int(os.path.getmtime(full) * 1_000_000_000)
+        if current_gen != if_generation_match:
+            return False, current_gen
+        os.makedirs(os.path.dirname(full), exist_ok=True)
+        with open(full, "wb") as f:
+            f.write(data)
+        new_gen = int(os.path.getmtime(full) * 1_000_000_000)
+        return True, new_gen
+
     def list_files(self, category: str) -> list[str]:
         folder = os.path.join(BASE_DIR, FOLDERS.get(category, FOLDERS["review"]))
         if not os.path.exists(folder):
@@ -789,6 +841,106 @@ class StorageGCS:
                 f"GCS get ล้มเหลว: {type(e).__name__} ({path_prefix}/)"
             )
             return None
+
+    def get_with_generation(self, path: str) -> tuple:
+        """อ่านไฟล์จาก GCS พร้อม generation number สำหรับ CAS.
+
+        Returns:
+            (bytes, generation: int) ถ้า object มี
+            (None, None) ถ้า object ไม่มีหรือ GCS ไม่พร้อม
+
+        generation คือ GCS object generation ที่เพิ่มทุกครั้งที่ object ถูกเขียนใหม่.
+        ใช้คู่กับ put_conditional() เพื่อป้องกัน lost-update race.
+        """
+        if not self.is_ready:
+            logger.warning("GCS ไม่พร้อม — get_with_generation() return (None, None)")
+            return None, None
+
+        try:
+            blob = self._bucket.blob(path)
+            # reload() ดึง metadata รวมถึง generation โดยไม่ต้องดาวน์โหลดข้อมูล
+            blob.reload()
+            data = blob.download_as_bytes()
+            return data, blob.generation
+        except Exception as e:
+            err_code = getattr(e, "code", None)
+            if err_code == 404:
+                return None, None
+            path_prefix = path.split("/")[0] if "/" in path else path
+            logger.warning(
+                f"GCS get_with_generation ล้มเหลว: {type(e).__name__} ({path_prefix}/)"
+            )
+            return None, None
+
+    def put_conditional(
+        self,
+        path: str,
+        data: bytes,
+        if_generation_match: int,
+        content_type: str = "application/json",
+    ) -> tuple:
+        """เขียนไฟล์แบบ conditional (CAS) บน GCS.
+
+        ใช้ if_generation_match ของ GCS เพื่อป้องกัน lost-update race:
+        เขียนสำเร็จก็ต่อเมื่อ object generation ตรงกับที่คาดหวัง
+        ถ้า worker อื่นเขียนไปก่อน → generation เปลี่ยน → 412 Precondition Failed
+
+        Args:
+            path: blob path ใน bucket
+            data: ข้อมูลที่ต้องการเขียน (bytes)
+            if_generation_match: generation ที่คาดหวัง (จาก get_with_generation)
+            content_type: MIME type
+
+        Returns:
+            (True, new_generation) ถ้าเขียนสำเร็จ
+            (False, None) ถ้า generation ไม่ตรง (conflict — worker อื่นเขียนไปก่อน)
+
+        Raises:
+            RuntimeError: ใน production mode เมื่อเขียนล้มเหลว (ไม่ใช่ conflict)
+        """
+        if not self.is_ready:
+            err_msg = f"GCS ไม่พร้อม ({self._init_error}) — ไม่สามารถเขียน conditional ได้"
+            logger.error(err_msg)
+            if IS_PRODUCTION:
+                raise RuntimeError(err_msg)
+            # Local fallback ไม่รองรับ CAS จริง — return failure เพื่อความปลอดภัย
+            return False, None
+
+        try:
+            blob = self._bucket.blob(path)
+            blob.upload_from_string(
+                data,
+                content_type=content_type,
+                if_generation_match=if_generation_match,
+            )
+            # reload เพื่อดึง new generation
+            blob.reload()
+            path_prefix = path.split("/")[0] if "/" in path else path
+            logger.info(
+                f"GCS put_conditional สำเร็จ: {path_prefix}/ "
+                f"({len(data):,} bytes, gen={blob.generation})"
+            )
+            return True, blob.generation
+        except Exception as e:
+            err_code = getattr(e, "code", None)
+            if err_code == 412:
+                # 412 Precondition Failed → worker อื่นเขียนไปก่อนแล้ว
+                path_prefix = path.split("/")[0] if "/" in path else path
+                logger.warning(
+                    f"GCS put_conditional: conflict (412) — "
+                    f"worker อื่นเขียนไปก่อน ({path_prefix}/)"
+                )
+                return False, None
+            # Error อื่น — ไม่ใช่ conflict
+            path_prefix = path.split("/")[0] if "/" in path else path
+            logger.error(
+                f"GCS put_conditional ล้มเหลว: {type(e).__name__} ({path_prefix}/)"
+            )
+            if IS_PRODUCTION:
+                raise RuntimeError(
+                    f"GCS put_conditional ล้มเหลว — ไม่สามารถบันทึกได้"
+                )
+            return False, None
 
     def list_files(self, category: str) -> list[str]:
         """แสดงรายการไฟล์ใน GCS bucket ตามประเภท."""
@@ -1997,6 +2149,81 @@ def format_search_results(results: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _update_clinical_on_approve(
+    storage_inst, doc_id: str, user_hash: str,
+    report_version: int | None,
+):
+    """อัพเดท clinical analysis หลัง physician approve.
+
+    ตั้ง PHYSICIAN_VERIFIED เฉพาะเมื่อ source_report_version ตรงกับ
+    report version ปัจจุบัน — ถ้า report ถูกแก้ไขหลังวิเคราะห์ ให้
+    ตั้ง STALE_AFTER_CORRECTION แทน.
+    """
+    try:
+        ca_path = f"{CLINICAL_ANALYSIS_PREFIX}{doc_id}.json"
+        ca_data = storage_inst.get(ca_path)
+        if not ca_data:
+            return
+        ca_dict = json.loads(ca_data)
+        source_ver = ca_dict.get("source_report_version")
+        # ถ้า report version เปลี่ยนไปจากตอนวิเคราะห์ → stale
+        if (source_ver is not None and report_version is not None
+                and source_ver < report_version):
+            ca_dict["verification_status"] = "STALE_AFTER_CORRECTION"
+            ca_dict["stale_reason"] = (
+                f"report version changed: {source_ver} → {report_version}"
+            )
+        else:
+            ca_dict["verification_status"] = "PHYSICIAN_VERIFIED"
+        ca_dict["verified_by"] = user_hash[:8]
+        ca_dict["verified_at"] = datetime.now().isoformat(
+            timespec="seconds"
+        )
+        storage_inst.put(
+            ca_path,
+            json.dumps(ca_dict, ensure_ascii=False).encode("utf-8"),
+            content_type="application/json",
+        )
+    except Exception as e:
+        logger.warning(
+            f"Clinical analysis update failed: "
+            f"doc={doc_id[:8]}, error={type(e).__name__}"
+        )
+
+
+def _invalidate_clinical_on_correction(
+    storage_inst, doc_id: str, report_version: int,
+):
+    """Invalidate clinical analysis หลังแก้ไขค่า report.
+
+    ตั้ง STALE_AFTER_CORRECTION เพื่อบังคับให้สร้างผลวิเคราะห์ใหม่
+    หลังจากแพทย์แก้ไขค่า OCR
+    """
+    try:
+        ca_path = f"{CLINICAL_ANALYSIS_PREFIX}{doc_id}.json"
+        ca_data = storage_inst.get(ca_path)
+        if not ca_data:
+            return
+        ca_dict = json.loads(ca_data)
+        ca_dict["verification_status"] = "STALE_AFTER_CORRECTION"
+        ca_dict["stale_reason"] = (
+            f"report corrected to version {report_version}"
+        )
+        ca_dict["invalidated_at"] = datetime.now().isoformat(
+            timespec="seconds"
+        )
+        storage_inst.put(
+            ca_path,
+            json.dumps(ca_dict, ensure_ascii=False).encode("utf-8"),
+            content_type="application/json",
+        )
+    except Exception as e:
+        logger.warning(
+            f"Clinical analysis invalidation failed: "
+            f"doc={doc_id[:8]}, error={type(e).__name__}"
+        )
+
+
 def handle_search_command(text: str, user_hash: str) -> str | None:
     """ประมวลผลคำสั่งค้นหาเอกสาร — คืนข้อความตอบกลับ หรือ None ถ้าไม่ใช่คำสั่ง."""
     text_stripped = text.strip()
@@ -2498,9 +2725,19 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             # ── Phase 2A: ใช้ PhysicianApprovalService ถ้ามี ──
             if physician_service is not None and is_physician:
                 try:
-                    result = physician_service.approve(
+                    # โหลด report เพื่อหา current version
+                    _pre_approve_enhanced = (
+                        physician_service
+                        ._load_enhanced_report(lab_path)
+                    )
+                    _expected_ver = (
+                        _pre_approve_enhanced.version
+                        if _pre_approve_enhanced else 1
+                    )
+                    result = physician_service.approve_report(
                         lab_path=lab_path,
-                        physician_id=user_hash[:8],
+                        user_hash=user_hash,
+                        expected_version=_expected_ver,
                         notes="Approved via LINE command",
                     )
                     if result.get("status") == "success":
@@ -2520,6 +2757,11 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                                 )
                             except Exception:
                                 pass
+                        # อัพเดท clinical analysis → PHYSICIAN_VERIFIED
+                        _update_clinical_on_approve(
+                            storage, full_doc_id,
+                            user_hash, result.get("version"),
+                        )
                         return (
                             f"✅ แพทย์ยืนยันผลแล็บ "
                             f"{full_doc_id[:8]} สำเร็จ\n"
@@ -2575,24 +2817,12 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 "result_count": len(lab_report.results),
             })
 
-            # อัพเดท clinical analysis verification_status → PHYSICIAN_VERIFIED
-            try:
-                _ca_path = f"{CLINICAL_ANALYSIS_PREFIX}{full_doc_id}.json"
-                _ca_data = storage.get(_ca_path)
-                if _ca_data:
-                    _ca_dict = json.loads(_ca_data)
-                    _ca_dict["verification_status"] = "PHYSICIAN_VERIFIED"
-                    _ca_dict["verified_by"] = user_hash[:8]
-                    _ca_dict["verified_at"] = datetime.now().isoformat(
-                        timespec="seconds"
-                    )
-                    storage.put(
-                        _ca_path,
-                        json.dumps(_ca_dict, ensure_ascii=False).encode("utf-8"),
-                        content_type="application/json",
-                    )
-            except Exception:
-                pass  # clinical analysis update ไม่ block approval
+            # อัพเดท clinical analysis verification_status
+            # legacy admin path: version = 1 (ไม่มี EnhancedLabReport)
+            _update_clinical_on_approve(
+                storage, full_doc_id, user_hash,
+                report_version=1,
+            )
 
             return (
                 f"✅ ยืนยันผลแล็บ {full_doc_id[:8]} สำเร็จ\n"
@@ -2656,15 +2886,63 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                     "2. ระบบได้ประมวลผลเรียบร้อยแล้ว"
                 )
             clinical_dict = json.loads(clinical_data)
+
+            # ── Stale-check: ถ้า report ถูกแก้ไขหลังวิเคราะห์ ──
+            verification_status = clinical_dict.get(
+                "verification_status", ""
+            )
+            source_ver = clinical_dict.get("source_report_version")
+            stale_warning = ""
+            if source_ver is not None:
+                # โหลด report ปัจจุบันเพื่อเทียบ version
+                _check_lab_path = (
+                    f"{LAB_RESULTS_PREFIX}{full_doc_id}.json"
+                )
+                try:
+                    _check_lab_data = storage.get(_check_lab_path)
+                    if _check_lab_data:
+                        _check_parsed = json.loads(_check_lab_data)
+                        current_ver = _check_parsed.get("version", 1)
+                        if current_ver > source_ver:
+                            stale_warning = (
+                                "⚠️ ผลวิเคราะห์นี้อ้างอิงผลแล็บ "
+                                f"version {source_ver} "
+                                f"แต่ผลแล็บปัจจุบันเป็น "
+                                f"version {current_ver}\n"
+                                "ผลวิเคราะห์อาจไม่ตรงกับค่าล่าสุด\n\n"
+                            )
+                            # ป้องกัน: ถ้ายัง PHYSICIAN_VERIFIED
+                            # แต่ report เปลี่ยนแล้ว → แสดงเป็น STALE
+                            if verification_status == "PHYSICIAN_VERIFIED":
+                                verification_status = "STALE_AFTER_CORRECTION"
+                except Exception:
+                    pass  # ถ้าอ่าน report ไม่ได้ ไม่ block การแสดงผล
+
             audit_logger.log("clinical_analysis_view", user_hash, {
                 "doc_id": full_doc_id[:8],
                 "finding_count": clinical_dict.get("finding_count", 0),
                 "ckd_stage": clinical_dict.get("ckd_stage", "UNKNOWN"),
+                "stale": bool(stale_warning),
             })
+
+            # ── Verification status banner ──
+            status_banner = ""
+            if verification_status == "PENDING_VERIFICATION":
+                status_banner = (
+                    "⏳ ผลวิเคราะห์ยังไม่ผ่านการตรวจสอบโดยแพทย์\n\n"
+                )
+            elif verification_status == "STALE_AFTER_CORRECTION":
+                status_banner = (
+                    "⚠️ ผลวิเคราะห์นี้ล้าสมัย — "
+                    "ผลแล็บถูกแก้ไขหลังจากวิเคราะห์\n"
+                    "กรุณารอผลวิเคราะห์ใหม่หลัง"
+                    "แพทย์ยืนยันผลแล็บที่แก้ไข\n\n"
+                )
+
             # แสดงข้อความสรุปที่สร้างไว้
             summary = clinical_dict.get("summary_text_th", "")
             if summary:
-                return summary
+                return f"{stale_warning}{status_banner}{summary}"
             return "มีผลวิเคราะห์แต่ไม่สามารถแสดงสรุปได้"
         except Exception as e:
             logger.warning(
@@ -4497,6 +4775,9 @@ def process_file_async(
                         _clinical_dict = clinical_result.to_dict()
                         # Tag ว่าผล OCR ยังไม่ผ่าน physician verification
                         _clinical_dict["verification_status"] = "PENDING_VERIFICATION"
+                        # ผูก version ของ report ที่ใช้วิเคราะห์
+                        # ณ จุดนี้ report เพิ่งสร้าง → version = 1
+                        _clinical_dict["source_report_version"] = 1
                         _clinical_dict["disclaimer"] = (
                             "ผลวิเคราะห์นี้สร้างจากผล OCR อัตโนมัติ "
                             "ยังไม่ผ่านการตรวจสอบโดยแพทย์ "
@@ -4614,11 +4895,11 @@ def process_file_async(
                 reply_message(reply_token, "\n".join(_reply_lines))
         except RuntimeError as e:
             # Production mode — GCS ล้มเหลว ต้องแจ้งผู้ใช้
-            # บันทึก error message เต็ม (ไม่มี path/ข้อมูลผู้ป่วย
-            # เพราะ RuntimeError message มาจากโค้ดเราเอง)
+            # บันทึกเฉพาะชนิด exception — ห้าม log message
+            # เพราะอาจมี path หรือข้อมูลผู้ป่วยรั่ว
             logger.error(
-                f"จัดเก็บเอกสารล้มเหลว (Production): {type(e).__name__}: "
-                f"{e} (doc_id={_doc_id})"
+                f"จัดเก็บเอกสารล้มเหลว (Production): "
+                f"{type(e).__name__} (doc_id={_doc_id})"
             )
             if reply_token:
                 reply_message(

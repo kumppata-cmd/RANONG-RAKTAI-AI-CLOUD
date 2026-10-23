@@ -255,23 +255,69 @@ class PhysicianApprovalService:
         parsed = json.loads(data)
         return EnhancedLabReport.from_dict(parsed)
 
-    def _save_enhanced_report(self, lab_path: str,
-                               enhanced: EnhancedLabReport) -> bool:
-        """บันทึก EnhancedLabReport กลับ storage.
+    def _load_enhanced_report_with_generation(
+        self, lab_path: str
+    ) -> tuple:
+        """โหลด EnhancedLabReport พร้อม GCS generation สำหรับ CAS.
 
-        Returns True on success.
-
-        NOTE: Currently does a blind storage.put(). The next hardening step
-        is to use GCS ``if_generation_match`` for conditional writes to prevent
-        lost-update races at the storage layer. This requires extending the
-        StorageLocal/StorageGCS abstraction to accept generation/metageneration
-        parameters in put(). Until then, application-level version checking
-        (``_check_version``) provides optimistic concurrency control.
+        Returns:
+            (EnhancedLabReport, generation: int) ถ้าพบ
+            (None, None) ถ้าไม่พบ
         """
+        if hasattr(self._storage, "get_with_generation"):
+            data, generation = self._storage.get_with_generation(lab_path)
+        else:
+            # fallback สำหรับ storage ที่ไม่รองรับ CAS
+            data = self._storage.get(lab_path)
+            generation = None
+        if data is None:
+            return None, None
+        parsed = json.loads(data)
+        return EnhancedLabReport.from_dict(parsed), generation
+
+    def _save_enhanced_report(self, lab_path: str,
+                               enhanced: EnhancedLabReport,
+                               expected_generation: int = None) -> bool:
+        """บันทึก EnhancedLabReport กลับ storage ด้วย CAS.
+
+        ใช้ GCS if_generation_match เพื่อป้องกัน lost-update race
+        ระหว่าง workers ที่ทำงานพร้อมกัน.
+
+        Args:
+            lab_path: path ใน storage
+            enhanced: report ที่แก้ไขแล้ว
+            expected_generation: GCS generation ที่คาดหวัง (จาก load)
+                ถ้า None → fallback ไป blind put (backward compat)
+
+        Returns:
+            True ถ้าเขียนสำเร็จ
+
+        Raises:
+            StaleVersionError: ถ้า worker อื่นเขียนไปก่อนแล้ว (CAS conflict)
+        """
+        encoded = enhanced.to_json().encode("utf-8")
+
+        if expected_generation is not None and hasattr(
+            self._storage, "put_conditional"
+        ):
+            success, _new_gen = self._storage.put_conditional(
+                lab_path,
+                encoded,
+                if_generation_match=expected_generation,
+                content_type="application/json",
+            )
+            if not success:
+                raise StaleVersionError(
+                    "ข้อมูลถูกแก้ไขโดย worker อื่น "
+                    "(GCS generation conflict) — กรุณาโหลดใหม่แล้วลองอีกครั้ง"
+                )
+            return True
+
+        # fallback: blind put (storage ไม่รองรับ CAS)
         try:
             self._storage.put(
                 lab_path,
-                enhanced.to_json().encode("utf-8"),
+                encoded,
                 content_type="application/json",
             )
             return True
@@ -423,7 +469,9 @@ class PhysicianApprovalService:
         """
         self._validate_physician(user_hash)
 
-        enhanced = self._load_enhanced_report(lab_path)
+        enhanced, gcs_generation = self._load_enhanced_report_with_generation(
+            lab_path
+        )
         if enhanced is None:
             return {"error": "ไม่พบผลแล็บ"}
 
@@ -477,9 +525,10 @@ class PhysicianApprovalService:
         except AuditPersistenceError:
             raise  # ห้าม approve โดยไม่มี audit trail
 
-        # บันทึก
-        if not self._save_enhanced_report(lab_path, enhanced):
-            return {"error": "ไม่สามารถบันทึกได้ กรุณาลองอีกครั้ง"}
+        # บันทึกด้วย CAS — ป้องกัน lost-update race ข้าม workers
+        self._save_enhanced_report(
+            lab_path, enhanced, expected_generation=gcs_generation
+        )
 
         return {
             "status": "success",
@@ -507,7 +556,9 @@ class PhysicianApprovalService:
                 "ต้องระบุเหตุผลในการปฏิเสธผลแล็บ"
             )
 
-        enhanced = self._load_enhanced_report(lab_path)
+        enhanced, gcs_generation = self._load_enhanced_report_with_generation(
+            lab_path
+        )
         if enhanced is None:
             return {"error": "ไม่พบผลแล็บ"}
 
@@ -547,8 +598,10 @@ class PhysicianApprovalService:
         except AuditPersistenceError:
             raise  # ห้าม reject โดยไม่มี audit trail
 
-        if not self._save_enhanced_report(lab_path, enhanced):
-            return {"error": "ไม่สามารถบันทึกได้ กรุณาลองอีกครั้ง"}
+        # บันทึกด้วย CAS
+        self._save_enhanced_report(
+            lab_path, enhanced, expected_generation=gcs_generation
+        )
 
         return {
             "status": "success",
@@ -583,7 +636,9 @@ class PhysicianApprovalService:
                 "ต้องระบุหมายเหตุเมื่อมีการแก้ไขค่า"
             )
 
-        enhanced = self._load_enhanced_report(lab_path)
+        enhanced, gcs_generation = self._load_enhanced_report_with_generation(
+            lab_path
+        )
         if enhanced is None:
             return {"error": "ไม่พบผลแล็บ"}
 
@@ -683,8 +738,10 @@ class PhysicianApprovalService:
         except AuditPersistenceError:
             raise  # ห้าม correct โดยไม่มี audit trail
 
-        if not self._save_enhanced_report(lab_path, enhanced):
-            return {"error": "ไม่สามารถบันทึกได้ กรุณาลองอีกครั้ง"}
+        # บันทึกด้วย CAS
+        self._save_enhanced_report(
+            lab_path, enhanced, expected_generation=gcs_generation
+        )
 
         # สร้าง summary ของการแก้ไข
         correction_summary = []

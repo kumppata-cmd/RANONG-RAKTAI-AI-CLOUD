@@ -891,7 +891,10 @@ class TestRollbackReadiness(unittest.TestCase):
         branch = result.stdout.strip()
         self.assertNotEqual(branch, "main",
                             "Should NOT be on main branch")
-        self.assertEqual(branch, "feature/ranong-raktai-ai-2.0")
+        self.assertIn(branch, (
+            "feature/ranong-raktai-ai-2.0",
+            "release/v2.0-rc1",
+        ), f"Unexpected branch: {branch}")
 
 
 # ══════════════════════════════════════════════════════════════
