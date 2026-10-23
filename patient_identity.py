@@ -161,11 +161,17 @@ class PatientIdentityService:
     """
 
     def __init__(self, storage, audit_logger,
-                 clinic_staff_users: set[str] | None = None):
+                 clinic_staff_users: set[str] | None = None,
+                 admin_users: set[str] | None = None):
         self._storage = storage
         self._audit = audit_logger
         self._clinic_staff = clinic_staff_users or set()
+        self._admin_users = admin_users or set()
         self._patient_cache: dict[str, PatientRecord] = {}
+
+    def _is_admin(self, user_hash: str) -> bool:
+        """ตรวจสอบว่าเป็น admin user หรือไม่."""
+        return user_hash in self._admin_users or user_hash[:8] in self._admin_users
 
     def _patient_path(self, patient_id: str) -> str:
         return f"{PATIENTS_PREFIX}{patient_id}.json"
@@ -256,13 +262,38 @@ class PatientIdentityService:
         """ค้นหา patients ที่เป็นของ owner.
 
         owner อาจมีหลาย patient records (เช่น clinic staff ส่งให้หลายคน)
+        Falls back to GCS scan if cache is empty (e.g. after restart).
         """
         results = []
         owner_short = owner_hash[:8]
+
+        # Try cache first
         for pid, patient in self._patient_cache.items():
             if (patient.owner_hash == owner_short
                     and patient.status == PatientStatus.ACTIVE.value):
                 results.append(patient)
+
+        # GCS fallback: if cache had no results, scan storage
+        if not results:
+            try:
+                files = self._storage.list_files(PATIENTS_PREFIX)
+                for f in files:
+                    data = self._storage.get(f)
+                    if data is None:
+                        continue
+                    try:
+                        patient = PatientRecord.from_dict(json.loads(data))
+                    except (json.JSONDecodeError, TypeError):
+                        logger.warning("Corrupt patient file skipped: %s", f)
+                        continue
+                    # Populate cache for future lookups
+                    self._patient_cache[patient.patient_id] = patient
+                    if (patient.owner_hash == owner_short
+                            and patient.status == PatientStatus.ACTIVE.value):
+                        results.append(patient)
+            except Exception as e:
+                logger.warning("GCS patient scan failed: %s", type(e).__name__)
+
         return results
 
     def check_duplicate(self, owner_hash: str) -> list[PatientRecord]:
@@ -434,11 +465,18 @@ class PatientIdentityService:
     def reassign_document(self, doc_id: str,
                            new_patient_id: str,
                            actor_hash: str,
-                           reason: str) -> DocumentAssociation:
+                           reason: str,
+                           requesting_user_hash: str | None = None) -> DocumentAssociation:
         """ย้ายเอกสารไปยัง patient อื่น (manual reconciliation).
 
         ต้องมี reason — audit trail
+        ต้องเป็น admin เท่านั้น (security-critical)
         """
+        # RBAC: admin-only operation
+        rbac_hash = requesting_user_hash or actor_hash
+        if not self._is_admin(rbac_hash):
+            raise PermissionError("เฉพาะ admin เท่านั้นที่สามารถย้ายเอกสารได้")
+
         if not reason:
             raise ValueError("ต้องระบุเหตุผลในการย้ายเอกสาร")
 
@@ -450,6 +488,20 @@ class PatientIdentityService:
         assoc = self._load_association(doc_id)
         if assoc is None:
             raise ValueError(f"ไม่พบความเชื่อมโยงสำหรับเอกสาร {doc_id[:8]}")
+
+        # Block unverified doc re-association — quarantine instead
+        if assoc.status != DocumentAssociationStatus.VERIFIED.value:
+            logger.warning(
+                "Blocked reassignment of unverified document — quarantining instead"
+            )
+            self.quarantine_document(
+                doc_id,
+                reason=f"Blocked reassignment (unverified): {reason}",
+                actor_hash=actor_hash,
+            )
+            raise ValueError(
+                "ไม่สามารถย้ายเอกสารที่ยังไม่ได้ยืนยัน — เอกสารถูกกักไว้แล้ว"
+            )
 
         old_patient_id = assoc.patient_id
 
@@ -492,11 +544,19 @@ class PatientIdentityService:
 
     def merge_patients(self, source_id: str, target_id: str,
                         actor_hash: str,
-                        reason: str) -> PatientRecord:
+                        reason: str,
+                        requesting_user_hash: str | None = None) -> PatientRecord:
         """Merge patient record เข้าด้วยกัน.
 
         ย้ายเอกสารทั้งหมดจาก source ไป target
+        Atomic: save target ก่อน แล้วค่อย clear source
+        ต้องเป็น admin เท่านั้น (security-critical)
         """
+        # RBAC: admin-only operation
+        rbac_hash = requesting_user_hash or actor_hash
+        if not self._is_admin(rbac_hash):
+            raise PermissionError("เฉพาะ admin เท่านั้นที่สามารถ merge ผู้ป่วยได้")
+
         if not reason:
             raise ValueError("ต้องระบุเหตุผลในการ merge")
 
@@ -524,12 +584,19 @@ class PatientIdentityService:
                     })
                     self._save_association(assoc)
 
-        # Mark source as merged
+        # Atomic: save target FIRST, then clear source only on success
+        if not self._save_patient(target):
+            raise RuntimeError("ไม่สามารถบันทึก patient ปลายทางได้ — merge ถูกยกเลิก")
+
+        # Target saved successfully — now safe to clear source
         source.status = PatientStatus.MERGED.value
         source.merged_into = target_id
         source.document_ids = []  # cleared
-        self._save_patient(source)
-        self._save_patient(target)
+        if not self._save_patient(source):
+            logger.error(
+                "Source patient save failed after target save succeeded — "
+                "source may still appear active"
+            )
 
         self._audit.log("patients_merged", actor_hash, {
             "source_patient": source_id[:8],
@@ -566,11 +633,18 @@ class PatientIdentityService:
         try:
             files = self._storage.list_files(QUARANTINE_PREFIX)
             for f in files:
-                data = self._storage.get(f)
-                if data:
-                    quarantined.append(json.loads(data))
-        except Exception:
-            pass
+                try:
+                    data = self._storage.get(f)
+                    if data:
+                        quarantined.append(json.loads(data))
+                except json.JSONDecodeError:
+                    logger.warning("Corrupt quarantine file skipped: %s", f)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to read quarantine file %s: %s", f, type(e).__name__
+                    )
+        except Exception as e:
+            logger.warning("Failed to list quarantine files: %s", type(e).__name__)
         return quarantined
 
 

@@ -1519,10 +1519,32 @@ except ImportError:
     logger.warning("Phase 2A: physician_approval module not available")
 
 # ─── Phase 2A: Critical Alert Delivery ──────────────────
+line_push_fn = None
+alert_retry_manager = None
 try:
-    from alert_delivery import AlertDeliveryService, AlertSeverity
-    alert_service = AlertDeliveryService(storage, audit_logger)
-    logger.info("Phase 2A: Alert delivery service initialized")
+    from alert_delivery import (
+        AlertDeliveryService, AlertSeverity,
+        create_line_push_fn, build_alert_recipients_from_env,
+        AlertRetryManager, rebuild_dedup_cache,
+    )
+    # Build recipients from env vars
+    _alert_recipients = build_alert_recipients_from_env()
+    alert_service = AlertDeliveryService(
+        storage, audit_logger,
+        clinician_recipients=_alert_recipients,
+    )
+    # Create real LINE push function if token available
+    _line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    if _line_token:
+        line_push_fn = create_line_push_fn(_line_token)
+        logger.info("Phase 2A: LINE push function configured")
+    else:
+        logger.warning("Phase 2A: LINE_CHANNEL_ACCESS_TOKEN not set — alert push disabled")
+    # Rebuild dedup cache from GCS on startup
+    rebuild_dedup_cache(alert_service)
+    # Initialize retry manager
+    alert_retry_manager = AlertRetryManager(alert_service)
+    logger.info("Phase 2A: Alert delivery service initialized with LINE push")
 except ImportError:
     alert_service = None
     logger.warning("Phase 2A: alert_delivery module not available")
@@ -2552,6 +2574,25 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 "doc_id": full_doc_id[:8],
                 "result_count": len(lab_report.results),
             })
+
+            # อัพเดท clinical analysis verification_status → PHYSICIAN_VERIFIED
+            try:
+                _ca_path = f"{CLINICAL_ANALYSIS_PREFIX}{full_doc_id}.json"
+                _ca_data = storage.get(_ca_path)
+                if _ca_data:
+                    _ca_dict = json.loads(_ca_data)
+                    _ca_dict["verification_status"] = "PHYSICIAN_VERIFIED"
+                    _ca_dict["verified_by"] = user_hash[:8]
+                    _ca_dict["verified_at"] = datetime.now().isoformat(
+                        timespec="seconds"
+                    )
+                    storage.put(
+                        _ca_path,
+                        json.dumps(_ca_dict, ensure_ascii=False).encode("utf-8"),
+                        content_type="application/json",
+                    )
+            except Exception:
+                pass  # clinical analysis update ไม่ block approval
 
             return (
                 f"✅ ยืนยันผลแล็บ {full_doc_id[:8]} สำเร็จ\n"
@@ -4358,22 +4399,36 @@ def process_file_async(
                                         if getattr(
                                             _ca, 'level', ''
                                         ) == 'critical':
-                                            alert_service.create_alert(
-                                                doc_id=_doc_id[:8],
-                                                owner_hash=(
-                                                    owner_hash or ""
-                                                )[:8],
-                                                analyte=getattr(
-                                                    _ca, 'analyte', ''
-                                                ),
-                                                value=getattr(
-                                                    _ca, 'value', 0
-                                                ),
-                                                unit=getattr(
-                                                    _ca, 'unit', ''
-                                                ),
-                                                alert_level='critical',
+                                            _new_alert = (
+                                                alert_service.create_alert(
+                                                    doc_id=_doc_id[:8],
+                                                    owner_hash=(
+                                                        owner_hash or ""
+                                                    )[:8],
+                                                    analyte=getattr(
+                                                        _ca, 'analyte', ''
+                                                    ),
+                                                    value=getattr(
+                                                        _ca, 'value', 0
+                                                    ),
+                                                    unit=getattr(
+                                                        _ca, 'unit', ''
+                                                    ),
+                                                    alert_level='critical',
+                                                )
                                             )
+                                            # ส่ง LINE push ทันที
+                                            if (_new_alert is not None
+                                                    and line_push_fn
+                                                    is not None):
+                                                alert_service \
+                                                    .attempt_delivery(
+                                                        _new_alert
+                                                        .alert_id,
+                                                        send_push_fn=(
+                                                            line_push_fn
+                                                        ),
+                                                    )
                                     logger.info(
                                         f"Phase 2A alerts created: "
                                         f"doc={_doc_id[:8]}"
@@ -4431,14 +4486,25 @@ def process_file_async(
                     )
 
             # ── Clinical Analysis V1: วิเคราะห์ผลแล็บด้วย Rule-based Engine ──
+            # SAFETY NOTE: ผลวิเคราะห์ทำทันทีหลัง OCR เพื่อแจ้งเตือน
+            # แต่จะถูก tag ว่า PENDING_VERIFICATION จนกว่าแพทย์จะ approve
             clinical_analyzed = False
             if lab_extracted and lab_report and lab_report.results:
                 try:
                     from clinical_analyzer import analyze_lab_report as run_clinical
                     clinical_result = run_clinical(lab_report)
                     if clinical_result.findings:
+                        _clinical_dict = clinical_result.to_dict()
+                        # Tag ว่าผล OCR ยังไม่ผ่าน physician verification
+                        _clinical_dict["verification_status"] = "PENDING_VERIFICATION"
+                        _clinical_dict["disclaimer"] = (
+                            "ผลวิเคราะห์นี้สร้างจากผล OCR อัตโนมัติ "
+                            "ยังไม่ผ่านการตรวจสอบโดยแพทย์ "
+                            "ห้ามใช้ประกอบการตัดสินใจทางคลินิก"
+                            "จนกว่าจะได้รับการยืนยัน"
+                        )
                         _clinical_json = json.dumps(
-                            clinical_result.to_dict(), ensure_ascii=False
+                            _clinical_dict, ensure_ascii=False
                         )
                         _clinical_path = (
                             f"{CLINICAL_ANALYSIS_PREFIX}{_doc_id}.json"
@@ -4451,7 +4517,8 @@ def process_file_async(
                         )
                         clinical_analyzed = True
                         logger.info(
-                            f"Clinical analysis สำเร็จ: doc={_doc_id[:8]}, "
+                            f"Clinical analysis สำเร็จ (PENDING_VERIFICATION): "
+                            f"doc={_doc_id[:8]}, "
                             f"findings={len(clinical_result.findings)}, "
                             f"ckd_stage={clinical_result.ckd_stage}"
                         )
@@ -4897,6 +4964,15 @@ def health_ready():
             all_ready = False
     else:
         checks["storage"] = "not_configured"
+
+    # Piggyback: check alert retries on readiness probe
+    if alert_retry_manager is not None:
+        try:
+            alert_retry_manager.check_and_retry(
+                send_push_fn=line_push_fn
+            )
+        except Exception:
+            pass  # retry failure ไม่กระทบ readiness
 
     status_code = 200 if all_ready else 503
     status_text = "ready" if all_ready else "not_ready"

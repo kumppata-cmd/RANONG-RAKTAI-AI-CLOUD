@@ -430,6 +430,7 @@ class TestPatientIdentity(unittest.TestCase):
             storage=self.storage,
             audit_logger=self.audit,
             clinic_staff_users={"staff001"},
+            admin_users={"staff001"},
         )
 
     def test_register_patient(self):
@@ -518,17 +519,20 @@ class TestPatientIdentity(unittest.TestCase):
         )
 
     def test_reassign_document(self):
-        """ย้ายเอกสารไปยังผู้ป่วยอื่น."""
+        """ย้ายเอกสาร (verified) ไปยังผู้ป่วยอื่น."""
         p1 = self.service.register_patient(
             owner_hash="owner1", submitter_hash="owner1"
         )
         p2 = self.service.register_patient(
             owner_hash="owner2", submitter_hash="owner2"
         )
+        # ต้อง auto_verify เพื่อให้ reassign ได้
+        # (unverified docs จะถูก quarantine แทน reassign)
         self.service.associate_document(
             doc_id="DOC_MOVE",
             patient_id=p1.patient_id,
             submitter_hash="owner1",
+            auto_verify=True,
         )
         assoc = self.service.reassign_document(
             doc_id="DOC_MOVE",
@@ -554,6 +558,7 @@ class TestPatientIdentity(unittest.TestCase):
             doc_id="DOC_X",
             patient_id=p1.patient_id,
             submitter_hash="owner1",
+            auto_verify=True,
         )
         with self.assertRaises(ValueError):
             self.service.reassign_document(

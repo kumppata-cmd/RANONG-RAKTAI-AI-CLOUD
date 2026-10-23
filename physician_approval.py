@@ -27,6 +27,7 @@ from enum import Enum
 from typing import Optional, Any
 
 from lab_models import LabReport, ReviewStatus, LabResult
+from audit_trail import AuditPersistenceError
 
 
 # ═══════════════════════════════════════════════════════════
@@ -259,6 +260,13 @@ class PhysicianApprovalService:
         """บันทึก EnhancedLabReport กลับ storage.
 
         Returns True on success.
+
+        NOTE: Currently does a blind storage.put(). The next hardening step
+        is to use GCS ``if_generation_match`` for conditional writes to prevent
+        lost-update races at the storage layer. This requires extending the
+        StorageLocal/StorageGCS abstraction to accept generation/metageneration
+        parameters in put(). Until then, application-level version checking
+        (``_check_version``) provides optimistic concurrency control.
         """
         try:
             self._storage.put(
@@ -296,12 +304,26 @@ class PhysicianApprovalService:
             )
 
     def list_pending_reports(self, doc_index,
+                              user_hash: str = "",
                               limit: int = 20) -> list[dict]:
         """แสดงรายการผลแล็บที่รอตรวจสอบ.
 
+        Args:
+            doc_index: document index instance
+            user_hash: hash ของผู้ใช้ — ต้องเป็น physician
+            limit: จำนวนสูงสุดที่แสดง
+
         Returns list of dicts with doc_id, specimen_date, result_count,
         confidence_flags, status.
+
+        Raises:
+            UnauthorizedPhysicianError: ผู้ใช้ไม่ใช่ physician
         """
+        if not user_hash or not self.is_physician(user_hash):
+            raise UnauthorizedPhysicianError(
+                "เฉพาะแพทย์ที่ได้รับอนุญาตเท่านั้นที่สามารถดูรายการรอตรวจสอบได้"
+            )
+
         pending = []
         from server import LAB_RESULTS_PREFIX
         all_docs = doc_index.all() if hasattr(doc_index, 'all') else []
@@ -444,17 +466,20 @@ class PhysicianApprovalService:
         enhanced.report.review_notes = notes
         enhanced.add_history(entry)
 
+        # Audit BEFORE save — security-critical: abort if audit fails
+        try:
+            self._audit.log("physician_approval", user_hash, {
+                "doc_id": enhanced.report.source_document_id[:8],
+                "result_count": len(enhanced.report.results),
+                "action": action,
+                "version": enhanced.version,
+            })
+        except AuditPersistenceError:
+            raise  # ห้าม approve โดยไม่มี audit trail
+
         # บันทึก
         if not self._save_enhanced_report(lab_path, enhanced):
             return {"error": "ไม่สามารถบันทึกได้ กรุณาลองอีกครั้ง"}
-
-        # Audit
-        self._audit.log("physician_approve", user_hash, {
-            "doc_id": enhanced.report.source_document_id[:8],
-            "result_count": len(enhanced.report.results),
-            "action": action,
-            "version": enhanced.version,
-        })
 
         return {
             "status": "success",
@@ -512,14 +537,18 @@ class PhysicianApprovalService:
         enhanced.report.review_notes = notes
         enhanced.add_history(entry)
 
+        # Audit BEFORE save — security-critical: abort if audit fails
+        try:
+            self._audit.log("physician_rejection", user_hash, {
+                "doc_id": enhanced.report.source_document_id[:8],
+                "action": ReviewAction.REJECTED.value,
+                "version": enhanced.version,
+            })
+        except AuditPersistenceError:
+            raise  # ห้าม reject โดยไม่มี audit trail
+
         if not self._save_enhanced_report(lab_path, enhanced):
             return {"error": "ไม่สามารถบันทึกได้ กรุณาลองอีกครั้ง"}
-
-        self._audit.log("physician_reject", user_hash, {
-            "doc_id": enhanced.report.source_document_id[:8],
-            "action": ReviewAction.REJECTED.value,
-            "version": enhanced.version,
-        })
 
         return {
             "status": "success",
@@ -644,14 +673,18 @@ class PhysicianApprovalService:
         enhanced.report.review_notes = notes
         enhanced.add_history(approve_entry)
 
+        # Audit BEFORE save — security-critical: abort if audit fails
+        try:
+            self._audit.log("physician_correction", user_hash, {
+                "doc_id": enhanced.report.source_document_id[:8],
+                "corrections": list(correction_details.keys()),
+                "version": enhanced.version,
+            })
+        except AuditPersistenceError:
+            raise  # ห้าม correct โดยไม่มี audit trail
+
         if not self._save_enhanced_report(lab_path, enhanced):
             return {"error": "ไม่สามารถบันทึกได้ กรุณาลองอีกครั้ง"}
-
-        self._audit.log("physician_correct_approve", user_hash, {
-            "doc_id": enhanced.report.source_document_id[:8],
-            "corrections": list(correction_details.keys()),
-            "version": enhanced.version,
-        })
 
         # สร้าง summary ของการแก้ไข
         correction_summary = []

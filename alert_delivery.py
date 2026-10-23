@@ -19,15 +19,20 @@ Critical Lab Alert Delivery — RANONG-RAKTAI-AI 2.0
 from __future__ import annotations
 
 import json
+import os
 import uuid
 import time
 import logging
+import hashlib
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Any
 
 logger = logging.getLogger(__name__)
+
+# LINE Push Messaging API endpoint (ไม่ใช่ Secrets)
+LINE_PUSH_API_URL = "https://api.line.me/v2/bot/message/push"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -456,11 +461,38 @@ class AlertDeliveryService:
         }
 
     def get_active_alerts(self) -> list[dict]:
-        """แสดง alerts ที่ยังไม่ resolved."""
-        # In production, this would query GCS/DB
-        # For now, return from dedup cache
+        """แสดง alerts ที่ยังไม่ resolved — ดึงจาก GCS + dedup cache."""
         active = []
+        seen_ids = set()
+
+        # 1. ดึงจาก GCS storage (persistent)
+        try:
+            alert_files = self._storage.list_files(ALERTS_PREFIX)
+            for f in alert_files:
+                try:
+                    data = self._storage.get(f)
+                    if data is None:
+                        continue
+                    alert = CriticalAlert.from_dict(json.loads(data))
+                    if alert.state != AlertState.RESOLVED.value:
+                        seen_ids.add(alert.alert_id)
+                        active.append({
+                            "alert_id": alert.alert_id,
+                            "analyte": alert.analyte,
+                            "severity": alert.severity,
+                            "state": alert.state,
+                            "created_at": alert.created_at,
+                            "doc_id": alert.doc_id[:8],
+                        })
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        except Exception as e:
+            logger.warning(f"GCS alert listing failed: {type(e).__name__}")
+
+        # 2. Fallback: dedup cache (in case GCS listing missed some)
         for dedup_key, alert_id in self._dedup_cache.items():
+            if alert_id in seen_ids:
+                continue
             alert = self._load_alert(alert_id)
             if alert and alert.state != AlertState.RESOLVED.value:
                 active.append({
@@ -483,6 +515,232 @@ class AlertDeliveryService:
         except (ValueError, TypeError):
             pass
         return -1
+
+
+# ═══════════════════════════════════════════════════════════
+# LINE Push Delivery — Real Integration
+# ═══════════════════════════════════════════════════════════
+
+def create_line_push_fn(channel_access_token: str):
+    """สร้าง push function สำหรับ LINE Messaging API.
+
+    ใช้ requests.post โดยตรง (ไม่ต้อง linebot SDK สำหรับ push)
+    ห้ามส่ง PHI — notification_text ผ่าน _build_notification ที่กรอง PHI แล้ว
+    ห้ามบันทึก token, user_id หรือเนื้อหาข้อความลง log
+
+    Args:
+        channel_access_token: LINE Channel Access Token จาก env var
+
+    Returns:
+        function(user_id, message) -> bool
+    """
+    import urllib.request
+    import urllib.error
+
+    def _push(user_id: str, message: str) -> bool:
+        """ส่ง push message ไปยัง LINE user.
+
+        ไม่ log user_id, token หรือเนื้อหาข้อความ
+        """
+        if not user_id or not message:
+            return False
+
+        payload = json.dumps({
+            "to": user_id,
+            "messages": [{
+                "type": "text",
+                "text": message,
+            }],
+        }).encode("utf-8")
+
+        req = urllib.request.Request(
+            LINE_PUSH_API_URL,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {channel_access_token}",
+            },
+            method="POST",
+        )
+
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                status = resp.getcode()
+                if status == 200:
+                    logger.info("LINE push delivered successfully")
+                    return True
+                else:
+                    logger.warning(f"LINE push returned status {status}")
+                    return False
+        except urllib.error.HTTPError as e:
+            logger.warning(f"LINE push HTTP error: {e.code}")
+            return False
+        except urllib.error.URLError as e:
+            logger.warning(f"LINE push URL error: {type(e).__name__}")
+            return False
+        except Exception as e:
+            logger.warning(f"LINE push failed: {type(e).__name__}")
+            return False
+
+    return _push
+
+
+def build_alert_recipients_from_env() -> dict[str, list[str]]:
+    """สร้าง recipient mapping จาก environment variables.
+
+    PHYSICIAN_USERS: comma-separated hashed LINE user IDs ที่มีสิทธิ์แพทย์
+    ALERT_RECIPIENTS: comma-separated LINE user IDs ที่จะได้รับแจ้งเตือน
+    (ถ้าไม่ตั้ง ALERT_RECIPIENTS ใช้ PHYSICIAN_USERS แทน)
+
+    ไม่ log user IDs
+    """
+    recipients = {}
+
+    # ลำดับ: ALERT_RECIPIENTS → PHYSICIAN_USERS
+    alert_ids = os.getenv("ALERT_RECIPIENTS", "").strip()
+    if not alert_ids:
+        alert_ids = os.getenv("PHYSICIAN_USERS", "").strip()
+
+    if alert_ids:
+        ids = [uid.strip() for uid in alert_ids.split(",") if uid.strip()]
+        if ids:
+            recipients["physician"] = ids
+            logger.info(f"Alert recipients configured: {len(ids)} physician(s)")
+        else:
+            logger.warning("No valid alert recipients found in env")
+    else:
+        logger.warning("ALERT_RECIPIENTS and PHYSICIAN_USERS not configured")
+
+    return recipients
+
+
+class AlertRetryManager:
+    """จัดการ retry สำหรับ failed deliveries.
+
+    เรียกจาก periodic check (ไม่ใช่ background thread)
+    เพื่อความ simple บน single-instance Render
+    """
+
+    def __init__(self, alert_service: AlertDeliveryService):
+        self._service = alert_service
+        self._last_retry_check = 0.0
+        self._retry_interval = 60  # ตรวจทุก 60 วินาที
+
+    def check_and_retry(self, send_push_fn=None) -> list[dict]:
+        """ตรวจสอบ alerts ที่ต้อง retry.
+
+        เรียกจาก health check หรือ periodic task
+        Returns list of retry results
+        """
+        now = time.time()
+        if now - self._last_retry_check < self._retry_interval:
+            return []
+
+        self._last_retry_check = now
+        results = []
+
+        try:
+            # List alerts from storage
+            alert_files = self._service._storage.list_files(ALERTS_PREFIX)
+            for f in alert_files:
+                try:
+                    data = self._service._storage.get(f)
+                    if data is None:
+                        continue
+                    alert = CriticalAlert.from_dict(json.loads(data))
+
+                    # Check if needs retry
+                    if alert.should_retry():
+                        delay = alert.get_retry_delay()
+                        # Check if enough time passed since last attempt
+                        if alert.sent_at:
+                            last_attempt_time = datetime.fromisoformat(
+                                alert.sent_at
+                            ).timestamp()
+                        else:
+                            last_attempt_time = datetime.fromisoformat(
+                                alert.created_at
+                            ).timestamp()
+
+                        if now - last_attempt_time >= delay:
+                            result = self._service.attempt_delivery(
+                                alert.alert_id, send_push_fn
+                            )
+                            results.append(result)
+
+                    # Check if needs escalation
+                    elif alert.should_escalate():
+                        self._escalate(alert, send_push_fn)
+                        results.append({
+                            "alert_id": alert.alert_id,
+                            "state": "escalated",
+                        })
+                except (json.JSONDecodeError, KeyError):
+                    continue
+        except Exception as e:
+            logger.warning(f"Retry check failed: {type(e).__name__}")
+
+        return results
+
+    def _escalate(self, alert: CriticalAlert,
+                  send_push_fn=None):
+        """Escalation — ส่ง admin notification.
+
+        ไม่มี PHI ใน escalation message
+        """
+        admin_recipients = self._service._recipients.get("admin", [])
+        if not admin_recipients and send_push_fn:
+            # Fallback: ส่งให้ physician recipients อีกครั้ง
+            # พร้อมข้อความ escalation
+            for recipient in self._service._recipients.get("physician", []):
+                try:
+                    send_push_fn(
+                        recipient,
+                        f"🆘 ESCALATION: แจ้งเตือน {alert.analyte} "
+                        f"ยังไม่ได้รับการตอบรับ "
+                        f"(ส่งแล้ว {alert.delivery_attempts} ครั้ง)\n"
+                        f"เอกสาร: {alert.doc_id[:8]}"
+                    )
+                except Exception:
+                    pass
+
+        alert.state = AlertState.ESCALATED.value
+        alert.add_event("escalated", details={
+            "reason": "max_delivery_attempts_reached",
+            "total_attempts": alert.delivery_attempts,
+        })
+        self._service._save_alert(alert)
+        self._service._audit.log("alert_escalated", alert.owner_hash, {
+            "alert_id": alert.alert_id[:8],
+            "analyte": alert.analyte,
+            "attempts": alert.delivery_attempts,
+        })
+
+
+def rebuild_dedup_cache(service: AlertDeliveryService) -> int:
+    """Rebuild dedup cache จาก GCS หลัง restart.
+
+    เรียกตอน startup เพื่อกู้คืน state
+    Returns จำนวน active alerts ที่โหลดได้
+    """
+    count = 0
+    try:
+        files = service._storage.list_files(ALERTS_PREFIX)
+        for f in files:
+            try:
+                data = service._storage.get(f)
+                if data is None:
+                    continue
+                alert = CriticalAlert.from_dict(json.loads(data))
+                if alert.state != AlertState.RESOLVED.value:
+                    service._dedup_cache[alert.dedup_key] = alert.alert_id
+                    count += 1
+            except (json.JSONDecodeError, KeyError):
+                continue
+    except Exception as e:
+        logger.warning(f"Dedup cache rebuild failed: {type(e).__name__}")
+    logger.info(f"Rebuilt dedup cache: {count} active alerts")
+    return count
 
 
 def format_active_alerts(alerts: list[dict]) -> str:
