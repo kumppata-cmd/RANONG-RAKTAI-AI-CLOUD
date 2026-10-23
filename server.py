@@ -2083,7 +2083,14 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 _reextracted = False
                 _doc_cat = doc.get("category", "")
                 _doc_text = doc.get("extracted_text", "")
-                if _doc_cat == "lab" and _doc_text and len(_doc_text.strip()) >= 50:
+                _doc_text_len = len(_doc_text.strip()) if _doc_text else 0
+                logger.info(
+                    f"On-demand re-extraction check: "
+                    f"doc={full_doc_id[:8]}, "
+                    f"cat={_doc_cat}, "
+                    f"text_len={_doc_text_len}"
+                )
+                if _doc_cat == "lab" and _doc_text and _doc_text_len >= 50:
                     try:
                         from lab_extractor import extract_lab_results_from_text
                         from lab_models import ExtractionMethod
@@ -2093,29 +2100,92 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                         )
                         if _re_report.results:
                             _re_json = _re_report.to_json()
-                            storage.put(
-                                lab_path,
-                                _re_json.encode("utf-8"),
-                                content_type="application/json",
-                                create_only=True,
-                            )
+                            # ── FIX Phase 14.7: ตั้ง lab_data ก่อน GCS write ──
+                            # เพื่อให้ผู้ใช้เห็นผลแล็บแม้ GCS write ล้มเหลว
                             lab_data = _re_json.encode("utf-8")
                             _reextracted = True
+                            _persistence_ok = False
+                            # GCS write เป็น best-effort cache
+                            try:
+                                storage.put(
+                                    lab_path,
+                                    lab_data,
+                                    content_type="application/json",
+                                    create_only=True,
+                                )
+                                _persistence_ok = True
+                            except Exception as gcs_err:
+                                # GCS write ล้มเหลว — ผู้ใช้ยังเห็นผล
+                                # แต่ไม่รายงานว่าจัดเก็บถาวรสำเร็จ
+                                logger.warning(
+                                    f"On-demand lab GCS cache write "
+                                    f"ล้มเหลว: "
+                                    f"{type(gcs_err).__name__} "
+                                    f"(doc_id={full_doc_id[:8]})"
+                                )
+                                audit_logger.log(
+                                    "lab_persistence_failed",
+                                    user_hash,
+                                    {
+                                        "doc_id": full_doc_id[:8],
+                                        "error_type": type(
+                                            gcs_err
+                                        ).__name__,
+                                        "result_count": len(
+                                            _re_report.results
+                                        ),
+                                    },
+                                )
+                            # ── แยกสถานะ extraction vs persistence ──
                             logger.info(
                                 f"On-demand lab re-extraction สำเร็จ: "
                                 f"doc={full_doc_id[:8]}, "
-                                f"results={len(_re_report.results)}"
+                                f"results={len(_re_report.results)}, "
+                                f"persisted={_persistence_ok}"
                             )
                             audit_logger.log(
                                 "lab_reextraction_success", user_hash,
-                                {"doc_id": full_doc_id[:8],
-                                 "result_count": len(_re_report.results)},
+                                {
+                                    "doc_id": full_doc_id[:8],
+                                    "result_count": len(
+                                        _re_report.results
+                                    ),
+                                    "persisted": _persistence_ok,
+                                },
                             )
                     except Exception as reext_err:
+                        import traceback as _reext_tb_mod
+                        _reext_tb = _reext_tb_mod.format_exc()
+                        _reext_msg = str(reext_err)
+                        # Sanitize: ตัด full doc_id, GCS path,
+                        # signed URL ออกจาก error message + traceback
+                        if full_doc_id and len(full_doc_id) > 8:
+                            _reext_msg = _reext_msg.replace(
+                                full_doc_id, full_doc_id[:8] + "…"
+                            )
+                            _reext_tb = _reext_tb.replace(
+                                full_doc_id, full_doc_id[:8] + "…"
+                            )
+                        # ตัด signed URL ที่อาจมี token
+                        import re as _re_mod
+                        _reext_tb = _re_mod.sub(
+                            r'https://storage\.googleapis\.com/[^\s"\']+',
+                            "[GCS_URL_REDACTED]",
+                            _reext_tb,
+                        )
+                        _reext_msg = _re_mod.sub(
+                            r'https://storage\.googleapis\.com/[^\s"\']+',
+                            "[GCS_URL_REDACTED]",
+                            _reext_msg,
+                        )
                         logger.warning(
                             f"On-demand lab re-extraction ล้มเหลว: "
-                            f"{type(reext_err).__name__} "
+                            f"{type(reext_err).__name__}: {_reext_msg} "
                             f"(doc_id={full_doc_id[:8]})"
+                        )
+                        logger.warning(
+                            f"On-demand re-extraction traceback "
+                            f"(doc_id={full_doc_id[:8]}):\n{_reext_tb}"
                         )
                 if lab_data is None:
                     audit_logger.log("lab_result_none", user_hash, {
@@ -3865,10 +3935,26 @@ def process_file_async(
                     # sanitize: ไม่ log doc_id เต็ม, ไม่ log ข้อมูลผู้ป่วย
                     _lab_err_msg = str(lab_err)
                     # ตัด path ที่อาจมี doc_id เต็ม
-                    if _doc_id and len(_doc_id) > 8 and _doc_id in _lab_err_msg:
-                        _lab_err_msg = _lab_err_msg.replace(
+                    if _doc_id and len(_doc_id) > 8:
+                        if _doc_id in _lab_err_msg:
+                            _lab_err_msg = _lab_err_msg.replace(
+                                _doc_id, _doc_id[:8] + "…"
+                            )
+                        _lab_tb = _lab_tb.replace(
                             _doc_id, _doc_id[:8] + "…"
                         )
+                    # ตัด signed URL ที่อาจมี token
+                    import re as _re_mod_lab
+                    _lab_tb = _re_mod_lab.sub(
+                        r'https://storage\.googleapis\.com/[^\s"\']+',
+                        "[GCS_URL_REDACTED]",
+                        _lab_tb,
+                    )
+                    _lab_err_msg = _re_mod_lab.sub(
+                        r'https://storage\.googleapis\.com/[^\s"\']+',
+                        "[GCS_URL_REDACTED]",
+                        _lab_err_msg,
+                    )
                     logger.error(
                         f"Lab extraction ล้มเหลว: {type(lab_err).__name__}: "
                         f"{_lab_err_msg} (doc_id={_doc_id[:8]})"
