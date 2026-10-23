@@ -45,29 +45,38 @@ ANALYTE_ALIASES: dict[str, str] = {
     "cr": "Creatinine",
     "creat": "Creatinine",
     "serum creatinine": "Creatinine",
+    "ครีอะตินีน": "Creatinine",
+    "ครีเอตินิน": "Creatinine",
+    "ครีเอตินีน": "Creatinine",
     # BUN
     "bun": "BUN",
     "blood urea nitrogen": "BUN",
     "urea nitrogen": "BUN",
+    "บียูเอ็น": "BUN",
+    "ยูเรียไนโตรเจน": "BUN",
     # eGFR
     "egfr": "eGFR",
     "gfr": "eGFR",
     "estimated gfr": "eGFR",
+    "อีจีเอฟอาร์": "eGFR",
     # Sodium
     "sodium": "Sodium",
     "sodium (na)": "Sodium",
     "na": "Sodium",
     "na+": "Sodium",
+    "โซเดียม": "Sodium",
     # Potassium
     "potassium": "Potassium",
     "potassium (k)": "Potassium",
     "k": "Potassium",
     "k+": "Potassium",
+    "โพแทสเซียม": "Potassium",
     # Chloride
     "chloride": "Chloride",
     "chloride (cl)": "Chloride",
     "cl": "Chloride",
     "cl-": "Chloride",
+    "คลอไรด์": "Chloride",
     # Bicarbonate
     "bicarbonate": "Bicarbonate",
     "bicarbonate (hco3)": "Bicarbonate",
@@ -76,11 +85,13 @@ ANALYTE_ALIASES: dict[str, str] = {
     "co2": "Bicarbonate",
     "total co2": "Bicarbonate",
     "tco2": "Bicarbonate",
+    "ไบคาร์บอเนต": "Bicarbonate",
     # Calcium
     "calcium": "Calcium",
     "calcium (ca)": "Calcium",
     "ca": "Calcium",
     "total calcium": "Calcium",
+    "แคลเซียม": "Calcium",
     # Phosphate
     "phosphate": "Phosphate",
     "phosphate (po4)": "Phosphate",
@@ -88,48 +99,64 @@ ANALYTE_ALIASES: dict[str, str] = {
     "po4": "Phosphate",
     "phos": "Phosphate",
     "inorganic phosphorus": "Phosphate",
+    "ฟอสเฟต": "Phosphate",
+    "ฟอสฟอรัส": "Phosphate",
     # Albumin
     "albumin": "Albumin",
     "alb": "Albumin",
     "serum albumin": "Albumin",
+    "อัลบูมิน": "Albumin",
     # Glucose / FBS
     "fbs": "FBS",
     "fbs (glucose)": "FBS",
     "fasting blood sugar": "FBS",
     "fasting glucose": "FBS",
+    "น้ำตาลอดอาหาร": "FBS",
     "glucose": "Glucose",
     "blood glucose": "Glucose",
+    "กลูโคส": "Glucose",
+    "น้ำตาลในเลือด": "Glucose",
     # Hemoglobin
     "hemoglobin": "Hemoglobin",
     "hemoglobin (hb)": "Hemoglobin",
     "hb": "Hemoglobin",
     "hgb": "Hemoglobin",
+    "ฮีโมโกลบิน": "Hemoglobin",
     # Hematocrit
     "hematocrit": "Hematocrit",
     "hematocrit (hct)": "Hematocrit",
     "hct": "Hematocrit",
+    "ฮีมาโตคริต": "Hematocrit",
     # WBC
     "wbc": "WBC",
     "white blood cell": "WBC",
     "white blood cells": "WBC",
     "white cell count": "WBC",
+    "เม็ดเลือดขาว": "WBC",
     # Platelet
     "platelet": "Platelet",
     "platelets": "Platelet",
     "plt": "Platelet",
     "platelet count": "Platelet",
+    "เกล็ดเลือด": "Platelet",
     # PTH
     "pth": "PTH",
     "parathyroid hormone": "PTH",
     "intact pth": "PTH",
     "ipth": "PTH",
+    "พาราไทรอยด์ฮอร์โมน": "PTH",
     # Ferritin
     "ferritin": "Ferritin",
     "serum ferritin": "Ferritin",
+    "เฟอร์ริติน": "Ferritin",
     # TSAT
     "tsat": "TSAT",
     "transferrin saturation": "TSAT",
     "iron saturation": "TSAT",
+    # Uric Acid
+    "uric acid": "Uric Acid",
+    "กรดยูริก": "Uric Acid",
+    "ยูริก": "Uric Acid",
     # Kt/V
     "kt/v": "Kt/V",
     "ktv": "Kt/V",
@@ -194,9 +221,25 @@ def extract_specimen_date(text: str) -> str:
 
 # Pattern for tabular single-line extraction
 # e.g., "Creatinine    5.2    mg/dL    0.6-1.2"
+# Phase 14.9: รองรับ Thai+English mixed names:
+# e.g., "ครีอะตินีน (Cr)     5.2     mg/dL     0.6-1.2"
 TABULAR_RE = re.compile(
-    r"(?P<name>[A-Za-z/\s()]+?)"       # analyte name
+    r"(?P<name>[A-Za-z/\s()]+?)"       # analyte name (English)
     r"\s+"
+    r"(?P<value>\d+\.?\d*)"            # numeric value
+    r"\s+"
+    r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
+    r"(?:\s+"
+    r"(?P<ref>[<>]?\d+\.?\d*(?:\s*-\s*\d+\.?\d*)?))?",  # optional reference
+    re.IGNORECASE,
+)
+
+# Phase 14.9: Tabular pattern for Thai analyte names
+# e.g., "ครีอะตินีน     5.2     mg/dL     0.6-1.2"
+# e.g., "ครีอะตินีน (Cr)     5.2     mg/dL     0.6-1.2"
+TABULAR_THAI_RE = re.compile(
+    r"(?P<name>[ก-๙A-Za-z/ ()]+?)"    # analyte name (Thai+English, no newline in spaces)
+    r":?\s{2,}"                         # optional colon + 2+ spaces (column separator)
     r"(?P<value>\d+\.?\d*)"            # numeric value
     r"\s+"
     r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
@@ -207,7 +250,13 @@ TABULAR_RE = re.compile(
 
 
 def _normalize_analyte(name: str) -> Optional[str]:
-    """แปลงชื่อ analyte เป็นชื่อมาตรฐาน."""
+    """แปลงชื่อ analyte เป็นชื่อมาตรฐาน.
+
+    รองรับ:
+    - English: "Creatinine", "Cr", "serum creatinine"
+    - Thai: "ครีอะตินีน", "บียูเอ็น"
+    - Mixed: "ครีอะตินีน (Cr)", "บียูเอ็น (BUN)"
+    """
     name_clean = name.strip().lower()
     # Remove trailing whitespace and common suffixes
     name_clean = re.sub(r"\s+$", "", name_clean)
@@ -221,6 +270,25 @@ def _normalize_analyte(name: str) -> Optional[str]:
         stripped = name_clean.removeprefix(prefix)
         if stripped in ANALYTE_ALIASES:
             return ANALYTE_ALIASES[stripped]
+
+    # ── Phase 14.9: Thai+English mixed format ──
+    # Pattern: "ครีอะตินีน (Cr)" or "บียูเอ็น(BUN)"
+    paren_match = re.match(r"(.+?)\s*\(([^)]+)\)", name_clean)
+    if paren_match:
+        thai_part = paren_match.group(1).strip()
+        eng_part = paren_match.group(2).strip().lower()
+        # Try English part first (more specific)
+        if eng_part in ANALYTE_ALIASES:
+            return ANALYTE_ALIASES[eng_part]
+        # Then try Thai part
+        if thai_part in ANALYTE_ALIASES:
+            return ANALYTE_ALIASES[thai_part]
+
+    # ── Phase 14.9: Thai text with colon separator ──
+    # Pattern: "ครีอะตินีน:" or "ครีอะตินีน :"
+    colon_stripped = re.sub(r"\s*:\s*$", "", name_clean)
+    if colon_stripped != name_clean and colon_stripped in ANALYTE_ALIASES:
+        return ANALYTE_ALIASES[colon_stripped]
 
     return None
 
@@ -361,7 +429,7 @@ def extract_lab_results_from_text(
 
         i += 1
 
-    # Strategy 2: If per-line found few results, try tabular
+    # Strategy 2: If per-line found few results, try tabular (English)
     if len(results) < 3:
         for match in TABULAR_RE.finditer(text):
             name = match.group("name")
@@ -376,6 +444,41 @@ def extract_lab_results_from_text(
 
                 flags = validate_result(canonical, value_f, unit)
                 confidence = 0.85
+                if "unit_mismatch" in flags:
+                    confidence -= 0.2
+                if "physiologic_impossible" in flags:
+                    confidence = 0.3
+
+                result = LabResult(
+                    analyte=canonical,
+                    value=value_f,
+                    unit=unit,
+                    reference_range=ref_range,
+                    confidence=round(confidence, 2),
+                    extraction_method=extraction_method,
+                    flags=flags,
+                    raw_text=match.group(0).strip(),
+                )
+                results.append(result)
+                seen_analytes.add(canonical)
+
+    # Strategy 3 (Phase 14.9): Try Thai tabular whenever Thai chars present
+    # Always run to catch Thai-named analytes missed by English strategies
+    _has_thai = any("ก" <= ch <= "๏" for ch in text)
+    if _has_thai:
+        for match in TABULAR_THAI_RE.finditer(text):
+            name = match.group("name")
+            canonical = _normalize_analyte(name)
+            if canonical and canonical not in seen_analytes:
+                value_f = _parse_value(match.group("value"))
+                if value_f is None:
+                    continue
+
+                unit = _normalize_unit(match.group("unit") or "")
+                ref_range = match.group("ref") or get_reference_range(canonical)
+
+                flags = validate_result(canonical, value_f, unit)
+                confidence = 0.80  # slightly lower for Thai OCR
                 if "unit_mismatch" in flags:
                     confidence -= 0.2
                 if "physiologic_impossible" in flags:

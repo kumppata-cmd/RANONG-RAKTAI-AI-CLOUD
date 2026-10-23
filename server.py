@@ -1336,6 +1336,11 @@ class AuditLogger:
         action: search, view, download, backfill
         user_hash: SHA-256 hash ของ LINE user ID
         details: ข้อมูลเพิ่มเติม (ห้ามมีข้อมูลผู้ป่วย)
+
+        Phase 14.9: ใช้ append-or-create pattern ที่ต้องการแค่
+        storage.objects.create + storage.objects.get permissions.
+        ถ้า objects.get ไม่มี (403) → fallback เป็น per-event files
+        เพื่อไม่ให้ audit logging ล้มเหลวเงียบ
         """
         entry = {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -1351,15 +1356,51 @@ class AuditLogger:
                 month_key = datetime.now().strftime("%Y-%m")
                 audit_path = f"{AUDIT_PREFIX}{month_key}.jsonl"
                 blob = self._storage._bucket.blob(audit_path)
-                if blob.exists():
+                try:
+                    # ลอง append (ต้องมี objects.get สำหรับ download)
                     existing = blob.download_as_text(encoding="utf-8")
                     blob.upload_from_string(
                         existing + line, content_type="application/jsonl"
                     )
-                else:
-                    blob.upload_from_string(
-                        line, content_type="application/jsonl"
-                    )
+                except Exception as get_err:
+                    err_msg = str(get_err)
+                    if "Not Found" in err_msg or "404" in err_msg:
+                        # ไฟล์ยังไม่มี — สร้างใหม่
+                        blob.upload_from_string(
+                            line, content_type="application/jsonl"
+                        )
+                    elif "Forbidden" in err_msg or "403" in err_msg:
+                        # ── Phase 14.9: Fallback เป็น per-event file ──
+                        # ถ้า objects.get ไม่มี permission
+                        # ใช้ per-event file แทน append
+                        # (ต้องการแค่ objects.create)
+                        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                        event_path = (
+                            f"{AUDIT_PREFIX}{month_key}/"
+                            f"{ts}-{action}.json"
+                        )
+                        event_blob = self._storage._bucket.blob(event_path)
+                        try:
+                            event_blob.upload_from_string(
+                                line,
+                                content_type="application/json",
+                                if_generation_match=0,
+                            )
+                        except Exception as create_err:
+                            logger.error(
+                                f"Audit log per-event write ล้มเหลว: "
+                                f"{type(create_err).__name__} — "
+                                f"ตรวจสอบ IAM: Service Account ต้องมี "
+                                f"storage.objects.create "
+                                f"สำหรับ path '{AUDIT_PREFIX}*' "
+                                f"ใน bucket "
+                                f"'{self._storage.bucket_name}'"
+                            )
+                    else:
+                        # Error อื่น — ลองสร้างใหม่
+                        blob.upload_from_string(
+                            line, content_type="application/jsonl"
+                        )
             except Exception as e:
                 # แยกประเภท error เพื่อช่วย debug IAM permissions
                 err_type = type(e).__name__
@@ -1368,7 +1409,7 @@ class AuditLogger:
                     logger.error(
                         f"Audit log write Forbidden — "
                         f"ตรวจสอบ IAM: Service Account ต้องมี "
-                        f"storage.objects.create + storage.objects.get "
+                        f"storage.objects.create "
                         f"สำหรับ path '{AUDIT_PREFIX}*' "
                         f"ใน bucket '{self._storage.bucket_name}'"
                     )

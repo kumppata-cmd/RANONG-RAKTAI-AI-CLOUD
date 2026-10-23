@@ -239,6 +239,17 @@ ANALYTE_SPECS: dict[str, AnalyteSpec] = {
         physiologic_max=100.0,
         primary_unit="%",
     ),
+    # Phase 14.9: เพิ่ม Uric Acid (กรดยูริก)
+    "Uric Acid": AnalyteSpec(
+        name="Uric Acid",
+        valid_units=["mg/dL", "mg/dl"],
+        reference_range=(3.5, 7.2),
+        critical_low=None,
+        critical_high=15.0,
+        physiologic_min=0.5,
+        physiologic_max=25.0,
+        primary_unit="mg/dL",
+    ),
     "Kt/V": AnalyteSpec(
         name="Kt/V",
         valid_units=["", "ratio"],
