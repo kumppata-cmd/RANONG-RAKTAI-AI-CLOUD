@@ -1470,6 +1470,97 @@ class AuditLogger:
 audit_logger = AuditLogger(storage)
 
 
+# ─── Phase 2A: Enhanced Audit Trail ─────────────────────
+try:
+    from audit_trail import (
+        PersistentAuditTrail, EnhancedAuditLogger,
+        AuditPersistenceError, SECURITY_CRITICAL_ACTIONS,
+    )
+    enhanced_audit = EnhancedAuditLogger(storage, fail_closed=True)
+    logger.info("Phase 2A: Enhanced audit trail initialized")
+except ImportError:
+    enhanced_audit = None
+    logger.warning("Phase 2A: audit_trail module not available")
+
+# ─── Phase 2A: OCR Clinical Safety ──────────────────────
+try:
+    from ocr_safety import OcrSafetyValidator
+    ocr_validator = OcrSafetyValidator()
+    logger.info("Phase 2A: OCR safety validator initialized")
+except ImportError:
+    ocr_validator = None
+    logger.warning("Phase 2A: ocr_safety module not available")
+
+# PHYSICIAN_USERS: SHA-256 hash ของ LINE userId ของแพทย์ที่ได้รับอนุมัติ
+# ตั้งค่าผ่าน Render environment variable (comma-separated hashes)
+PHYSICIAN_USERS = set(
+    h.strip() for h in
+    os.getenv("PHYSICIAN_USERS", "").split(",")
+    if h.strip()
+)
+
+# ─── Phase 2A: Physician Approval ───────────────────────
+try:
+    from physician_approval import (
+        PhysicianApprovalService,
+        InvalidStateTransitionError,
+        StaleVersionError,
+        DuplicateApprovalError,
+    )
+    physician_service = PhysicianApprovalService(
+        storage, audit_logger, PHYSICIAN_USERS, ADMIN_USERS,
+    )
+    logger.info("Phase 2A: Physician approval service initialized")
+except ImportError:
+    physician_service = None
+    InvalidStateTransitionError = Exception
+    StaleVersionError = Exception
+    DuplicateApprovalError = Exception
+    logger.warning("Phase 2A: physician_approval module not available")
+
+# ─── Phase 2A: Critical Alert Delivery ──────────────────
+try:
+    from alert_delivery import AlertDeliveryService, AlertSeverity
+    alert_service = AlertDeliveryService(storage, audit_logger)
+    logger.info("Phase 2A: Alert delivery service initialized")
+except ImportError:
+    alert_service = None
+    logger.warning("Phase 2A: alert_delivery module not available")
+
+# ─── Phase 2A: Patient Identity ─────────────────────────
+try:
+    from patient_identity import PatientIdentityService
+    patient_identity_service = PatientIdentityService(storage, audit_logger)
+    logger.info("Phase 2A: Patient identity service initialized")
+except ImportError:
+    patient_identity_service = None
+    logger.warning("Phase 2A: patient_identity module not available")
+
+# ─── Phase 2B: Monitoring Schedule ──────────────────────
+try:
+    from monitoring_schedule import (
+        check_monitoring_status,
+        monitoring_report_text_th,
+    )
+    logger.info("Phase 2B: Monitoring schedule module loaded")
+except ImportError:
+    check_monitoring_status = None
+    monitoring_report_text_th = None
+    logger.warning("Phase 2B: monitoring_schedule module not available")
+
+# ─── Phase 2B: Nephrology KPI Dashboard ─────────────────
+try:
+    from nephrology_kpi import (
+        generate_nephrology_dashboard,
+        dashboard_text_th,
+    )
+    logger.info("Phase 2B: Nephrology KPI dashboard module loaded")
+except ImportError:
+    generate_nephrology_dashboard = None
+    dashboard_text_th = None
+    logger.warning("Phase 2B: nephrology_kpi module not available")
+
+
 # ─── Document Content Reading from GCS ────────────────────
 # อ่านเนื้อหาเอกสารโดยตรงจาก GCS — ไม่ต้องส่ง signed URL ให้ผู้ใช้
 
@@ -1955,6 +2046,7 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         CommandType.APPROVE_LAB, CommandType.CLINICAL_ANALYSIS,
         CommandType.TREND, CommandType.PATIENT_REPORT,
         CommandType.CLINIC_KPI, CommandType.MEDICATION_REVIEW,
+        CommandType.MONITORING_STATUS, CommandType.NEPHROLOGY_KPI,
         CommandType.MY_STATS,
     }
     if not is_authorized_user(user_hash):
@@ -1974,7 +2066,9 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 or text_stripped == "แนวโน้มแล็บ"
                 or text_stripped == "รายงานแล็บ"
                 or text_stripped == "KPI"
-                or text_stripped.startswith("ตรวจยา")):
+                or text_stripped.startswith("ตรวจยา")
+                or text_stripped in ("ตารางตรวจ", "กำหนดตรวจ", "แล็บถัดไป")
+                or text_stripped in ("KPIไต", "kpiไต", "เป้าหมายไต", "dashboard")):
             audit_logger.log("unauthorized_access", user_hash, {
                 "command": text_stripped[:20]
             })
@@ -2350,14 +2444,28 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             return "กรุณาระบุรหัสเอกสาร เช่น: ยืนยันผลแล็บ a1b2c3d4"
         doc_id_query = _approve_doc_id
 
-        # ต้องเป็น Admin เท่านั้น
-        if user_hash not in ADMIN_USERS:
-            audit_logger.log("lab_approve_not_admin", user_hash, {
+        # ── Phase 2A: ต้องเป็น Admin หรือ Physician ──
+        is_physician = user_hash in PHYSICIAN_USERS
+        is_admin = user_hash in ADMIN_USERS
+        if not is_admin and not is_physician:
+            audit_logger.log("lab_approve_unauthorized", user_hash, {
                 "doc_id": doc_id_query[:8],
             })
-            return "ขออภัย เฉพาะผู้ดูแลระบบเท่านั้นที่สามารถยืนยันผลแล็บได้"
+            if enhanced_audit:
+                try:
+                    enhanced_audit.log(
+                        "physician_approval_denied",
+                        user_hash,
+                        {"doc_id": doc_id_query[:8]},
+                    )
+                except Exception:
+                    pass
+            return (
+                "ขออภัย เฉพาะแพทย์หรือผู้ดูแลระบบ"
+                "เท่านั้นที่สามารถยืนยันผลแล็บได้"
+            )
 
-        # ตรวจสอบเอกสาร (admin เห็นทุกเอกสาร)
+        # ตรวจสอบเอกสาร (admin/physician เห็นทุกเอกสาร)
         doc = doc_index.get(doc_id_query)
         if doc is None:
             return "ไม่พบเอกสารที่ตรงกับรหัสนี้"
@@ -2365,6 +2473,59 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         full_doc_id = doc.get("document_id", doc_id_query)
         lab_path = f"{LAB_RESULTS_PREFIX}{full_doc_id}.json"
         try:
+            # ── Phase 2A: ใช้ PhysicianApprovalService ถ้ามี ──
+            if physician_service is not None and is_physician:
+                try:
+                    result = physician_service.approve(
+                        lab_path=lab_path,
+                        physician_id=user_hash[:8],
+                        notes="Approved via LINE command",
+                    )
+                    if result.get("status") == "success":
+                        audit_logger.log("lab_approve", user_hash, {
+                            "doc_id": full_doc_id[:8],
+                            "via": "physician_service",
+                        })
+                        if enhanced_audit:
+                            try:
+                                enhanced_audit.log(
+                                    "physician_approval",
+                                    user_hash,
+                                    {
+                                        "doc_id": full_doc_id[:8],
+                                        "version": result.get("version"),
+                                    },
+                                )
+                            except Exception:
+                                pass
+                        return (
+                            f"✅ แพทย์ยืนยันผลแล็บ "
+                            f"{full_doc_id[:8]} สำเร็จ\n"
+                            f"สถานะ: {result.get('new_status')}\n"
+                            f"version: {result.get('version')}"
+                        )
+                    else:
+                        return (
+                            f"ไม่สามารถยืนยันได้: "
+                            f"{result.get('error', 'unknown')}"
+                        )
+                except DuplicateApprovalError:
+                    return (
+                        f"ผลแล็บ {full_doc_id[:8]} "
+                        f"ได้รับการยืนยันแล้ว"
+                    )
+                except StaleVersionError:
+                    return (
+                        "มีการแก้ไขผลแล็บพร้อมกัน "
+                        "กรุณาลองใหม่อีกครั้ง"
+                    )
+                except InvalidStateTransitionError:
+                    return (
+                        f"ผลแล็บ {full_doc_id[:8]} "
+                        f"อยู่ในสถานะที่ไม่สามารถยืนยันได้"
+                    )
+
+            # ── Fallback: Admin approval (legacy) ──
             lab_data = storage.get(lab_path)
             if lab_data is None:
                 return "ยังไม่มีผลแล็บสำหรับเอกสารนี้"
@@ -2801,6 +2962,123 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         except Exception as e:
             logger.warning(f"Medication review error: {type(e).__name__}")
             return "ขออภัย ไม่สามารถตรวจสอบยาได้ในขณะนี้"
+
+    # ── ตารางตรวจ — Monitoring Schedule ──
+    if parsed.command_type == CommandType.MONITORING_STATUS or text_stripped in (
+        "ตารางตรวจ", "กำหนดตรวจ", "แล็บถัดไป"
+    ):
+        if check_monitoring_status is None:
+            return "ขออภัย ฟีเจอร์ตารางตรวจยังไม่พร้อมใช้งาน"
+
+        try:
+            # ดึงผลแล็บของผู้ใช้
+            user_docs = doc_index.list_by_owner(user_hash, limit=200)
+            lab_reports = []
+            for doc_meta in (user_docs or []):
+                did = doc_meta.get("document_id", "")
+                if not did:
+                    continue
+                lab_path = f"{LAB_RESULTS_PREFIX}{did}.json"
+                try:
+                    lab_data = storage.get(lab_path)
+                    if lab_data:
+                        lab_reports.append(json.loads(lab_data))
+                except Exception:
+                    pass
+
+            report = check_monitoring_status(
+                lab_reports=lab_reports,
+                owner_hash=user_hash,
+            )
+
+            audit_logger.log("monitoring_status_view", user_hash, {
+                "total_overdue": report.total_overdue,
+                "total_missing": report.total_missing,
+                "lab_reports_checked": len(lab_reports),
+            })
+
+            return monitoring_report_text_th(report)
+
+        except Exception as e:
+            logger.warning(f"Monitoring status error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถตรวจสอบตารางตรวจได้ในขณะนี้"
+
+    # ── KPI ไต — Nephrology KPI Dashboard ──
+    if parsed.command_type == CommandType.NEPHROLOGY_KPI or text_stripped in (
+        "KPIไต", "kpiไต", "เป้าหมายไต", "dashboard"
+    ):
+        if generate_nephrology_dashboard is None:
+            return "ขออภัย ฟีเจอร์ KPI ไตยังไม่พร้อมใช้งาน"
+
+        try:
+            # ดึงผลแล็บของผู้ใช้
+            user_docs = doc_index.list_by_owner(user_hash, limit=200)
+            lab_reports = []
+            for doc_meta in (user_docs or []):
+                did = doc_meta.get("document_id", "")
+                if not did:
+                    continue
+                lab_path = f"{LAB_RESULTS_PREFIX}{did}.json"
+                try:
+                    lab_data = storage.get(lab_path)
+                    if lab_data:
+                        lab_reports.append(json.loads(lab_data))
+                except Exception:
+                    pass
+
+            # ดึง monitoring report ถ้ามี
+            monitoring_report = None
+            if check_monitoring_status is not None:
+                try:
+                    monitoring_report = check_monitoring_status(
+                        lab_reports=lab_reports,
+                        owner_hash=user_hash,
+                    )
+                except Exception:
+                    pass
+
+            # ดึงข้อมูล approval backlog (ถ้ามี physician service)
+            approval_data = None
+            if physician_service is not None:
+                try:
+                    pending = physician_service.get_pending_reports()
+                    approval_data = {
+                        "total_pending": len(pending) if pending else 0,
+                    }
+                except Exception:
+                    pass
+
+            # ดึงข้อมูล alert performance (ถ้ามี alert service)
+            alert_data = None
+            if alert_service is not None:
+                try:
+                    active = alert_service.get_active_alerts()
+                    alert_data = {
+                        "total_active": len(active) if active else 0,
+                    }
+                except Exception:
+                    pass
+
+            dashboard = generate_nephrology_dashboard(
+                lab_reports=lab_reports,
+                owner_hash=user_hash,
+                medication_review_data=None,
+                monitoring_report=monitoring_report,
+                approval_data=approval_data,
+                alert_data=alert_data,
+            )
+
+            audit_logger.log("nephrology_kpi_view", user_hash, {
+                "domain_count": len(dashboard.domain_kpis),
+                "missing_investigations": dashboard.missing_investigation_count,
+                "lab_reports_checked": len(lab_reports),
+            })
+
+            return dashboard_text_th(dashboard)
+
+        except Exception as e:
+            logger.warning(f"Nephrology KPI error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถสร้างรายงาน KPI ไตได้ในขณะนี้"
 
     return None  # ไม่ใช่คำสั่งค้นหา
 
@@ -3974,6 +4252,27 @@ def process_file_async(
                         extracted_text, _doc_id, _lab_method
                     )
                     if lab_report.results:
+                        # ── Phase 2A: OCR Safety Validation ──
+                        if ocr_validator is not None:
+                            try:
+                                _validation = ocr_validator.validate_report(
+                                    lab_report
+                                )
+                                if _validation.get("flags"):
+                                    lab_report.ocr_flags = _validation[
+                                        "flags"
+                                    ]
+                                    logger.info(
+                                        f"OCR validation flags: "
+                                        f"doc={_doc_id[:8]}, "
+                                        f"flags={len(_validation['flags'])}"
+                                    )
+                            except Exception as _ocr_err:
+                                logger.warning(
+                                    f"OCR validation error: "
+                                    f"{type(_ocr_err).__name__}"
+                                )
+
                         # บันทึกผลแล็บลง GCS — create-only
                         _lab_json = lab_report.to_json()
                         _lab_path = f"{LAB_RESULTS_PREFIX}{_doc_id}.json"
@@ -4047,6 +4346,45 @@ def process_file_async(
                                         f"Critical alert stored: "
                                         f"doc={_doc_id[:8]}"
                                     )
+
+                            # ── Phase 2A: Enhanced Alert Delivery ──
+                            if (alert_service is not None
+                                    and _alert_summary.critical_count > 0):
+                                try:
+                                    # สร้าง alert สำหรับแต่ละ critical
+                                    for _ca in getattr(
+                                        _alert_summary, 'alerts', []
+                                    ):
+                                        if getattr(
+                                            _ca, 'level', ''
+                                        ) == 'critical':
+                                            alert_service.create_alert(
+                                                doc_id=_doc_id[:8],
+                                                owner_hash=(
+                                                    owner_hash or ""
+                                                )[:8],
+                                                analyte=getattr(
+                                                    _ca, 'analyte', ''
+                                                ),
+                                                value=getattr(
+                                                    _ca, 'value', 0
+                                                ),
+                                                unit=getattr(
+                                                    _ca, 'unit', ''
+                                                ),
+                                                alert_level='critical',
+                                            )
+                                    logger.info(
+                                        f"Phase 2A alerts created: "
+                                        f"doc={_doc_id[:8]}"
+                                    )
+                                except Exception as _adel_err:
+                                    logger.warning(
+                                        f"Phase 2A alert delivery "
+                                        f"error: "
+                                        f"{type(_adel_err).__name__}"
+                                    )
+
                         except Exception as alert_err:
                             # Alert ล้มเหลวไม่ทำให้ upload ล้มเหลว
                             logger.warning(
@@ -4517,6 +4855,57 @@ def download_proxy(token):
 
     # 302 redirect → ไม่ cache, Signed URL มีอายุ 5 นาที
     return redirect(signed_url)
+
+
+# ─── Phase 2A Health Monitoring: /health/live, /health/ready ──
+try:
+    from health_check import init_health, _check_storage, _health_state
+    init_health()
+except ImportError:
+    pass
+
+
+@app.route("/health/live", methods=["GET"])
+def health_live():
+    """Liveness probe — process สามารถรับ request ได้หรือไม่."""
+    try:
+        return jsonify({
+            "status": "alive",
+            "timestamp": datetime.now().isoformat(timespec="seconds"),
+            "uptime_since": _health_state.get("started_at", "unknown"),
+        }), 200
+    except Exception:
+        return jsonify({"status": "unhealthy"}), 503
+
+
+@app.route("/health/ready", methods=["GET"])
+def health_ready():
+    """Readiness probe — dependencies พร้อมใช้งานหรือไม่.
+
+    ไม่เปิดเผย credentials, bucket name, service account
+    """
+    checks = {}
+    all_ready = True
+
+    if storage is not None and hasattr(storage, 'list_files'):
+        try:
+            gcs_ok = _check_storage(storage)
+        except Exception:
+            gcs_ok = False
+        checks["storage"] = "ok" if gcs_ok else "unavailable"
+        if not gcs_ok:
+            all_ready = False
+    else:
+        checks["storage"] = "not_configured"
+
+    status_code = 200 if all_ready else 503
+    status_text = "ready" if all_ready else "not_ready"
+
+    return jsonify({
+        "status": status_text,
+        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "checks": checks,
+    }), status_code
 
 
 @app.route("/health", methods=["GET"])

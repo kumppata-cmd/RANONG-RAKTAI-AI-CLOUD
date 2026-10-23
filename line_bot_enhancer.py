@@ -41,6 +41,8 @@ class CommandType(Enum):
     PATIENT_REPORT = "patient_report"
     CLINIC_KPI = "clinic_kpi"
     MEDICATION_REVIEW = "medication_review"
+    MONITORING_STATUS = "monitoring_status"
+    NEPHROLOGY_KPI = "nephrology_kpi"
     HELP = "help"
     STATUS = "status"
     MY_STATS = "my_stats"
@@ -121,6 +123,20 @@ COMMAND_ALIASES: list[tuple[str, CommandType, int | None]] = [
     (r"^เช็คยา\s+(.+)$", CommandType.MEDICATION_REVIEW, 1),
     (r"^ตรวจสอบยา\s+(.+)$", CommandType.MEDICATION_REVIEW, 1),
     (r"^med\s+(.+)$", CommandType.MEDICATION_REVIEW, 1),
+
+    # ─── ตารางตรวจ / Monitoring Schedule ───
+    (r"^ตารางตรวจ$", CommandType.MONITORING_STATUS, None),
+    (r"^กำหนดตรวจ$", CommandType.MONITORING_STATUS, None),
+    (r"^แล็บถัดไป$", CommandType.MONITORING_STATUS, None),
+    (r"^monitoring$", CommandType.MONITORING_STATUS, None),
+    (r"^schedule$", CommandType.MONITORING_STATUS, None),
+
+    # ─── KPI ไต / Nephrology KPI Dashboard ───
+    (r"^KPI\s*ไต$", CommandType.NEPHROLOGY_KPI, None),
+    (r"^kpi\s*ไต$", CommandType.NEPHROLOGY_KPI, None),
+    (r"^เป้าหมายไต$", CommandType.NEPHROLOGY_KPI, None),
+    (r"^nephro\s*kpi$", CommandType.NEPHROLOGY_KPI, None),
+    (r"^dashboard$", CommandType.NEPHROLOGY_KPI, None),
 
     # ─── สถิติ ───
     (r"^สถิติ$", CommandType.MY_STATS, None),
@@ -493,6 +509,13 @@ def generate_help_text(is_admin: bool = False, has_docs: bool = True) -> str:
         "\n💊 ตรวจสอบยา:\n"
         "  ตรวจยา [รายการยา]\n"
         "  เช่น: ตรวจยา Metformin, Ibuprofen"
+    )
+
+    # Monitoring schedule
+    sections.append(
+        "\n📅 ตารางตรวจติดตาม:\n"
+        "  ตารางตรวจ / กำหนดตรวจ / แล็บถัดไป\n"
+        "  KPIไต / เป้าหมายไต / dashboard"
     )
 
     # Stats

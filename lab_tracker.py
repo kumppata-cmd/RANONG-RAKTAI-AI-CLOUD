@@ -545,3 +545,276 @@ def _generate_trend_summary(analysis: TrendAnalysis) -> str:
     lines.append("")
     lines.append(f"⚠️ {analysis.disclaimer}")
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
+# Phase 2B: Monitoring Schedule Configuration
+# ═══════════════════════════════════════════════════════════
+# ตารางตรวจเริ่มต้นสำหรับคลินิก — สามารถปรับได้โดยทีมแพทย์
+# ไม่ใช่มาตรฐานการรักษาสากล
+
+@dataclass
+class MonitoringItem:
+    """รายการตรวจในตารางติดตาม."""
+    analyte: str              # ชื่อการตรวจ
+    period: str               # TrackingPeriod value
+    description_th: str = ""  # คำอธิบายภาษาไทย
+    is_required: bool = True  # จำเป็นหรือแนะนำ
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "analyte": self.analyte,
+            "period": self.period,
+            "description_th": self.description_th,
+            "is_required": self.is_required,
+        }
+
+
+# Default monitoring schedule — configurable by clinical leadership
+DEFAULT_MONITORING_SCHEDULE: list[MonitoringItem] = [
+    # ── Monthly ──
+    MonitoringItem("CBC", TrackingPeriod.MONTHLY.value,
+                   "ตรวจนับเม็ดเลือด"),
+    MonitoringItem("BUN", TrackingPeriod.MONTHLY.value,
+                   "Blood Urea Nitrogen"),
+    MonitoringItem("Creatinine", TrackingPeriod.MONTHLY.value,
+                   "Creatinine"),
+    MonitoringItem("Potassium", TrackingPeriod.MONTHLY.value,
+                   "โปตัสเซียม"),
+    MonitoringItem("Sodium", TrackingPeriod.MONTHLY.value,
+                   "โซเดียม"),
+    MonitoringItem("Calcium", TrackingPeriod.MONTHLY.value,
+                   "แคลเซียม"),
+    MonitoringItem("Phosphate", TrackingPeriod.MONTHLY.value,
+                   "ฟอสเฟต"),
+    # ── Quarterly ──
+    MonitoringItem("Fasting Glucose", TrackingPeriod.QUARTERLY.value,
+                   "น้ำตาลในเลือด (อดอาหาร)", notes="FBS"),
+    MonitoringItem("Albumin", TrackingPeriod.QUARTERLY.value,
+                   "อัลบูมิน — ภาวะโภชนาการ"),
+    MonitoringItem("Kt/V", TrackingPeriod.QUARTERLY.value,
+                   "ประสิทธิภาพการฟอกเลือด"),
+    MonitoringItem("Hemoglobin", TrackingPeriod.QUARTERLY.value,
+                   "ฮีโมโกลบิน — ภาวะซีด"),
+    # ── Semi-Annual ──
+    MonitoringItem("iPTH", TrackingPeriod.SEMI_ANNUAL.value,
+                   "Intact PTH — กระดูกและแร่ธาตุ"),
+    MonitoringItem("Ferritin", TrackingPeriod.SEMI_ANNUAL.value,
+                   "ธาตุเหล็กสะสม"),
+    MonitoringItem("TSAT", TrackingPeriod.SEMI_ANNUAL.value,
+                   "Transferrin Saturation"),
+    MonitoringItem("HBsAg", TrackingPeriod.SEMI_ANNUAL.value,
+                   "ตรวจไวรัสตับอักเสบ B"),
+    MonitoringItem("Anti-HCV", TrackingPeriod.SEMI_ANNUAL.value,
+                   "ตรวจไวรัสตับอักเสบ C"),
+    # ── Annual ──
+    MonitoringItem("ECG", TrackingPeriod.ANNUAL.value,
+                   "คลื่นไฟฟ้าหัวใจ"),
+    MonitoringItem("CXR", TrackingPeriod.ANNUAL.value,
+                   "เอกซเรย์ปอด"),
+    MonitoringItem("HbA1c", TrackingPeriod.ANNUAL.value,
+                   "น้ำตาลสะสม", is_required=False,
+                   notes="เฉพาะผู้ป่วยเบาหวาน"),
+]
+
+
+@dataclass
+class MissingInvestigation:
+    """การตรวจที่ขาดหายตามตาราง."""
+    analyte: str
+    expected_period: str      # TrackingPeriod value
+    last_done_date: str = ""  # วันที่ตรวจครั้งล่าสุด (empty=ไม่เคยตรวจ)
+    days_overdue: int = 0     # จำนวนวันเกินกำหนด
+    description_th: str = ""
+    is_required: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "analyte": self.analyte,
+            "expected_period": self.expected_period,
+            "last_done_date": self.last_done_date,
+            "days_overdue": self.days_overdue,
+            "description_th": self.description_th,
+            "is_required": self.is_required,
+        }
+
+
+@dataclass
+class ScheduleCompliance:
+    """ผลการตรวจสอบความครบถ้วนตามตาราง.
+
+    กฎความปลอดภัย:
+      - ตารางเป็น configurable defaults ไม่ใช่มาตรฐานสากล
+      - ต้องได้รับการอนุมัติจากทีมแพทย์
+    """
+    reference_date: str = ""
+    total_items: int = 0
+    completed_items: int = 0
+    missing_items: list[MissingInvestigation] = field(default_factory=list)
+    compliance_percent: float = 0.0
+    disclaimer: str = (
+        "⚠️ ตารางตรวจนี้เป็นค่าเริ่มต้นของคลินิก — "
+        "ไม่ใช่มาตรฐานสากล — ต้องได้รับการอนุมัติจากทีมแพทย์"
+    )
+
+    def __post_init__(self):
+        if not self.reference_date:
+            self.reference_date = datetime.now().strftime("%Y-%m-%d")
+
+    def to_dict(self) -> dict:
+        return {
+            "reference_date": self.reference_date,
+            "total_items": self.total_items,
+            "completed_items": self.completed_items,
+            "missing_count": len(self.missing_items),
+            "compliance_percent": round(self.compliance_percent, 1),
+            "missing_items": [m.to_dict() for m in self.missing_items],
+            "disclaimer": self.disclaimer,
+        }
+
+
+def check_schedule_compliance(
+    lab_reports: list[dict],
+    schedule: list[MonitoringItem] | None = None,
+    reference_date: Optional[str] = None,
+) -> ScheduleCompliance:
+    """ตรวจสอบความครบถ้วนของการตรวจตามตาราง.
+
+    Args:
+        lab_reports: list ของ lab report dicts
+        schedule: ตารางตรวจ (None = ใช้ค่าเริ่มต้น)
+        reference_date: วันที่อ้างอิง (default=today)
+
+    Returns:
+        ScheduleCompliance
+
+    กฎความปลอดภัย:
+      - ตารางเป็น configurable defaults ไม่ใช่มาตรฐานสากล
+    """
+    if schedule is None:
+        schedule = DEFAULT_MONITORING_SCHEDULE
+
+    if reference_date:
+        ref_date = datetime.fromisoformat(reference_date)
+    else:
+        ref_date = datetime.now()
+
+    # Build last-done map: analyte → latest specimen_date
+    last_done: dict[str, str] = {}
+    for report in lab_reports:
+        specimen_date = report.get("specimen_date", "")
+        if not specimen_date:
+            continue
+        for result in report.get("results", []):
+            analyte = result.get("analyte", "")
+            if analyte:
+                existing = last_done.get(analyte, "")
+                if specimen_date > existing:
+                    last_done[analyte] = specimen_date
+
+    compliance = ScheduleCompliance(
+        reference_date=ref_date.strftime("%Y-%m-%d"),
+        total_items=len(schedule),
+    )
+
+    completed = 0
+    missing: list[MissingInvestigation] = []
+
+    for item in schedule:
+        period_days = PERIOD_DAYS.get(item.period, 90)
+        cutoff_date = (ref_date - timedelta(days=period_days)).strftime(
+            "%Y-%m-%d"
+        )
+
+        done_date = last_done.get(item.analyte, "")
+        if done_date and done_date >= cutoff_date:
+            completed += 1
+        else:
+            # Calculate days overdue
+            overdue = 0
+            if done_date:
+                try:
+                    last_dt = datetime.fromisoformat(done_date)
+                    expected_next = last_dt + timedelta(days=period_days)
+                    if ref_date > expected_next:
+                        overdue = (ref_date - expected_next).days
+                except (ValueError, TypeError):
+                    pass
+            else:
+                overdue = period_days  # never done
+
+            missing.append(MissingInvestigation(
+                analyte=item.analyte,
+                expected_period=item.period,
+                last_done_date=done_date,
+                days_overdue=overdue,
+                description_th=item.description_th,
+                is_required=item.is_required,
+            ))
+
+    compliance.completed_items = completed
+    compliance.missing_items = missing
+    if compliance.total_items > 0:
+        compliance.compliance_percent = (
+            completed / compliance.total_items * 100
+        )
+
+    return compliance
+
+
+def schedule_compliance_text_th(compliance: ScheduleCompliance) -> str:
+    """สร้างข้อความสรุปความครบถ้วนภาษาไทย."""
+    lines = [
+        "📅 สรุปความครบถ้วนการตรวจตามตาราง",
+        f"วันที่: {compliance.reference_date}",
+        "",
+        f"📊 ครบถ้วน: {compliance.completed_items}/{compliance.total_items} "
+        f"({compliance.compliance_percent:.0f}%)",
+        "",
+    ]
+
+    if compliance.missing_items:
+        required_missing = [
+            m for m in compliance.missing_items if m.is_required
+        ]
+        optional_missing = [
+            m for m in compliance.missing_items if not m.is_required
+        ]
+
+        if required_missing:
+            lines.append(
+                f"🔴 การตรวจที่ขาด ({len(required_missing)} รายการ):"
+            )
+            for m in required_missing:
+                period_name = PERIOD_NAMES_TH.get(
+                    m.expected_period, m.expected_period
+                )
+                last_info = (
+                    f"ครั้งล่าสุด: {m.last_done_date}"
+                    if m.last_done_date else "ยังไม่เคยตรวจ"
+                )
+                lines.append(
+                    f"  • {m.analyte} ({period_name}) — "
+                    f"{last_info}"
+                )
+                if m.days_overdue > 0:
+                    lines.append(
+                        f"    เกินกำหนด {m.days_overdue} วัน"
+                    )
+            lines.append("")
+
+        if optional_missing:
+            lines.append(
+                f"🟡 การตรวจแนะนำที่ยังไม่ได้ทำ "
+                f"({len(optional_missing)} รายการ):"
+            )
+            for m in optional_missing:
+                lines.append(f"  • {m.analyte}: {m.description_th}")
+            lines.append("")
+    else:
+        lines.append("✅ การตรวจครบถ้วนตามตาราง")
+        lines.append("")
+
+    lines.append(f"⚠️ {compliance.disclaimer}")
+    return "\n".join(lines)

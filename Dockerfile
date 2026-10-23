@@ -1,5 +1,6 @@
-# RANONG RAKTAI AI — Cloud Deployment
+# RANONG RAKTAI AI 2.0 — Cloud Deployment
 # Dockerfile สำหรับ Render (ติดตั้ง Tesseract OCR + Thai language)
+# Security: Non-root runtime user, least-privilege filesystem
 
 FROM python:3.12-slim
 
@@ -21,7 +22,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# คัดลอก source code
+# คัดลอก source code — ทั้ง modules เดิมและใหม่
 COPY server.py .
 COPY lab_models.py .
 COPY lab_extractor.py .
@@ -32,9 +33,24 @@ COPY clinical_reports.py .
 COPY medication_review.py .
 COPY line_bot_enhancer.py .
 COPY lab_alert.py .
+COPY physician_approval.py .
+COPY alert_delivery.py .
+COPY patient_identity.py .
+COPY ocr_safety.py .
+COPY health_check.py .
+COPY audit_trail.py .
 
-# สร้างโฟลเดอร์ชั่วคราว
-RUN mkdir -p /tmp/ranong_raktai/logs
+# สร้าง non-root user สำหรับ runtime
+RUN groupadd -r appuser && \
+    useradd -r -g appuser -d /app -s /sbin/nologin appuser
+
+# สร้างโฟลเดอร์ชั่วคราวที่ appuser เข้าถึงได้
+RUN mkdir -p /tmp/ranong_raktai/logs && \
+    chown -R appuser:appuser /tmp/ranong_raktai && \
+    chown -R appuser:appuser /app
+
+# Switch to non-root user
+USER appuser
 
 # Expose port (Render กำหนด PORT ผ่าน env)
 EXPOSE 10000

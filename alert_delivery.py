@@ -1,0 +1,514 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Critical Lab Alert Delivery — RANONG-RAKTAI-AI 2.0
+
+ระบบส่ง alert วิกฤตให้แพทย์ผ่าน LINE Push Message
+
+กฎความปลอดภัย:
+  - ไม่มี PHI ใน notification preview
+  - API acceptance ≠ clinician acknowledgement
+  - Low-confidence OCR → urgent source verification, NOT auto-accept
+  - eGFR<15 ในผู้ป่วย maintenance dialysis ไม่ใช่ acute emergency อัตโนมัติ
+  - Retry with exponential backoff
+  - Failed delivery escalation
+  - Persistent alert state
+  - Audit logging ทุก event
+"""
+
+from __future__ import annotations
+
+import json
+import uuid
+import time
+import logging
+from dataclasses import dataclass, field, asdict
+from datetime import datetime
+from enum import Enum
+from typing import Optional, Any
+
+logger = logging.getLogger(__name__)
+
+
+# ═══════════════════════════════════════════════════════════
+# Alert State Machine
+# ═══════════════════════════════════════════════════════════
+
+class AlertState(str, Enum):
+    """สถานะของ critical alert."""
+    DETECTED = "detected"
+    QUEUED = "queued"
+    SENT = "sent"
+    DELIVERY_FAILED = "delivery_failed"
+    ACKNOWLEDGED = "acknowledged"
+    RESOLVED = "resolved"
+    ESCALATED = "escalated"
+
+
+class AlertSeverity(str, Enum):
+    """ระดับความรุนแรง."""
+    CRITICAL = "critical"       # ต้องแจ้งทันที
+    URGENT = "urgent"           # ต้องแจ้งเร็ว
+    SOURCE_VERIFY = "source_verify"  # OCR confidence ต่ำ ต้องตรวจสอบต้นฉบับ
+
+
+# Valid state transitions
+ALERT_TRANSITIONS = {
+    AlertState.DETECTED.value: {AlertState.QUEUED.value},
+    AlertState.QUEUED.value: {AlertState.SENT.value, AlertState.DELIVERY_FAILED.value},
+    AlertState.SENT.value: {AlertState.ACKNOWLEDGED.value, AlertState.ESCALATED.value},
+    AlertState.DELIVERY_FAILED.value: {AlertState.QUEUED.value, AlertState.ESCALATED.value},
+    AlertState.ACKNOWLEDGED.value: {AlertState.RESOLVED.value},
+    AlertState.ESCALATED.value: {AlertState.QUEUED.value, AlertState.RESOLVED.value},
+}
+
+
+@dataclass
+class AlertEvent:
+    """Audit event สำหรับ alert lifecycle."""
+    event_id: str
+    action: str
+    timestamp: str
+    actor: str = ""
+    details: dict = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass
+class CriticalAlert:
+    """Critical lab alert record.
+
+    ไม่เก็บข้อมูลผู้ป่วยโดยตรง — ใช้ doc_id อ้างอิง
+    """
+    alert_id: str                    # UUID
+    doc_id: str                      # document ID ที่พบค่าผิดปกติ
+    owner_hash: str                  # owner ของเอกสาร (hashed)
+    analyte: str                     # ชื่อ analyte ที่ผิดปกติ
+    value: float                     # ค่าที่ตรวจพบ
+    unit: str                        # หน่วย
+    alert_level: str                 # critical_high/critical_low/etc
+    severity: str = AlertSeverity.CRITICAL.value
+    state: str = AlertState.DETECTED.value
+    ocr_confidence: float = 1.0      # confidence ของ OCR
+    created_at: str = ""
+    sent_at: str = ""
+    acknowledged_at: str = ""
+    acknowledged_by: str = ""
+    resolved_at: str = ""
+    delivery_attempts: int = 0
+    max_delivery_attempts: int = 5
+    last_delivery_error: str = ""
+    escalation_target: str = ""
+    notification_text: str = ""      # ข้อความที่ส่ง (ไม่มี PHI)
+    events: list[dict] = field(default_factory=list)
+    dedup_key: str = ""              # สำหรับ deduplication
+
+    def __post_init__(self):
+        if not self.alert_id:
+            self.alert_id = uuid.uuid4().hex[:16]
+        if not self.created_at:
+            self.created_at = datetime.now().isoformat(timespec="seconds")
+        if not self.dedup_key:
+            self.dedup_key = f"{self.doc_id}:{self.analyte}:{self.alert_level}"
+        # Low OCR confidence → source verification severity
+        if self.ocr_confidence < 0.7:
+            self.severity = AlertSeverity.SOURCE_VERIFY.value
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> CriticalAlert:
+        events = data.pop("events", [])
+        alert = cls(**{k: v for k, v in data.items()
+                       if k in cls.__dataclass_fields__})
+        alert.events = events
+        return alert
+
+    def add_event(self, action: str, actor: str = "",
+                  details: dict | None = None):
+        """เพิ่ม audit event."""
+        event = AlertEvent(
+            event_id=uuid.uuid4().hex[:8],
+            action=action,
+            timestamp=datetime.now().isoformat(timespec="seconds"),
+            actor=actor,
+            details=details or {},
+        )
+        self.events.append(event.to_dict())
+
+    def can_transition_to(self, new_state: str) -> bool:
+        valid = ALERT_TRANSITIONS.get(self.state, set())
+        return new_state in valid
+
+    def should_retry(self) -> bool:
+        return (
+            self.state == AlertState.DELIVERY_FAILED.value
+            and self.delivery_attempts < self.max_delivery_attempts
+        )
+
+    def should_escalate(self) -> bool:
+        return (
+            self.state == AlertState.DELIVERY_FAILED.value
+            and self.delivery_attempts >= self.max_delivery_attempts
+        )
+
+    def get_retry_delay(self) -> int:
+        """Exponential backoff delay in seconds."""
+        base = 30  # 30 seconds base
+        return min(base * (2 ** (self.delivery_attempts - 1)), 3600)
+
+
+# ═══════════════════════════════════════════════════════════
+# Alert Delivery Service
+# ═══════════════════════════════════════════════════════════
+
+ALERTS_PREFIX = "_alerts/"  # GCS path
+
+
+class AlertDeliveryService:
+    """จัดการ critical alert delivery.
+
+    Dependencies:
+      - storage: StorageLocal/StorageGCS
+      - audit_logger: AuditLogger
+      - clinician_recipients: dict mapping role → LINE user_id list
+    """
+
+    def __init__(self, storage, audit_logger,
+                 clinician_recipients: dict[str, list[str]] | None = None):
+        self._storage = storage
+        self._audit = audit_logger
+        self._recipients = clinician_recipients or {}
+        self._dedup_cache: dict[str, str] = {}  # dedup_key → alert_id
+
+    def _alert_path(self, alert_id: str) -> str:
+        return f"{ALERTS_PREFIX}{alert_id}.json"
+
+    def _save_alert(self, alert: CriticalAlert) -> bool:
+        try:
+            self._storage.put(
+                self._alert_path(alert.alert_id),
+                alert.to_json().encode("utf-8"),
+                content_type="application/json",
+            )
+            return True
+        except Exception as e:
+            logger.error(f"Alert save failed: {type(e).__name__}")
+            return False
+
+    def _load_alert(self, alert_id: str) -> CriticalAlert | None:
+        data = self._storage.get(self._alert_path(alert_id))
+        if data is None:
+            return None
+        return CriticalAlert.from_dict(json.loads(data))
+
+    def create_alert(self, doc_id: str, owner_hash: str,
+                      analyte: str, value: float, unit: str,
+                      alert_level: str,
+                      ocr_confidence: float = 1.0,
+                      patient_context: dict | None = None) -> CriticalAlert | None:
+        """สร้าง alert ใหม่จากผลตรวจที่ผิดปกติ.
+
+        patient_context: ข้อมูลบริบทผู้ป่วย เช่น
+            {"is_dialysis_patient": True} — ไม่ auto-classify eGFR<15
+
+        Returns None ถ้า deduplicated.
+        """
+        # สร้าง dedup key
+        dedup_key = f"{doc_id}:{analyte}:{alert_level}"
+
+        # Check dedup
+        if dedup_key in self._dedup_cache:
+            existing_id = self._dedup_cache[dedup_key]
+            existing = self._load_alert(existing_id)
+            if existing and existing.state not in (
+                AlertState.RESOLVED.value,
+            ):
+                logger.info(f"Alert deduplicated: {dedup_key}")
+                return None
+
+        # Patient context interpretation
+        severity = AlertSeverity.CRITICAL.value
+        if ocr_confidence < 0.7:
+            severity = AlertSeverity.SOURCE_VERIFY.value
+        elif patient_context:
+            # eGFR<15 ในผู้ป่วย maintenance dialysis ไม่ใช่ acute emergency
+            if (analyte.lower() in ("egfr", "gfr")
+                    and value < 15
+                    and patient_context.get("is_dialysis_patient")):
+                severity = AlertSeverity.URGENT.value
+
+        alert = CriticalAlert(
+            alert_id="",  # auto-generated
+            doc_id=doc_id,
+            owner_hash=owner_hash[:8],
+            analyte=analyte,
+            value=value,
+            unit=unit,
+            alert_level=alert_level,
+            severity=severity,
+            ocr_confidence=ocr_confidence,
+        )
+
+        # Build notification text (NO PHI)
+        alert.notification_text = self._build_notification(alert)
+
+        alert.add_event("detected", details={
+            "severity": severity,
+            "ocr_confidence": ocr_confidence,
+        })
+
+        # Transition to queued
+        alert.state = AlertState.QUEUED.value
+        alert.add_event("queued")
+
+        if self._save_alert(alert):
+            self._dedup_cache[dedup_key] = alert.alert_id
+            self._audit.log("alert_created", owner_hash, {
+                "alert_id": alert.alert_id[:8],
+                "analyte": analyte,
+                "alert_level": alert_level,
+                "severity": severity,
+            })
+            return alert
+
+        return None
+
+    def _build_notification(self, alert: CriticalAlert) -> str:
+        """สร้าง notification text — ไม่มี PHI.
+
+        ข้อความจะไม่มี: ชื่อผู้ป่วย, วันเกิด, หมายเลขบัตร,
+        ที่อยู่ หรือข้อมูลที่ระบุตัวบุคคลได้
+        """
+        severity_icon = {
+            AlertSeverity.CRITICAL.value: "🔴",
+            AlertSeverity.URGENT.value: "🟠",
+            AlertSeverity.SOURCE_VERIFY.value: "⚠️",
+        }.get(alert.severity, "🔴")
+
+        text = (
+            f"{severity_icon} แจ้งเตือนผลตรวจ\n"
+            f"รายการ: {alert.analyte}\n"
+            f"ระดับ: {alert.alert_level}\n"
+            f"เอกสาร: {alert.doc_id[:8]}\n"
+        )
+
+        if alert.severity == AlertSeverity.SOURCE_VERIFY.value:
+            text += (
+                f"\n⚠️ OCR confidence ต่ำ ({alert.ocr_confidence:.0%})\n"
+                f"กรุณาตรวจสอบเอกสารต้นฉบับ"
+            )
+
+        text += f"\n\nตอบ 'รับทราบ {alert.alert_id[:8]}' เพื่อยืนยัน"
+        return text
+
+    def attempt_delivery(self, alert_id: str,
+                          send_push_fn=None) -> dict:
+        """พยายามส่ง alert ผ่าน LINE push.
+
+        send_push_fn: function(user_id: str, message: str) -> bool
+            ถ้าไม่มี — จำลอง delivery (testing mode)
+        """
+        alert = self._load_alert(alert_id)
+        if alert is None:
+            return {"error": "ไม่พบ alert"}
+
+        if alert.state not in (AlertState.QUEUED.value,
+                                AlertState.DELIVERY_FAILED.value):
+            return {"error": f"สถานะ {alert.state} ไม่สามารถส่งได้"}
+
+        alert.delivery_attempts += 1
+
+        # ส่ง LINE push
+        recipients = self._recipients.get("physician", [])
+        if not recipients:
+            logger.warning("No physician recipients configured for alerts")
+            alert.state = AlertState.DELIVERY_FAILED.value
+            alert.last_delivery_error = "ไม่มี physician recipient"
+            alert.add_event("delivery_failed", details={
+                "reason": "no_recipients",
+                "attempt": alert.delivery_attempts,
+            })
+            self._save_alert(alert)
+            return {"error": "ไม่มี physician recipient"}
+
+        delivery_success = False
+        if send_push_fn:
+            for recipient_id in recipients:
+                try:
+                    success = send_push_fn(
+                        recipient_id, alert.notification_text
+                    )
+                    if success:
+                        delivery_success = True
+                        break
+                except Exception as e:
+                    logger.warning(
+                        f"Alert push failed: {type(e).__name__}"
+                    )
+        else:
+            # Testing mode — simulate delivery
+            delivery_success = True
+
+        if delivery_success:
+            alert.state = AlertState.SENT.value
+            alert.sent_at = datetime.now().isoformat(timespec="seconds")
+            alert.add_event("sent", details={
+                "attempt": alert.delivery_attempts,
+            })
+            self._audit.log("alert_sent", alert.owner_hash, {
+                "alert_id": alert.alert_id[:8],
+                "analyte": alert.analyte,
+                "attempt": alert.delivery_attempts,
+            })
+        else:
+            alert.state = AlertState.DELIVERY_FAILED.value
+            alert.last_delivery_error = "LINE push failed"
+            alert.add_event("delivery_failed", details={
+                "attempt": alert.delivery_attempts,
+            })
+
+            # Check escalation
+            if alert.should_escalate():
+                alert.state = AlertState.ESCALATED.value
+                alert.add_event("escalated", details={
+                    "reason": "max_delivery_attempts_reached",
+                })
+                self._audit.log("alert_escalated", alert.owner_hash, {
+                    "alert_id": alert.alert_id[:8],
+                    "analyte": alert.analyte,
+                    "attempts": alert.delivery_attempts,
+                })
+
+        self._save_alert(alert)
+        return {
+            "alert_id": alert.alert_id,
+            "state": alert.state,
+            "delivery_attempts": alert.delivery_attempts,
+            "success": delivery_success,
+        }
+
+    def acknowledge_alert(self, alert_id: str,
+                           physician_hash: str) -> dict:
+        """แพทย์รับทราบ alert.
+
+        API acceptance ≠ clinician acknowledgement
+        ต้องมี physician ตอบกลับจริง
+        """
+        alert = self._load_alert(alert_id)
+        if alert is None:
+            return {"error": "ไม่พบ alert"}
+
+        if alert.state not in (AlertState.SENT.value,
+                                AlertState.ESCALATED.value):
+            return {"error": f"ไม่สามารถรับทราบ alert สถานะ {alert.state}"}
+
+        alert.state = AlertState.ACKNOWLEDGED.value
+        alert.acknowledged_at = datetime.now().isoformat(timespec="seconds")
+        alert.acknowledged_by = physician_hash[:8]
+        alert.add_event("acknowledged", actor=physician_hash[:8])
+
+        self._save_alert(alert)
+        self._audit.log("alert_acknowledged", physician_hash, {
+            "alert_id": alert.alert_id[:8],
+            "analyte": alert.analyte,
+            "response_time_sec": self._calc_response_time(alert),
+        })
+
+        return {
+            "status": "acknowledged",
+            "alert_id": alert.alert_id,
+            "message": f"✅ รับทราบการแจ้งเตือน {alert.analyte} แล้ว",
+        }
+
+    def resolve_alert(self, alert_id: str,
+                       physician_hash: str,
+                       resolution_notes: str = "") -> dict:
+        """แพทย์ resolve alert."""
+        alert = self._load_alert(alert_id)
+        if alert is None:
+            return {"error": "ไม่พบ alert"}
+
+        if alert.state != AlertState.ACKNOWLEDGED.value:
+            return {"error": "ต้อง acknowledge ก่อน resolve"}
+
+        alert.state = AlertState.RESOLVED.value
+        alert.resolved_at = datetime.now().isoformat(timespec="seconds")
+        alert.add_event("resolved", actor=physician_hash[:8],
+                        details={"notes": resolution_notes})
+
+        self._save_alert(alert)
+        self._audit.log("alert_resolved", physician_hash, {
+            "alert_id": alert.alert_id[:8],
+            "analyte": alert.analyte,
+        })
+
+        return {
+            "status": "resolved",
+            "alert_id": alert.alert_id,
+            "message": f"✅ แจ้งเตือน {alert.analyte} ได้รับการแก้ไขแล้ว",
+        }
+
+    def get_active_alerts(self) -> list[dict]:
+        """แสดง alerts ที่ยังไม่ resolved."""
+        # In production, this would query GCS/DB
+        # For now, return from dedup cache
+        active = []
+        for dedup_key, alert_id in self._dedup_cache.items():
+            alert = self._load_alert(alert_id)
+            if alert and alert.state != AlertState.RESOLVED.value:
+                active.append({
+                    "alert_id": alert.alert_id,
+                    "analyte": alert.analyte,
+                    "severity": alert.severity,
+                    "state": alert.state,
+                    "created_at": alert.created_at,
+                    "doc_id": alert.doc_id[:8],
+                })
+        return active
+
+    def _calc_response_time(self, alert: CriticalAlert) -> int:
+        """คำนวณ response time เป็นวินาที."""
+        try:
+            if alert.sent_at and alert.acknowledged_at:
+                sent = datetime.fromisoformat(alert.sent_at)
+                acked = datetime.fromisoformat(alert.acknowledged_at)
+                return int((acked - sent).total_seconds())
+        except (ValueError, TypeError):
+            pass
+        return -1
+
+
+def format_active_alerts(alerts: list[dict]) -> str:
+    """สร้างข้อความแสดง active alerts สำหรับ LINE."""
+    if not alerts:
+        return "✅ ไม่มีการแจ้งเตือนที่ค้างอยู่"
+
+    lines = [f"🔔 การแจ้งเตือน ({len(alerts)} รายการ)\n"]
+    for a in alerts:
+        severity_icon = {
+            AlertSeverity.CRITICAL.value: "🔴",
+            AlertSeverity.URGENT.value: "🟠",
+            AlertSeverity.SOURCE_VERIFY.value: "⚠️",
+        }.get(a["severity"], "🔴")
+
+        state_icon = {
+            AlertState.QUEUED.value: "⏳",
+            AlertState.SENT.value: "📤",
+            AlertState.DELIVERY_FAILED.value: "❌",
+            AlertState.ESCALATED.value: "🆘",
+            AlertState.ACKNOWLEDGED.value: "✅",
+        }.get(a["state"], "")
+
+        lines.append(
+            f"{severity_icon} {a['analyte']} [{a['doc_id']}] "
+            f"{state_icon} {a['state']}"
+        )
+
+    return "\n".join(lines)

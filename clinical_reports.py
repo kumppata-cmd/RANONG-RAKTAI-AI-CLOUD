@@ -395,3 +395,433 @@ def clinic_summary_text_th(kpi: ClinicKPI) -> str:
 
     lines.append(f"⚠️ {kpi.disclaimer}")
     return "\n".join(lines)
+
+
+# ═══════════════════════════════════════════════════════════
+# Phase 2B: Nephrology KPI Dashboard
+# ═══════════════════════════════════════════════════════════
+
+# Target ranges for nephrology KPIs — configurable by clinical leadership
+# ห้ามถือว่าผู้ป่วย CKD และ HD ทุกรายมีเป้าหมายเดียวกัน
+
+NEPHROLOGY_TARGETS: dict[str, dict] = {
+    # Anemia indicators
+    "Hemoglobin": {
+        "target_min": 10.0, "target_max": 12.0,
+        "unit": "g/dL",
+        "category": "anemia",
+        "label_th": "ฮีโมโกลบิน (เป้าหมาย HD)",
+    },
+    "Hematocrit": {
+        "target_min": 30.0, "target_max": 36.0,
+        "unit": "%",
+        "category": "anemia",
+        "label_th": "ฮีมาโตคริต",
+    },
+    "Ferritin": {
+        "target_min": 200, "target_max": 500,
+        "unit": "ng/mL",
+        "category": "anemia",
+        "label_th": "ธาตุเหล็กสะสม",
+    },
+    "TSAT": {
+        "target_min": 20, "target_max": 50,
+        "unit": "%",
+        "category": "anemia",
+        "label_th": "Transferrin Saturation",
+    },
+    # Dialysis adequacy
+    "Kt/V": {
+        "target_min": 1.2, "target_max": 999,
+        "unit": "",
+        "category": "adequacy",
+        "label_th": "ประสิทธิภาพฟอกเลือด",
+    },
+    # CKD-MBD
+    "Calcium": {
+        "target_min": 8.4, "target_max": 10.2,
+        "unit": "mg/dL",
+        "category": "ckd_mbd",
+        "label_th": "แคลเซียม",
+    },
+    "Phosphate": {
+        "target_min": 3.5, "target_max": 5.5,
+        "unit": "mg/dL",
+        "category": "ckd_mbd",
+        "label_th": "ฟอสเฟต",
+    },
+    "iPTH": {
+        "target_min": 150, "target_max": 600,
+        "unit": "pg/mL",
+        "category": "ckd_mbd",
+        "label_th": "Intact PTH",
+    },
+    # Nutrition
+    "Albumin": {
+        "target_min": 3.5, "target_max": 999,
+        "unit": "g/dL",
+        "category": "nutrition",
+        "label_th": "อัลบูมิน — ภาวะโภชนาการ",
+    },
+}
+
+CATEGORY_NAMES_TH: dict[str, str] = {
+    "anemia": "📊 ตัวชี้วัดภาวะซีด (Anemia)",
+    "adequacy": "🔬 ประสิทธิภาพการฟอกเลือด (Dialysis Adequacy)",
+    "ckd_mbd": "🦴 ตัวชี้วัด CKD-MBD",
+    "nutrition": "🍽️ ตัวชี้วัดภาวะโภชนาการ",
+}
+
+
+@dataclass
+class NephrologyKPIItem:
+    """ตัวชี้วัด KPI หนึ่งรายการ."""
+    analyte: str
+    category: str
+    label_th: str = ""
+    latest_value: Optional[float] = None
+    latest_date: str = ""
+    unit: str = ""
+    target_min: float = 0
+    target_max: float = 999
+    on_target: bool = False
+    patient_count: int = 0        # จำนวนผู้ป่วยที่มีข้อมูล
+    on_target_count: int = 0      # จำนวนที่อยู่ในเป้าหมาย
+
+    def to_dict(self) -> dict:
+        d: dict = {
+            "analyte": self.analyte,
+            "category": self.category,
+            "label_th": self.label_th,
+            "target_range": f"{self.target_min}-{self.target_max}",
+            "unit": self.unit,
+            "on_target": self.on_target,
+        }
+        if self.latest_value is not None:
+            d["latest_value"] = self.latest_value
+            d["latest_date"] = self.latest_date
+        if self.patient_count > 0:
+            d["patient_count"] = self.patient_count
+            d["on_target_count"] = self.on_target_count
+            pct = (self.on_target_count / self.patient_count * 100
+                   if self.patient_count > 0 else 0)
+            d["on_target_percent"] = round(pct, 1)
+        return d
+
+
+@dataclass
+class NephrologyDashboard:
+    """แดชบอร์ด KPI โรคไต — Phase 2B.
+
+    กฎความปลอดภัย:
+      - เป้าหมายเป็น configurable defaults
+      - ห้ามถือว่าผู้ป่วยทุกรายมีเป้าหมายเดียวกัน
+      - ข้อมูลประกอบการพิจารณาเท่านั้น
+    """
+    report_date: str = ""
+    # Per-patient mode
+    owner_hash: str = ""
+    kpi_items: list[NephrologyKPIItem] = field(default_factory=list)
+    # Operational KPIs
+    medication_review_total: int = 0
+    medication_review_completed: int = 0
+    missing_investigation_count: int = 0
+    pending_approval_count: int = 0
+    critical_alert_unacknowledged: int = 0
+    critical_alert_total: int = 0
+    avg_acknowledgement_hours: Optional[float] = None
+    disclaimer: str = (
+        "⚠️ รายงาน KPI นี้เป็นข้อมูลประกอบ — "
+        "เป้าหมายอาจแตกต่างตามผู้ป่วยแต่ละราย"
+    )
+
+    def __post_init__(self):
+        if not self.report_date:
+            self.report_date = datetime.now().strftime("%Y-%m-%d")
+
+    def to_dict(self) -> dict:
+        d: dict = {
+            "report_date": self.report_date,
+            "kpi_items": [k.to_dict() for k in self.kpi_items],
+            "medication_review_total": self.medication_review_total,
+            "medication_review_completed": self.medication_review_completed,
+            "missing_investigation_count": self.missing_investigation_count,
+            "pending_approval_count": self.pending_approval_count,
+            "critical_alert_unacknowledged": self.critical_alert_unacknowledged,
+            "critical_alert_total": self.critical_alert_total,
+            "disclaimer": self.disclaimer,
+        }
+        if self.owner_hash:
+            d["owner_hash_prefix"] = self.owner_hash[:8]
+        if self.avg_acknowledgement_hours is not None:
+            d["avg_acknowledgement_hours"] = round(
+                self.avg_acknowledgement_hours, 1
+            )
+        med_pct = 0
+        if self.medication_review_total > 0:
+            med_pct = (
+                self.medication_review_completed
+                / self.medication_review_total * 100
+            )
+        d["medication_review_percent"] = round(med_pct, 1)
+        return d
+
+
+def generate_nephrology_dashboard(
+    lab_reports: list[dict],
+    owner_hash: str = "",
+    pending_approvals: int = 0,
+    unacked_alerts: int = 0,
+    total_alerts: int = 0,
+    med_review_total: int = 0,
+    med_review_completed: int = 0,
+    missing_investigations: int = 0,
+    avg_ack_hours: Optional[float] = None,
+) -> NephrologyDashboard:
+    """สร้างแดชบอร์ด KPI โรคไต — Phase 2B.
+
+    Args:
+        lab_reports: list ของ lab report dicts
+        owner_hash: hash ของเจ้าของ (empty=clinic-wide)
+        pending_approvals: จำนวน lab ที่รอ physician approval
+        unacked_alerts: จำนวน critical alerts ที่ยังไม่ acknowledge
+        total_alerts: จำนวน critical alerts ทั้งหมด
+        med_review_total: จำนวนผู้ป่วยทั้งหมดที่ต้อง review ยา
+        med_review_completed: จำนวนที่ review แล้ว
+        missing_investigations: จำนวนการตรวจที่ขาด
+        avg_ack_hours: เวลาเฉลี่ยในการ acknowledge (ชั่วโมง)
+
+    Returns:
+        NephrologyDashboard
+    """
+    dashboard = NephrologyDashboard(
+        owner_hash=owner_hash,
+        pending_approval_count=pending_approvals,
+        critical_alert_unacknowledged=unacked_alerts,
+        critical_alert_total=total_alerts,
+        medication_review_total=med_review_total,
+        medication_review_completed=med_review_completed,
+        missing_investigation_count=missing_investigations,
+        avg_acknowledgement_hours=avg_ack_hours,
+    )
+
+    # Build latest value per analyte from lab reports
+    latest_values: dict[str, tuple[float, str, str]] = {}
+    for report in lab_reports:
+        specimen_date = report.get("specimen_date", "")
+        for result in report.get("results", []):
+            analyte = result.get("analyte", "")
+            if not analyte:
+                continue
+            try:
+                value = float(result.get("value", 0))
+            except (TypeError, ValueError):
+                continue
+            unit = result.get("unit", "")
+            existing = latest_values.get(analyte)
+            if existing is None or specimen_date > existing[1]:
+                latest_values[analyte] = (value, specimen_date, unit)
+
+    # Generate KPI items for configured targets
+    for analyte, target in NEPHROLOGY_TARGETS.items():
+        item = NephrologyKPIItem(
+            analyte=analyte,
+            category=target["category"],
+            label_th=target.get("label_th", analyte),
+            target_min=target["target_min"],
+            target_max=target["target_max"],
+            unit=target.get("unit", ""),
+        )
+
+        latest = latest_values.get(analyte)
+        if latest:
+            item.latest_value = latest[0]
+            item.latest_date = latest[1]
+            item.unit = latest[2] or item.unit
+            item.on_target = (
+                target["target_min"] <= latest[0] <= target["target_max"]
+            )
+
+        dashboard.kpi_items.append(item)
+
+    return dashboard
+
+
+def generate_clinic_nephrology_dashboard(
+    all_patient_kpis: list[PatientKPI],
+    pending_approvals: int = 0,
+    unacked_alerts: int = 0,
+    total_alerts: int = 0,
+    med_review_total: int = 0,
+    med_review_completed: int = 0,
+    missing_investigations: int = 0,
+    avg_ack_hours: Optional[float] = None,
+) -> NephrologyDashboard:
+    """สร้างแดชบอร์ด KPI โรคไตรวมทั้งคลินิก — Phase 2B.
+
+    Args:
+        all_patient_kpis: list ของ PatientKPI ทุกผู้ป่วย
+        (other args same as generate_nephrology_dashboard)
+
+    Returns:
+        NephrologyDashboard (clinic-wide aggregate)
+    """
+    dashboard = NephrologyDashboard(
+        pending_approval_count=pending_approvals,
+        critical_alert_unacknowledged=unacked_alerts,
+        critical_alert_total=total_alerts,
+        medication_review_total=med_review_total,
+        medication_review_completed=med_review_completed,
+        missing_investigation_count=missing_investigations,
+        avg_acknowledgement_hours=avg_ack_hours,
+    )
+
+    # Aggregate per-analyte stats across patients
+    analyte_data: dict[str, list[tuple[float, bool]]] = {}
+    for pkpi in all_patient_kpis:
+        for stat in pkpi.analyte_stats:
+            if stat.latest_value is None:
+                continue
+            target = NEPHROLOGY_TARGETS.get(stat.analyte)
+            if target is None:
+                continue
+            on_target = (
+                target["target_min"] <= stat.latest_value
+                <= target["target_max"]
+            )
+            if stat.analyte not in analyte_data:
+                analyte_data[stat.analyte] = []
+            analyte_data[stat.analyte].append(
+                (stat.latest_value, on_target)
+            )
+
+    for analyte, target in NEPHROLOGY_TARGETS.items():
+        data = analyte_data.get(analyte, [])
+        item = NephrologyKPIItem(
+            analyte=analyte,
+            category=target["category"],
+            label_th=target.get("label_th", analyte),
+            target_min=target["target_min"],
+            target_max=target["target_max"],
+            unit=target.get("unit", ""),
+            patient_count=len(data),
+            on_target_count=sum(1 for _, ot in data if ot),
+        )
+        if data:
+            item.on_target = item.on_target_count == item.patient_count
+        dashboard.kpi_items.append(item)
+
+    return dashboard
+
+
+def nephrology_dashboard_text_th(
+    dashboard: NephrologyDashboard,
+) -> str:
+    """สร้างข้อความแดชบอร์ด KPI โรคไตภาษาไทย."""
+    lines = [
+        "🏥 แดชบอร์ด KPI โรคไต",
+        f"วันที่: {dashboard.report_date}",
+        "",
+    ]
+
+    # Operational KPIs first
+    lines.append("📋 ตัวชี้วัดปฏิบัติงาน:")
+
+    # Medication review completion
+    if dashboard.medication_review_total > 0:
+        pct = (
+            dashboard.medication_review_completed
+            / dashboard.medication_review_total * 100
+        )
+        lines.append(
+            f"  💊 ทบทวนยาครบ: "
+            f"{dashboard.medication_review_completed}"
+            f"/{dashboard.medication_review_total} "
+            f"({pct:.0f}%)"
+        )
+
+    # Missing investigations
+    if dashboard.missing_investigation_count > 0:
+        lines.append(
+            f"  📅 การตรวจที่ขาด: "
+            f"{dashboard.missing_investigation_count} รายการ"
+        )
+
+    # Physician approval backlog
+    if dashboard.pending_approval_count > 0:
+        lines.append(
+            f"  📝 Lab รอ Physician Approval: "
+            f"{dashboard.pending_approval_count}"
+        )
+
+    # Alert acknowledgement
+    if dashboard.critical_alert_total > 0:
+        ack_count = (
+            dashboard.critical_alert_total
+            - dashboard.critical_alert_unacknowledged
+        )
+        lines.append(
+            f"  🔔 Critical Alert: "
+            f"ack {ack_count}/{dashboard.critical_alert_total}"
+        )
+        if dashboard.critical_alert_unacknowledged > 0:
+            lines.append(
+                f"     ⚠️ ยังไม่ acknowledge: "
+                f"{dashboard.critical_alert_unacknowledged}"
+            )
+    if dashboard.avg_acknowledgement_hours is not None:
+        lines.append(
+            f"  ⏱️ เวลาเฉลี่ย acknowledge: "
+            f"{dashboard.avg_acknowledgement_hours:.1f} ชั่วโมง"
+        )
+
+    lines.append("")
+
+    # Clinical KPIs by category
+    items_by_category: dict[str, list[NephrologyKPIItem]] = {}
+    for item in dashboard.kpi_items:
+        cat = item.category
+        if cat not in items_by_category:
+            items_by_category[cat] = []
+        items_by_category[cat].append(item)
+
+    for cat_key in ["anemia", "adequacy", "ckd_mbd", "nutrition"]:
+        items = items_by_category.get(cat_key, [])
+        if not items:
+            continue
+
+        cat_name = CATEGORY_NAMES_TH.get(cat_key, cat_key)
+        lines.append(cat_name)
+
+        for item in items:
+            if item.patient_count > 0:
+                # Clinic-wide mode
+                pct = (item.on_target_count / item.patient_count * 100
+                       if item.patient_count > 0 else 0)
+                lines.append(
+                    f"  {item.label_th}: "
+                    f"{item.on_target_count}/{item.patient_count} "
+                    f"on target ({pct:.0f}%)"
+                )
+            elif item.latest_value is not None:
+                # Individual mode
+                emoji = "✅" if item.on_target else "⚠️"
+                target_str = f"{item.target_min}"
+                if item.target_max < 999:
+                    target_str += f"-{item.target_max}"
+                else:
+                    target_str = f"≥{item.target_min}"
+                lines.append(
+                    f"  {emoji} {item.label_th}: "
+                    f"{item.latest_value} {item.unit} "
+                    f"(เป้า {target_str})"
+                )
+            else:
+                lines.append(
+                    f"  ❓ {item.label_th}: ไม่มีข้อมูล"
+                )
+
+        lines.append("")
+
+    lines.append(f"⚠️ {dashboard.disclaimer}")
+    return "\n".join(lines)
