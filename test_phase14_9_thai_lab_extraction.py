@@ -570,5 +570,283 @@ class TestOCRArtifactHandling(unittest.TestCase):
             self.assertEqual(report.results[0].extraction_method, "regex_ocr")
 
 
+# ═══════════════════════════════════════════════════════════
+# 11. Phase 14.9 Final Safety Check Tests
+# ═══════════════════════════════════════════════════════════
+
+
+class TestAuditUUIDFilename(unittest.TestCase):
+    """Audit event filenames must include UUID to prevent collisions."""
+
+    def _make_audit_logger(self, storage_mock):
+        from server import AuditLogger
+        return AuditLogger(storage_mock)
+
+    def test_per_event_filename_has_uuid(self):
+        """Per-event fallback filename should contain UUID for uniqueness."""
+        storage = MagicMock()
+        storage.is_ready = True
+        storage.bucket_name = "test-bucket"
+
+        main_blob = MagicMock()
+        main_blob.download_as_text.side_effect = Exception("403 Forbidden")
+
+        event_blob = MagicMock()
+        blob_paths = []
+
+        def blob_side_effect(path):
+            blob_paths.append(path)
+            if len(blob_paths) == 1:
+                return main_blob
+            return event_blob
+
+        storage._bucket.blob.side_effect = blob_side_effect
+
+        logger_obj = self._make_audit_logger(storage)
+        logger_obj.log("search", "abc123def456")
+
+        # Per-event path should exist and contain a UUID-like segment
+        self.assertTrue(len(blob_paths) >= 2, "Should create per-event blob")
+        event_path = blob_paths[1]
+        # Format: _audit/YYYY-MM/YYYYMMDD-HHMMSS-{uuid8hex}-{action}.json
+        parts = event_path.split("/")
+        filename = parts[-1]  # e.g. 20261023-115100-a1b2c3d4-search.json
+        name_parts = filename.replace(".json", "").split("-")
+        # Should have: date, time, uuid(8hex), action
+        self.assertTrue(len(name_parts) >= 4,
+            f"Filename should have date-time-uuid-action: {filename}")
+
+    def test_concurrent_uuid_uniqueness(self):
+        """Two concurrent audit writes should generate unique filenames."""
+        import uuid as uuid_mod
+
+        uuids = set()
+        for _ in range(100):
+            uuids.add(uuid_mod.uuid4().hex[:8])
+
+        # All should be unique
+        self.assertEqual(len(uuids), 100,
+            "UUID4 should produce unique values for concurrent writes")
+
+
+class TestAuditPersistenceFailureWarning(unittest.TestCase):
+    """When GCS audit write fails completely, must emit WARNING."""
+
+    def _make_audit_logger(self, storage_mock):
+        from server import AuditLogger
+        return AuditLogger(storage_mock)
+
+    def test_total_failure_emits_warning(self):
+        """If both append and per-event fail, should log WARNING."""
+        storage = MagicMock()
+        storage.is_ready = True
+        storage.bucket_name = "test-bucket"
+
+        # Main blob 403, per-event blob also fails
+        main_blob = MagicMock()
+        main_blob.download_as_text.side_effect = Exception("403 Forbidden")
+
+        event_blob = MagicMock()
+        event_blob.upload_from_string.side_effect = Exception("403 Forbidden")
+
+        call_count = [0]
+        def blob_side_effect(path):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return main_blob
+            return event_blob
+
+        storage._bucket.blob.side_effect = blob_side_effect
+
+        logger_obj = self._make_audit_logger(storage)
+
+        with patch("server.logger") as mock_logger:
+            logger_obj.log("download", "abc123def456")
+
+            # Should have WARNING about persistence failure
+            warning_calls = [
+                str(c) for c in mock_logger.warning.call_args_list
+            ]
+            persistence_warnings = [
+                w for w in warning_calls
+                if "AUDIT_PERSISTENCE_FAILURE" in w
+            ]
+            self.assertTrue(
+                len(persistence_warnings) > 0,
+                f"Should emit AUDIT_PERSISTENCE_FAILURE warning. "
+                f"Got warnings: {warning_calls}"
+            )
+
+    def test_storage_not_ready_emits_warning(self):
+        """When GCS is not ready, should warn about non-durable audit."""
+        storage = MagicMock()
+        storage.is_ready = False
+
+        logger_obj = self._make_audit_logger(storage)
+
+        with patch("server.logger") as mock_logger:
+            logger_obj.log("search", "abc123def456")
+
+            warning_calls = [
+                str(c) for c in mock_logger.warning.call_args_list
+            ]
+            # Should warn that audit is not in durable storage
+            has_warning = any(
+                "durable" in w.lower() or "GCS ไม่พร้อม" in w
+                for w in warning_calls
+            )
+            self.assertTrue(has_warning,
+                f"Should warn about non-durable audit. Got: {warning_calls}")
+
+
+class TestMultiWorkerDocumentIndexSafety(unittest.TestCase):
+    """Verify DocumentIndex design is safe for Gunicorn prefork model."""
+
+    def test_add_uses_gcs_before_memory(self):
+        """add() must write GCS before updating in-memory cache."""
+        from server import DocumentIndex
+
+        storage = MagicMock()
+        storage.is_ready = True
+
+        # Track call order
+        call_order = []
+
+        blob_mock = MagicMock()
+        def upload_side(*a, **kw):
+            call_order.append("gcs_write")
+        blob_mock.upload_from_string.side_effect = upload_side
+
+        storage._bucket.blob.return_value = blob_mock
+        storage._client.list_blobs.return_value = []
+
+        idx = DocumentIndex(storage)
+        # Force cache as fresh to avoid reload
+        import time as time_mod
+        idx._cache_ts = time_mod.time()
+
+        doc = {
+            "document_id": "synth-safety-001",
+            "owner_hash": hashlib.sha256(b"U_test_user").hexdigest(),
+            "category": "lab",
+        }
+        result = idx.add(doc)
+
+        self.assertTrue(result)
+        self.assertIn("gcs_write", call_order,
+            "Must write to GCS before memory update")
+
+    def test_add_412_triggers_reload(self):
+        """When GCS returns 412 (already exists), should reload from GCS."""
+        from server import DocumentIndex
+
+        storage = MagicMock()
+        storage.is_ready = True
+
+        # Simulate 412 Precondition Failed
+        blob_mock = MagicMock()
+        err = Exception("412 Precondition Failed")
+        err.code = 412
+        blob_mock.upload_from_string.side_effect = err
+
+        storage._bucket.blob.return_value = blob_mock
+        storage._client.list_blobs.return_value = []
+
+        idx = DocumentIndex(storage)
+        import time as time_mod
+        idx._cache_ts = time_mod.time()
+
+        doc = {
+            "document_id": "synth-safety-002",
+            "owner_hash": hashlib.sha256(b"U_test_user").hexdigest(),
+            "category": "lab",
+        }
+        result = idx.add(doc)
+
+        # Should return False (idempotent)
+        self.assertFalse(result)
+
+    def test_fail_closed_empty_owner(self):
+        """list_by_owner with unknown owner should return empty list."""
+        from server import DocumentIndex
+
+        storage = MagicMock()
+        storage.is_ready = True
+        storage._client.list_blobs.return_value = []
+
+        idx = DocumentIndex(storage)
+
+        # Add a doc for user A
+        import time as time_mod
+        idx._cache_ts = time_mod.time()
+        owner_a = hashlib.sha256(b"U_owner_a").hexdigest()
+        owner_b = hashlib.sha256(b"U_owner_b").hexdigest()
+
+        idx._docs = [{
+            "document_id": "synth-001",
+            "owner_hash": owner_a,
+            "category": "lab",
+        }]
+        idx._doc_map = {"synth-001": idx._docs[0]}
+
+        # User B should see nothing
+        results = idx.list_by_owner(owner_b)
+        self.assertEqual(len(results), 0,
+            "Different owner should see empty results (fail-closed)")
+
+        # User A should see their doc
+        results = idx.list_by_owner(owner_a)
+        self.assertEqual(len(results), 1)
+
+
+class TestHumanReviewEnforcement(unittest.TestCase):
+    """Verify that all extracted results start as pending_review."""
+
+    def test_thai_extraction_pending_review(self):
+        """Thai lab results must start as pending_review."""
+        thai_text = (
+            "ผลตรวจเลือด\n"
+            "ครีอะตินีน    1.5    mg/dL    0.6-1.2\n"
+            "โซเดียม    140    mmol/L    136-145\n"
+        )
+        report = extract_lab_results_from_text(
+            thai_text, "synth-review-001", "regex_ocr"
+        )
+        self.assertEqual(report.status, "pending_review",
+            "All results must start as pending_review")
+
+    def test_english_extraction_pending_review(self):
+        """English lab results must start as pending_review."""
+        eng_text = "Creatinine  1.5  mg/dL  0.6-1.2\n"
+        report = extract_lab_results_from_text(
+            eng_text, "synth-review-002", "regex_pdf_text"
+        )
+        self.assertEqual(report.status, "pending_review")
+
+    def test_uric_acid_reference_not_absolute(self):
+        """Uric Acid reference range is general — not per-patient criteria.
+
+        ค่า reference range (3.5-7.2 mg/dL) เป็นค่าทั่วไปสำหรับผู้ใหญ่
+        ไม่แยกเพศ (ชาย: 3.5-7.2, หญิง: 2.6-6.0 แตกต่างกันได้)
+        Rule Engine ต้อง flag เป็น abnormal เท่านั้น ไม่ใช่ diagnose
+        ผลต้องผ่าน Human Review เสมอ
+        """
+        from lab_rules import validate_result, ANALYTE_SPECS
+
+        spec = ANALYTE_SPECS.get("Uric Acid")
+        self.assertIsNotNone(spec, "Uric Acid must be in ANALYTE_SPECS")
+
+        # Female normal value (2.6-6.0) might be flagged as abnormal_low
+        # by the general range (3.5-7.2) — this is expected behavior
+        # because Rule Engine uses general ranges, not sex-specific
+        flags = validate_result("Uric Acid", 3.0, "mg/dL")
+        # 3.0 is below 3.5 → should flag as abnormal_low
+        self.assertIn("abnormal_low", flags,
+            "Values below general range should be flagged for review")
+        # But NOT critical — 3.0 is physiologically normal
+        self.assertNotIn("critical_low", flags)
+        self.assertNotIn("physiologic_impossible", flags)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

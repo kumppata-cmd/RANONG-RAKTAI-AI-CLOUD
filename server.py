@@ -894,16 +894,31 @@ class DocumentIndex:
     แต่ละเอกสารเก็บเป็น _index/docs/{doc_id}.json
     อ่าน legacy _index/documents.jsonl ด้วย (backward compatibility)
 
-    ออกแบบสำหรับ Gunicorn multi-worker:
-    - ทุก read operation โหลดจาก GCS ใหม่ผ่าน short-lived cache
-    - add() เขียน GCS ก่อน แล้วจึงอัพเดท memory
-    - ป้องกัน duplicate ด้วย if_generation_match=0 (create-only)
+    ออกแบบสำหรับ Gunicorn multi-worker (prefork model):
+
+    ⚠️ Gunicorn ใช้ prefork — แต่ละ worker เป็น process แยก
+    threading.Lock ป้องกันเฉพาะ threads ภายใน process เดียวกัน
+    ไม่สามารถ lock ข้าม workers ได้
+
+    การป้องกัน cross-worker consistency:
+    1. GCS เป็น authoritative store (source of truth)
+    2. ทุก read operation โหลดจาก GCS ใหม่ผ่าน short-lived cache (5 วินาที)
+    3. add() เขียน GCS ก่อน → ถ้าสำเร็จจึงอัพเดท memory
+    4. if_generation_match=0 ป้องกัน duplicate ข้าม workers (create-only)
+    5. 412 Precondition Failed = worker อื่นสร้างไปก่อน → reload จาก GCS
+    6. Owner isolation ใช้ SHA-256 hash filter — ข้อมูลจาก GCS เสมอ
+
+    threading.Lock ใช้สำหรับ:
+    - ป้องกัน concurrent access ภายใน thread pool ของ worker เดียว
+    - ไม่ใช้เพื่อ lock ข้าม Gunicorn workers (ไม่สามารถทำได้)
     """
 
     def __init__(self, storage_instance):
         self._storage = storage_instance
         self._docs: list[dict] = []
         self._doc_map: dict[str, dict] = {}  # doc_id -> doc
+        # threading.Lock สำหรับ intra-worker thread safety เท่านั้น
+        # cross-worker consistency ป้องกันด้วย GCS (see docstring above)
         self._lock = threading.Lock()
         self._cache_ts: float = 0  # timestamp ที่ load cache ล่าสุด
         self._cache_ttl: float = INDEX_CACHE_TTL
@@ -1341,6 +1356,14 @@ class AuditLogger:
         storage.objects.create + storage.objects.get permissions.
         ถ้า objects.get ไม่มี (403) → fallback เป็น per-event files
         เพื่อไม่ให้ audit logging ล้มเหลวเงียบ
+
+        Phase 14.9 Safety Check:
+        - ใช้ UUID ใน filename ป้องกัน collision เมื่อ 2 workers
+          เขียนในเวลาเดียวกัน
+        - ถ้า GCS ทั้ง append และ per-event ล้มเหลว → log WARNING
+          เพื่อให้ monitoring ตรวจจับได้
+        - Local logger.info เป็นแค่ secondary signal (Render log
+          ไม่ถาวร) — ไม่ถือเป็น durable audit trail
         """
         entry = {
             "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -1349,6 +1372,9 @@ class AuditLogger:
             "details": details or {},
         }
         line = json.dumps(entry, ensure_ascii=False) + "\n"
+
+        # ── Track ว่า GCS audit เขียนสำเร็จหรือไม่ ──
+        _gcs_audit_ok = False
 
         # เขียนลง GCS
         if self._storage.is_ready:
@@ -1362,6 +1388,7 @@ class AuditLogger:
                     blob.upload_from_string(
                         existing + line, content_type="application/jsonl"
                     )
+                    _gcs_audit_ok = True
                 except Exception as get_err:
                     err_msg = str(get_err)
                     if "Not Found" in err_msg or "404" in err_msg:
@@ -1369,15 +1396,19 @@ class AuditLogger:
                         blob.upload_from_string(
                             line, content_type="application/jsonl"
                         )
+                        _gcs_audit_ok = True
                     elif "Forbidden" in err_msg or "403" in err_msg:
                         # ── Phase 14.9: Fallback เป็น per-event file ──
                         # ถ้า objects.get ไม่มี permission
                         # ใช้ per-event file แทน append
                         # (ต้องการแค่ objects.create)
+                        # ใช้ UUID ป้องกัน filename collision
+                        # ระหว่าง Gunicorn workers
                         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+                        event_id = uuid.uuid4().hex[:8]
                         event_path = (
                             f"{AUDIT_PREFIX}{month_key}/"
-                            f"{ts}-{action}.json"
+                            f"{ts}-{event_id}-{action}.json"
                         )
                         event_blob = self._storage._bucket.blob(event_path)
                         try:
@@ -1386,6 +1417,7 @@ class AuditLogger:
                                 content_type="application/json",
                                 if_generation_match=0,
                             )
+                            _gcs_audit_ok = True
                         except Exception as create_err:
                             logger.error(
                                 f"Audit log per-event write ล้มเหลว: "
@@ -1401,6 +1433,7 @@ class AuditLogger:
                         blob.upload_from_string(
                             line, content_type="application/jsonl"
                         )
+                        _gcs_audit_ok = True
             except Exception as e:
                 # แยกประเภท error เพื่อช่วย debug IAM permissions
                 err_type = type(e).__name__
@@ -1415,8 +1448,22 @@ class AuditLogger:
                     )
                 else:
                     logger.error(f"Audit log write ล้มเหลว: {err_type}")
+        else:
+            logger.warning(
+                "Audit log: GCS ไม่พร้อม — audit event ไม่ได้เขียนลง "
+                "durable storage (เฉพาะ local log เท่านั้น)"
+            )
 
-        # Fallback: เขียนลง local log ด้วย
+        # ── ตรวจจับ audit event ที่ไม่ได้เขียนลง durable storage ──
+        if not _gcs_audit_ok:
+            logger.warning(
+                f"AUDIT_PERSISTENCE_FAILURE: action={action} "
+                f"user={user_hash[:8]}… — audit event ไม่ได้เขียน "
+                f"ลง GCS (durable storage) — ต้องตรวจสอบ"
+            )
+
+        # Secondary signal: เขียนลง local log ด้วย
+        # หมายเหตุ: Render log ไม่ถาวร — ไม่ถือเป็น durable audit trail
         logger.info(f"AUDIT: {action} user={user_hash[:8]}…")
 
 

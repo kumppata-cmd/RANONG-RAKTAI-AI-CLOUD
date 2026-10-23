@@ -37,6 +37,13 @@ class AnalyteSpec:
 # ═══════════════════════════════════════════════════════════
 # Analyte Specifications — Kidney-relevant analytes
 # Reference ranges based on standard clinical laboratory values
+#
+# ⚠️ CLINICAL DISCLAIMER:
+# Reference ranges เป็นค่ามาตรฐานทั่วไป ไม่ใช่เกณฑ์ตายตัว
+# ค่าปกติอาจแตกต่างตามเพศ อายุ เชื้อชาติ โรคร่วม ยาที่ใช้
+# และเกณฑ์ของแต่ละห้องปฏิบัติการ
+# ผลทั้งหมดต้องผ่าน Human Review โดยแพทย์ก่อนนำไปใช้
+# ห้ามใช้ Rule Engine เป็นเครื่องมือวินิจฉัยโดยตรง
 # ═══════════════════════════════════════════════════════════
 
 ANALYTE_SPECS: dict[str, AnalyteSpec] = {
@@ -240,10 +247,13 @@ ANALYTE_SPECS: dict[str, AnalyteSpec] = {
         primary_unit="%",
     ),
     # Phase 14.9: เพิ่ม Uric Acid (กรดยูริก)
+    # ⚠️ Reference range เป็นค่าทั่วไปสำหรับผู้ใหญ่ (ชาย/หญิงรวม)
+    # ค่าปกติอาจแตกต่างตามเพศ อายุ โรคร่วม และเกณฑ์ของห้องปฏิบัติการ
+    # ห้ามใช้เป็นเกณฑ์ตายตัวกับผู้ป่วยทุกคน — ต้อง Human Review
     "Uric Acid": AnalyteSpec(
         name="Uric Acid",
         valid_units=["mg/dL", "mg/dl"],
-        reference_range=(3.5, 7.2),
+        reference_range=(3.5, 7.2),  # ค่าทั่วไปผู้ใหญ่ ไม่แยกเพศ
         critical_low=None,
         critical_high=15.0,
         physiologic_min=0.5,
