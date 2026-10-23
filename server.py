@@ -917,13 +917,23 @@ class DocumentIndex:
 
         Deduplicate ด้วย doc_id — per-doc files มีความสำคัญกว่า legacy
 
-        Return True ถ้าโหลดสำเร็จ
+        Return True ถ้าโหลดสำเร็จ (อย่างน้อย 1 แหล่งอ่านได้)
+        Return False ถ้าทุกแหล่งล้มเหลว — เก็บ stale data ไว้ดีกว่าลบทิ้ง
+
+        Phase 14.8 Fix: ป้องกัน silent index wipe เมื่อ GCS reload ล้มเหลว
+        Root cause: เมื่อทั้ง legacy JSONL และ list_blobs ล้มเหลว
+        new_docs = [] ถูก set เป็น self._docs → index ว่างเปล่า →
+        ผู้ใช้เห็น "ไม่พบผลแล็บ" ทั้งที่เอกสารถูกจัดเก็บแล้ว
         """
         if not hasattr(self._storage, '_client') or not self._storage.is_ready:
             return False
         try:
             new_docs = []
             new_map = {}
+
+            # ── Phase 14.8: track ว่าแต่ละแหล่งอ่านสำเร็จหรือไม่ ──
+            _legacy_ok = False
+            _perdoc_ok = False
 
             # 1. อ่าน legacy JSONL (backward compatibility)
             try:
@@ -942,6 +952,10 @@ class DocumentIndex:
                                 new_map[doc_id] = doc
                         except json.JSONDecodeError:
                             continue
+                    _legacy_ok = True
+                else:
+                    # JSONL ไม่มี — ถือว่าอ่านสำเร็จ (empty is valid)
+                    _legacy_ok = True
             except Exception as legacy_err:
                 err_code = getattr(legacy_err, "code", None)
                 if err_code == 403:
@@ -954,6 +968,9 @@ class DocumentIndex:
                         f"Legacy index JSONL อ่านไม่ได้: "
                         f"{type(legacy_err).__name__} (code={err_code})"
                     )
+                else:
+                    # 404 = ไม่มีไฟล์ — ถือว่าอ่านสำเร็จ (empty is valid)
+                    _legacy_ok = True
 
             # 2. อ่าน per-document JSON files
             try:
@@ -981,6 +998,7 @@ class DocumentIndex:
                             f"{blob.name} — {type(blob_err).__name__}"
                         )
                         continue
+                _perdoc_ok = True
             except Exception as list_err:
                 err_code = getattr(list_err, "code", None)
                 if err_code == 403:
@@ -993,7 +1011,29 @@ class DocumentIndex:
                         f"Per-doc index list ล้มเหลว: "
                         f"{type(list_err).__name__} (code={err_code})"
                     )
-                # ถ้า list ล้มเหลว แต่ legacy สำเร็จ ก็ยังใช้ legacy data ได้
+
+            # ── Phase 14.8: ป้องกัน silent index wipe ──
+            # Per-doc files เป็นแหล่งข้อมูลหลัก (legacy เป็น backup)
+            # ถ้า per-doc list ล้มเหลว → ไม่ไว้ใจ new_docs
+            # เพราะ legacy อาจเป็น empty/404 ตามปกติ (ไม่ได้ write ใน add)
+            # → เก็บ stale cache ไว้ดีกว่า replace ด้วย empty
+            if not _perdoc_ok:
+                if new_docs:
+                    # Legacy มีข้อมูล → ใช้ legacy data ได้
+                    logger.warning(
+                        "Per-doc index list ล้มเหลว แต่มี legacy data "
+                        f"({len(new_docs)} docs) — ใช้ legacy data"
+                    )
+                else:
+                    # ไม่มีข้อมูลจากแหล่งใดเลย → เก็บ stale cache
+                    logger.error(
+                        "Document index reload: per-doc list ล้มเหลว "
+                        "และไม่มี legacy data — "
+                        "เก็บ stale cache ไว้ "
+                        f"(มี {len(self._docs)} docs ใน memory)"
+                    )
+                    # ไม่อัพเดท cache_ts → จะลอง reload อีกครั้ง
+                    return False
 
             with self._lock:
                 self._docs = new_docs
