@@ -1753,6 +1753,16 @@ except ImportError:
 except Exception as e:
     logger.warning(f"Dashboard V2: registration failed: {e}")
 
+# ─── OCR Review (Feature 4) ──────────────────────────────
+try:
+    from ocr_review import register_ocr_review
+    register_ocr_review(app, storage, doc_index, enhanced_audit)
+    logger.info("OCR Review: registered successfully")
+except ImportError:
+    logger.warning("OCR Review: ocr_review module not available")
+except Exception as e:
+    logger.warning(f"OCR Review: registration failed: {e}")
+
 
 # ─── Document Content Reading from GCS ────────────────────
 # อ่านเนื้อหาเอกสารโดยตรงจาก GCS — ไม่ต้องส่ง signed URL ให้ผู้ใช้
