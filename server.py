@@ -41,6 +41,17 @@ from pathlib import Path
 from flask import Flask, request, abort, jsonify, redirect
 import requests as http_requests
 
+# ─── Quarterly/Monthly Organization & HN Registry ──────────
+from patient_hn_registry import HNRegistry, get_quarter
+from quarterly_compare import (
+    build_quarterly_path,
+    build_monthly_patient_path,
+    build_legacy_path,
+    compare_lab_reports,
+    compare_latest_labs,
+    get_patient_lab_history,
+)
+
 # ─── OCR (Tesseract) ────────────────────────────────────────
 try:
     import pytesseract
@@ -698,13 +709,23 @@ class StorageGCS:
             return self._fallback.save(data, category, filename)
 
         folder = FOLDERS.get(category, FOLDERS["review"])
-        # แบ่งตามเดือน เพื่อไม่ให้โฟลเดอร์เดียวสะสมไฟล์จนเปิดช้า
-        if subfolder:
+        # ──────────────────────────────────────────────────────
+        # Quarterly/Monthly sub-folder organization:
+        #   - lab, rx → quarterly: folder/2026-Q4/2026-10/uuid.pdf
+        #   - dialysis → monthly per patient: folder/2026-10/{hn}/uuid.pdf
+        #   - อื่นๆ → monthly (เดิม): folder/2026-10/uuid.pdf
+        # ──────────────────────────────────────────────────────
+        owner_hash_for_path = (metadata or {}).get("owner_hash_short", "")
+        if category in ("lab", "rx"):
+            blob_path = build_quarterly_path(folder, filename)
+        elif category == "dialysis" and owner_hash_for_path:
+            patient_folder = hn_registry.get_folder_name(owner_hash_for_path) if hn_registry else ""
+            blob_path = build_monthly_patient_path(folder, filename, patient_folder)
+        elif subfolder:
             # ป้องกัน path traversal ใน subfolder
-            safe_sub = subfolder.replace("/", "_").replace("\\", "_").replace("..", "_")
-            blob_path = f"{folder}/{safe_sub}/{datetime.now():%Y-%m}/{filename}"
+            blob_path = build_legacy_path(folder, filename, subfolder)
         else:
-            blob_path = f"{folder}/{datetime.now():%Y-%m}/{filename}"
+            blob_path = build_legacy_path(folder, filename)
 
         content_type = self._get_content_type(filename)
 
@@ -1029,6 +1050,12 @@ def get_storage():
 
 
 storage = get_storage()
+
+# ─── HN Registry: จัดการรหัส HN คลินิก + HN โรงพยาบาล ────
+hn_registry = HNRegistry()
+if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
+    hn_registry.set_storage(storage._bucket)
+    logger.info("HNRegistry initialized with GCS bucket")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1795,6 +1822,166 @@ except Exception as e:
     logger.warning(f"Document Workflow: registration failed: {e}")
 
 
+# ═══════════════════════════════════════════════════════════
+# Comparison API & HN Registry — Feature: Quarterly Compare
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/admin/api/v2/compare/lab", methods=["GET"])
+def api_compare_lab():
+    """เปรียบเทียบผลแล็บ 2 เอกสาร — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    old_id = request.args.get("old", "").strip()
+    new_id = request.args.get("new", "").strip()
+    if not old_id or not new_id:
+        return jsonify({"error": "ต้องระบุ ?old=DOC_ID&new=DOC_ID"}), 400
+
+    result = compare_lab_reports(storage, old_id, new_id)
+    if "error" in result:
+        return jsonify(result), 404
+    return jsonify(result)
+
+
+@app.route("/admin/api/v2/compare/patient-labs", methods=["GET"])
+def api_compare_patient_labs():
+    """เปรียบเทียบผลแล็บล่าสุด vs ก่อนหน้าของผู้ป่วย — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    owner = request.args.get("owner", "").strip()
+    if not owner:
+        return jsonify({"error": "ต้องระบุ ?owner=OWNER_HASH"}), 400
+
+    result = compare_latest_labs(storage, doc_index, owner)
+    if "error" in result:
+        return jsonify(result), 404 if "ไม่พบ" in result.get("error", "") else 200
+    return jsonify(result)
+
+
+@app.route("/admin/api/v2/patient-lab-history", methods=["GET"])
+def api_patient_lab_history():
+    """ประวัติผลแล็บของผู้ป่วย — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    owner = request.args.get("owner", "").strip()
+    if not owner:
+        return jsonify({"error": "ต้องระบุ ?owner=OWNER_HASH"}), 400
+
+    history = get_patient_lab_history(storage, doc_index, owner)
+    # ซ่อน raw results จาก response — แสดงเฉพาะ summary
+    for h in history:
+        h["results"] = [
+            {"analyte_name": r.get("analyte_name", ""), "value": r.get("value")}
+            for r in h.get("results", [])
+        ]
+    return jsonify({"owner": owner[:6], "history": history, "count": len(history)})
+
+
+@app.route("/admin/api/v2/hn-registry/register", methods=["POST"])
+def api_hn_register():
+    """ลงทะเบียน HN ผู้ป่วย — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    owner_hash = data.get("owner_hash", "").strip()
+    clinic_hn = data.get("clinic_hn", "").strip()
+    hospital_hn = data.get("hospital_hn", "").strip()
+    display_name = data.get("display_name", "").strip()
+
+    if not owner_hash:
+        return jsonify({"error": "ต้องระบุ owner_hash"}), 400
+    if not clinic_hn and not hospital_hn:
+        return jsonify({"error": "ต้องระบุ clinic_hn หรือ hospital_hn อย่างน้อย 1 รายการ"}), 400
+
+    success, msg = hn_registry.register(
+        owner_hash=owner_hash,
+        clinic_hn=clinic_hn,
+        hospital_hn=hospital_hn,
+        display_name=display_name,
+        registered_by="admin",
+    )
+    return jsonify({"success": success, "message": msg}), 200 if success else 400
+
+
+@app.route("/admin/api/v2/hn-registry/list", methods=["GET"])
+def api_hn_list():
+    """แสดงรายชื่อ HN ทั้งหมด — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    patients = hn_registry.list_all()
+    return jsonify({
+        "count": len(patients),
+        "patients": [
+            {
+                "hn_pair": p.hn_pair,
+                "clinic_hn": p.clinic_hn,
+                "hospital_hn": p.hospital_hn,
+                "display_name": p.display_name,
+                "owner_hash": p.owner_hash[:6] + "...",
+                "registered_at": p.registered_at,
+            }
+            for p in patients
+        ],
+    })
+
+
+@app.route("/admin/api/v2/hn-registry/search", methods=["GET"])
+def api_hn_search():
+    """ค้นหา HN — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"error": "ต้องระบุ ?q=KEYWORD"}), 400
+
+    results = hn_registry.search_hn(q)
+    return jsonify({
+        "query": q,
+        "count": len(results),
+        "results": [
+            {
+                "hn_pair": p.hn_pair,
+                "clinic_hn": p.clinic_hn,
+                "hospital_hn": p.hospital_hn,
+                "display_name": p.display_name,
+            }
+            for p in results
+        ],
+    })
+
+
+logger.info("Comparison API & HN Registry: endpoints registered")
+
+
 # ─── Document Content Reading from GCS ────────────────────
 # อ่านเนื้อหาเอกสารโดยตรงจาก GCS — ไม่ต้องส่ง signed URL ให้ผู้ใช้
 
@@ -2360,6 +2547,9 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         # Feature 6: Patient Assistant
         CommandType.APPOINTMENT, CommandType.VIEW_APPOINTMENTS,
         CommandType.CANCEL_APPOINTMENT, CommandType.VIEW_ESCALATIONS,
+        # Feature: Quarterly Compare & HN
+        CommandType.COMPARE_LAB, CommandType.COMPARE_RX,
+        CommandType.REGISTER_HN, CommandType.MY_HN,
     }
     # Feature 6 commands that don't require authorization
     # (health advice and contact staff are open to all users)
@@ -3521,6 +3711,90 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         except Exception as e:
             logger.warning(f"Medication review error: {type(e).__name__}")
             return "ขออภัย ไม่สามารถตรวจสอบยาได้ในขณะนี้"
+
+    # ── เปรียบเทียบผลแล็บ (ล่าสุด vs ก่อนหน้า) ──
+    if parsed.command_type == CommandType.COMPARE_LAB:
+        try:
+            result = compare_latest_labs(storage, doc_index, user_hash)
+            if "error" in result:
+                return result["error"]
+            audit_logger.log("compare_lab", user_hash, {
+                "old_doc": result.get("old_doc_id", "")[:8],
+                "new_doc": result.get("new_doc_id", "")[:8],
+            })
+            return result.get("text_th", "ไม่สามารถเปรียบเทียบได้")
+        except Exception as e:
+            logger.warning(f"Compare lab error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถเปรียบเทียบผลแล็บได้ในขณะนี้"
+
+    # ── เปรียบเทียบใบยา ──
+    if parsed.command_type == CommandType.COMPARE_RX:
+        return (
+            "📋 ฟีเจอร์เปรียบเทียบใบยากำลังพัฒนา\n\n"
+            "ขณะนี้ระบบรองรับ:\n"
+            "• เปรียบเทียบแล็บ — ดูผลแล็บเก่า vs ใหม่\n"
+            "• ตรวจยา [ชื่อยา] — ตรวจยาที่อาจเป็นอันตราย\n\n"
+            "พิมพ์ 'เปรียบเทียบแล็บ' เพื่อเริ่มต้น"
+        )
+
+    # ── ลงทะเบียน HN ──
+    if parsed.command_type == CommandType.REGISTER_HN:
+        hn_input = parsed.args.strip()
+        if not hn_input:
+            return (
+                "📋 ลงทะเบียน HN\n\n"
+                "รูปแบบ: ลงทะเบียนHN [HNคลินิก] [HNรพ.]\n\n"
+                "ตัวอย่าง:\n"
+                "• ลงทะเบียนHN 1234 56789\n"
+                "• ลงทะเบียนHN 1234\n"
+                "• HN 1234 56789"
+            )
+        try:
+            # parse HN input: อาจเป็น "1234 56789" หรือ "1234"
+            parts = hn_input.split()
+            clinic_hn = parts[0] if len(parts) >= 1 else ""
+            hospital_hn = parts[1] if len(parts) >= 2 else ""
+
+            success, msg = hn_registry.register(
+                owner_hash=user_hash,
+                clinic_hn=clinic_hn,
+                hospital_hn=hospital_hn,
+                registered_by="patient",
+            )
+            audit_logger.log("hn_register", user_hash, {
+                "success": success,
+                "has_clinic_hn": bool(clinic_hn),
+                "has_hospital_hn": bool(hospital_hn),
+            })
+            return msg
+        except Exception as e:
+            logger.warning(f"HN register error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถลงทะเบียน HN ได้ในขณะนี้"
+
+    # ── ดูข้อมูล HN ของฉัน ──
+    if parsed.command_type == CommandType.MY_HN:
+        try:
+            patient = hn_registry.get_by_owner(user_hash)
+            if patient:
+                lines = [
+                    "🏥 ข้อมูล HN ของคุณ",
+                    f"📋 รหัส: {patient.hn_pair}",
+                ]
+                if patient.clinic_hn:
+                    lines.append(f"  • HN คลินิก: {patient.clinic_hn}")
+                if patient.hospital_hn:
+                    lines.append(f"  • HN โรงพยาบาล: {patient.hospital_hn}")
+                lines.append(f"📅 ลงทะเบียน: {patient.registered_at[:10]}")
+                return "\n".join(lines)
+            else:
+                return (
+                    "ยังไม่มี HN ในระบบ\n\n"
+                    "พิมพ์ 'ลงทะเบียนHN [HNคลินิก] [HNรพ.]'\n"
+                    "ตัวอย่าง: ลงทะเบียนHN 1234 56789"
+                )
+        except Exception as e:
+            logger.warning(f"MY_HN error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถดึงข้อมูล HN ได้ในขณะนี้"
 
     # ── ตารางตรวจ — Monitoring Schedule ──
     if parsed.command_type == CommandType.MONITORING_STATUS or text_stripped in (
@@ -4930,6 +5204,9 @@ def process_file_async(
                 size_bytes=size_now,
                 sha256_hex=sha256_hex or "",
             )
+            # เพิ่ม owner_hash สำหรับ quarterly/monthly path construction
+            if owner_hash:
+                metadata["owner_hash_short"] = owner_hash[:8]
 
             # ── Document Search V1: extract text for indexing ──
             extracted_text = ""

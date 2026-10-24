@@ -53,6 +53,11 @@ class CommandType(Enum):
     HEALTH_ADVICE = "health_advice"
     CONTACT_STAFF = "contact_staff"
     VIEW_ESCALATIONS = "view_escalations"
+    # ── Feature: Quarterly Compare & HN Registry ──
+    COMPARE_LAB = "compare_lab"
+    COMPARE_RX = "compare_rx"
+    REGISTER_HN = "register_hn"
+    MY_HN = "my_hn"
     UNKNOWN = "unknown"
 
 
@@ -183,6 +188,32 @@ COMMAND_ALIASES: list[tuple[str, CommandType, int | None]] = [
     (r"^ดูคำร้อง$", CommandType.VIEW_ESCALATIONS, None),
     (r"^คำร้อง$", CommandType.VIEW_ESCALATIONS, None),
     (r"^escalations?$", CommandType.VIEW_ESCALATIONS, None),
+
+    # ─── Feature: เปรียบเทียบผลแล็บ ───
+    (r"^เปรียบเทียบแล็บ$", CommandType.COMPARE_LAB, None),
+    (r"^เปรียบเทียบผลแล็บ$", CommandType.COMPARE_LAB, None),
+    (r"^เทียบแล็บ$", CommandType.COMPARE_LAB, None),
+    (r"^compare\s*lab$", CommandType.COMPARE_LAB, None),
+    (r"^เปรียบเทียบแล็บ\s+(.+)$", CommandType.COMPARE_LAB, 1),
+
+    # ─── Feature: เปรียบเทียบใบยา ───
+    (r"^เปรียบเทียบยา$", CommandType.COMPARE_RX, None),
+    (r"^เทียบยา$", CommandType.COMPARE_RX, None),
+    (r"^compare\s*rx$", CommandType.COMPARE_RX, None),
+    (r"^เปรียบเทียบใบยา$", CommandType.COMPARE_RX, None),
+
+    # ─── Feature: ลงทะเบียน HN ───
+    (r"^ลงทะเบียนHN\s+(.+)$", CommandType.REGISTER_HN, 1),
+    (r"^ลงทะเบียน\s*HN\s+(.+)$", CommandType.REGISTER_HN, 1),
+    (r"^registerhn\s+(.+)$", CommandType.REGISTER_HN, 1),
+    (r"^register\s*hn\s+(.+)$", CommandType.REGISTER_HN, 1),
+    (r"^HN\s+(.+)$", CommandType.REGISTER_HN, 1),
+
+    # ─── Feature: ดูข้อมูล HN ของฉัน ───
+    (r"^HNของฉัน$", CommandType.MY_HN, None),
+    (r"^hn\s*ของฉัน$", CommandType.MY_HN, None),
+    (r"^my\s*hn$", CommandType.MY_HN, None),
+    (r"^ดูHN$", CommandType.MY_HN, None),
 
     # ─── ช่วยเหลือ ───
     (r"^ช่วยเหลือ$", CommandType.HELP, None),

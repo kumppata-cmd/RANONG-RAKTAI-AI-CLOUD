@@ -436,6 +436,7 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,san
     <div class="tab" data-tab="trends">📈 กราฟค่าแล็บ</div>
     <div class="tab" data-tab="dialysis">🫁 ฟอกไต</div>
     <div class="tab" data-tab="alerts">🚨 ค่าผิดปกติ</div>
+    <div class="tab" data-tab="compare">🔄 เปรียบเทียบ</div>
   </div>
 
   <!-- Tab content -->
@@ -444,6 +445,7 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,san
   <div id="tab-trends" class="tab-content" style="display:none"></div>
   <div id="tab-dialysis" class="tab-content" style="display:none"></div>
   <div id="tab-alerts" class="tab-content" style="display:none"></div>
+  <div id="tab-compare" class="tab-content" style="display:none"></div>
 </div>
 
 <script>
@@ -755,6 +757,86 @@ async function loadAlerts() {
   }
 }
 
+// ── Compare ──
+async function loadCompare() {
+  const el = document.getElementById('tab-compare');
+  el.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+  try {
+    const d = await apiFetch('/reports?per_page=50');
+    const items = (d.items || []).filter(r => r.result_count > 0);
+
+    let html = '<div class="section"><h3>🔄 เปรียบเทียบผลแล็บ</h3>';
+    html += '<p style="font-size:.85rem;color:var(--muted);margin-bottom:16px">เลือก 2 รายงานเพื่อเปรียบเทียบค่าแล็บ (เก่า → ใหม่)</p>';
+
+    if (items.length < 2) {
+      html += '<div style="text-align:center;padding:40px;color:var(--muted)">ต้องมี Lab Reports อย่างน้อย 2 รายการจึงจะเปรียบเทียบได้</div>';
+    } else {
+      html += '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:16px">';
+      html += '<div style="flex:1;min-width:200px"><label style="font-size:.8rem;color:var(--muted)">ผลแล็บเก่า</label>';
+      html += '<select id="cmp-old" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--bg3);background:var(--bg);color:var(--text);margin-top:4px">';
+      items.forEach((r,i) => {
+        html += '<option value="'+r.source_document_id+'"'+(i===1?' selected':'')+'>'+r.source_document_id+' — '+r.specimen_date+' ('+r.result_count+' ค่า)</option>';
+      });
+      html += '</select></div>';
+      html += '<div style="flex:1;min-width:200px"><label style="font-size:.8rem;color:var(--muted)">ผลแล็บใหม่</label>';
+      html += '<select id="cmp-new" style="width:100%;padding:8px;border-radius:8px;border:1px solid var(--bg3);background:var(--bg);color:var(--text);margin-top:4px">';
+      items.forEach((r,i) => {
+        html += '<option value="'+r.source_document_id+'"'+(i===0?' selected':'')+'>'+r.source_document_id+' — '+r.specimen_date+' ('+r.result_count+' ค่า)</option>';
+      });
+      html += '</select></div>';
+      html += '<div style="display:flex;align-items:flex-end"><button onclick="runCompare()" style="padding:8px 20px;border-radius:8px;border:none;background:var(--accent);color:#000;cursor:pointer;font-weight:600">เปรียบเทียบ</button></div>';
+      html += '</div>';
+    }
+
+    html += '<div id="compare-result"></div>';
+    html += '</div>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--red);padding:20px">โหลดไม่สำเร็จ: '+e.message+'</div>';
+  }
+}
+
+async function runCompare() {
+  const oldId = document.getElementById('cmp-old').value;
+  const newId = document.getElementById('cmp-new').value;
+  const el = document.getElementById('compare-result');
+  if (oldId === newId) { el.innerHTML = '<div style="color:var(--yellow);padding:12px">กรุณาเลือกรายงานที่ต่างกัน</div>'; return; }
+  el.innerHTML = '<div class="loading"><div class="spinner"></div></div>';
+  try {
+    const sep = '/compare/lab?old='+encodeURIComponent(oldId)+'&new='+encodeURIComponent(newId);
+    const r = await fetch('/admin/api/v2/compare/lab?' + 'old='+encodeURIComponent(oldId)+'&new='+encodeURIComponent(newId)+'&secret='+encodeURIComponent(SECRET));
+    if (!r.ok) { const e = await r.json(); throw new Error(e.error || 'HTTP '+r.status); }
+    const d = await r.json();
+    const items = d.items || [];
+    let html = '<div class="section" style="margin-top:16px"><h3>📊 ผลเปรียบเทียบ ('+items.length+' ค่า)</h3>';
+    if (!items.length) {
+      html += '<div style="padding:20px;color:var(--muted);text-align:center">ไม่มีค่าแล็บที่เปรียบเทียบได้</div>';
+    } else {
+      html += '<table class="data-table"><thead><tr><th>ค่าแล็บ</th><th>เก่า</th><th>ใหม่</th><th>เปลี่ยนแปลง</th><th>สถานะ</th></tr></thead><tbody>';
+      items.forEach(c => {
+        const dirColor = c.direction === '↑' ? 'var(--red)' : c.direction === '↓' ? 'var(--green)' : 'var(--muted)';
+        const statusColor = c.status_change === 'worsened' ? 'var(--red)' : c.status_change === 'improved' ? 'var(--green)' : 'var(--muted)';
+        const statusTH = {improved:'ดีขึ้น',worsened:'แย่ลง',stable:'คงที่',new:'ค่าใหม่'}[c.status_change] || c.status_change;
+        html += '<tr>'
+          + '<td style="font-weight:600">'+c.analyte+'</td>'
+          + '<td>'+(c.old_value !== null ? c.old_value + ' ' + (c.unit||'') : '—')+'</td>'
+          + '<td>'+(c.new_value !== null ? c.new_value + ' ' + (c.unit||'') : '—')+'</td>'
+          + '<td style="color:'+dirColor+';font-weight:600">'+(c.direction||'—')+' '+(c.change_pct !== null ? c.change_pct.toFixed(1)+'%' : '')+'</td>'
+          + '<td style="color:'+statusColor+'">'+statusTH+'</td>'
+          + '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    if (d.summary) {
+      html += '<div style="margin-top:12px;padding:12px;border-radius:8px;background:var(--bg);border:1px solid var(--bg3);font-size:.85rem;color:var(--muted)">'+d.summary+'</div>';
+    }
+    html += '</div>';
+    el.innerHTML = html;
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--red);padding:12px">เปรียบเทียบไม่สำเร็จ: '+e.message+'</div>';
+  }
+}
+
 function loadTab(tab) {
   switch(tab) {
     case 'overview': loadOverview(); break;
@@ -762,6 +844,7 @@ function loadTab(tab) {
     case 'trends': loadTrends(); break;
     case 'dialysis': loadDialysis(); break;
     case 'alerts': loadAlerts(); break;
+    case 'compare': loadCompare(); break;
   }
 }
 
