@@ -49,14 +49,22 @@ jobs:
           # E501: line too long — ข้ามไว้เพราะโค้ดเดิมมีบรรทัดยาว
           # W503: line break before binary operator — ไม่บังคับ
           # E402: module level import not at top — บาง module ต้อง import ตามเงื่อนไข
-          # test_*.py ในราก = legacy tests ที่อาจ import module เฉพาะ environment
           echo "=== Flake8 lint (E9,F63,F7,F82) ==="
+          echo "--- Flake8 version ---"
+          flake8 --version
+          echo "--- Running flake8 ---"
           flake8 . \
             --count \
             --select=E9,F63,F7,F82 \
             --show-source \
             --statistics \
-            --exclude=.git,__pycache__,*.backup*,test_*.py
+            --exclude=.git,__pycache__,*.backup*,test_*.py,tests/ \
+            --format='%(path)s:%(row)d:%(col)d: %(code)s %(text)s' \
+            2>&1 | tee /tmp/flake8_output.txt
+          RESULT=${PIPESTATUS[0]}
+          echo "--- Flake8 exit code: $RESULT ---"
+          cat /tmp/flake8_output.txt
+          exit $RESULT
 
   # ---------------------------------------------------------------------------
   # Job 2: Test — รัน pytest
