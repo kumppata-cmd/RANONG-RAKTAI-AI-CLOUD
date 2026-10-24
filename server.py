@@ -4517,7 +4517,21 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "ไปยัง", "ผู้รับเงิน", "ผู้โอน", "โอนสำเร็จ",
              "qr code", "วันที่ทำรายการ", "mobile banking",
              "krungthai", "kasikorn", "scb", "bbl", "ktb",
-             "ยอดโอน", "transfer"],
+             "ยอดโอน", "transfer",
+             # ใบกำกับภาษี / ใบวางบิล (medical supply)
+             "ใบกำกับภาษี", "ใบวางบิล", "ใบส่งของ", "ใบส่งสินค้า",
+             "เลขประจำตัวผู้เสียภาษี", "tax id", "สาขา",
+             "purchase order", "po no", "p.o.", "delivery order",
+             "ใบเสนอราคา", "quotation", "credit note",
+             # บริษัทที่เป็น supplier ของคลินิก
+             "nikkiso", "meditop", "fresenius", "bjc",
+             "berli jucker", "b.l.h.", "blh",
+             "central poly", "pinyo pharmacy", "thai water",
+             "s.p.logistic", "sp logistic",
+             "นิคคิโซ", "เมดิท็อป", "เฟรเซนีอุส",
+             "เบอร์ลี่ ยุคเกอร์", "บี.เอล.เอช",
+             "เซ็นทรัลโพลี", "ภิญโญฟาร์มาซี",
+             ],
             2,
         ),
         "rx": (
@@ -4593,6 +4607,37 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "reason": f"bank slip pre-check ({len(bank_hits)} strong hits)",
             "confidence": min(len(bank_hits) / 3.0, 1.0),
         }
+
+    # ── Pre-check: บริษัท supplier ที่รู้จัก ──
+    # ถ้าตรวจพบชื่อบริษัทจาก BILL_COMPANY_REGISTRY ≥2 hits
+    # + มี keyword เกี่ยวกับเงิน/ราคา อย่างน้อย 1 → บังคับ bills
+    _company_check = detect_bill_company(content)
+    if _company_check != "OTHER":
+        _company_hits = sum(
+            1 for kw in BILL_COMPANY_REGISTRY.get(_company_check, [])
+            if kw.lower() in content_lower
+        )
+        _money_kws = [
+            "บาท", "ราคา", "จำนวนเงิน", "ยอดรวม", "รวมทั้งสิ้น",
+            "ภาษี", "vat", "tax", "ใบกำกับ", "invoice", "ใบเสร็จ",
+            "ใบแจ้งหนี้", "ชำระเงิน", "ส่วนลด", "receipt",
+            "ใบกำกับภาษี", "ใบวางบิล", "ใบส่งของ",
+        ]
+        _money_hits = sum(1 for kw in _money_kws if kw.lower() in content_lower)
+        if _company_hits >= 2 and _money_hits >= 1:
+            logger.info(
+                f"  pre-check: known supplier {_company_check} "
+                f"({_company_hits} company hits, {_money_hits} money hits) → bills"
+            )
+            return {
+                "category": "bills",
+                "bill_company": _company_check,
+                "reason": (
+                    f"known supplier pre-check: {_company_check} "
+                    f"({_company_hits} company hits, {_money_hits} money hits)"
+                ),
+                "confidence": min((_company_hits + _money_hits) / 5.0, 1.0),
+            }
 
     best, best_score = "review", 0
     all_matches = {}
@@ -5108,11 +5153,17 @@ def process_file_async(
                             f"ลบไฟล์ชั่วคราวไม่สำเร็จ: {type(e).__name__}"
                         )
                     # ลบ local copy ใน category folder ด้วย (ephemeral)
-                    _local_cat_dest = os.path.join(
-                        BASE_DIR,
-                        FOLDERS.get(category, FOLDERS["review"]),
-                        os.path.basename(filepath),
-                    )
+                    _cat_folder = FOLDERS.get(category, FOLDERS["review"])
+                    if bill_company:
+                        _local_cat_dest = os.path.join(
+                            BASE_DIR, _cat_folder, bill_company,
+                            os.path.basename(filepath),
+                        )
+                    else:
+                        _local_cat_dest = os.path.join(
+                            BASE_DIR, _cat_folder,
+                            os.path.basename(filepath),
+                        )
                     if os.path.exists(_local_cat_dest):
                         try:
                             os.remove(_local_cat_dest)
@@ -5137,11 +5188,17 @@ def process_file_async(
                 ".jpg": "JPG", ".jpeg": "JPEG", ".png": "PNG",
             }.get(ext, ext)
 
+            # แสดง subfolder (บริษัท) ใน reply ถ้าเป็นบิล
+            _storage_display = FOLDERS.get(category, FOLDERS['review'])
+            if bill_company and category == "bills":
+                _storage_display = f"{_storage_display}/{bill_company}"
             _reply_lines = [
                 f"รับเอกสารแล้ว ({file_type_name})",
                 f"ประเภท: {cat_name}",
-                f"จัดเก็บใน: {FOLDERS.get(category, FOLDERS['review'])}",
+                f"จัดเก็บใน: {_storage_display}",
             ]
+            if bill_company and category == "bills":
+                _reply_lines.append(f"🏢 บริษัท: {bill_company}")
             if merged_page_count > 1:
                 _reply_lines.insert(0, f"📄 รวมผลแล็บ {merged_page_count} หน้าสำเร็จ")
             if lab_extracted:
