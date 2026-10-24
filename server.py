@@ -662,6 +662,7 @@ class StorageGCS:
         category: str,
         filename: str,
         metadata: dict | None = None,
+        subfolder: str | None = None,
     ) -> str:
         """อัปโหลดไฟล์ไป GCS.
 
@@ -672,6 +673,9 @@ class StorageGCS:
         (ดู build_storage_filename) — ไม่ใช่ชื่อไฟล์ต้นฉบับจากผู้ใช้
 
         metadata ต้องไม่มีข้อมูลส่วนบุคคล — ดู build_object_metadata
+
+        subfolder: subfolder เพิ่มเติม เช่น ชื่อบริษัทสำหรับ bills
+                   → path จะเป็น folder/subfolder/YYYY-MM/filename
         """
         # ป้องกัน path traversal (ต้องทำก่อน is_ready check เพราะ fallback ก็ต้องใช้ชื่อที่ปลอดภัย)
         filename = os.path.basename(filename)
@@ -694,7 +698,12 @@ class StorageGCS:
 
         folder = FOLDERS.get(category, FOLDERS["review"])
         # แบ่งตามเดือน เพื่อไม่ให้โฟลเดอร์เดียวสะสมไฟล์จนเปิดช้า
-        blob_path = f"{folder}/{datetime.now():%Y-%m}/{filename}"
+        if subfolder:
+            # ป้องกัน path traversal ใน subfolder
+            safe_sub = subfolder.replace("/", "_").replace("\\", "_").replace("..", "_")
+            blob_path = f"{folder}/{safe_sub}/{datetime.now():%Y-%m}/{filename}"
+        else:
+            blob_path = f"{folder}/{datetime.now():%Y-%m}/{filename}"
 
         content_type = self._get_content_type(filename)
 
@@ -4362,6 +4371,54 @@ def classify_with_claude(filepath: str) -> dict:
         return classify_with_keywords(filepath)
 
 
+# ── Bill Company Registry ──
+# แยกบิลตามบริษัท — เพิ่มบริษัทใหม่ได้ง่ายโดยเพิ่ม entry ใน dict
+# key = ชื่อ folder (uppercase), value = list ของ keywords ที่ OCR จะพบในบิล
+# ถ้าไม่ตรงบริษัทใด → จัดเป็น "OTHER"
+BILL_COMPANY_REGISTRY: dict[str, list[str]] = {
+    "NIKKISO": [
+        "nikkiso", "นิคคิโซ", "nikkiso medical",
+        "nikkiso co", "nikkiso thailand",
+    ],
+    "MEDITOP": [
+        "meditop", "เมดิท็อป", "meditop co",
+        "meditop thailand", "บจก.เมดิท็อป", "บริษัท เมดิท็อป",
+    ],
+    "FRESENIUS": [
+        "fresenius", "เฟรเซนีอุส", "fresenius kabi",
+        "fresenius medical care", "fmc",
+    ],
+    "SP_LOGISTIC": [
+        "s.p.logistic", "sp logistic", "เอส.พี.โลจิสติก",
+        "s.p. logistic", "sp logistics",
+    ],
+    "THAI_WATER_GENERATION": [
+        "thai water generation", "ไทย วอเตอร์ เจเนอเรชั่น",
+        "thai water", "twg",
+    ],
+    # ── เพิ่มบริษัทใหม่ที่นี่ ──
+}
+
+
+def detect_bill_company(text: str) -> str:
+    """ตรวจจับชื่อบริษัทจากข้อความ OCR ของบิล.
+
+    Returns:
+        ชื่อบริษัท (uppercase) หรือ "OTHER" ถ้าไม่พบ
+    """
+    text_lower = text.lower()
+    best_company = "OTHER"
+    best_hits = 0
+    for company, keywords in BILL_COMPANY_REGISTRY.items():
+        hits = sum(1 for kw in keywords if kw.lower() in text_lower)
+        if hits > best_hits:
+            best_company = company
+            best_hits = hits
+    if best_hits > 0:
+        logger.info(f"  bill company detected: {best_company} ({best_hits} hits)")
+    return best_company
+
+
 def classify_with_keywords(filepath: str, override_text: str | None = None) -> dict:
     """Fallback: จำแนกด้วย keyword matching + OCR.
 
@@ -4492,9 +4549,11 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
     ]
     bank_hits = [kw for kw in _bank_strong if kw.lower() in content_lower]
     if len(bank_hits) >= 2:
-        logger.info(f"  pre-check: bank slip detected ({len(bank_hits)} strong hits) → bills")
+        company = detect_bill_company(content)
+        logger.info(f"  pre-check: bank slip detected ({len(bank_hits)} strong hits) → bills/{company}")
         return {
             "category": "bills",
+            "bill_company": company,
             "reason": f"bank slip pre-check ({len(bank_hits)} strong hits)",
             "confidence": min(len(bank_hits) / 3.0, 1.0),
         }
@@ -4514,23 +4573,37 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
         if matched:
             logger.info(f"  keyword [{cat}]: {len(matched)} hits")
 
-    return {
+    result = {
         "category": best,
         "reason": f"keyword match ({best_score} hits)",
         "confidence": min(best_score / 5.0, 1.0) if best_score > 0 else 0.0,
     }
 
+    # ถ้าจัดเป็น bills → ตรวจจับบริษัทจาก OCR text
+    if best == "bills":
+        result["bill_company"] = detect_bill_company(content)
+
+    return result
+
 
 def copy_to_category(
-    src_path: str, category: str, metadata: dict | None = None
+    src_path: str, category: str, metadata: dict | None = None,
+    subfolder: str | None = None,
 ) -> str:
     """คัดลอกไฟล์ไปยังโฟลเดอร์ตามประเภท + cloud storage.
 
     Production mode: ถ้า cloud upload ล้มเหลว จะ raise RuntimeError
     เพื่อให้ process_file_async() จับแล้วแจ้งข้อผิดพลาดกลับไป
+
+    subfolder: subfolder เพิ่มเติม เช่น ชื่อบริษัทสำหรับ bills
+               → GCS path จะเป็น 02_BILLS_RECEIPTS/NIKKISO/2026-10/file.jpg
     """
     # Local copy (ephemeral — เป็น temp ระหว่างรอ upload)
-    dest_folder = os.path.join(BASE_DIR, FOLDERS.get(category, FOLDERS["review"]))
+    base_folder = FOLDERS.get(category, FOLDERS["review"])
+    if subfolder:
+        dest_folder = os.path.join(BASE_DIR, base_folder, subfolder)
+    else:
+        dest_folder = os.path.join(BASE_DIR, base_folder)
     os.makedirs(dest_folder, exist_ok=True)
     filename = os.path.basename(src_path)
     dest_path = os.path.join(dest_folder, filename)
@@ -4541,7 +4614,8 @@ def copy_to_category(
         )
     shutil.copy2(src_path, dest_path)
     # ไม่ log path เต็ม
-    logger.info(f"คัดลอก → {FOLDERS.get(category, FOLDERS['review'])}")
+    log_dest = f"{base_folder}/{subfolder}" if subfolder else base_folder
+    logger.info(f"คัดลอก → {log_dest}")
 
     # Cloud storage (ถ้าตั้งค่าไว้ และ backend ไม่ใช่ local)
     cloud_path = None
@@ -4549,7 +4623,9 @@ def copy_to_category(
         try:
             with open(src_path, "rb") as f:
                 data = f.read()
-            cloud_path = storage.save(data, category, filename, metadata)
+            cloud_path = storage.save(
+                data, category, filename, metadata, subfolder=subfolder
+            )
         except RuntimeError:
             # Production mode — GCS ล้มเหลว ห้าม fallback
             raise
@@ -4605,6 +4681,7 @@ def process_file_async(
                     result = classify_with_keywords(filepath)
 
             category = result.get("category", "review")
+            bill_company = result.get("bill_company")  # subfolder for bills
             ext_now = os.path.splitext(filepath)[1].lower()
             try:
                 size_now = os.path.getsize(filepath)
@@ -4659,7 +4736,10 @@ def process_file_async(
                     ocr_status = "failed"
             extracted_text = extracted_text[:MAX_INDEX_TEXT_LENGTH]
 
-            dest = copy_to_category(filepath, category, metadata=metadata)
+            dest = copy_to_category(
+                filepath, category, metadata=metadata,
+                subfolder=bill_company,
+            )
 
             # ── Document Search V1: add to index after GCS upload ──
             stored_in_gcs = bool(dest and dest.startswith("gs://"))
