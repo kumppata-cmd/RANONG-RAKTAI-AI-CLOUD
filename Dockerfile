@@ -40,6 +40,10 @@ COPY patient_identity.py .
 COPY ocr_safety.py .
 COPY health_check.py .
 COPY audit_trail.py .
+COPY dashboard.py .
+COPY ocr_review.py .
+COPY lab_dashboard.py .
+COPY line_patient_assistant.py .
 
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \
