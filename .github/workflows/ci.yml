@@ -50,21 +50,23 @@ jobs:
           # W503: line break before binary operator — ไม่บังคับ
           # E402: module level import not at top — บาง module ต้อง import ตามเงื่อนไข
           echo "=== Flake8 lint (E9,F63,F7,F82) ==="
-          echo "--- Flake8 version ---"
           flake8 --version
-          echo "--- Running flake8 ---"
           flake8 . \
             --count \
             --select=E9,F63,F7,F82 \
             --show-source \
             --statistics \
             --exclude=.git,__pycache__,*.backup*,test_*.py,tests/ \
-            --format='%(path)s:%(row)d:%(col)d: %(code)s %(text)s' \
-            2>&1 | tee /tmp/flake8_output.txt
-          RESULT=${PIPESTATUS[0]}
-          echo "--- Flake8 exit code: $RESULT ---"
-          cat /tmp/flake8_output.txt
-          exit $RESULT
+            2>&1 | tee /tmp/flake8_out.txt; FLAKE_EXIT=${PIPESTATUS[0]}
+          echo "### Flake8 Results" >> $GITHUB_STEP_SUMMARY
+          if [ $FLAKE_EXIT -ne 0 ]; then
+            echo '```' >> $GITHUB_STEP_SUMMARY
+            cat /tmp/flake8_out.txt >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ No lint errors" >> $GITHUB_STEP_SUMMARY
+          fi
+          exit $FLAKE_EXIT
 
   # ---------------------------------------------------------------------------
   # Job 2: Test — รัน pytest
