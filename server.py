@@ -4415,7 +4415,16 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "ค่าห้อง", "ค่าแพทย์", "เงินสด", "โอนเงิน", "บาท",
              "ภาษี", "vat", "tax", "ใบกำกับ", "ใบแจ้งหนี้",
              "ค่าใช้จ่าย", "รวมทั้งสิ้น", "ชื่อผู้ป่วย", "เลขที่ใบเสร็จ",
-             "ค่าเบิก", "สิทธิ์", "เบิกได้", "ส่วนเกิน"],
+             "ค่าเบิก", "สิทธิ์", "เบิกได้", "ส่วนเกิน",
+             # สลิปโอนเงิน / ธนาคาร
+             "โอนเงินสำเร็จ", "ค่าธรรมเนียม", "พร้อมเพย์", "promptpay",
+             "รหัสอ้างอิง", "สลิป", "บัญชี", "เลขที่บัญชี",
+             "ธนาคาร", "กรุงไทย", "กสิกร", "ไทยพาณิชย์",
+             "กรุงเทพ", "ออมสิน", "ทหารไทย", "กรุงศรี",
+             "ไปยัง", "ผู้รับเงิน", "ผู้โอน", "โอนสำเร็จ",
+             "qr code", "วันที่ทำรายการ", "mobile banking",
+             "krungthai", "kasikorn", "scb", "bbl", "ktb",
+             "ยอดโอน", "transfer"],
             2,
         ),
         "rx": (
@@ -4431,10 +4440,10 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             ["ผลตรวจ", "laboratory", "lab report", "ผลเลือด",
              "BUN", "creatinine", "eGFR", "hemoglobin",
              "ค่าปกติ", "mg/dL", "mg/dl", "CBC", "potassium",
-             "result", "reference", "normal", "abnormal",
+             "result", "reference range", "normal range", "abnormal",
              "hematocrit", "WBC", "RBC", "platelet", "sodium",
              "albumin", "glucose", "cholesterol", "HbA1c",
-             "uric acid", "calcium", "phosphorus", "ค่า",
+             "uric acid", "calcium", "phosphorus",
              "ห้องปฏิบัติการ", "ผลแล็บ", "ผลlab", "ผล lab",
              "specimen", "serum", "blood", "urine",
              "mmol", "umol", "g/dl", "g/dL",
@@ -4472,6 +4481,23 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             2,
         ),
     }
+
+    # ── Pre-check: สลิปโอนเงิน / ธนาคาร ──
+    # ถ้าพบ keyword ที่บ่งชี้ว่าเป็นสลิปโอนเงินชัดเจน → บังคับ bills
+    # เพื่อป้องกันการจัดประเภทผิดเป็นผลแล็บ
+    _bank_strong = [
+        "โอนเงินสำเร็จ", "โอนสำเร็จ", "พร้อมเพย์", "promptpay",
+        "mobile banking", "สลิปโอน", "ค่าธรรมเนียม",
+        "krungthai", "kasikorn", "กรุงไทย", "กสิกร",
+    ]
+    bank_hits = [kw for kw in _bank_strong if kw.lower() in content_lower]
+    if len(bank_hits) >= 2:
+        logger.info(f"  pre-check: bank slip detected ({len(bank_hits)} strong hits) → bills")
+        return {
+            "category": "bills",
+            "reason": f"bank slip pre-check ({len(bank_hits)} strong hits)",
+            "confidence": min(len(bank_hits) / 3.0, 1.0),
+        }
 
     best, best_score = "review", 0
     all_matches = {}
