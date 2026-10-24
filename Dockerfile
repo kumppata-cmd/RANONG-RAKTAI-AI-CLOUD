@@ -44,6 +44,7 @@ COPY dashboard.py .
 COPY ocr_review.py .
 COPY lab_dashboard.py .
 COPY line_patient_assistant.py .
+COPY document_workflow.py .
 
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \

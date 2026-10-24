@@ -1783,6 +1783,16 @@ except ImportError:
 except Exception as e:
     logger.warning(f"Patient Assistant: registration failed: {e}")
 
+# ─── Document Workflow (Feature 7) ───────────────────────
+try:
+    from document_workflow import register_workflow
+    register_workflow(app, storage, doc_index, enhanced_audit)
+    logger.info("Document Workflow: registered successfully")
+except ImportError:
+    logger.warning("Document Workflow: module not available")
+except Exception as e:
+    logger.warning(f"Document Workflow: registration failed: {e}")
+
 
 # ─── Document Content Reading from GCS ────────────────────
 # อ่านเนื้อหาเอกสารโดยตรงจาก GCS — ไม่ต้องส่ง signed URL ให้ผู้ใช้

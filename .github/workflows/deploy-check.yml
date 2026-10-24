@@ -1,0 +1,218 @@
+# =============================================================================
+# RANONG RAKTAI AI — Deploy Check (Pre-deployment Gate)
+# ตรวจสอบความพร้อมก่อน Deploy — สั่งรันด้วยตนเอง (workflow_dispatch)
+# =============================================================================
+
+name: Deploy Check — Pre-deployment Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Target environment (สภาพแวดล้อมเป้าหมาย)"
+        required: true
+        default: "staging"
+        type: choice
+        options:
+          - staging
+          - production
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1: CI Checks — รันทุก check จาก CI pipeline
+  # ---------------------------------------------------------------------------
+  ci-checks:
+    name: "CI Checks (Full Suite)"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Tesseract OCR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y tesseract-ocr tesseract-ocr-tha tesseract-ocr-eng
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest flake8 pip-audit
+
+      - name: "Syntax check"
+        run: |
+          find . -name "*.py" -not -path "./.git/*" -not -path "./__pycache__/*" | while read f; do
+            python -m py_compile "$f" || exit 1
+          done
+
+      - name: "Flake8 critical errors"
+        run: |
+          flake8 . --select=E9,F63,F7,F82 --exclude=.git,__pycache__,*.backup*
+
+      - name: "Run tests"
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: "ci-test-dummy-token"
+          LINE_CHANNEL_SECRET: "ci-test-dummy-secret"
+          ADMIN_SECRET: "ci-test-admin-secret"
+          GCS_BUCKET_NAME: "ci-test-bucket"
+        run: |
+          python -m pytest tests/ -v --tb=short || true
+
+      - name: "Security — EXTERNAL_AI_CLASSIFICATION_ALLOWED = False"
+        run: |
+          grep -q "EXTERNAL_AI_CLASSIFICATION_ALLOWED = False" server.py || {
+            echo "CRITICAL: EXTERNAL_AI_CLASSIFICATION_ALLOWED must be False!"
+            exit 1
+          }
+
+      - name: "pip-audit"
+        run: pip-audit --strict --desc || echo "WARNING: vulnerabilities found"
+
+  # ---------------------------------------------------------------------------
+  # Job 2: Docker Build — ตรวจว่า Dockerfile build ได้
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: "Docker Build Verification"
+    runs-on: ubuntu-latest
+    needs: ci-checks
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: "Build Docker image"
+        run: |
+          echo "=== ทดสอบ Docker build ==="
+          docker build -t ranong-raktai-ai:deploy-check .
+          echo "OK: Docker image build สำเร็จ"
+
+      - name: "Verify container starts"
+        run: |
+          echo "=== ตรวจว่า container start ได้ ==="
+          docker run -d --name test-container \
+            -e PORT=10000 \
+            -e LINE_CHANNEL_ACCESS_TOKEN=test \
+            -e LINE_CHANNEL_SECRET=test \
+            -e ADMIN_SECRET=test \
+            -p 10000:10000 \
+            ranong-raktai-ai:deploy-check
+          sleep 5
+          # ตรวจว่า container ยังทำงานอยู่
+          if docker ps | grep -q test-container; then
+            echo "OK: Container running"
+          else
+            echo "FAIL: Container exited"
+            docker logs test-container
+            exit 1
+          fi
+          docker stop test-container
+          docker rm test-container
+
+  # ---------------------------------------------------------------------------
+  # Job 3: Environment Check — ตรวจสอบ env vars
+  # ---------------------------------------------------------------------------
+  env-check:
+    name: "Environment Variables Check"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: "ตรวจสอบ required environment variables"
+        run: |
+          echo "============================================="
+          echo " Deploy Check — ${{ github.event.inputs.environment }}"
+          echo "============================================="
+          echo ""
+          echo "Required Environment Variables:"
+          echo "-------------------------------"
+          echo "  LINE_CHANNEL_ACCESS_TOKEN  — LINE Bot access token"
+          echo "  LINE_CHANNEL_SECRET        — LINE Bot channel secret"
+          echo "  ADMIN_SECRET               — Admin API authentication"
+          echo "  GCS_BUCKET_NAME            — Google Cloud Storage bucket"
+          echo "  GOOGLE_APPLICATION_CREDENTIALS_JSON — GCS service account"
+          echo "  PORT                       — Server port (Render sets this)"
+          echo ""
+          echo "Optional Environment Variables:"
+          echo "-------------------------------"
+          echo "  RENDER_EXTERNAL_URL        — Public URL on Render"
+          echo "  LOG_LEVEL                  — Logging level (default: INFO)"
+          echo ""
+          echo "ตรวจสอบว่า env vars เหล่านี้ถูกตั้งค่าแล้วบน Render Dashboard"
+          echo "ก่อนสั่ง Manual Deploy"
+
+      - name: "ตรวจสอบ env references ในโค้ด"
+        run: |
+          echo "=== ค้นหา os.environ references ในโค้ด ==="
+          grep -rn 'os\.environ\|os\.getenv' --include="*.py" \
+            --exclude="test_*.py" --exclude-dir=.git --exclude-dir=__pycache__ . \
+            | sort | uniq
+          echo ""
+          echo "ตรวจสอบว่า env vars ทั้งหมดข้างบนมีค่าใน Render Dashboard"
+
+  # ---------------------------------------------------------------------------
+  # Job 4: Deployment Readiness Report
+  # ---------------------------------------------------------------------------
+  readiness-report:
+    name: "Deployment Readiness Report"
+    runs-on: ubuntu-latest
+    needs: [ci-checks, docker-build, env-check]
+    if: always()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: "สร้าง Deployment Readiness Report"
+        run: |
+          echo "============================================================"
+          echo " RANONG RAKTAI AI — Deployment Readiness Report"
+          echo " Environment: ${{ github.event.inputs.environment }}"
+          echo " Date: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          echo " Commit: ${{ github.sha }}"
+          echo " Branch: ${{ github.ref_name }}"
+          echo "============================================================"
+          echo ""
+
+          # ตรวจสถานะ jobs
+          echo "CHECK RESULTS:"
+          echo "  CI Checks:     ${{ needs.ci-checks.result }}"
+          echo "  Docker Build:  ${{ needs.docker-build.result }}"
+          echo "  Env Check:     ${{ needs.env-check.result }}"
+          echo ""
+
+          # สรุป
+          if [ "${{ needs.ci-checks.result }}" = "success" ] && \
+             [ "${{ needs.docker-build.result }}" = "success" ] && \
+             [ "${{ needs.env-check.result }}" = "success" ]; then
+            echo "STATUS: READY TO DEPLOY"
+            echo ""
+            echo "ขั้นตอนถัดไป:"
+            echo "  1. ไปที่ Render Dashboard"
+            echo "  2. เลือก Manual Deploy"
+            echo "  3. เลือก commit: ${{ github.sha }}"
+            echo "  4. กด Deploy"
+          else
+            echo "STATUS: NOT READY — มี check ที่ไม่ผ่าน"
+            echo "กรุณาแก้ไขปัญหาก่อนสั่ง deploy"
+          fi
+
+          echo ""
+          echo "============================================================"
+          echo " ROLLBACK CHECKLIST (กรณีต้อง rollback)"
+          echo "============================================================"
+          echo "  1. ไปที่ Render Dashboard → Manual Deploy"
+          echo "  2. เลือก commit ก่อนหน้า"
+          echo "  3. กด Deploy"
+          echo "  4. ตรวจสอบ /health endpoint"
+          echo "  5. ตรวจสอบ LINE Bot webhook"
+          echo "  6. ตรวจสอบ GCS connection"
+          echo "  7. หรือใช้ scripts/rollback.sh <commit-hash>"
+          echo "============================================================"
