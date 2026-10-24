@@ -4379,6 +4379,9 @@ BILL_COMPANY_REGISTRY: dict[str, list[str]] = {
     "NIKKISO": [
         "nikkiso", "นิคคิโซ", "nikkiso medical",
         "nikkiso co", "nikkiso thailand",
+        "นิคคิโซ เมดิคัล", "nikkiso medical (thailand)",
+        "0105537100222",  # tax ID
+        "hemodialysis package", "วัสดุสิ้นเปลืองสำหรับฟอกเลือด",
     ],
     "MEDITOP": [
         "meditop", "เมดิท็อป", "meditop co",
