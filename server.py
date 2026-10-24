@@ -197,12 +197,13 @@ DEDUP_CONTENT_TTL_SECONDS = int(os.getenv("DEDUP_CONTENT_TTL", "600"))  # 10 น
 # สร้างค่าด้วย: python3 -c "import uuid; print(uuid.uuid4().hex)"
 _user_id_salt_env = os.getenv("USER_ID_SALT", "").strip()
 _USER_ID_SALT_MISSING = False  # Flag สำหรับ fail-closed ถ้า salt ไม่ได้ตั้ง
+_early_logger = logging.getLogger(__name__)  # Early logger ก่อน basicConfig
 if IS_PRODUCTION and not _user_id_salt_env:
     # Production ต้องมี salt คงที่ — ห้ามใช้ค่า default
     # ไม่ crash แต่ fail-closed: ปฏิเสธทุก request ที่ต้องใช้ hash
     _USER_ID_SALT_MISSING = True
     USER_ID_SALT = "MISSING-SALT-DO-NOT-USE"
-    logger.critical(
+    _early_logger.critical(
         "CRITICAL: USER_ID_SALT ต้องตั้งค่าใน Production ENV — "
         "ระบบจะปฏิเสธทุก request จนกว่าจะตั้งค่า — "
         "ใช้ค่าสุ่มที่ไม่ซ้ำ เช่น: python3 -c \"import secrets; print(secrets.token_hex(32))\""
@@ -3203,7 +3204,7 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             # สร้างกราฟ PNG (ถ้ามี matplotlib)
             try:
                 chart_png = generate_trend_chart_png(analysis)
-                if chart_png and line_user_id:
+                if chart_png and user_hash:
                     import uuid as _uuid_mod
                     chart_id = _uuid_mod.uuid4().hex[:12]
                     chart_path = os.path.join("/tmp/ranong_raktai", f"chart_{chart_id}.png")
@@ -3222,7 +3223,7 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                             "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
                         }
                         flex_msg = {
-                            "to": line_user_id,
+                            "to": "",  # NOTE: chart push ต้องใช้ LINE user ID — ยังไม่มีใน search command
                             "messages": [{
                                 "type": "flex",
                                 "altText": "📊 กราฟแนวโน้มผลตรวจ Lab",
@@ -3267,8 +3268,8 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                             }],
                         }
                         if LINE_CHANNEL_ACCESS_TOKEN:
-                            requests.post(push_url, headers=push_headers,
-                                          json=flex_msg, timeout=10)
+                            http_requests.post(push_url, headers=push_headers,
+                                               json=flex_msg, timeout=10)
                             logger.info(f"Chart sent via LINE Flex for trend analysis")
                     except Exception as push_err:
                         logger.warning(f"Chart push failed: {type(push_err).__name__}")
@@ -6845,7 +6846,7 @@ def _keepalive_worker():
         _time.sleep(_KEEPALIVE_INTERVAL)
         try:
             target_url = _RENDER_EXTERNAL_URL or f"http://localhost:{PORT}"
-            resp = requests.get(
+            resp = http_requests.get(
                 f"{target_url}/health/live",
                 timeout=15,
                 headers={"User-Agent": "RanongRaktaiAI-KeepAlive/1.0"},
