@@ -662,6 +662,7 @@ tr:hover td { background: rgba(56,189,248,.03); }
 <div class="header">
   <h1>🏥 RANONG RAKTAI AI</h1>
   <div class="meta">
+    <a href="#" id="lab-dash-link" style="color:var(--teal);font-size:.85rem;font-weight:600;">🔬 Lab & Dialysis</a>
     <a href="#" id="ocr-review-link" style="color:var(--orange);font-size:.85rem;font-weight:600;">🔍 OCR Review</a>
     <span>GCS: <span class="dot" id="gcs-dot"></span> <span id="gcs-label">—</span></span>
     <span>โหมด: <span id="env-label">—</span></span>
@@ -778,6 +779,7 @@ tr:hover td { background: rgba(56,189,248,.03); }
 const SECRET = new URLSearchParams(location.search).get('secret') || '';
 const API = '/admin/api/v2';
 document.getElementById('ocr-review-link').href = '/admin/v2/ocr-review?secret=' + encodeURIComponent(SECRET);
+document.getElementById('lab-dash-link').href = '/admin/v2/lab-dashboard?secret=' + encodeURIComponent(SECRET);
 const CAT_NAMES = {
   lab:'ผลแล็บ', rx:'ใบสั่งยา', bills:'ใบเสร็จ', inbox:'กล่องข้อความ',
   dialysis:'ฟอกไต', review:'รอตรวจสอบ', other:'อื่นๆ'

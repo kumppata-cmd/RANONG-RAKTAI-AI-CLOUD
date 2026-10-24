@@ -1763,6 +1763,16 @@ except ImportError:
 except Exception as e:
     logger.warning(f"OCR Review: registration failed: {e}")
 
+# ─── Lab Dashboard (Feature 5) ───────────────────────────
+try:
+    from lab_dashboard import register_lab_dashboard
+    register_lab_dashboard(app, storage, doc_index, enhanced_audit)
+    logger.info("Lab Dashboard: registered successfully")
+except ImportError:
+    logger.warning("Lab Dashboard: lab_dashboard module not available")
+except Exception as e:
+    logger.warning(f"Lab Dashboard: registration failed: {e}")
+
 
 # ─── Document Content Reading from GCS ────────────────────
 # อ่านเนื้อหาเอกสารโดยตรงจาก GCS — ไม่ต้องส่ง signed URL ให้ผู้ใช้
