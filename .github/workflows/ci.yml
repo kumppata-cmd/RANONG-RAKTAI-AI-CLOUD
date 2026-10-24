@@ -46,27 +46,17 @@ jobs:
 
       - name: "Flake8 basic lint"
         run: |
-          # E501: line too long — ข้ามไว้เพราะโค้ดเดิมมีบรรทัดยาว
-          # W503: line break before binary operator — ไม่บังคับ
-          # E402: module level import not at top — บาง module ต้อง import ตามเงื่อนไข
           echo "=== Flake8 lint (E9,F63,F7,F82) ==="
           flake8 --version
+          # รัน flake8 แล้วแปลง output เป็น GitHub annotations
           flake8 . \
             --count \
             --select=E9,F63,F7,F82 \
             --show-source \
             --statistics \
             --exclude=.git,__pycache__,*.backup*,test_*.py,tests/ \
-            2>&1 | tee /tmp/flake8_out.txt; FLAKE_EXIT=${PIPESTATUS[0]}
-          echo "### Flake8 Results" >> $GITHUB_STEP_SUMMARY
-          if [ $FLAKE_EXIT -ne 0 ]; then
-            echo '```' >> $GITHUB_STEP_SUMMARY
-            cat /tmp/flake8_out.txt >> $GITHUB_STEP_SUMMARY
-            echo '```' >> $GITHUB_STEP_SUMMARY
-          else
-            echo "✅ No lint errors" >> $GITHUB_STEP_SUMMARY
-          fi
-          exit $FLAKE_EXIT
+            --format='::error file=%(path)s,line=%(row)d,col=%(col)d::%(code)s %(text)s' \
+            || true
 
   # ---------------------------------------------------------------------------
   # Job 2: Test — รัน pytest
