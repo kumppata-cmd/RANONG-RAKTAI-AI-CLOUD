@@ -4386,6 +4386,9 @@ BILL_COMPANY_REGISTRY: dict[str, list[str]] = {
     "MEDITOP": [
         "meditop", "เมดิท็อป", "meditop co",
         "meditop thailand", "บจก.เมดิท็อป", "บริษัท เมดิท็อป",
+        "0105528039974",  # tax ID
+        "blood line tubing", "mdt-bl-vt",
+        "two filter vt", "fm-act",
     ],
     "FRESENIUS": [
         "fresenius", "เฟรเซนีอุส", "fresenius kabi",
@@ -4398,6 +4401,36 @@ BILL_COMPANY_REGISTRY: dict[str, list[str]] = {
     "THAI_WATER_GENERATION": [
         "thai water generation", "ไทย วอเตอร์ เจเนอเรชั่น",
         "thai water", "twg",
+        "ไทย วอเตอร์ เจนเนอเรชั่น",
+        "0315557000647",  # tax ID
+        "thaiwatergen.co.th", "thaiwatergen",
+        "supernova", "ผลิตน้ำบริสุทธิ์", "ระบบ ro",
+        "flo filter",
+    ],
+    "BJC": [
+        "bjc", "เบอร์ลี่ ยุคเกอร์", "berli jucker",
+        "บจก.เบอร์ลี่", "บริษัท เบอร์ลี่",
+        "0107536009226",  # tax ID
+        "berli jucker public", "agani needle",
+        "kdl 3ml syringe",
+    ],
+    "BLH": [
+        "blh", "บี.เอล.เอช", "b.l.h. trading",
+        "b.l.h.", "blh trading",
+        "0105496000431",  # tax ID
+        "service@blh.co.th",
+    ],
+    "CENTRAL_POLY": [
+        "central poly", "เซ็นทรัลโพลีเทรดดิ้ง", "central polytrading",
+        "centralpolytrading", "เซ็นทรัลโพลี",
+        "0835560000178",  # tax ID
+        "pharmasinlaboratories", "central poly trading",
+    ],
+    "PINYO_PHARMACY": [
+        "pinyo pharmacy", "ภิญโญฟาร์มาซี", "pinyo",
+        "ภิญโญ ฟาร์มาซี", "ห้างหุ้นส่วนจำกัด ภิญโญ",
+        "0103510000",  # tax ID prefix (partially visible)
+        "pinyo pharmacy ltd",
     ],
     # ── เพิ่มบริษัทใหม่ที่นี่ ──
 }
