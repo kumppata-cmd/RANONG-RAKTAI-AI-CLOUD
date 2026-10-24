@@ -4362,11 +4362,18 @@ def classify_with_claude(filepath: str) -> dict:
         return classify_with_keywords(filepath)
 
 
-def classify_with_keywords(filepath: str) -> dict:
-    """Fallback: จำแนกด้วย keyword matching + OCR."""
+def classify_with_keywords(filepath: str, override_text: str | None = None) -> dict:
+    """Fallback: จำแนกด้วย keyword matching + OCR.
+
+    override_text: ถ้ามี ใช้ข้อความนี้แทน OCR จากไฟล์
+    (ใช้สำหรับ multi-page merge ที่ OCR รวมไว้แล้ว)
+    """
     ext = os.path.splitext(filepath)[1].lower()
 
-    if ext in (".jpg", ".jpeg", ".png"):
+    if override_text:
+        # ใช้ข้อความที่ส่งมาแทน OCR — จาก multi-page merge
+        content = override_text
+    elif ext in (".jpg", ".jpeg", ".png"):
         content = extract_text_with_ocr(filepath)
         if not content or len(content.strip()) < 20:
             return {
@@ -4537,6 +4544,8 @@ def process_file_async(
     sha256_hex: str | None = None,
     owner_hash: str | None = None,
     line_user_id: str = "",
+    merged_ocr_text: str | None = None,
+    merged_page_count: int = 0,
 ):
     """ประมวลผลไฟล์ในเธรดแยก.
 
@@ -4548,6 +4557,9 @@ def process_file_async(
 
     line_user_id: LINE user ID ดิบ — ใช้สำหรับ push_message กลับไปหาผู้ใช้
     เมื่อพบผลตรวจผิดปกติ (Lab Alert) ไม่ถูกบันทึกลง log หรือ metadata
+
+    merged_ocr_text: ข้อความ OCR ที่รวมจากหลายหน้าแล้ว (จาก multi-page buffer)
+    merged_page_count: จำนวนหน้าที่รวม (0 = ไม่ได้รวม)
     """
     _doc_id = doc_id or os.path.splitext(os.path.basename(filepath))[0]
 
@@ -4560,7 +4572,11 @@ def process_file_async(
             elif ENABLE_AI_CLASSIFY:
                 result = classify_with_claude(filepath)
             else:
-                result = classify_with_keywords(filepath)
+                # ถ้ามี merged_ocr_text จาก multi-page → ใช้ข้อความรวมสำหรับ classify
+                if merged_ocr_text:
+                    result = classify_with_keywords(filepath, override_text=merged_ocr_text)
+                else:
+                    result = classify_with_keywords(filepath)
 
             category = result.get("category", "review")
             ext_now = os.path.splitext(filepath)[1].lower()
@@ -4580,31 +4596,41 @@ def process_file_async(
             # ── Document Search V1: extract text for indexing ──
             extracted_text = ""
             ocr_status = "none"
-            try:
-                if ext_now == ".txt":
-                    try:
-                        with open(filepath, "r", encoding="utf-8", errors="replace") as f:
-                            extracted_text = f.read()
-                        ocr_status = "native"
-                    except OSError:
-                        ocr_status = "failed"
-                elif ext_now == ".pdf":
-                    extracted_text = extract_pdf_text(filepath)
-                    if len(extracted_text.strip()) < 50:
-                        # scanned PDF → OCR
+
+            # ถ้ามี merged_ocr_text จาก multi-page buffer → ใช้ข้อความรวมเลย
+            if merged_ocr_text:
+                extracted_text = merged_ocr_text
+                ocr_status = f"ocr_merged_{merged_page_count}pages"
+                logger.info(
+                    f"ใช้ merged OCR text: {merged_page_count} หน้า, "
+                    f"{len(extracted_text)} chars"
+                )
+            else:
+                try:
+                    if ext_now == ".txt":
+                        try:
+                            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                                extracted_text = f.read()
+                            ocr_status = "native"
+                        except OSError:
+                            ocr_status = "failed"
+                    elif ext_now == ".pdf":
+                        extracted_text = extract_pdf_text(filepath)
+                        if len(extracted_text.strip()) < 50:
+                            # scanned PDF → OCR
+                            extracted_text = extract_text_with_ocr(filepath)
+                            ocr_status = "ocr"
+                        else:
+                            ocr_status = "native"
+                    elif ext_now in (".jpg", ".jpeg", ".png"):
                         extracted_text = extract_text_with_ocr(filepath)
                         ocr_status = "ocr"
-                    else:
-                        ocr_status = "native"
-                elif ext_now in (".jpg", ".jpeg", ".png"):
-                    extracted_text = extract_text_with_ocr(filepath)
-                    ocr_status = "ocr"
-            except Exception as ocr_err:
-                logger.warning(
-                    f"Text extraction ล้มเหลว: {type(ocr_err).__name__} "
-                    f"(doc_id={_doc_id})"
-                )
-                ocr_status = "failed"
+                except Exception as ocr_err:
+                    logger.warning(
+                        f"Text extraction ล้มเหลว: {type(ocr_err).__name__} "
+                        f"(doc_id={_doc_id})"
+                    )
+                    ocr_status = "failed"
             extracted_text = extracted_text[:MAX_INDEX_TEXT_LENGTH]
 
             dest = copy_to_category(filepath, category, metadata=metadata)
@@ -4969,27 +4995,33 @@ def process_file_async(
                 ".jpg": "JPG", ".jpeg": "JPEG", ".png": "PNG",
             }.get(ext, ext)
 
+            _reply_lines = [
+                f"รับเอกสารแล้ว ({file_type_name})",
+                f"ประเภท: {cat_name}",
+                f"จัดเก็บใน: {FOLDERS.get(category, FOLDERS['review'])}",
+            ]
+            if merged_page_count > 1:
+                _reply_lines.insert(0, f"📄 รวมผลแล็บ {merged_page_count} หน้าสำเร็จ")
+            if lab_extracted:
+                _reply_lines.append(
+                    f"📋 พบผลตรวจ {len(lab_report.results)} รายการ"
+                )
+                _reply_lines.append(
+                    f"พิมพ์ 'ผลแล็บ {_doc_id[:8]}' เพื่อดูผลตรวจ"
+                )
+            if clinical_analyzed:
+                _reply_lines.append(
+                    f"🔬 วิเคราะห์ทางคลินิกเสร็จสิ้น"
+                )
+                _reply_lines.append(
+                    f"พิมพ์ 'วิเคราะห์แล็บ {_doc_id[:8]}' เพื่อดูผลวิเคราะห์"
+                )
+            _result_text = "\n".join(_reply_lines)
             if reply_token:
-                _reply_lines = [
-                    f"รับเอกสารแล้ว ({file_type_name})",
-                    f"ประเภท: {cat_name}",
-                    f"จัดเก็บใน: {FOLDERS.get(category, FOLDERS['review'])}",
-                ]
-                if lab_extracted:
-                    _reply_lines.append(
-                        f"📋 พบผลตรวจ {len(lab_report.results)} รายการ"
-                    )
-                    _reply_lines.append(
-                        f"พิมพ์ 'ผลแล็บ {_doc_id[:8]}' เพื่อดูผลตรวจ"
-                    )
-                if clinical_analyzed:
-                    _reply_lines.append(
-                        f"🔬 วิเคราะห์ทางคลินิกเสร็จสิ้น"
-                    )
-                    _reply_lines.append(
-                        f"พิมพ์ 'วิเคราะห์แล็บ {_doc_id[:8]}' เพื่อดูผลวิเคราะห์"
-                    )
-                reply_message(reply_token, "\n".join(_reply_lines))
+                reply_message(reply_token, _result_text)
+            elif line_user_id:
+                # Multi-page merge: reply_token หมดอายุ → ใช้ push_message
+                push_message(line_user_id, _result_text)
         except RuntimeError as e:
             # Production mode — GCS ล้มเหลว ต้องแจ้งผู้ใช้
             # บันทึกเฉพาะชนิด exception — ห้าม log message
@@ -5021,6 +5053,114 @@ def process_file_async(
     thread.start()
 
 
+# ─── Multi-Page Lab Report Buffer ─────────────────────────
+# เมื่อผู้ใช้ส่งภาพหลายรูปติดกัน (เช่น ผลแล็บหลายหน้า)
+# ระบบจะรอรวมรูปทั้งหมดเป็นเอกสารเดียว แทนที่จะแยกประมวลผลทีละรูป
+# Window: 30 วินาที — หลังรูปสุดท้ายจะเริ่มประมวลผลรวม
+# ใช้ได้เฉพาะภาพ (image) — ไฟล์ PDF/TXT ประมวลผลทันทีเหมือนเดิม
+# ─────────────────────────────────────────────────────────────
+
+_MULTIPAGE_WINDOW_SECS = int(os.environ.get("MULTIPAGE_WINDOW_SECS", "30"))
+_MULTIPAGE_MAX_PAGES = int(os.environ.get("MULTIPAGE_MAX_PAGES", "10"))
+_multipage_lock = threading.Lock()
+_multipage_buffers: dict[str, dict] = {}
+# Structure: { user_hash: {
+#   "pages": [(data, ext, sha256_hex, doc_id, filename), ...],
+#   "line_user_id": str,
+#   "timer": threading.Timer,
+#   "first_reply_token": str | None,
+# }}
+
+
+def _multipage_flush(user_hash: str):
+    """ประมวลผลรูปภาพทั้งหมดในบัฟเฟอร์ของผู้ใช้เมื่อหมดเวลารอ.
+
+    ถ้ามีรูปเดียว → ประมวลผลปกติ (เหมือนไม่มีบัฟเฟอร์)
+    ถ้ามีหลายรูป → รวมเป็นเอกสารเดียว, OCR ทุกหน้า, ต่อข้อความ
+    """
+    with _multipage_lock:
+        buf = _multipage_buffers.pop(user_hash, None)
+    if not buf:
+        return
+
+    pages = buf["pages"]
+    line_user_id = buf["line_user_id"]
+
+    if len(pages) == 1:
+        # รูปเดียว — ประมวลผลปกติ
+        data, ext, sha256_hex, doc_id, filename = pages[0]
+        filepath = save_to_inbox(data, filename)
+        process_file_async(
+            filepath, None, doc_id=doc_id, sha256_hex=sha256_hex,
+            owner_hash=user_hash, line_user_id=line_user_id,
+        )
+        return
+
+    # หลายรูป — รวมเป็นเอกสารเดียว
+    page_count = len(pages)
+    logger.info(
+        f"Multi-page merge: user={user_hash[:8]}…, pages={page_count}"
+    )
+
+    # แจ้งผู้ใช้ว่าเริ่มประมวลผลรวม
+    if line_user_id:
+        push_message(
+            line_user_id,
+            f"📄 กำลังรวมผลแล็บ {page_count} หน้าเป็นเอกสารเดียว…",
+        )
+
+    # ใช้ doc_id ของหน้าแรกเป็นตัวแทนเอกสารรวม
+    primary_doc_id = pages[0][3]
+    primary_ext = pages[0][1]
+
+    # รวม SHA256 ของทุกหน้าเป็น combined hash
+    combined_sha_input = "|".join(p[2] for p in pages)
+    combined_sha256 = hashlib.sha256(
+        combined_sha_input.encode("utf-8")
+    ).hexdigest()
+
+    # บันทึกหน้าแรกลง inbox เป็นไฟล์หลัก
+    primary_data = pages[0][0]
+    primary_filename = pages[0][4]
+    primary_filepath = save_to_inbox(primary_data, primary_filename)
+
+    # OCR ทุกหน้าและรวมข้อความ
+    combined_texts = []
+    for i, (page_data, page_ext, _, _, _) in enumerate(pages, 1):
+        page_text = ""
+        if HAS_TESSERACT and HAS_PIL:
+            try:
+                page_text = _ocr_from_bytes(page_data, "image")
+            except Exception as ocr_err:
+                logger.warning(
+                    f"Multi-page OCR ล้มเหลว หน้า {i}: "
+                    f"{type(ocr_err).__name__}"
+                )
+        if page_text.strip():
+            combined_texts.append(f"[หน้า {i}/{page_count}]\n{page_text.strip()}")
+        else:
+            combined_texts.append(f"[หน้า {i}/{page_count}]\n(ไม่สามารถอ่านข้อความได้)")
+
+    merged_text = "\n\n".join(combined_texts)
+    logger.info(
+        f"Multi-page OCR สำเร็จ: pages={page_count}, "
+        f"total_chars={len(merged_text)}"
+    )
+
+    # ประมวลผลด้วยข้อความรวม — เรียก process_file_async
+    # แต่แทรก merged_text เข้าไปเพื่อใช้แทน OCR ของไฟล์เดียว
+    process_file_async(
+        primary_filepath,
+        None,  # reply_token หมดอายุแล้ว — ใช้ push_message แทน
+        doc_id=primary_doc_id,
+        sha256_hex=combined_sha256,
+        owner_hash=user_hash,
+        line_user_id=line_user_id,
+        merged_ocr_text=merged_text,
+        merged_page_count=page_count,
+    )
+
+
 def _handle_incoming_document(
     data: bytes,
     ext: str,
@@ -5033,6 +5173,9 @@ def _handle_incoming_document(
     ชั้นที่ 3 ของการกันไฟล์ซ้ำ — ตรวจ sha256 ของเนื้อหา
     ต้องทำหลังดาวน์โหลด (ต้องมีข้อมูลถึงจะ hash ได้) แต่ก่อนบันทึกลง inbox
     จึงไม่มี temp file ค้างเมื่อพบว่าซ้ำ
+
+    สำหรับภาพ (jpg/jpeg/png): เข้า multi-page buffer เพื่อรอรวมหลายหน้า
+    สำหรับไฟล์อื่น (pdf/txt): ประมวลผลทันที
     """
     sha256_hex = content_sha256(data)
 
@@ -5045,6 +5188,79 @@ def _handle_incoming_document(
         return
 
     doc_id, filename = build_storage_filename(ext)
+
+    # ── Multi-page buffer: เฉพาะภาพเท่านั้น ──
+    if ext in (".jpg", ".jpeg", ".png"):
+        with _multipage_lock:
+            buf = _multipage_buffers.get(user_hash)
+            if buf is not None:
+                # ยกเลิก timer เดิม แล้วเริ่มใหม่
+                if buf["timer"] is not None:
+                    buf["timer"].cancel()
+                page_num = len(buf["pages"]) + 1
+
+                if page_num > _MULTIPAGE_MAX_PAGES:
+                    # เกินจำนวนสูงสุด — ปฏิเสธ
+                    reply_message(
+                        reply_token,
+                        f"⚠️ รองรับสูงสุด {_MULTIPAGE_MAX_PAGES} หน้าต่อครั้ง\n"
+                        "กรุณาส่งผลแล็บชุดใหม่หลังจากชุดนี้ประมวลผลเสร็จ",
+                    )
+                    # เริ่ม timer ใหม่สำหรับหน้าที่มีอยู่
+                    new_timer = threading.Timer(
+                        _MULTIPAGE_WINDOW_SECS,
+                        _multipage_flush,
+                        args=[user_hash],
+                    )
+                    new_timer.daemon = True
+                    buf["timer"] = new_timer
+                    new_timer.start()
+                    return
+
+                buf["pages"].append((data, ext, sha256_hex, doc_id, filename))
+                # อัปเดต line_user_id ถ้ามี
+                if line_user_id:
+                    buf["line_user_id"] = line_user_id
+                new_timer = threading.Timer(
+                    _MULTIPAGE_WINDOW_SECS,
+                    _multipage_flush,
+                    args=[user_hash],
+                )
+                new_timer.daemon = True
+                buf["timer"] = new_timer
+                new_timer.start()
+
+                reply_message(
+                    reply_token,
+                    f"📄 ได้รับหน้าที่ {page_num} แล้ว\n"
+                    f"ส่งหน้าถัดไปได้เลย (รอ {_MULTIPAGE_WINDOW_SECS} วินาทีแล้วจะรวมอัตโนมัติ)",
+                )
+                return
+            else:
+                # สร้างบัฟเฟอร์ใหม่ — หน้าแรก
+                new_timer = threading.Timer(
+                    _MULTIPAGE_WINDOW_SECS,
+                    _multipage_flush,
+                    args=[user_hash],
+                )
+                new_timer.daemon = True
+                _multipage_buffers[user_hash] = {
+                    "pages": [(data, ext, sha256_hex, doc_id, filename)],
+                    "line_user_id": line_user_id,
+                    "timer": new_timer,
+                    "first_reply_token": reply_token,
+                }
+                new_timer.start()
+
+                reply_message(
+                    reply_token,
+                    "📄 ได้รับหน้าที่ 1 แล้ว\n"
+                    f"ถ้ามีหลายหน้า ส่งต่อได้เลย (รอ {_MULTIPAGE_WINDOW_SECS} วินาทีแล้วจะรวมอัตโนมัติ)\n"
+                    "ถ้ามีหน้าเดียว ไม่ต้องทำอะไร — จะประมวลผลอัตโนมัติ",
+                )
+                return
+
+    # ── ไฟล์อื่น (PDF, TXT) — ประมวลผลทันทีเหมือนเดิม ──
     filepath = save_to_inbox(data, filename)
     process_file_async(
         filepath, reply_token, doc_id=doc_id, sha256_hex=sha256_hex,
