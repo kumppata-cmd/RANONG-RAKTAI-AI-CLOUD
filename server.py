@@ -1773,6 +1773,16 @@ except ImportError:
 except Exception as e:
     logger.warning(f"Lab Dashboard: registration failed: {e}")
 
+# ─── Patient Assistant (Feature 6) ────────────────────────
+try:
+    from line_patient_assistant import register_patient_assistant
+    register_patient_assistant(app, storage, doc_index, enhanced_audit)
+    logger.info("Patient Assistant: registered successfully")
+except ImportError:
+    logger.warning("Patient Assistant: module not available")
+except Exception as e:
+    logger.warning(f"Patient Assistant: registration failed: {e}")
+
 
 # ─── Document Content Reading from GCS ────────────────────
 # อ่านเนื้อหาเอกสารโดยตรงจาก GCS — ไม่ต้องส่ง signed URL ให้ผู้ใช้
@@ -2336,7 +2346,45 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
         CommandType.CLINIC_KPI, CommandType.MEDICATION_REVIEW,
         CommandType.MONITORING_STATUS, CommandType.NEPHROLOGY_KPI,
         CommandType.MY_STATS,
+        # Feature 6: Patient Assistant
+        CommandType.APPOINTMENT, CommandType.VIEW_APPOINTMENTS,
+        CommandType.CANCEL_APPOINTMENT, CommandType.VIEW_ESCALATIONS,
     }
+    # Feature 6 commands that don't require authorization
+    # (health advice and contact staff are open to all users)
+    OPEN_COMMANDS = {
+        CommandType.HEALTH_ADVICE, CommandType.CONTACT_STAFF,
+    }
+    # ── Feature 6: Open commands (ไม่ต้อง authorize) ──
+    if parsed.command_type in OPEN_COMMANDS:
+        try:
+            from line_patient_assistant import (
+                get_health_advice,
+                create_escalation, format_escalation_confirmation,
+            )
+            if parsed.command_type == CommandType.HEALTH_ADVICE:
+                return get_health_advice(parsed.args)
+            if parsed.command_type == CommandType.CONTACT_STAFF:
+                msg = parsed.args or "ต้องการติดต่อเจ้าหน้าที่"
+                esc = create_escalation(storage, user_hash, msg)
+                audit_logger.log("escalation_created", user_hash, {
+                    "urgency": esc["urgency"],
+                    "category": esc["category"],
+                })
+                # Notify admin users via push_message
+                for admin_hash in ADMIN_USERS:
+                    # Cannot push to hash — admin notification handled via dashboard
+                    pass
+                return format_escalation_confirmation(esc)
+        except ImportError:
+            logger.warning("Feature 6: line_patient_assistant module not available")
+            if parsed.command_type == CommandType.HEALTH_ADVICE:
+                return "ฟีเจอร์คำแนะนำสุขภาพยังไม่พร้อมใช้งาน"
+            return "ฟีเจอร์ติดต่อเจ้าหน้าที่ยังไม่พร้อมใช้งาน"
+        except Exception as e:
+            logger.warning(f"Feature 6 error: {type(e).__name__}")
+            return "ขออภัย ระบบขัดข้องชั่วคราว กรุณาลองใหม่"
+
     if not is_authorized_user(user_hash):
         if parsed.command_type in PROTECTED_COMMANDS:
             audit_logger.log("unauthorized_access", user_hash, {
@@ -2362,6 +2410,71 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
             })
             return "ขออภัย คุณไม่มีสิทธิ์ใช้งานระบบค้นหาเอกสาร\nกรุณาติดต่อผู้ดูแลระบบ"
         return None  # ไม่ใช่คำสั่งค้นหา
+
+    # ── Feature 6: Protected commands (ต้อง authorize) ──
+    if parsed.command_type in (
+        CommandType.APPOINTMENT,
+        CommandType.VIEW_APPOINTMENTS,
+        CommandType.CANCEL_APPOINTMENT,
+        CommandType.VIEW_ESCALATIONS,
+    ):
+        try:
+            from line_patient_assistant import (
+                parse_appointment_text, save_appointment,
+                format_appointment_confirmation,
+                list_appointments, format_appointments_list,
+                cancel_appointment,
+                list_pending_escalations,
+            )
+            if parsed.command_type == CommandType.APPOINTMENT:
+                appt_data = parse_appointment_text(parsed.args)
+                if not appt_data["date"]:
+                    return (
+                        "กรุณาระบุวันที่นัดหมาย เช่น:\n"
+                        "  นัดหมาย ฟอกไต 25/12/69 09:00\n"
+                        "  นัดหมาย ตรวจเลือด พรุ่งนี้ เช้า"
+                    )
+                appt = save_appointment(storage, user_hash, appt_data)
+                audit_logger.log("appointment_created", user_hash, {
+                    "date": appt.date,
+                    "purpose": appt.purpose,
+                })
+                return format_appointment_confirmation(appt)
+
+            if parsed.command_type == CommandType.VIEW_APPOINTMENTS:
+                appointments = list_appointments(storage, user_hash)
+                return format_appointments_list(appointments)
+
+            if parsed.command_type == CommandType.CANCEL_APPOINTMENT:
+                result = cancel_appointment(storage, user_hash, parsed.args)
+                audit_logger.log("appointment_cancelled", user_hash, {
+                    "id_prefix": parsed.args[:8],
+                })
+                return result
+
+            if parsed.command_type == CommandType.VIEW_ESCALATIONS:
+                # Admin only
+                if user_hash not in ADMIN_USERS:
+                    return "ขออภัย เฉพาะผู้ดูแลเท่านั้นที่ดูคำร้องได้"
+                escalations = list_pending_escalations(storage)
+                if not escalations:
+                    return "📨 ไม่มีคำร้องที่รอดำเนินการ"
+                lines = ["📨 คำร้องที่รอดำเนินการ\n"]
+                for i, esc in enumerate(escalations, 1):
+                    urgency_icon = "🔴" if esc["urgency"] == "urgent" else "🟡"
+                    lines.append(
+                        f"{i}. {urgency_icon} [{esc['category']}] "
+                        f"ผู้ป่วย: {esc['owner_hash'][:8]}…\n"
+                        f"   🕐 {esc['created_at'][:16]}"
+                    )
+                return "\n".join(lines)
+
+        except ImportError:
+            logger.warning("Feature 6: line_patient_assistant module not available")
+            return "ฟีเจอร์นัดหมายยังไม่พร้อมใช้งาน"
+        except Exception as e:
+            logger.warning(f"Feature 6 error: {type(e).__name__}")
+            return "ขออภัย ระบบขัดข้องชั่วคราว กรุณาลองใหม่"
 
     # ── สถิติ — แสดงสรุปเอกสารของผู้ใช้ ──
     if parsed.command_type == CommandType.MY_STATS:

@@ -46,6 +46,13 @@ class CommandType(Enum):
     HELP = "help"
     STATUS = "status"
     MY_STATS = "my_stats"
+    # ── Feature 6: Patient Assistant ──
+    APPOINTMENT = "appointment"
+    VIEW_APPOINTMENTS = "view_appointments"
+    CANCEL_APPOINTMENT = "cancel_appointment"
+    HEALTH_ADVICE = "health_advice"
+    CONTACT_STAFF = "contact_staff"
+    VIEW_ESCALATIONS = "view_escalations"
     UNKNOWN = "unknown"
 
 
@@ -143,6 +150,39 @@ COMMAND_ALIASES: list[tuple[str, CommandType, int | None]] = [
     (r"^สถิติของฉัน$", CommandType.MY_STATS, None),
     (r"^stats$", CommandType.MY_STATS, None),
     (r"^my\s*stats$", CommandType.MY_STATS, None),
+
+    # ─── Feature 6: นัดหมาย ───
+    (r"^นัดหมาย\s+(.+)$", CommandType.APPOINTMENT, 1),
+    (r"^นัด\s+(.+)$", CommandType.APPOINTMENT, 1),
+    (r"^ตั้งนัด\s+(.+)$", CommandType.APPOINTMENT, 1),
+    (r"^appointment\s+(.+)$", CommandType.APPOINTMENT, 1),
+    (r"^ดูนัด$", CommandType.VIEW_APPOINTMENTS, None),
+    (r"^นัดหมายของฉัน$", CommandType.VIEW_APPOINTMENTS, None),
+    (r"^ดูนัดหมาย$", CommandType.VIEW_APPOINTMENTS, None),
+    (r"^my\s*appointments?$", CommandType.VIEW_APPOINTMENTS, None),
+    (r"^ยกเลิกนัด\s+(.+)$", CommandType.CANCEL_APPOINTMENT, 1),
+    (r"^cancel\s+(.+)$", CommandType.CANCEL_APPOINTMENT, 1),
+
+    # ─── Feature 6: คำแนะนำสุขภาพ ───
+    (r"^สุขภาพ\s+(.+)$", CommandType.HEALTH_ADVICE, 1),
+    (r"^สุขภาพ$", CommandType.HEALTH_ADVICE, None),
+    (r"^คำแนะนำ\s*(.*)$", CommandType.HEALTH_ADVICE, 1),
+    (r"^คำแนะนำสุขภาพ\s*(.*)$", CommandType.HEALTH_ADVICE, 1),
+    (r"^health\s*(.*)$", CommandType.HEALTH_ADVICE, 1),
+    (r"^ดูแลไต$", CommandType.HEALTH_ADVICE, None),
+    (r"^ความรู้ไต$", CommandType.HEALTH_ADVICE, None),
+
+    # ─── Feature 6: ติดต่อเจ้าหน้าที่ ───
+    (r"^ติดต่อเจ้าหน้าที่\s*(.*)$", CommandType.CONTACT_STAFF, 1),
+    (r"^ติดต่อ\s*(.*)$", CommandType.CONTACT_STAFF, 1),
+    (r"^ต้องการความช่วยเหลือ\s*(.*)$", CommandType.CONTACT_STAFF, 1),
+    (r"^contact\s*(.*)$", CommandType.CONTACT_STAFF, 1),
+    (r"^ฉุกเฉิน\s*(.*)$", CommandType.CONTACT_STAFF, 1),
+
+    # ─── Feature 6: Admin — ดูคำร้อง ───
+    (r"^ดูคำร้อง$", CommandType.VIEW_ESCALATIONS, None),
+    (r"^คำร้อง$", CommandType.VIEW_ESCALATIONS, None),
+    (r"^escalations?$", CommandType.VIEW_ESCALATIONS, None),
 
     # ─── ช่วยเหลือ ───
     (r"^ช่วยเหลือ$", CommandType.HELP, None),
@@ -525,12 +565,35 @@ def generate_help_text(is_admin: bool = False, has_docs: bool = True) -> str:
         "  สถานะ / status"
     )
 
+    # Feature 6: Patient assistant commands
+    sections.append(
+        "\n📅 นัดหมาย:\n"
+        "  นัดหมาย [วัตถุประสงค์] [วันที่] [เวลา]\n"
+        "  เช่น: นัดหมาย ฟอกไต 25/12/69 09:00\n"
+        "  ดูนัด — ดูนัดหมายที่จะมาถึง\n"
+        "  ยกเลิกนัด [รหัส]"
+    )
+
+    sections.append(
+        "\n🏥 คำแนะนำสุขภาพ:\n"
+        "  สุขภาพ — ดูหัวข้อทั้งหมด\n"
+        "  สุขภาพ [หัวข้อ] เช่น สุขภาพ อาหาร\n"
+        "  ดูแลไต / ความรู้ไต"
+    )
+
+    sections.append(
+        "\n📨 ติดต่อเจ้าหน้าที่:\n"
+        "  ติดต่อเจ้าหน้าที่ [ข้อความ]\n"
+        "  ฉุกเฉิน [อาการ]"
+    )
+
     # Admin commands
     if is_admin:
         sections.append(
             "\n🔧 คำสั่งผู้ดูแล:\n"
             "  ยืนยันผลแล็บ [รหัส]\n"
-            "  KPI"
+            "  KPI\n"
+            "  ดูคำร้อง — ดูคำร้องจากผู้ป่วย"
         )
 
     # Tips
@@ -539,6 +602,7 @@ def generate_help_text(is_admin: bool = False, has_docs: bool = True) -> str:
         "• ใช้คำค้นหลายคำเพื่อกรอง เช่น 'ค้นหา BUN creatinine'\n"
         "• กรองตามช่วงเวลา: 'ค้นหา แล็บ สัปดาห์นี้'\n"
         "• พิมพ์ 'ผลแล็บล่าสุด' เพื่อดูผลตรวจล่าสุดโดยไม่ต้องหารหัส\n"
+        "• พิมพ์ 'สุขภาพ' เพื่อดูคำแนะนำสุขภาพไต\n"
         "• ผลแล็บหลายหน้า: ส่งภาพทีละรูปต่อเนื่อง ระบบจะรวมอัตโนมัติ"
     )
 
