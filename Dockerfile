@@ -13,6 +13,7 @@ RUN apt-get update && \
         tesseract-ocr-eng \
         libgl1 \
         libglib2.0-0 \
+        fonts-thai-tlwg \
     && rm -rf /var/lib/apt/lists/*
 
 # ตั้งค่า working directory

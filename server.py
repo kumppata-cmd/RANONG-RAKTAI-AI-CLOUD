@@ -3036,7 +3036,84 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 "critical_count": len(analysis.critical_alerts()),
             })
 
-            return analysis.summary_text_th()
+            summary_text = analysis.summary_text_th()
+
+            # สร้างกราฟ PNG (ถ้ามี matplotlib)
+            try:
+                chart_png = generate_trend_chart_png(analysis)
+                if chart_png and line_user_id:
+                    import uuid as _uuid_mod
+                    chart_id = _uuid_mod.uuid4().hex[:12]
+                    chart_path = os.path.join("/tmp/ranong_raktai", f"chart_{chart_id}.png")
+                    os.makedirs(os.path.dirname(chart_path), exist_ok=True)
+                    with open(chart_path, "wb") as cf:
+                        cf.write(chart_png)
+                    token = create_chart_token(chart_id)
+                    base_url = request.host_url.rstrip("/")
+                    chart_url = f"{base_url}/admin/chart/{token}"
+
+                    # ส่ง Flex Message พร้อมกราฟ
+                    try:
+                        push_url = "https://api.line.me/v2/bot/message/push"
+                        push_headers = {
+                            "Content-Type": "application/json",
+                            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                        }
+                        flex_msg = {
+                            "to": line_user_id,
+                            "messages": [{
+                                "type": "flex",
+                                "altText": "📊 กราฟแนวโน้มผลตรวจ Lab",
+                                "contents": {
+                                    "type": "bubble",
+                                    "size": "giga",
+                                    "header": {
+                                        "type": "box",
+                                        "layout": "vertical",
+                                        "contents": [{
+                                            "type": "text",
+                                            "text": "📊 กราฟแนวโน้มผลตรวจ Lab",
+                                            "weight": "bold",
+                                            "size": "lg",
+                                            "color": "#38bdf8",
+                                        }],
+                                        "backgroundColor": "#0f172a",
+                                        "paddingAll": "15px",
+                                    },
+                                    "hero": {
+                                        "type": "image",
+                                        "url": chart_url,
+                                        "size": "full",
+                                        "aspectRatio": "20:13",
+                                        "aspectMode": "fit",
+                                        "backgroundColor": "#0f172a",
+                                    },
+                                    "footer": {
+                                        "type": "box",
+                                        "layout": "vertical",
+                                        "contents": [{
+                                            "type": "text",
+                                            "text": "กราฟหมดอายุใน 5 นาที",
+                                            "size": "xs",
+                                            "color": "#94a3b8",
+                                            "align": "center",
+                                        }],
+                                        "backgroundColor": "#0f172a",
+                                        "paddingAll": "10px",
+                                    },
+                                },
+                            }],
+                        }
+                        if LINE_CHANNEL_ACCESS_TOKEN:
+                            requests.post(push_url, headers=push_headers,
+                                          json=flex_msg, timeout=10)
+                            logger.info(f"Chart sent via LINE Flex for trend analysis")
+                    except Exception as push_err:
+                        logger.warning(f"Chart push failed: {type(push_err).__name__}")
+            except Exception as chart_err:
+                logger.warning(f"Chart generation skipped: {type(chart_err).__name__}")
+
+            return summary_text
 
         except Exception as e:
             logger.warning(f"Trend analysis error: {type(e).__name__}")
@@ -5635,6 +5712,436 @@ def admin_legacy_docs():
     }), 200
 
 
+# ─── Admin Dashboard: Stats API ──────────────────────────
+
+@app.route("/admin/api/stats", methods=["GET"])
+def admin_api_stats():
+    """API สำหรับดึงข้อมูลสถิติระบบ — ใช้โดย Dashboard."""
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    auth_param = request.args.get("secret", "")
+    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    # Document counts by category
+    cat_counts: dict[str, int] = {}
+    for doc in doc_index._docs:
+        cat = doc.get("category", "other")
+        cat_counts[cat] = cat_counts.get(cat, 0) + 1
+
+    # Recent documents (last 20)
+    sorted_docs = sorted(
+        doc_index._docs,
+        key=lambda d: d.get("upload_date", ""),
+        reverse=True,
+    )[:20]
+    recent_docs = []
+    for d in sorted_docs:
+        recent_docs.append({
+            "doc_id": d.get("document_id", "")[:8],
+            "category": d.get("category", ""),
+            "upload_date": d.get("upload_date", ""),
+            "owner": d.get("owner_hash", "")[:8] or "—",
+            "size_kb": round(d.get("file_size", 0) / 1024, 1),
+            "ocr": d.get("ocr_status", ""),
+        })
+
+    # Count alerts from GCS
+    alert_count = 0
+    recent_alerts = []
+    try:
+        if hasattr(storage, '_bucket') and storage._bucket:
+            alert_blobs = list(storage._bucket.list_blobs(
+                prefix="_alerts/", max_results=50
+            ))
+            alert_count = len(alert_blobs)
+            for ab in alert_blobs[:10]:
+                try:
+                    adata = json.loads(ab.download_as_text())
+                    recent_alerts.append({
+                        "doc_id": adata.get("document_id", "")[:8],
+                        "critical": adata.get("critical_count", 0),
+                        "warning": adata.get("warning_count", 0),
+                        "date": adata.get("created_at", "")[:16],
+                    })
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Count approved labs
+    approved_count = 0
+    try:
+        if hasattr(storage, '_bucket') and storage._bucket:
+            lab_blobs = list(storage._bucket.list_blobs(
+                prefix="_lab_results/", max_results=200
+            ))
+            for lb in lab_blobs:
+                try:
+                    ldata = json.loads(lb.download_as_text())
+                    if ldata.get("status") == "approved":
+                        approved_count += 1
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    return jsonify({
+        "gcs_ready": getattr(storage, "is_ready", False),
+        "total_docs": doc_index.count(),
+        "legacy_docs": doc_index.count_legacy(),
+        "categories": cat_counts,
+        "recent_docs": recent_docs,
+        "alert_count": alert_count,
+        "recent_alerts": recent_alerts,
+        "approved_count": approved_count,
+        "app_env": APP_ENV,
+        "physician_users": len(PHYSICIAN_USERS),
+        "admin_users": len(ADMIN_USERS),
+        "authorized_users": len(AUTHORIZED_USERS),
+    }), 200
+
+
+# ─── Admin Dashboard: Web UI ────────────────────────────
+
+DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RANONG RAKTAI AI — Admin Dashboard</title>
+<style>
+:root{--bg:#0f172a;--card:#1e293b;--border:#334155;--text:#e2e8f0;
+--muted:#94a3b8;--accent:#38bdf8;--green:#22c55e;--red:#ef4444;
+--yellow:#eab308;--purple:#a78bfa}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;
+padding:16px;max-width:1200px;margin:0 auto}
+h1{font-size:1.5rem;color:var(--accent);margin-bottom:4px}
+.subtitle{color:var(--muted);font-size:0.85rem;margin-bottom:20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px}
+.card h3{font-size:0.8rem;color:var(--muted);text-transform:uppercase;margin-bottom:8px}
+.card .val{font-size:2rem;font-weight:700}
+.card .val.ok{color:var(--green)}.card .val.warn{color:var(--yellow)}.card .val.err{color:var(--red)}
+.section{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:16px;margin-bottom:16px}
+.section h2{font-size:1rem;color:var(--accent);margin-bottom:12px;border-bottom:1px solid var(--border);padding-bottom:8px}
+table{width:100%;border-collapse:collapse;font-size:0.85rem}
+th{text-align:left;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--border);font-weight:500}
+td{padding:6px 8px;border-bottom:1px solid var(--border)}
+.badge{display:inline-block;padding:2px 8px;border-radius:9999px;font-size:0.7rem;font-weight:600}
+.badge-lab{background:#164e63;color:#22d3ee}
+.badge-rx{background:#4a1d96;color:#c4b5fd}
+.badge-bill{background:#713f12;color:#fde047}
+.badge-inbox{background:#1e3a5f;color:#93c5fd}
+.badge-dialysis{background:#14532d;color:#86efac}
+.badge-review{background:#3f3f46;color:#d4d4d8}
+.cats{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:16px}
+.cat-chip{display:flex;align-items:center;gap:6px;padding:8px 14px;border-radius:10px;
+background:var(--bg);border:1px solid var(--border);font-size:0.85rem}
+.cat-chip .cnt{font-weight:700;color:var(--accent)}
+.refresh{color:var(--muted);font-size:0.75rem;text-align:right}
+#error{display:none;background:#450a0a;border:1px solid var(--red);border-radius:8px;
+padding:12px;margin-bottom:16px;color:#fca5a5}
+</style>
+</head>
+<body>
+<h1>🏥 RANONG RAKTAI AI</h1>
+<p class="subtitle">Admin Dashboard — ระบบจัดการเอกสารทางการแพทย์</p>
+<div id="error"></div>
+
+<div class="grid">
+  <div class="card"><h3>สถานะ GCS</h3><div class="val" id="gcs">—</div></div>
+  <div class="card"><h3>เอกสารทั้งหมด</h3><div class="val" id="total">—</div></div>
+  <div class="card"><h3>แจ้งเตือนวิกฤต</h3><div class="val" id="alerts">—</div></div>
+  <div class="card"><h3>ยืนยันแล้ว</h3><div class="val" id="approved">—</div></div>
+  <div class="card"><h3>เอกสาร Legacy</h3><div class="val" id="legacy">—</div></div>
+  <div class="card"><h3>โหมด</h3><div class="val" id="env" style="font-size:1.2rem">—</div></div>
+</div>
+
+<div class="section">
+<h2>📁 จำนวนเอกสารตามหมวดหมู่</h2>
+<div class="cats" id="categories"></div>
+</div>
+
+<div class="section">
+<h2>🔔 การแจ้งเตือนล่าสุด</h2>
+<table><thead><tr><th>รหัส</th><th>วิกฤต</th><th>เตือน</th><th>วันที่</th></tr></thead>
+<tbody id="alert-rows"></tbody></table>
+</div>
+
+<div class="section">
+<h2>📋 เอกสารล่าสุด (20 รายการ)</h2>
+<table><thead><tr><th>รหัส</th><th>หมวด</th><th>วันที่</th><th>เจ้าของ</th><th>ขนาด</th><th>OCR</th></tr></thead>
+<tbody id="doc-rows"></tbody></table>
+</div>
+
+<div class="section">
+<h2>👥 ผู้ใช้ระบบ</h2>
+<div class="grid" style="margin-bottom:0">
+  <div class="card" style="border:0;padding:8px"><h3>แพทย์</h3><div class="val" id="physicians" style="font-size:1.5rem">—</div></div>
+  <div class="card" style="border:0;padding:8px"><h3>ผู้ดูแล</h3><div class="val" id="admins" style="font-size:1.5rem">—</div></div>
+  <div class="card" style="border:0;padding:8px"><h3>ผู้ใช้ที่อนุมัติ</h3><div class="val" id="authed" style="font-size:1.5rem">—</div></div>
+</div>
+</div>
+
+<p class="refresh">อัปเดตอัตโนมัติทุก 30 วินาที — <span id="last-update">—</span></p>
+
+<script>
+const SECRET=new URLSearchParams(location.search).get('secret')||'';
+const CAT_NAMES={lab:'ผลแล็บ',rx:'ใบสั่งยา',bills:'ใบเสร็จ',inbox:'กล่องข้อความ',
+dialysis:'ฟอกไต',review:'รอตรวจสอบ',other:'อื่นๆ'};
+const CAT_BADGE={lab:'badge-lab',rx:'badge-rx',bills:'badge-bill',
+inbox:'badge-inbox',dialysis:'badge-dialysis',review:'badge-review'};
+
+async function load(){
+  try{
+    const r=await fetch('/admin/api/stats?secret='+encodeURIComponent(SECRET));
+    if(!r.ok)throw new Error('HTTP '+r.status);
+    const d=await r.json();
+    document.getElementById('error').style.display='none';
+
+    // Cards
+    const gcsEl=document.getElementById('gcs');
+    gcsEl.textContent=d.gcs_ready?'พร้อม':'ไม่พร้อม';
+    gcsEl.className='val '+(d.gcs_ready?'ok':'err');
+    document.getElementById('total').textContent=d.total_docs;
+    const alertEl=document.getElementById('alerts');
+    alertEl.textContent=d.alert_count;
+    alertEl.className='val '+(d.alert_count>0?'warn':'ok');
+    document.getElementById('approved').textContent=d.approved_count;
+    document.getElementById('approved').className='val ok';
+    const legEl=document.getElementById('legacy');
+    legEl.textContent=d.legacy_docs;
+    legEl.className='val '+(d.legacy_docs>0?'yellow':'ok');
+    document.getElementById('env').textContent=d.app_env;
+
+    // Categories
+    const cc=document.getElementById('categories');
+    cc.innerHTML='';
+    for(const[k,v]of Object.entries(d.categories||{})){
+      const chip=document.createElement('div');chip.className='cat-chip';
+      chip.innerHTML='<span class="badge '+(CAT_BADGE[k]||'badge-review')+'">'
+        +(CAT_NAMES[k]||k)+'</span><span class="cnt">'+v+'</span>';
+      cc.appendChild(chip);
+    }
+
+    // Alerts table
+    const ar=document.getElementById('alert-rows');
+    ar.innerHTML='';
+    (d.recent_alerts||[]).forEach(a=>{
+      ar.innerHTML+='<tr><td>'+a.doc_id+'</td><td style="color:var(--red)">'+a.critical
+        +'</td><td style="color:var(--yellow)">'+a.warning+'</td><td>'+a.date+'</td></tr>';
+    });
+    if(!d.recent_alerts||!d.recent_alerts.length)
+      ar.innerHTML='<tr><td colspan="4" style="color:var(--muted)">ไม่มีการแจ้งเตือน</td></tr>';
+
+    // Docs table
+    const dr=document.getElementById('doc-rows');
+    dr.innerHTML='';
+    (d.recent_docs||[]).forEach(doc=>{
+      dr.innerHTML+='<tr><td>'+doc.doc_id+'</td><td><span class="badge '
+        +(CAT_BADGE[doc.category]||'badge-review')+'">'+(CAT_NAMES[doc.category]||doc.category)
+        +'</span></td><td>'+doc.upload_date+'</td><td>'+doc.owner
+        +'</td><td>'+doc.size_kb+' KB</td><td>'+doc.ocr+'</td></tr>';
+    });
+
+    // Users
+    document.getElementById('physicians').textContent=d.physician_users;
+    document.getElementById('admins').textContent=d.admin_users;
+    document.getElementById('authed').textContent=d.authorized_users;
+
+    document.getElementById('last-update').textContent=new Date().toLocaleTimeString('th-TH');
+  }catch(e){
+    const err=document.getElementById('error');
+    err.style.display='block';
+    err.textContent='โหลดข้อมูลไม่สำเร็จ: '+e.message;
+  }
+}
+load();
+setInterval(load,30000);
+</script>
+</body>
+</html>"""
+
+
+@app.route("/admin/dashboard", methods=["GET"])
+def admin_dashboard():
+    """Admin Dashboard — Web UI สำหรับดูสถิติระบบ."""
+    # Auth: ตรวจสอบ secret จาก query parameter (สำหรับเปิดในเบราว์เซอร์)
+    auth_param = request.args.get("secret", "")
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
+        return (
+            "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>"
+            "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
+            "<p>เข้าถึง: /admin/dashboard?secret=YOUR_ADMIN_SECRET</p>"
+            "</body></html>"
+        ), 401
+    return DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+# ─── Lab Trend Chart Generation ──────────────────────────
+
+def generate_trend_chart_png(analysis, owner_prefix: str = "") -> bytes | None:
+    """สร้างกราฟแนวโน้มผลแล็บเป็น PNG bytes.
+
+    ไม่ใส่ชื่อผู้ป่วย — ใช้เฉพาะข้อมูล analyte/value.
+    Returns None if matplotlib unavailable or no data.
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")  # Non-interactive backend
+        import matplotlib.pyplot as plt
+        import matplotlib.dates as mdates
+    except ImportError:
+        logger.warning("matplotlib ไม่ได้ติดตั้ง — ข้ามสร้างกราฟ")
+        return None
+
+    trends = getattr(analysis, "trends", [])
+    if not trends:
+        return None
+
+    # Filter to trends with at least 2 data points
+    plottable = [t for t in trends if len(getattr(t, "data_points", [])) >= 2]
+    if not plottable:
+        return None
+
+    fig, axes = plt.subplots(
+        len(plottable), 1,
+        figsize=(8, max(3, 2.5 * len(plottable))),
+        squeeze=False,
+    )
+    fig.suptitle("แนวโน้มผลตรวจ Lab", fontsize=14, fontweight="bold", y=0.98)
+
+    COLORS = ["#38bdf8", "#f472b6", "#a78bfa", "#22c55e", "#fb923c", "#e879f9"]
+
+    for idx, trend in enumerate(plottable):
+        ax = axes[idx][0]
+        points = trend.data_points
+        dates = []
+        values = []
+        for p in points:
+            try:
+                d = p.date if hasattr(p, "date") else p.get("date", "")
+                v = p.value if hasattr(p, "value") else p.get("value", 0)
+                if isinstance(d, str):
+                    from datetime import datetime as _dtc
+                    d = _dtc.fromisoformat(d.replace("Z", "+00:00"))
+                dates.append(d)
+                values.append(float(v))
+            except (ValueError, TypeError, AttributeError):
+                continue
+
+        if len(dates) < 2:
+            ax.text(0.5, 0.5, "ข้อมูลไม่เพียงพอ", transform=ax.transAxes,
+                    ha="center", va="center", color="#94a3b8")
+            continue
+
+        color = COLORS[idx % len(COLORS)]
+        ax.plot(dates, values, marker="o", color=color, linewidth=2, markersize=5)
+
+        # Reference range shading
+        ref = getattr(trend, "reference_range", None)
+        if ref and len(ref) == 2:
+            try:
+                lo, hi = float(ref[0]), float(ref[1])
+                ax.axhspan(lo, hi, alpha=0.15, color="#22c55e", label="ค่าปกติ")
+            except (ValueError, TypeError):
+                pass
+
+        analyte = getattr(trend, "analyte", f"Lab {idx+1}")
+        unit = getattr(trend, "unit", "")
+        direction = getattr(trend, "direction", None)
+        dir_sym = ""
+        if direction:
+            d_name = direction.name if hasattr(direction, "name") else str(direction)
+            dir_sym = {"INCREASING": " ↑", "DECREASING": " ↓", "STABLE": " →"}.get(
+                d_name, ""
+            )
+
+        ax.set_ylabel(f"{analyte} ({unit})" if unit else analyte, fontsize=10)
+        ax.set_title(f"{analyte}{dir_sym}", fontsize=11, loc="left", color=color)
+        ax.grid(True, alpha=0.2)
+        ax.tick_params(labelsize=8)
+
+        # Format dates
+        if len(dates) > 5:
+            ax.xaxis.set_major_locator(mdates.AutoDateLocator())
+        ax.xaxis.set_major_formatter(mdates.DateFormatter("%d/%m"))
+
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+    # Save to bytes
+    import io
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=120, bbox_inches="tight",
+                facecolor="#0f172a", edgecolor="none")
+    plt.close(fig)
+    buf.seek(0)
+    return buf.read()
+
+
+@app.route("/admin/chart/<token>", methods=["GET"])
+def admin_chart_download(token):
+    """ดาวน์โหลดกราฟแนวโน้ม — token-based access (5 นาที)."""
+    import hmac as _hmac_mod
+    import hashlib as _hash_mod
+
+    # Validate token: HMAC(secret, "chart:{timestamp}:{chart_id}")
+    # Token format: {timestamp}:{chart_id}:{signature}
+    parts = token.split(":", 2)
+    if len(parts) != 3:
+        return "Invalid token", 403
+
+    ts_str, chart_id, sig = parts
+    try:
+        ts = int(ts_str)
+    except ValueError:
+        return "Invalid token", 403
+
+    # Check expiry (5 minutes)
+    import time
+    if abs(time.time() - ts) > 300:
+        return "Token expired", 403
+
+    # Verify HMAC
+    key = (ADMIN_SECRET or "fallback").encode("utf-8")
+    msg = f"chart:{ts_str}:{chart_id}".encode("utf-8")
+    expected = _hmac_mod.new(key, msg, _hash_mod.sha256).hexdigest()[:16]
+    if not _hmac_mod.compare_digest(sig, expected):
+        return "Invalid token", 403
+
+    # Load chart from temp storage
+    chart_path = os.path.join("/tmp/ranong_raktai", f"chart_{chart_id}.png")
+    if not os.path.isfile(chart_path):
+        return "Chart not found", 404
+
+    with open(chart_path, "rb") as f:
+        data = f.read()
+
+    # Clean up
+    try:
+        os.remove(chart_path)
+    except OSError:
+        pass
+
+    from flask import Response
+    return Response(data, mimetype="image/png")
+
+
+def create_chart_token(chart_id: str) -> str:
+    """สร้าง HMAC token สำหรับดาวน์โหลดกราฟ (อายุ 5 นาที)."""
+    import hmac as _hmac_mod
+    import hashlib as _hash_mod
+    import time
+
+    ts = str(int(time.time()))
+    key = (ADMIN_SECRET or "fallback").encode("utf-8")
+    msg = f"chart:{ts}:{chart_id}".encode("utf-8")
+    sig = _hmac_mod.new(key, msg, _hash_mod.sha256).hexdigest()[:16]
+    return f"{ts}:{chart_id}:{sig}"
+
+
 # ═══════════════════════════════════════════════════════════
 # Startup
 # ═══════════════════════════════════════════════════════════
@@ -5749,6 +6256,49 @@ if IS_PRODUCTION:
     logger.info("=" * 40)
 
 logger.info("=" * 60)
+
+
+# ─── Cold Start Prevention: Self-Ping Keep-Alive ─────────
+# Render Free Tier จะปิด service หลังไม่มี traffic 15 นาที
+# ระบบนี้จะ ping ตัวเองทุก 10 นาที เพื่อป้องกัน cold start
+# หมายเหตุ: ไม่ใช้ external cron — ใช้ in-process thread ที่เบา
+
+import threading
+
+_KEEPALIVE_INTERVAL = int(os.environ.get("KEEPALIVE_INTERVAL", "600"))  # 10 นาที
+_KEEPALIVE_ENABLED = os.environ.get("KEEPALIVE_ENABLED", "true").lower() == "true"
+_RENDER_EXTERNAL_URL = os.environ.get("RENDER_EXTERNAL_URL", "")
+
+
+def _keepalive_worker():
+    """Background thread: ping /health/live ทุก 10 นาที."""
+    import time as _time
+    while True:
+        _time.sleep(_KEEPALIVE_INTERVAL)
+        try:
+            target_url = _RENDER_EXTERNAL_URL or f"http://localhost:{PORT}"
+            resp = requests.get(
+                f"{target_url}/health/live",
+                timeout=15,
+                headers={"User-Agent": "RanongRaktaiAI-KeepAlive/1.0"},
+            )
+            logger.debug(f"Keep-alive ping: {resp.status_code}")
+        except Exception as e:
+            logger.debug(f"Keep-alive ping failed: {type(e).__name__}")
+
+
+if _KEEPALIVE_ENABLED and not IS_TESTING:
+    _keepalive_thread = threading.Thread(
+        target=_keepalive_worker,
+        daemon=True,
+        name="keepalive-ping",
+    )
+    _keepalive_thread.start()
+    logger.info(
+        f"Keep-alive: เปิดใช้งาน (ทุก {_KEEPALIVE_INTERVAL} วินาที)"
+    )
+else:
+    logger.info("Keep-alive: ปิด (KEEPALIVE_ENABLED=false หรือ testing mode)")
 
 
 # ═══════════════════════════════════════════════════════════

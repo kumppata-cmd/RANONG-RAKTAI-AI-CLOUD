@@ -20,5 +20,8 @@ Pillow==11.1.0
 google-cloud-storage==2.18.2
 google-auth==2.35.0
 
+# Chart Generation
+matplotlib==3.9.3
+
 # NOTE: Tesseract OCR binary ต้องติดตั้งผ่าน apt (ดู Dockerfile)
 # NOTE: ไม่ใช้ python-dotenv บน cloud — ตั้ง ENV ผ่าน Render Dashboard
