@@ -1743,6 +1743,16 @@ except ImportError:
     dashboard_text_th = None
     logger.warning("Phase 2B: nephrology_kpi module not available")
 
+# ─── Dashboard V2 ─────────────────────────────────────────
+try:
+    from dashboard import register_dashboard
+    register_dashboard(app, storage, doc_index, enhanced_audit)
+    logger.info("Dashboard V2: registered successfully")
+except ImportError:
+    logger.warning("Dashboard V2: dashboard module not available")
+except Exception as e:
+    logger.warning(f"Dashboard V2: registration failed: {e}")
+
 
 # ─── Document Content Reading from GCS ────────────────────
 # อ่านเนื้อหาเอกสารโดยตรงจาก GCS — ไม่ต้องส่ง signed URL ให้ผู้ใช้
