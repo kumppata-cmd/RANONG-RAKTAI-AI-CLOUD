@@ -7645,6 +7645,28 @@ def admin_legacy_docs():
     }), 200
 
 
+# ─── Admin Debug: GCS Paths ──────────────────────────────
+
+@app.route("/admin/api/v2/debug-paths", methods=["GET"])
+def admin_debug_paths():
+    """แสดง GCS path ของเอกสาร — ไม่แสดงข้อมูลผู้ป่วย."""
+    auth_param = request.args.get("secret", "")
+    if not ADMIN_SECRET or auth_param != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+    cat_filter = request.args.get("category", "")
+    paths = []
+    for doc in doc_index._docs:
+        if cat_filter and doc.get("category") != cat_filter:
+            continue
+        paths.append({
+            "doc_id": doc.get("document_id", "")[:8],
+            "category": doc.get("category", ""),
+            "gcs_path": doc.get("gcs_object_path", ""),
+            "upload_date": doc.get("upload_date", ""),
+        })
+    return jsonify({"count": len(paths), "paths": paths}), 200
+
+
 # ─── Admin Dashboard: Stats API ──────────────────────────
 
 @app.route("/admin/api/stats", methods=["GET"])
