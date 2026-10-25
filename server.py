@@ -46,6 +46,7 @@ from patient_hn_registry import HNRegistry, get_quarter
 from patient_master_registry import (
     MasterPatientRegistry,
     parse_patient_list_ocr,
+    parse_patient_text_input,
     extract_hn_from_document,
 )
 from quarterly_compare import (
@@ -5995,11 +5996,12 @@ def _process_registration_image(
             push_message(
                 line_user_id,
                 "❌ ไม่พบ HN + ชื่อผู้ป่วยในรูป\n\n"
-                "รูปแบบที่รองรับ:\n"
-                "  • 1234 สมชาย ใจดี\n"
-                "  • HN:1234 สมชาย\n"
-                "  • 1234/56789 สมชาย\n\n"
-                "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อลองใหม่",
+                "ลองใหม่:\n"
+                "📸 ถ่ายรูปใหม่ให้ชัดขึ้น หรือ\n"
+                "⌨️ พิมพ์ข้อความ เช่น:\n"
+                "  56001 สมชาย ใจดี\n"
+                "  56001/00002567 สมชาย\n\n"
+                "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อเริ่มใหม่",
             )
             return
 
@@ -6025,8 +6027,10 @@ def _process_registration_image(
         report_lines.append("รายชื่อ:")
         for i, pd in enumerate(patients_data[:15], 1):
             hn = pd.get("clinic_hn", "?")
+            hosp = pd.get("hospital_hn", "")
             name = pd.get("patient_name", "-")
-            report_lines.append(f"  {i}. {hn} — {name}")
+            hn_disp = f"{hn}/{hosp}" if hosp else hn
+            report_lines.append(f"  {i}. {hn_disp} — {name}")
         if len(patients_data) > 15:
             report_lines.append(f"  ...และอีก {len(patients_data)-15} คน")
 
@@ -6342,6 +6346,58 @@ def webhook():
                 text = msg.get("text", "")
                 logger.info(f"รับข้อความ: {len(text)} chars")
 
+                # ── ตรวจ Registration Mode สำหรับข้อความพิมพ์ ──
+                reg_ts = _registration_mode.get(user_hash)
+                _in_registration = reg_ts and (time.time() - reg_ts) < _REGISTRATION_TIMEOUT_SECS
+                # ถ้าหมดเวลา → ลบ
+                if reg_ts and not _in_registration:
+                    del _registration_mode[user_hash]
+
+                if _in_registration and text.strip() not in (
+                    "ยกเลิก", "cancel", "ลงทะเบียนรายชื่อ", "ลงทะเบียน",
+                    "register", "register patients",
+                ):
+                    # ── ข้อความพิมพ์ในโหมดลงทะเบียน → parse เป็นข้อมูลผู้ป่วย ──
+                    del _registration_mode[user_hash]
+                    patients_data = parse_patient_text_input(text)
+                    if patients_data:
+                        new_count, updated_count, messages = master_registry.register_batch(
+                            patients_data, registered_by="admin_text"
+                        )
+                        report_lines = [
+                            f"📋 ลงทะเบียนจากข้อความเสร็จสิ้น",
+                            f"",
+                            f"👤 พบ {len(patients_data)} รายการ",
+                            f"✅ ใหม่: {new_count} คน",
+                            f"🔄 อัปเดต: {updated_count} คน",
+                        ]
+                        if messages:
+                            report_lines.append("")
+                            report_lines.extend(messages)
+                        report_lines.append("")
+                        report_lines.append("รายชื่อ:")
+                        for i, pd in enumerate(patients_data[:15], 1):
+                            hn = pd.get("clinic_hn", "?")
+                            hosp = pd.get("hospital_hn", "")
+                            name = pd.get("patient_name", "-")
+                            hn_disp = f"{hn}/{hosp}" if hosp else hn
+                            report_lines.append(f"  {i}. {hn_disp} — {name}")
+                        if len(patients_data) > 15:
+                            report_lines.append(f"  ...และอีก {len(patients_data)-15} คน")
+                        reply_message(reply_token, "\n".join(report_lines))
+                    else:
+                        reply_message(
+                            reply_token,
+                            "❌ ไม่พบ HN + ชื่อในข้อความ\n\n"
+                            "รูปแบบที่รองรับ:\n"
+                            "  • 56001 สมชาย ใจดี\n"
+                            "  • HN:56001 สมชาย\n"
+                            "  • 56001/00002567 สมชาย\n"
+                            "  • สมชาย ใจดี 00002567 56001\n\n"
+                            "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อลองใหม่",
+                        )
+                    continue
+
                 # ── Document Search V1: ตรวจคำสั่งค้นหาก่อน ──
                 search_response = handle_search_command(text, user_hash)
                 if search_response:
@@ -6354,6 +6410,7 @@ def webhook():
                 elif text.strip() in (
                     "ลงทะเบียนรายชื่อ", "ลงทะเบียน",
                     "register", "register patients",
+                    "เพิ่มผู้ป่วย", "เพิ่มชื่อ",
                 ):
                     # ตรวจสิทธิ์ admin (เฉพาะ admin เท่านั้น)
                     _admin_hash = os.getenv("ADMIN_LINE_HASH", "").strip()
@@ -6367,12 +6424,16 @@ def webhook():
                         reply_message(
                             reply_token,
                             "📋 โหมดลงทะเบียนรายชื่อผู้ป่วย\n\n"
-                            "📸 ถ่ายรูปรายชื่อผู้ป่วยแล้วส่งมาได้เลย\n"
-                            "รองรับรูปแบบ:\n"
-                            "  • HN ชื่อ-นามสกุล (เช่น 1234 สมชาย ใจดี)\n"
-                            "  • HN/HN-รพ. ชื่อ (เช่น 1234/56789 สมชาย)\n\n"
-                            "⏱️ มีเวลา 2 นาทีในการส่งรูป\n"
-                            "พิมพ์ 'ยกเลิก' เพื่อออกจากโหมด",
+                            "เลือกวิธีเพิ่มชื่อ:\n\n"
+                            "📸 วิธีที่ 1: ถ่ายรูปรายชื่อแล้วส่ง\n"
+                            "  รองรับตาราง เช่น ชื่อ + HN รพ + HN clinic\n\n"
+                            "⌨️ วิธีที่ 2: พิมพ์ข้อความ เช่น\n"
+                            "  56001 สมชาย ใจดี\n"
+                            "  HN:56001 สมชาย ใจดี\n"
+                            "  56001/00002567 สมชาย\n"
+                            "  (หลายคน: 1 บรรทัดต่อ 1 คน)\n\n"
+                            "⏱️ มีเวลา 2 นาที\n"
+                            "พิมพ์ 'ยกเลิก' เพื่อออก",
                         )
                 elif text.strip() in ("ยกเลิก", "cancel"):
                     if user_hash in _registration_mode:

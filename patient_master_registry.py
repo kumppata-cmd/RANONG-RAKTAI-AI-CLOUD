@@ -380,20 +380,22 @@ class MasterPatientRegistry:
 # ─────────────────────────────────────────────────────────────
 
 def parse_patient_list_ocr(text: str) -> list[dict]:
-    """แยก HN + ชื่อผู้ป่วยจากข้อความ OCR ของรายชื่อผู้ป่วย
+    """แยก HN + ชื่อผู้ป่วยจากข้อความ OCR หรือข้อความพิมพ์
 
     รองรับรูปแบบ:
-    1. "1234 สมชาย ใจดี"          → HN=1234, ชื่อ=สมชาย ใจดี
-    2. "HN 1234 สมชาย"            → HN=1234, ชื่อ=สมชาย
-    3. "HN:1234 สมชาย ใจดี"       → HN=1234, ชื่อ=สมชาย ใจดี
-    4. "1. 1234 สมชาย ใจดี"       → HN=1234, ชื่อ=สมชาย ใจดี
-    5. "1234/56789 สมชาย"         → clinic=1234, hospital=56789
-    6. "1234 - สมชาย ใจดี"        → HN=1234, ชื่อ=สมชาย ใจดี
-    7. แต่ละบรรทัดมี 1 ผู้ป่วย
+    1. "1234 สมชาย ใจดี"           → HN=1234
+    2. "HN 1234 สมชาย"             → HN=1234
+    3. "HN:1234 สมชาย ใจดี"        → HN=1234
+    4. "1. 1234 สมชาย ใจดี"        → HN=1234 (ลำดับนำหน้า)
+    5. "1234/56789 สมชาย"          → clinic=1234, hospital=56789
+    6. "นาย สมชาย ใจดี 00002567 56001"  → ตาราง: ชื่อ + HN รพ + HN clinic
+    7. "นาย สมชาย 56001"           → ชื่อ + HN ท้ายบรรทัด
+    8. แต่ละบรรทัดมี 1 ผู้ป่วย
 
     Returns: list of {"clinic_hn": str, "hospital_hn": str, "patient_name": str}
     """
     results = []
+    seen_hns: set[str] = set()  # ป้องกัน duplicate
     lines = text.strip().split("\n")
 
     for line in lines:
@@ -403,28 +405,46 @@ def parse_patient_list_ocr(text: str) -> list[dict]:
 
         parsed = _parse_patient_line(line)
         if parsed:
-            results.append(parsed)
+            # ป้องกัน duplicate — ตรวจ HN ซ้ำ
+            key = parsed.get("clinic_hn", "") or parsed.get("hospital_hn", "")
+            if key and key not in seen_hns:
+                seen_hns.add(key)
+                results.append(parsed)
 
     logger.info("parse_patient_list_ocr: %d patients from %d lines",
                 len(results), len(lines))
     return results
 
 
+# Header/noise patterns ที่ต้อง skip
+_SKIP_PATTERNS = re.compile(
+    r'ลำดับ|ชื่อ.*สกุล|HN\s*รพ|HN\s*clinic|รหัส.*ผู้ป่วย|'
+    r'ทะเบียน|หมายเหตุ|วันที่|หน้า\s*\d|page\s*\d|'
+    r'โรงพยาบาล.*ระนอง|คลินิก.*รักษ์|total|รวม',
+    re.IGNORECASE,
+)
+
+
 def _parse_patient_line(line: str) -> Optional[dict]:
-    """แยก HN + ชื่อจากบรรทัดเดียว"""
+    """แยก HN + ชื่อจากบรรทัดเดียว — รองรับทั้ง OCR ตาราง และพิมพ์เอง"""
 
     # ลบหมายเลขลำดับ (1. , 2. , 3) , #1, ฯลฯ)
-    line = re.sub(r'^[\d]+[\.\)\s]+', '', line).strip()
+    line = re.sub(r'^[\d]{1,3}[\.\)\s]+', '', line).strip()
     line = re.sub(r'^#\d+\s*', '', line).strip()
 
-    if not line:
+    if not line or len(line) < 3:
+        return None
+
+    # Skip header/noise lines
+    if _SKIP_PATTERNS.search(line):
         return None
 
     clinic_hn = ""
     hospital_hn = ""
     patient_name = ""
 
-    # Pattern 1: "HN:1234" หรือ "HN 1234" หรือ "HN1234"
+    # ── Pattern 1: Explicit HN label ──
+    # "HN:1234", "HN 1234", "HN1234", "HN 1234/56789 สมชาย"
     m = re.match(
         r'(?:HN|hn|H\.?N\.?)\s*[:=\-]?\s*(\d{1,10})\s*[/\-]?\s*(\d{1,10})?\s*[,\-\s]*(.+)?',
         line,
@@ -442,8 +462,7 @@ def _parse_patient_line(line: str) -> Optional[dict]:
                 "patient_name": patient_name,
             }
 
-    # Pattern 2: ตัวเลข HN นำหน้า เช่น "1234 สมชาย ใจดี"
-    #   หรือ "1234/56789 สมชาย ใจดี" (clinic/hospital pair)
+    # ── Pattern 2: HN pair at start "1234/56789 ชื่อ" ──
     m = re.match(
         r'(\d{1,10})\s*[/\-]\s*(\d{1,10})\s+(.+)',
         line,
@@ -455,21 +474,68 @@ def _parse_patient_line(line: str) -> Optional[dict]:
             "patient_name": m.group(3).strip().rstrip(',.-'),
         }
 
-    # Pattern 3: ตัวเลข HN เดี่ยว + ชื่อไทย/อังกฤษ
+    # ── Pattern 3: HN at start + Thai/English name ──
+    # "56001 นาย สมชาย ใจดี"
     m = re.match(
-        r'(\d{1,10})\s+[,\-\s]*([ก-๙A-Za-z].+)',
+        r'(\d{2,10})\s+[,\-\s]*([ก-๙A-Za-z].+)',
         line,
     )
     if m:
+        # ตรวจว่ามี HN ตัวที่สองท้ายบรรทัดหรือไม่
+        rest = m.group(2)
+        m2 = re.search(r'\s+(\d{3,10})\s*$', rest)
+        if m2:
+            # มี 2 HN: ตัวแรก + ชื่อ + ตัวที่สอง
+            name_part = rest[:m2.start()].strip().rstrip(',.-')
+            return {
+                "clinic_hn": m.group(1),
+                "hospital_hn": m2.group(1),
+                "patient_name": name_part,
+            }
         return {
             "clinic_hn": m.group(1),
             "hospital_hn": "",
-            "patient_name": m.group(2).strip().rstrip(',.-'),
+            "patient_name": rest.strip().rstrip(',.-'),
         }
 
-    # Pattern 4: ชื่อไทย + HN (กลับด้าน)
+    # ── Pattern 4: Table format — ชื่อไทยอยู่ตรงกลาง, HN อยู่ท้าย ──
+    # "นาย สมชาย ใจดี 00002567 56001"
+    # "นส. สมหญิง รักดี 00005318 56034"
+    # Strategy: หาตัวเลข 3+ หลักทั้งหมด + หาชื่อไทย
+    digit_groups = re.findall(r'\d{3,}', line)
+    thai_match = re.search(r'[ก-๙][ก-๙\s\.A-Za-z]*[ก-๙]', line)
+
+    if digit_groups and thai_match:
+        name = thai_match.group().strip()
+        # ลบคำนำหน้า "นาย" "นาง" "นส" ที่ซ้ำ ไม่ต้อง — เก็บไว้
+        if len(digit_groups) >= 2:
+            # 2+ ตัวเลข: ตัวยาวกว่า = hospital HN, ตัวสั้นกว่า = clinic HN
+            # ถ้ายาวเท่ากัน: ตัวแรก = hospital, ตัวหลัง = clinic
+            nums = list(digit_groups)
+            if len(nums[0]) > len(nums[-1]):
+                hospital_hn = nums[0]
+                clinic_hn = nums[-1]
+            elif len(nums[0]) < len(nums[-1]):
+                clinic_hn = nums[0]
+                hospital_hn = nums[-1]
+            else:
+                # ยาวเท่ากัน → ตัวแรก hospital, ตัวหลัง clinic
+                hospital_hn = nums[0]
+                clinic_hn = nums[-1]
+        else:
+            clinic_hn = digit_groups[0]
+
+        if name and len(name) >= 2 and (clinic_hn or hospital_hn):
+            return {
+                "clinic_hn": clinic_hn,
+                "hospital_hn": hospital_hn,
+                "patient_name": name,
+            }
+
+    # ── Pattern 5: ชื่อไทย + HN เดี่ยวท้ายบรรทัด ──
+    # "นาย สมชาย ใจดี 56001"
     m = re.match(
-        r'([ก-๙].+?)\s+(?:HN|hn)?\s*[:=]?\s*(\d{2,10})',
+        r'([ก-๙].+?)\s+(?:HN|hn)?\s*[:=]?\s*(\d{2,10})\s*$',
         line,
     )
     if m:
@@ -479,7 +545,58 @@ def _parse_patient_line(line: str) -> Optional[dict]:
             "patient_name": m.group(1).strip().rstrip(',.-'),
         }
 
+    # ── Pattern 6: Fallback — หาชื่อไทยและตัวเลขอะไรก็ได้ ──
+    if thai_match:
+        any_nums = re.findall(r'\d{2,}', line)
+        if any_nums:
+            name = thai_match.group().strip()
+            if len(name) >= 2:
+                return {
+                    "clinic_hn": any_nums[-1],  # ตัวเลขสุดท้าย
+                    "hospital_hn": any_nums[0] if len(any_nums) > 1 else "",
+                    "patient_name": name,
+                }
+
     return None
+
+
+def parse_patient_text_input(text: str) -> list[dict]:
+    """แยก HN + ชื่อจากข้อความที่พิมพ์เอง (ไม่ใช่ OCR)
+
+    รองรับรูปแบบ:
+    - "HN 12345 สมชาย ใจดี"
+    - "12345 สมชาย ใจดี"
+    - "12345/67890 สมชาย"
+    - "สมชาย ใจดี HN12345"
+    - หลายบรรทัด (1 คนต่อบรรทัด)
+    - คั่นด้วย comma: "12345 สมชาย, 12346 สมหญิง"
+
+    Returns: list of {"clinic_hn": str, "hospital_hn": str, "patient_name": str}
+    """
+    results = []
+    seen_hns: set[str] = set()
+
+    # แยกบรรทัด และแยก comma
+    raw_lines = text.strip().split("\n")
+    lines: list[str] = []
+    for raw in raw_lines:
+        # แยก comma-separated entries ถ้ามี pattern HN/ชื่อ
+        parts = re.split(r',\s*(?=\d|HN|hn|[ก-๙])', raw)
+        lines.extend(parts)
+
+    for line in lines:
+        line = line.strip()
+        if not line or len(line) < 3:
+            continue
+        parsed = _parse_patient_line(line)
+        if parsed:
+            key = parsed.get("clinic_hn", "") or parsed.get("hospital_hn", "")
+            if key and key not in seen_hns:
+                seen_hns.add(key)
+                results.append(parsed)
+
+    logger.info("parse_patient_text_input: %d patients from text", len(results))
+    return results
 
 
 # ─────────────────────────────────────────────────────────────
