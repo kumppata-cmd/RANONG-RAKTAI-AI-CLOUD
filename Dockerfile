@@ -45,6 +45,10 @@ COPY ocr_review.py .
 COPY lab_dashboard.py .
 COPY line_patient_assistant.py .
 COPY document_workflow.py .
+COPY patient_hn_registry.py .
+COPY quarterly_compare.py .
+COPY monitoring_schedule.py .
+COPY nephrology_kpi.py .
 
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \
