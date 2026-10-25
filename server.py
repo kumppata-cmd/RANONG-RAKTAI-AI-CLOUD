@@ -7154,6 +7154,22 @@ except ImportError:
     pass
 
 
+@app.route("/health/parser-test", methods=["GET"])
+def health_parser_test():
+    """ทดสอบ OCR parser — ไม่มีข้อมูลผู้ป่วยจริง"""
+    from patient_master_registry import _parse_patient_line, parse_patient_list_ocr
+    test_line = "P35 | Sarr situ annues | 00063695 | 63203"
+    result = _parse_patient_line(test_line)
+    # ทดสอบ full pipeline
+    test_block = "36 | cure laut | 00032210 | 63208\n37 | cans guts | 00007094 | 63215"
+    batch = parse_patient_list_ocr(test_block)
+    return jsonify({
+        "parser_version": "pattern7-ocr-fallback",
+        "single_line_test": {"input": test_line, "result": result},
+        "batch_test": {"input_lines": 2, "parsed_count": len(batch), "results": batch},
+    }), 200
+
+
 @app.route("/health/live", methods=["GET"])
 def health_live():
     """Liveness probe — process สามารถรับ request ได้หรือไม่."""
@@ -7217,7 +7233,7 @@ def health():
     """
     health_info = {
         "status": "running",
-        "version": "cloud-2.0-production",
+        "version": "cloud-2.0-production-p7fix",
         "app_env": APP_ENV,
         "testing_mode": IS_TESTING,
         "production_mode": IS_PRODUCTION,
