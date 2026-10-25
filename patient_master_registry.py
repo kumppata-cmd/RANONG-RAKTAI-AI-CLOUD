@@ -149,11 +149,13 @@ class MasterPatientRegistry:
         except Exception as e:
             logger.error("MasterPatientRegistry: load failed: %s", e)
 
-    def _save(self) -> bool:
-        """บันทึก registry ทั้งหมดลง GCS"""
+    def _save(self) -> tuple:
+        """บันทึก registry ทั้งหมดลง GCS
+        Returns: (success: bool, error_detail: str)
+        """
         if not self._storage:
             logger.warning("MasterPatientRegistry: no storage — cannot save")
-            return False
+            return False, "no storage backend"
         try:
             blob = self._storage.blob(self.GCS_FILE)
             data = {
@@ -162,18 +164,24 @@ class MasterPatientRegistry:
                 "patient_count": len(self._patients),
                 "patients": [p.to_dict() for p in self._patients],
             }
+            payload = json.dumps(data, ensure_ascii=False, indent=2)
+            logger.info(
+                "MasterPatientRegistry: saving %d patients (%d bytes) to %s",
+                len(self._patients), len(payload), self.GCS_FILE,
+            )
             blob.upload_from_string(
-                json.dumps(data, ensure_ascii=False, indent=2),
+                payload,
                 content_type="application/json",
             )
             logger.info(
-                "MasterPatientRegistry: saved %d patients",
+                "MasterPatientRegistry: saved %d patients OK",
                 len(self._patients),
             )
-            return True
+            return True, ""
         except Exception as e:
-            logger.error("MasterPatientRegistry: save failed: %s", e)
-            return False
+            err = f"{type(e).__name__}: {e}"
+            logger.error("MasterPatientRegistry: save failed: %s", err)
+            return False, err
 
     def _rebuild_index(self) -> None:
         """สร้าง index ใหม่จาก patient list"""
@@ -233,9 +241,10 @@ class MasterPatientRegistry:
                 p.notes = notes
             p.updated_at = datetime.now(timezone.utc).isoformat()
             self._rebuild_index()
-            if self._save():
+            ok, err = self._save()
+            if ok:
                 return True, f"อัปเดต: {p.hn_display} ({p.patient_name})"
-            return False, "❌ บันทึกไม่สำเร็จ"
+            return False, f"❌ บันทึกไม่สำเร็จ: {err}"
 
         # ลงทะเบียนใหม่
         patient = MasterPatient(
@@ -247,9 +256,13 @@ class MasterPatientRegistry:
         )
         self._patients.append(patient)
         self._rebuild_index()
-        if self._save():
+        ok, err = self._save()
+        if ok:
             return True, f"✅ ลงทะเบียน: {patient.hn_display} ({patient.patient_name})"
-        return False, "❌ บันทึกไม่สำเร็จ"
+        # rollback — ลบ patient ที่เพิ่งเพิ่มเข้าไป
+        self._patients.pop()
+        self._rebuild_index()
+        return False, f"❌ บันทึกไม่สำเร็จ: {err}"
 
     def register_batch(
         self,
@@ -308,12 +321,13 @@ class MasterPatientRegistry:
                 new_count += 1
 
         self._rebuild_index()
-        if self._save():
+        ok, err = self._save()
+        if ok:
             messages.append(
                 f"✅ ลงทะเบียนใหม่ {new_count} คน, อัปเดต {updated_count} คน"
             )
         else:
-            messages.append("❌ บันทึกลง GCS ไม่สำเร็จ")
+            messages.append(f"❌ บันทึกลง GCS ไม่สำเร็จ: {err}")
         return new_count, updated_count, messages
 
     def match_hn(self, hn: str) -> Optional[MasterPatient]:
@@ -418,13 +432,14 @@ class MasterPatientRegistry:
 
         patient.updated_at = datetime.now(timezone.utc).isoformat()
         self._rebuild_index()
-        if self._save():
+        ok, err = self._save()
+        if ok:
             return True, (
                 f"✅ แก้ไขสำเร็จ\n"
                 f"เดิม: {old_display}\n"
                 f"แก้ไข: {', '.join(changes)}"
             )
-        return False, "❌ บันทึกไม่สำเร็จ"
+        return False, f"❌ บันทึกไม่สำเร็จ: {err}"
 
     def delete(self, clinic_hn: str) -> tuple[bool, str]:
         """ลบผู้ป่วยจาก registry"""
@@ -435,9 +450,13 @@ class MasterPatientRegistry:
             return False, f"ไม่พบ HN: {clinic_hn}"
         patient = self._patients.pop(idx)
         self._rebuild_index()
-        if self._save():
+        ok, err = self._save()
+        if ok:
             return True, f"✅ ลบสำเร็จ: {patient.hn_display} ({patient.patient_name})"
-        return False, "❌ บันทึกไม่สำเร็จ"
+        # rollback — ใส่กลับ
+        self._patients.insert(idx, patient)
+        self._rebuild_index()
+        return False, f"❌ บันทึกไม่สำเร็จ: {err}"
 
 
 # ─────────────────────────────────────────────────────────────

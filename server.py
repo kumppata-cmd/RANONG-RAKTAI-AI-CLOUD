@@ -2458,6 +2458,56 @@ loadPatients();
 </html>'''
 
 
+@app.route("/admin/api/v2/master-registry/debug-gcs", methods=["GET"])
+def api_master_registry_debug_gcs():
+    """ทดสอบ GCS write โดยตรง — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if not admin_secret or auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    results = {}
+    # 1) ตรวจ storage backend
+    results["storage_backend"] = STORAGE_BACKEND
+    results["has_storage_bucket"] = hasattr(storage, '_bucket') if storage else False
+
+    # 2) ตรวจ master_registry._storage
+    results["registry_has_storage"] = master_registry._storage is not None
+    results["registry_storage_type"] = type(master_registry._storage).__name__ if master_registry._storage else None
+    results["registry_loaded"] = master_registry._loaded
+    results["registry_patient_count"] = len(master_registry._patients)
+
+    # 3) ทดสอบ write test blob
+    if master_registry._storage:
+        try:
+            test_blob = master_registry._storage.blob("_patient_master/_write_test.txt")
+            test_blob.upload_from_string("write_test_ok", content_type="text/plain")
+            results["write_test"] = "OK"
+            # cleanup
+            try:
+                test_blob.delete()
+            except Exception:
+                pass
+        except Exception as e:
+            results["write_test"] = f"FAILED: {type(e).__name__}: {e}"
+
+    # 4) ทดสอบ write registry path
+    if master_registry._storage:
+        try:
+            reg_blob = master_registry._storage.blob(master_registry.GCS_FILE)
+            results["registry_blob_exists"] = reg_blob.exists()
+            # ลอง download เพื่อดูว่า read ได้
+            try:
+                content = reg_blob.download_as_text()
+                results["registry_read"] = f"OK ({len(content)} bytes)"
+            except Exception as e:
+                results["registry_read"] = f"FAILED: {type(e).__name__}: {e}"
+        except Exception as e:
+            results["registry_blob_check"] = f"FAILED: {type(e).__name__}: {e}"
+
+    return jsonify(results), 200
+
+
 logger.info("Master Patient Registry API: endpoints registered")
 
 
