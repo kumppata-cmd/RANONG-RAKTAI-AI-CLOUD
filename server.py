@@ -5855,7 +5855,42 @@ _multipage_buffers: dict[str, dict] = {}
 # เมื่อ admin พิมพ์ "ลงทะเบียนรายชื่อ" → เข้าโหมดรอรับรูป
 # รูปถัดไปที่ส่งจะถูก OCR แล้วแปลงเป็นทะเบียนผู้ป่วย
 _REGISTRATION_TIMEOUT_SECS = 120  # หมดเวลาหลัง 2 นาที
-_registration_mode: dict[str, float] = {}  # user_hash -> timestamp
+
+# ── File-based registration mode (shared across Gunicorn workers) ──
+_REG_MODE_DIR = os.path.join(tempfile.gettempdir(), "ranong_raktai", "reg_mode")
+os.makedirs(_REG_MODE_DIR, exist_ok=True)
+
+
+def _set_registration_mode(user_hash: str):
+    """ตั้ง registration mode — เขียนไฟล์ใน /tmp เพื่อ share ข้าม workers"""
+    filepath = os.path.join(_REG_MODE_DIR, f"{user_hash}.flag")
+    with open(filepath, "w") as f:
+        f.write(str(time.time()))
+
+
+def _check_registration_mode(user_hash: str) -> bool:
+    """ตรวจ registration mode — อ่านไฟล์จาก /tmp (shared ข้าม workers)"""
+    filepath = os.path.join(_REG_MODE_DIR, f"{user_hash}.flag")
+    try:
+        with open(filepath, "r") as f:
+            ts = float(f.read().strip())
+        if (time.time() - ts) < _REGISTRATION_TIMEOUT_SECS:
+            return True
+        else:
+            # หมดเวลา → ลบ
+            _clear_registration_mode(user_hash)
+            return False
+    except (FileNotFoundError, ValueError):
+        return False
+
+
+def _clear_registration_mode(user_hash: str):
+    """ลบ registration mode flag"""
+    filepath = os.path.join(_REG_MODE_DIR, f"{user_hash}.flag")
+    try:
+        os.remove(filepath)
+    except FileNotFoundError:
+        pass
 # Structure: { user_hash: {
 #   "pages": [(data, ext, sha256_hex, doc_id, filename), ...],
 #   "line_user_id": str,
@@ -6294,11 +6329,10 @@ def webhook():
                     reply_message(reply_token, "ไม่สามารถดาวน์โหลดภาพได้")
                     continue
 
-                # ── ตรวจ Registration Mode ──
-                reg_ts = _registration_mode.get(user_hash)
-                if reg_ts and (time.time() - reg_ts) < _REGISTRATION_TIMEOUT_SECS:
+                # ── ตรวจ Registration Mode (file-based, shared across workers) ──
+                if _check_registration_mode(user_hash):
                     # อยู่ในโหมดลงทะเบียน → OCR แล้วลงทะเบียน
-                    del _registration_mode[user_hash]
+                    _clear_registration_mode(user_hash)
                     threading.Thread(
                         target=_process_registration_image,
                         args=(data, ext, user_hash, _line_user_id),
@@ -6310,9 +6344,6 @@ def webhook():
                         "จะแจ้งผลเมื่อเสร็จ",
                     )
                     continue
-                elif reg_ts:
-                    # หมดเวลา → ลบ mode แล้วดำเนินการปกติ
-                    del _registration_mode[user_hash]
 
                 _handle_incoming_document(data, ext, user_hash, reply_token, _line_user_id)
 
@@ -6346,19 +6377,16 @@ def webhook():
                 text = msg.get("text", "")
                 logger.info(f"รับข้อความ: {len(text)} chars")
 
-                # ── ตรวจ Registration Mode สำหรับข้อความพิมพ์ ──
-                reg_ts = _registration_mode.get(user_hash)
-                _in_registration = reg_ts and (time.time() - reg_ts) < _REGISTRATION_TIMEOUT_SECS
-                # ถ้าหมดเวลา → ลบ
-                if reg_ts and not _in_registration:
-                    del _registration_mode[user_hash]
+                # ── ตรวจ Registration Mode สำหรับข้อความพิมพ์ (file-based) ──
+                _in_registration = _check_registration_mode(user_hash)
 
                 if _in_registration and text.strip() not in (
                     "ยกเลิก", "cancel", "ลงทะเบียนรายชื่อ", "ลงทะเบียน",
                     "register", "register patients",
+                    "เพิ่มผู้ป่วย", "เพิ่มชื่อ",
                 ):
                     # ── ข้อความพิมพ์ในโหมดลงทะเบียน → parse เป็นข้อมูลผู้ป่วย ──
-                    del _registration_mode[user_hash]
+                    _clear_registration_mode(user_hash)
                     patients_data = parse_patient_text_input(text)
                     if patients_data:
                         new_count, updated_count, messages = master_registry.register_batch(
@@ -6420,7 +6448,7 @@ def webhook():
                             "⚠️ เฉพาะผู้ดูแลระบบเท่านั้นที่ลงทะเบียนรายชื่อได้",
                         )
                     else:
-                        _registration_mode[user_hash] = time.time()
+                        _set_registration_mode(user_hash)
                         reply_message(
                             reply_token,
                             "📋 โหมดลงทะเบียนรายชื่อผู้ป่วย\n\n"
@@ -6436,8 +6464,8 @@ def webhook():
                             "พิมพ์ 'ยกเลิก' เพื่อออก",
                         )
                 elif text.strip() in ("ยกเลิก", "cancel"):
-                    if user_hash in _registration_mode:
-                        del _registration_mode[user_hash]
+                    if _check_registration_mode(user_hash):
+                        _clear_registration_mode(user_hash)
                         reply_message(
                             reply_token,
                             "❌ ยกเลิกโหมดลงทะเบียนรายชื่อแล้ว",
