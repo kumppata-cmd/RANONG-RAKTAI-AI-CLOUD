@@ -2114,6 +2114,37 @@ def api_master_registry_delete():
     return jsonify({"success": success, "message": msg}), 200 if success else 400
 
 
+@app.route("/admin/api/v2/master-registry/update", methods=["POST"])
+def api_master_registry_update():
+    """แก้ไขข้อมูลผู้ป่วย — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    hn = data.get("hn", "").strip()
+    if not hn:
+        return jsonify({"error": "ต้องระบุ hn (HN ที่ต้องการแก้ไข)"}), 400
+
+    new_name = data.get("new_name", "").strip()
+    new_clinic_hn = data.get("new_clinic_hn", "").strip()
+    new_hospital_hn = data.get("new_hospital_hn", "").strip()
+
+    if not new_name and not new_clinic_hn and not new_hospital_hn:
+        return jsonify({"error": "ต้องระบุข้อมูลที่ต้องการแก้ไข (new_name, new_clinic_hn, หรือ new_hospital_hn)"}), 400
+
+    success, msg = master_registry.update_patient(
+        hn=hn,
+        new_name=new_name,
+        new_clinic_hn=new_clinic_hn,
+        new_hospital_hn=new_hospital_hn,
+    )
+    return jsonify({"success": success, "message": msg}), 200 if success else 400
+
+
 logger.info("Master Patient Registry API: endpoints registered")
 
 
