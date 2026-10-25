@@ -4931,19 +4931,22 @@ def verify_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
-def push_message(user_id: str, text: str):
+def push_message(user_id: str, text: str) -> bool:
     """ส่งข้อความ Push ไปยัง LINE user.
 
     ใช้สำหรับแจ้งเตือนผลตรวจผิดปกติ
     ไม่ log user_id หรือเนื้อหาข้อความ
+    Returns True if sent successfully, False otherwise.
     """
     if IS_TESTING and not IS_TESTING_DOCS:
         logger.info("TESTING MODE: ไม่ส่ง push message")
-        return
+        return False
     if not LINE_CHANNEL_ACCESS_TOKEN:
-        return
+        logger.error("[PUSH] ไม่มี LINE_CHANNEL_ACCESS_TOKEN — ส่ง push message ไม่ได้")
+        return False
     if not user_id:
-        return
+        logger.error("[PUSH] user_id ว่าง — ส่ง push message ไม่ได้")
+        return False
     url = "https://api.line.me/v2/bot/message/push"
     request_body = json.dumps(
         {
@@ -4964,11 +4967,20 @@ def push_message(user_id: str, text: str):
         )
         resp.raise_for_status()
         logger.info(f"Push message สำเร็จ (status={resp.status_code})")
+        return True
     except Exception as e:
         status = getattr(getattr(e, "response", None), "status_code", "-")
+        resp_body = ""
+        try:
+            resp_body = getattr(e, "response", None)
+            resp_body = resp_body.text[:200] if resp_body is not None else ""
+        except Exception:
+            pass
         logger.error(
-            f"Push message ไม่สำเร็จ: {type(e).__name__} (status={status})"
+            f"[PUSH] Push message ไม่สำเร็จ: {type(e).__name__} "
+            f"(status={status}) body={resp_body}"
         )
+        return False
 
 
 def reply_message(reply_token: str, text: str):
@@ -6382,6 +6394,46 @@ def _multipage_flush(user_hash: str):
     )
 
 
+def _safe_ocr_with_timeout(filepath: str, timeout_sec: int = 60) -> str:
+    """เรียก extract_text_with_ocr พร้อม timeout ป้องกัน hang.
+
+    ใช้ threading.Timer + Event เพื่อจำกัดเวลา OCR
+    — ป้องกัน Tesseract แฮงค์บนรูปเสียหายหรือใหญ่เกินไป
+    """
+    import threading as _th
+
+    result_container: list[str] = []
+    error_container: list[str] = []
+    done_event = _th.Event()
+
+    def _run_ocr():
+        try:
+            text = extract_text_with_ocr(filepath)
+            result_container.append(text or "")
+        except Exception as e:
+            error_container.append(f"{type(e).__name__}: {e}")
+        finally:
+            done_event.set()
+
+    ocr_thread = _th.Thread(target=_run_ocr, daemon=True)
+    ocr_thread.start()
+
+    finished = done_event.wait(timeout=timeout_sec)
+
+    if not finished:
+        logger.error(
+            f"[REG-IMG] OCR timeout ({timeout_sec}s) — "
+            "Tesseract อาจแฮงค์หรือรูปใหญ่เกินไป"
+        )
+        return ""
+
+    if error_container:
+        logger.error(f"[REG-IMG] OCR error in thread: {error_container[0]}")
+        return ""
+
+    return result_container[0] if result_container else ""
+
+
 def _process_registration_image(
     data: bytes,
     ext: str,
@@ -6392,8 +6444,17 @@ def _process_registration_image(
 
     ทำงานในเธรดแยก — ใช้ push_message แทน reply_token
     """
+    # ─── Safety: ตรวจ line_user_id ก่อนเริ่ม ──────────────
+    if not line_user_id:
+        logger.error("[REG-IMG] line_user_id ว่าง — ไม่สามารถแจ้งผลกลับได้")
+        return
+
+    tmp_path: str | None = None
     try:
-        logger.info(f"[REG-IMG] เริ่มประมวลผลรูปลงทะเบียน ({len(data)} bytes, ext={ext})")
+        logger.info(
+            f"[REG-IMG] เริ่มประมวลผลรูปลงทะเบียน "
+            f"({len(data)} bytes, ext={ext}, uid_ok={bool(line_user_id)})"
+        )
         # บันทึกรูปชั่วคราว
         tmp_dir = os.path.join(tempfile.gettempdir(), "ranong_raktai", "reg_tmp")
         os.makedirs(tmp_dir, exist_ok=True)
@@ -6402,14 +6463,16 @@ def _process_registration_image(
             f.write(data)
         logger.info(f"[REG-IMG] บันทึกรูปชั่วคราว: {tmp_path}")
 
-        # OCR
+        # ── OCR (with timeout via subprocess) ──────────────
         logger.info("[REG-IMG] เริ่ม OCR...")
-        ocr_text = extract_text_with_ocr(tmp_path)
+        ocr_text = _safe_ocr_with_timeout(tmp_path, timeout_sec=60)
         logger.info(f"[REG-IMG] OCR เสร็จ: {len(ocr_text or '')} chars")
 
         # ลบไฟล์ชั่วคราว
         try:
-            os.remove(tmp_path)
+            if tmp_path:
+                os.remove(tmp_path)
+                tmp_path = None
         except OSError:
             pass
 
@@ -6442,9 +6505,11 @@ def _process_registration_image(
             return
 
         # ลงทะเบียน batch
+        logger.info("[REG-IMG] เริ่ม register_batch...")
         new_count, updated_count, messages = master_registry.register_batch(
             patients_data, registered_by="admin_ocr"
         )
+        logger.info(f"[REG-IMG] register_batch เสร็จ: new={new_count}, updated={updated_count}")
 
         # แจ้งผล
         report_lines = [
@@ -6470,18 +6535,32 @@ def _process_registration_image(
         if len(patients_data) > 15:
             report_lines.append(f"  ...และอีก {len(patients_data)-15} คน")
 
-        push_message(line_user_id, "\n".join(report_lines))
+        logger.info("[REG-IMG] กำลังส่ง push_message ผลลงทะเบียน...")
+        sent = push_message(line_user_id, "\n".join(report_lines))
         logger.info(
-            "Registration image processed: %d new, %d updated",
-            new_count, updated_count,
+            f"[REG-IMG] Registration done: {new_count} new, {updated_count} updated, "
+            f"push_sent={sent}"
         )
     except Exception as e:
-        logger.error("Registration image processing failed: %s", e)
-        push_message(
-            line_user_id,
-            "❌ เกิดข้อผิดพลาดในการลงทะเบียน\n"
-            "กรุณาลองใหม่ หรือแจ้งผู้ดูแลระบบ",
-        )
+        logger.error(f"[REG-IMG] Processing failed: {type(e).__name__}: {e}")
+        try:
+            push_message(
+                line_user_id,
+                "❌ เกิดข้อผิดพลาดในการลงทะเบียน\n"
+                "กรุณาลองใหม่ หรือแจ้งผู้ดูแลระบบ",
+            )
+        except Exception as e2:
+            logger.error(f"[REG-IMG] push_message ส่งแจ้ง error ไม่ได้: {e2}")
+    finally:
+        # cleanup temp file ถ้ายังอยู่
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        # คืนหน่วยความจำ — สำคัญมากบน Render 512MB
+        import gc
+        gc.collect()
 
 
 def _handle_incoming_document(
@@ -6746,7 +6825,10 @@ def webhook():
                 if reg_flag:
                     # อยู่ในโหมดลงทะเบียน → OCR แล้วลงทะเบียน
                     _clear_registration_mode(user_hash)
-                    logger.info(f"[DEBUG-IMG] spawning _process_registration_image thread")
+                    logger.info(
+                        f"[DEBUG-IMG] spawning _process_registration_image thread "
+                        f"(uid_present={bool(_line_user_id)}, data={len(data)}B)"
+                    )
                     threading.Thread(
                         target=_process_registration_image,
                         args=(data, ext, user_hash, _line_user_id),
