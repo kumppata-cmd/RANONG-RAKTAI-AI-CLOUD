@@ -112,6 +112,7 @@ class MasterPatientRegistry:
 
     GCS_PREFIX = "_patient_master"
     GCS_FILE = "_patient_master/registry.json"
+    GCS_VERSIONED_PREFIX = "_patient_master/registry_v"
 
     def __init__(self, storage=None):
         self._storage = storage  # GCS bucket object
@@ -126,11 +127,43 @@ class MasterPatientRegistry:
 
     # ── Load / Save ──────────────────────────────────────────
 
+    def _find_latest_versioned(self):
+        """ค้นหา versioned registry ล่าสุด"""
+        try:
+            blobs = list(self._storage.list_blobs(
+                prefix=self.GCS_VERSIONED_PREFIX
+            ))
+            if not blobs:
+                return None
+            # เรียงตามชื่อ — v{timestamp} จะเรียงตาม time
+            blobs.sort(key=lambda b: b.name, reverse=True)
+            return blobs[0]
+        except Exception as e:
+            logger.warning("MasterPatientRegistry: list versioned failed: %s", e)
+            return None
+
     def _load(self) -> None:
-        """โหลด registry จาก GCS"""
+        """โหลด registry จาก GCS — ลอง versioned ก่อน, fallback legacy"""
         if self._loaded or not self._storage:
             return
         try:
+            # ลอง versioned file ก่อน (ใหม่)
+            latest = self._find_latest_versioned()
+            if latest:
+                data = json.loads(latest.download_as_text())
+                patients_data = data.get("patients", [])
+                self._patients = [
+                    MasterPatient.from_dict(p) for p in patients_data
+                ]
+                self._rebuild_index()
+                logger.info(
+                    "MasterPatientRegistry: loaded %d patients from %s",
+                    len(self._patients), latest.name,
+                )
+                self._loaded = True
+                return
+
+            # fallback: legacy path
             blob = self._storage.blob(self.GCS_FILE)
             if blob.exists():
                 data = json.loads(blob.download_as_text())
@@ -140,7 +173,7 @@ class MasterPatientRegistry:
                 ]
                 self._rebuild_index()
                 logger.info(
-                    "MasterPatientRegistry: loaded %d patients",
+                    "MasterPatientRegistry: loaded %d patients (legacy)",
                     len(self._patients),
                 )
             else:
@@ -150,14 +183,17 @@ class MasterPatientRegistry:
             logger.error("MasterPatientRegistry: load failed: %s", e)
 
     def _save(self) -> tuple:
-        """บันทึก registry ทั้งหมดลง GCS
+        """บันทึก registry ลง GCS — ใช้ versioned path (ไม่ต้อง delete permission)
         Returns: (success: bool, error_detail: str)
         """
         if not self._storage:
             logger.warning("MasterPatientRegistry: no storage — cannot save")
             return False, "no storage backend"
         try:
-            blob = self._storage.blob(self.GCS_FILE)
+            # ใช้ timestamp เป็น version — เขียนไฟล์ใหม่ทุกครั้ง ไม่ overwrite
+            ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+            versioned_path = f"{self.GCS_VERSIONED_PREFIX}{ts}.json"
+            blob = self._storage.blob(versioned_path)
             data = {
                 "version": 1,
                 "updated_at": datetime.now(timezone.utc).isoformat(),
@@ -167,21 +203,42 @@ class MasterPatientRegistry:
             payload = json.dumps(data, ensure_ascii=False, indent=2)
             logger.info(
                 "MasterPatientRegistry: saving %d patients (%d bytes) to %s",
-                len(self._patients), len(payload), self.GCS_FILE,
+                len(self._patients), len(payload), versioned_path,
             )
             blob.upload_from_string(
                 payload,
                 content_type="application/json",
             )
             logger.info(
-                "MasterPatientRegistry: saved %d patients OK",
-                len(self._patients),
+                "MasterPatientRegistry: saved %d patients OK → %s",
+                len(self._patients), versioned_path,
             )
+
+            # ลบ version เก่า (best-effort — อาจล้มเหลวถ้าไม่มี delete permission)
+            self._cleanup_old_versions(keep=3)
+
             return True, ""
         except Exception as e:
             err = f"{type(e).__name__}: {e}"
             logger.error("MasterPatientRegistry: save failed: %s", err)
             return False, err
+
+    def _cleanup_old_versions(self, keep: int = 3) -> None:
+        """ลบ version เก่า — best effort"""
+        try:
+            blobs = list(self._storage.list_blobs(
+                prefix=self.GCS_VERSIONED_PREFIX
+            ))
+            if len(blobs) <= keep:
+                return
+            blobs.sort(key=lambda b: b.name, reverse=True)
+            for old_blob in blobs[keep:]:
+                try:
+                    old_blob.delete()
+                except Exception:
+                    pass  # ไม่มี delete permission — ปล่อยไป
+        except Exception:
+            pass
 
     def _rebuild_index(self) -> None:
         """สร้าง index ใหม่จาก patient list"""
