@@ -8647,42 +8647,32 @@ def admin_retroactive_route():
         # จึงต้องคำนวณ path มาตรฐานก่อน แล้วค่อยเทียบว่าตรงอยู่แล้วหรือไม่
         # (เทียบที่ `new_blob_path == blob_path` ด้านล่าง)
 
-        # ดึง HN จาก OCR text
+        # ดึง HN จาก OCR text แล้วจับคู่กับทะเบียน
+        # หมายเหตุ: ถ้าจับคู่ไม่ได้ ก็ยังย้ายเข้าโครงสร้างไตรมาส/เดือน
+        # (ไม่มีแฟ้มรายผู้ป่วย) เพื่อให้ทุก folder หลักมี sub-folder
+        # สม่ำเสมอกัน — ไม่ทิ้งเอกสารไว้แบบ folder/YYYY-MM/ อย่างเดียว
         text = doc.get("extracted_text", "")
-        if not text:
-            skipped.append({
-                "doc_id": doc_id_short, "category": cat,
-                "reason": "no OCR text",
-            })
-            continue
-
-        found_hns = extract_hn_from_document(text)
-        if not found_hns:
-            skipped.append({
-                "doc_id": doc_id_short, "category": cat,
-                "reason": "no HN found in OCR",
-            })
-            continue
-
-        # จับคู่ HN กับ registry
         matched_folder = ""
         matched_hn = ""
-        for hn in found_hns:
-            folder = master_registry.get_folder_for_hn(hn)
-            if folder:
-                matched_folder = folder
-                matched_hn = hn
-                break
+        hn_note = ""
 
-        if not matched_folder:
-            skipped.append({
-                "doc_id": doc_id_short, "category": cat,
-                "reason": f"HN found but no registry match",
-                "hns": found_hns,
-            })
-            continue
+        if not text:
+            hn_note = "no OCR text"
+        else:
+            found_hns = extract_hn_from_document(text)
+            if not found_hns:
+                hn_note = "no HN found in OCR"
+            else:
+                for hn in found_hns:
+                    folder = master_registry.get_folder_for_hn(hn)
+                    if folder:
+                        matched_folder = folder
+                        matched_hn = hn
+                        break
+                if not matched_folder:
+                    hn_note = "HN found but no registry match"
 
-        # สร้าง path ใหม่ที่มี patient folder
+        # สร้าง path ใหม่ (มี patient folder ถ้าจับคู่ได้)
         # gcs_path เป็น gs://bucket/... ต้องตัดเอาเฉพาะ blob path
         if gcs_path.startswith("gs://"):
             blob_path = gcs_path.split("/", 3)[3] if gcs_path.count("/") >= 3 else ""
@@ -8725,9 +8715,13 @@ def admin_retroactive_route():
             "category": cat,
             "matched_hn": matched_hn,
             "patient_folder": matched_folder,
+            # ระบุว่าได้แฟ้มรายผู้ป่วยหรือย้ายเข้าแค่ไตรมาส/เดือน
+            "routed_to": "patient_folder" if matched_folder else "quarter_month_only",
             "old_path_suffix": blob_path.split("/", 1)[-1][:40] + "...",
             "new_path_suffix": new_blob_path.split("/", 1)[-1][:50] + "...",
         }
+        if hn_note:
+            entry["hn_note"] = hn_note
 
         if dry_run:
             entry["action"] = "would_copy"
@@ -8809,6 +8803,12 @@ def admin_retroactive_route():
         "categories": categories,
         "already_in_folder": already_in_folder,
         "routed_count": len(routed),
+        "routed_to_patient_folder": sum(
+            1 for e in routed if e.get("routed_to") == "patient_folder"
+        ),
+        "routed_quarter_month_only": sum(
+            1 for e in routed if e.get("routed_to") == "quarter_month_only"
+        ),
         "skipped_count": len(skipped),
         "error_count": len(errors),
         "routed": routed,
