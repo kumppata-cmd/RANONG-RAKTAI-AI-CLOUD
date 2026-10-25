@@ -7374,8 +7374,8 @@ def _handle_incoming_document(
 
     if not dedup_guard.is_new_content(user_hash, sha256_hex):
         logger.info(f"ข้ามเอกสารเนื้อหาซ้ำ (sha={sha256_hex[:8]}…)")
-        reply_message(
-            reply_token,
+        _safe_reply(
+            reply_token, line_user_id,
             "ได้รับเอกสารนี้แล้วเมื่อสักครู่\nไม่ต้องส่งซ้ำครับ",
         )
         return
@@ -7404,8 +7404,8 @@ def _handle_incoming_document(
 
                 if page_num > _MULTIPAGE_MAX_PAGES:
                     # เกินจำนวนสูงสุด — ปฏิเสธ
-                    reply_message(
-                        reply_token,
+                    _safe_reply(
+                        reply_token, line_user_id,
                         f"⚠️ รองรับสูงสุด {_MULTIPAGE_MAX_PAGES} หน้าต่อครั้ง\n"
                         "กรุณาส่งผลแล็บชุดใหม่หลังจากชุดนี้ประมวลผลเสร็จ",
                     )
@@ -7459,8 +7459,8 @@ def _handle_incoming_document(
                     _multipage_timers[user_hash] = new_timer
                 new_timer.start()
 
-                reply_message(
-                    reply_token,
+                _safe_reply(
+                    reply_token, line_user_id,
                     f"📄 ได้รับหน้าที่ {page_num} แล้ว\n"
                     f"ส่งหน้าถัดไปได้เลย (รอ {_MULTIPAGE_WINDOW_SECS} วินาทีแล้วจะรวมอัตโนมัติ)",
                 )
@@ -7493,8 +7493,8 @@ def _handle_incoming_document(
                     _multipage_timers[user_hash] = new_timer
                 new_timer.start()
 
-                reply_message(
-                    reply_token,
+                _safe_reply(
+                    reply_token, line_user_id,
                     "📄 ได้รับหน้าที่ 1 แล้ว\n"
                     f"ถ้ามีหลายหน้า ส่งต่อได้เลย (รอ {_MULTIPAGE_WINDOW_SECS} วินาทีแล้วจะรวมอัตโนมัติ)\n"
                     "ถ้ามีหน้าเดียว ไม่ต้องทำอะไร — จะประมวลผลอัตโนมัติ",
@@ -7510,6 +7510,108 @@ def _handle_incoming_document(
         filepath, reply_token, doc_id=doc_id, sha256_hex=sha256_hex,
         owner_hash=user_hash, line_user_id=line_user_id,
     )
+
+
+# ─── Async-safe message helper ────────────────────────────
+# reply_token หมดอายุเร็ว (~30 วินาที) — ถ้าอยู่ใน background thread
+# ให้ fallback ไป push_message แทน
+# ─────────────────────────────────────────────────────────────
+
+def _safe_reply(reply_token: str | None, line_user_id: str, text: str):
+    """ตอบกลับผู้ใช้ — ลอง reply ก่อน ถ้าไม่ได้ให้ใช้ push."""
+    if reply_token:
+        reply_message(reply_token, text)
+    elif line_user_id:
+        push_message(line_user_id, text)
+    else:
+        logger.warning("_safe_reply: ไม่มีทั้ง reply_token และ line_user_id — ส่งข้อความไม่ได้")
+
+
+def _safe_reply_flex(reply_token: str | None, line_user_id: str, message: dict):
+    """ตอบกลับผู้ใช้ด้วย Flex Message — ลอง reply ก่อน ถ้าไม่ได้ให้ใช้ push text."""
+    if reply_token:
+        reply_line_message(reply_token, message)
+    elif line_user_id:
+        # Push API ส่ง Flex ได้เช่นกัน
+        _push_flex_message(line_user_id, message)
+    else:
+        logger.warning("_safe_reply_flex: ไม่มีทั้ง reply_token และ line_user_id")
+
+
+def _push_flex_message(user_id: str, message: dict) -> bool:
+    """Push a Flex/non-text message to a LINE user."""
+    if not LINE_CHANNEL_ACCESS_TOKEN or not user_id:
+        return False
+    url = "https://api.line.me/v2/bot/message/push"
+    request_body = json.dumps(
+        {"to": user_id, "messages": [message]},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        resp = http_requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            data=request_body,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        return True
+    except Exception as e:
+        status = getattr(getattr(e, "response", None), "status_code", "-")
+        logger.error(f"[PUSH-FLEX] ไม่สำเร็จ: {type(e).__name__} (status={status})")
+        return False
+
+
+# ─── Async webhook event processors ──────────────────────
+# เหล่านี้ทำงานใน background thread หลังจาก webhook return 200 แล้ว
+# ใช้ push_message แทน reply_message เพราะ reply_token หมดอายุ
+# ─────────────────────────────────────────────────────────────
+
+def _async_process_image(msg_id: str, user_hash: str, line_user_id: str):
+    """Background thread: ดาวน์โหลดภาพจาก LINE แล้วส่งเข้า multi-page buffer."""
+    try:
+        ext = get_content_type_ext(msg_id)
+        if ext not in ALLOWED_EXTENSIONS:
+            ext = ".jpg"
+        logger.info(f"[ASYNC-IMG] ext={ext}, downloading content...")
+
+        data = download_line_content(msg_id)
+        if not data:
+            logger.error(f"[ASYNC-IMG] download FAILED for msg_id={msg_id}")
+            push_message(line_user_id, "ไม่สามารถดาวน์โหลดภาพได้ กรุณาลองส่งใหม่")
+            return
+        logger.info(f"[ASYNC-IMG] downloaded {len(data)} bytes")
+
+        # ตรวจ Registration Mode
+        reg_flag = _check_registration_mode(user_hash)
+        if reg_flag:
+            _clear_registration_mode(user_hash)
+            _process_registration_image(data, ext, user_hash, line_user_id)
+            return
+
+        # reply_token=None เพราะหมดอายุแล้ว — _handle_incoming_document จะใช้ push_message
+        _handle_incoming_document(data, ext, user_hash, None, line_user_id)
+    except Exception as e:
+        logger.error(f"[ASYNC-IMG] unexpected error: {type(e).__name__}: {e}")
+        push_message(line_user_id, "เกิดข้อผิดพลาดในการประมวลผลภาพ กรุณาลองส่งใหม่")
+
+
+def _async_process_file(msg_id: str, file_ext: str, user_hash: str, line_user_id: str):
+    """Background thread: ดาวน์โหลดไฟล์จาก LINE แล้วประมวลผล."""
+    try:
+        data = download_line_content(msg_id)
+        if not data:
+            push_message(line_user_id, "ไม่สามารถดาวน์โหลดไฟล์ได้ กรุณาลองส่งใหม่")
+            return
+
+        # reply_token=None — _handle_incoming_document จะใช้ push_message
+        _handle_incoming_document(data, file_ext, user_hash, None, line_user_id)
+    except Exception as e:
+        logger.error(f"[ASYNC-FILE] unexpected error: {type(e).__name__}: {e}")
+        push_message(line_user_id, "เกิดข้อผิดพลาดในการประมวลผลไฟล์ กรุณาลองส่งใหม่")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -7650,40 +7752,15 @@ def webhook():
                     reply_message(reply_token, limit_msg)
                     continue
 
-                ext = get_content_type_ext(msg_id)
-                if ext not in ALLOWED_EXTENSIONS:
-                    ext = ".jpg"
-                logger.info(f"[DEBUG-IMG] ext={ext}, downloading content...")
-                data = download_line_content(msg_id)
-                if not data:
-                    logger.error(f"[DEBUG-IMG] download_line_content FAILED for msg_id={msg_id}")
-                    reply_message(reply_token, "ไม่สามารถดาวน์โหลดภาพได้")
-                    continue
-                logger.info(f"[DEBUG-IMG] downloaded {len(data)} bytes")
-
-                # ── ตรวจ Registration Mode (file-based, shared across workers) ──
-                reg_flag = _check_registration_mode(user_hash)
-                logger.info(f"[DEBUG-IMG] registration_mode={reg_flag} user_hash={user_hash[:8]}…")
-                if reg_flag:
-                    # อยู่ในโหมดลงทะเบียน → OCR แล้วลงทะเบียน
-                    _clear_registration_mode(user_hash)
-                    logger.info(
-                        f"[DEBUG-IMG] spawning _process_registration_image thread "
-                        f"(uid_present={bool(_line_user_id)}, data={len(data)}B)"
-                    )
-                    threading.Thread(
-                        target=_process_registration_image,
-                        args=(data, ext, user_hash, _line_user_id),
-                        daemon=True,
-                    ).start()
-                    reply_message(
-                        reply_token,
-                        "📋 กำลัง OCR รายชื่อผู้ป่วย...\n"
-                        "จะแจ้งผลเมื่อเสร็จ",
-                    )
-                    continue
-
-                _handle_incoming_document(data, ext, user_hash, reply_token, _line_user_id)
+                # [FIX] Async processing — ดาวน์โหลดและประมวลผลใน background thread
+                # เพื่อให้ webhook return 200 ให้ LINE ทันก่อน timeout
+                reply_message(reply_token, "📷 ได้รับภาพแล้ว กำลังประมวลผล...")
+                threading.Thread(
+                    target=_async_process_image,
+                    args=(msg_id, user_hash, _line_user_id),
+                    daemon=True,
+                ).start()
+                continue
 
             elif msg_type == "file":
                 # ชื่อไฟล์จากผู้ใช้ใช้เพื่อดูนามสกุลเท่านั้น
@@ -7705,11 +7782,14 @@ def webhook():
                     reply_message(reply_token, limit_msg)
                     continue
 
-                data = download_line_content(msg_id)
-                if not data:
-                    reply_message(reply_token, "ไม่สามารถดาวน์โหลดไฟล์ได้")
-                    continue
-                _handle_incoming_document(data, file_ext, user_hash, reply_token, _line_user_id)
+                # [FIX] Async processing — ดาวน์โหลดและประมวลผลใน background thread
+                reply_message(reply_token, "📄 ได้รับไฟล์แล้ว กำลังประมวลผล...")
+                threading.Thread(
+                    target=_async_process_file,
+                    args=(msg_id, file_ext, user_hash, _line_user_id),
+                    daemon=True,
+                ).start()
+                continue
 
             elif msg_type == "text":
                 text = msg.get("text", "")
