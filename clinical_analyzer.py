@@ -65,6 +65,8 @@ class AssessmentArea(str, Enum):
     DIALYSIS_ADEQUACY = "dialysis_adequacy"
     NUTRITION = "nutrition"
     GLYCEMIC = "glycemic"
+    PROTEINURIA = "proteinuria"
+    LIPID = "lipid"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -314,8 +316,11 @@ def _assess_anemia(results: dict[str, LabResult]) -> list[ClinicalFinding]:
                 values=values,
             ))
 
-    # Iron assessment
-    if ferritin_result or tsat_result:
+    # Iron assessment (Ferritin, TSAT, Iron, TIBC)
+    iron_result = results.get("Iron")
+    tibc_result = results.get("TIBC")
+
+    if ferritin_result or tsat_result or iron_result or tibc_result:
         iron_finding_parts = []
         iron_values = {}
         iron_based_on = []
@@ -348,6 +353,40 @@ def _assess_anemia(results: dict[str, LabResult]) -> list[ClinicalFinding]:
             elif tsat > 50:
                 severity = Severity.MILD
                 rec = "TSAT สูง ระวัง iron overload"
+
+        # Phase B: Iron (Serum Iron)
+        if iron_result:
+            iron_val = iron_result.value
+            iron_values["Iron"] = iron_val
+            iron_based_on.append("Iron")
+            iron_finding_parts.append(f"Iron {iron_val} µg/dL")
+
+            if iron_val < 60:
+                if severity.value != Severity.WARNING.value:
+                    severity = Severity.WARNING
+                rec = "เหล็กในเลือดต่ำ ประเมินร่วมกับ Ferritin/TSAT"
+
+        # Phase B: TIBC
+        if tibc_result:
+            tibc = tibc_result.value
+            iron_values["TIBC"] = tibc
+            iron_based_on.append("TIBC")
+            iron_finding_parts.append(f"TIBC {tibc} µg/dL")
+
+            if tibc > 400:
+                if severity.value != Severity.WARNING.value:
+                    severity = Severity.MILD
+                rec = "TIBC สูง บ่งชี้ iron deficiency"
+
+        # Calculate TSAT from Iron/TIBC if not directly available
+        if iron_result and tibc_result and not tsat_result:
+            if tibc_result.value > 0:
+                calc_tsat = (iron_result.value / tibc_result.value) * 100
+                iron_values["TSAT_calculated"] = round(calc_tsat, 1)
+                iron_finding_parts.append(f"TSAT (calculated) {calc_tsat:.1f}%")
+                if calc_tsat < 20:
+                    severity = Severity.WARNING
+                    rec = "TSAT (คำนวณ) ต่ำ functional iron deficiency พิจารณา IV Iron"
 
         if severity != Severity.NORMAL:
             findings.append(ClinicalFinding(
@@ -727,6 +766,251 @@ def _assess_glycemic(results: dict[str, LabResult]) -> list[ClinicalFinding]:
                 values={analyte_name: fbs},
             ))
 
+    # ── Phase B: HbA1c assessment ──
+    hba1c_result = results.get("HbA1c")
+    if hba1c_result:
+        hba1c = hba1c_result.value
+        severity = Severity.NORMAL
+        finding = f"HbA1c {hba1c}%"
+        rec = ""
+
+        # ⚠️ HbA1c อาจไม่แม่นยำในผู้ป่วย CKD เนื่องจาก anemia, ESA, uremia
+        if hba1c > 10.0:
+            severity = Severity.CRITICAL
+            finding += " — ควบคุมน้ำตาลไม่ดี (poorly controlled)"
+            rec = "ปรับยาเบาหวานเร่งด่วน ส่งต่อแพทย์เบาหวาน"
+        elif hba1c > 8.0:
+            severity = Severity.WARNING
+            finding += " — น้ำตาลสูง ควรปรับยา"
+            rec = "ปรับยาเบาหวาน เป้าหมาย HbA1c <7% (อาจผ่อนปรนในผู้ป่วย CKD)"
+        elif hba1c > 7.0:
+            severity = Severity.MILD
+            finding += " — สูงกว่าเป้าหมายเล็กน้อย"
+            rec = "ติดตาม ปรับอาหาร/ยา เป้าหมาย <7%"
+        elif hba1c < 5.0:
+            severity = Severity.MILD
+            finding += " — ต่ำ อาจบ่งบอก anemia หรือ hemolysis"
+            rec = "ตรวจ Hemoglobin ร่วม อาจไม่แม่นยำในผู้ป่วย CKD ที่มีภาวะซีด"
+
+        if severity != Severity.NORMAL:
+            findings.append(ClinicalFinding(
+                area=AssessmentArea.GLYCEMIC.value,
+                finding=finding,
+                severity=severity.value,
+                recommendation=rec,
+                based_on=["HbA1c"],
+                values={"HbA1c": hba1c},
+            ))
+
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════
+# Proteinuria Assessment — KDIGO Albuminuria Staging
+# ═══════════════════════════════════════════════════════════
+
+def _assess_proteinuria(results: dict[str, LabResult]) -> list[ClinicalFinding]:
+    """ประเมินภาวะโปรตีนรั่วในปัสสาวะ (UPCR/UACR).
+
+    KDIGO Albuminuria Staging:
+      A1: <30 mg/g — ปกติหรือเพิ่มเล็กน้อย
+      A2: 30-300 mg/g — เพิ่มปานกลาง (microalbuminuria)
+      A3: >300 mg/g — เพิ่มรุนแรง (macroalbuminuria)
+    """
+    findings = []
+
+    # UACR — ตัวชี้วัดหลักสำหรับ CKD progression
+    uacr_result = results.get("UACR")
+    if uacr_result:
+        uacr = uacr_result.value
+        severity = Severity.NORMAL
+        finding = f"UACR {uacr} mg/g"
+        rec = ""
+
+        if uacr > 2000:
+            severity = Severity.CRITICAL
+            finding += " — โปรตีนรั่วรุนแรงมาก (nephrotic range)"
+            rec = "ส่งต่อแพทย์โรคไต ประเมิน nephrotic syndrome ปรับ ACEI/ARB"
+        elif uacr > 300:
+            severity = Severity.WARNING
+            finding += " — A3 macroalbuminuria"
+            rec = "ปรับ ACEI/ARB ให้ได้ขนาดสูงสุด ควบคุม BP <130/80 ติดตามทุก 3 เดือน"
+        elif uacr > 30:
+            severity = Severity.MILD
+            finding += " — A2 microalbuminuria"
+            rec = "เริ่มหรือปรับ ACEI/ARB ควบคุม BP และน้ำตาล ติดตามทุก 6 เดือน"
+
+        if severity != Severity.NORMAL:
+            findings.append(ClinicalFinding(
+                area=AssessmentArea.PROTEINURIA.value,
+                finding=finding,
+                severity=severity.value,
+                recommendation=rec,
+                based_on=["UACR"],
+                values={"UACR": uacr},
+            ))
+
+    # UPCR — ตัวชี้วัดรอง
+    upcr_result = results.get("UPCR")
+    if upcr_result:
+        upcr = upcr_result.value
+        severity = Severity.NORMAL
+        finding = f"UPCR {upcr} g/g"
+        rec = ""
+
+        if upcr > 3.5:
+            severity = Severity.CRITICAL
+            finding += " — nephrotic range proteinuria"
+            rec = "ส่งต่อแพทย์โรคไต ประเมิน nephrotic syndrome"
+        elif upcr > 1.0:
+            severity = Severity.WARNING
+            finding += " — โปรตีนรั่วปานกลาง-มาก"
+            rec = "ปรับ ACEI/ARB ติดตามอย่างใกล้ชิด ตรวจ UACR ร่วม"
+        elif upcr > 0.2:
+            severity = Severity.MILD
+            finding += " — โปรตีนรั่วเล็กน้อย"
+            rec = "ติดตาม พิจารณา ACEI/ARB ถ้ายังไม่ได้ใช้"
+
+        if severity != Severity.NORMAL:
+            findings.append(ClinicalFinding(
+                area=AssessmentArea.PROTEINURIA.value,
+                finding=finding,
+                severity=severity.value,
+                recommendation=rec,
+                based_on=["UPCR"],
+                values={"UPCR": upcr},
+            ))
+
+    return findings
+
+
+# ═══════════════════════════════════════════════════════════
+# Lipid Assessment — CKD Cardiovascular Risk
+# ═══════════════════════════════════════════════════════════
+
+def _assess_lipid(results: dict[str, LabResult]) -> list[ClinicalFinding]:
+    """ประเมินไขมันในเลือด สำหรับผู้ป่วย CKD.
+
+    ⚠️ ผู้ป่วย CKD มีความเสี่ยง cardiovascular สูง
+    KDIGO แนะนำ statin ในผู้ป่วย CKD อายุ ≥50 ปี
+    """
+    findings = []
+
+    tc_result = results.get("Total Cholesterol")
+    ldl_result = results.get("LDL")
+    hdl_result = results.get("HDL")
+    tg_result = results.get("Triglycerides")
+
+    # LDL — ตัวชี้วัดหลัก
+    if ldl_result:
+        ldl = ldl_result.value
+        severity = Severity.NORMAL
+        finding = f"LDL {ldl} mg/dL"
+        rec = ""
+        values = {"LDL": ldl}
+        based_on = ["LDL"]
+
+        if ldl > 190:
+            severity = Severity.WARNING
+            finding += " — สูงมาก"
+            rec = "เริ่มหรือปรับ statin ผู้ป่วย CKD มีความเสี่ยง CV สูง"
+        elif ldl > 130:
+            severity = Severity.MILD
+            finding += " — สูง"
+            rec = "พิจารณา statin โดยเฉพาะผู้ป่วย CKD อายุ ≥50 ปี (KDIGO)"
+        elif ldl > 100:
+            severity = Severity.INFO
+            finding += " — ค่อนข้างสูง"
+            rec = "เป้าหมาย LDL <100 ในผู้ป่วย CKD (high CV risk)"
+
+        if severity != Severity.NORMAL:
+            findings.append(ClinicalFinding(
+                area=AssessmentArea.LIPID.value,
+                finding=finding,
+                severity=severity.value,
+                recommendation=rec,
+                based_on=based_on,
+                values=values,
+            ))
+
+    # Triglycerides
+    if tg_result:
+        tg = tg_result.value
+        severity = Severity.NORMAL
+        finding = f"Triglycerides {tg} mg/dL"
+        rec = ""
+
+        if tg > 500:
+            severity = Severity.CRITICAL
+            finding += " — สูงมาก เสี่ยงตับอ่อนอักเสบ"
+            rec = "เสี่ยง acute pancreatitis พิจารณา fibrate/omega-3"
+        elif tg > 200:
+            severity = Severity.MILD
+            finding += " — สูง"
+            rec = "ปรับอาหาร ออกกำลังกาย ตรวจสอบสาเหตุ (DM, nephrotic)"
+
+        if severity != Severity.NORMAL:
+            findings.append(ClinicalFinding(
+                area=AssessmentArea.LIPID.value,
+                finding=finding,
+                severity=severity.value,
+                recommendation=rec,
+                based_on=["Triglycerides"],
+                values={"Triglycerides": tg},
+            ))
+
+    # HDL — ต่ำ = เสี่ยง CV
+    if hdl_result:
+        hdl = hdl_result.value
+        severity = Severity.NORMAL
+        finding = f"HDL {hdl} mg/dL"
+        rec = ""
+
+        if hdl < 35:
+            severity = Severity.WARNING
+            finding += " — ต่ำมาก เสี่ยง CV สูง"
+            rec = "ออกกำลังกาย ปรับอาหาร HDL ต่ำเพิ่มความเสี่ยงหลอดเลือดหัวใจ"
+        elif hdl < 40:
+            severity = Severity.MILD
+            finding += " — ต่ำ"
+            rec = "ปรับพฤติกรรม ออกกำลังกาย"
+
+        if severity != Severity.NORMAL:
+            findings.append(ClinicalFinding(
+                area=AssessmentArea.LIPID.value,
+                finding=finding,
+                severity=severity.value,
+                recommendation=rec,
+                based_on=["HDL"],
+                values={"HDL": hdl},
+            ))
+
+    # Total Cholesterol summary (if no LDL available)
+    if tc_result and not ldl_result:
+        tc = tc_result.value
+        severity = Severity.NORMAL
+        finding = f"Total Cholesterol {tc} mg/dL"
+        rec = ""
+
+        if tc > 300:
+            severity = Severity.WARNING
+            finding += " — สูงมาก"
+            rec = "ตรวจ LDL/HDL แยก พิจารณา statin"
+        elif tc > 200:
+            severity = Severity.MILD
+            finding += " — สูง"
+            rec = "ตรวจ LDL/HDL แยก ปรับอาหาร"
+
+        if severity != Severity.NORMAL:
+            findings.append(ClinicalFinding(
+                area=AssessmentArea.LIPID.value,
+                finding=finding,
+                severity=severity.value,
+                recommendation=rec,
+                based_on=["Total Cholesterol"],
+                values={"Total Cholesterol": tc},
+            ))
+
     return findings
 
 
@@ -838,6 +1122,8 @@ def analyze_lab_report(lab_report: LabReport) -> ClinicalAnalysis:
     all_findings.extend(_assess_dialysis(results))
     all_findings.extend(_assess_nutrition(results))
     all_findings.extend(_assess_glycemic(results))
+    all_findings.extend(_assess_proteinuria(results))
+    all_findings.extend(_assess_lipid(results))
 
     analysis.findings = all_findings
 

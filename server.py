@@ -8736,6 +8736,268 @@ setInterval(load,30000);
 </html>"""
 
 
+# ─── Clinical KPI Dashboard (Phase A) ─────────────────────
+
+try:
+    from clinical_dashboard import compute_clinical_kpi, CLINICAL_DASHBOARD_HTML
+except ImportError:
+    compute_clinical_kpi = None
+    CLINICAL_DASHBOARD_HTML = "<html><body><h1>Clinical Dashboard module not found</h1></body></html>"
+
+try:
+    from nephrology_drug_db import review_ckd_medications, lookup_drug
+except ImportError:
+    review_ckd_medications = None
+    lookup_drug = None
+
+try:
+    from ckd_progression import analyze_ckd_progression
+except ImportError:
+    analyze_ckd_progression = None
+
+try:
+    from auto_report import generate_monthly_report, report_to_line_text, report_to_flex_message
+except ImportError:
+    generate_monthly_report = None
+    report_to_line_text = None
+    report_to_flex_message = None
+
+try:
+    from liff_app import get_patient_labs_for_liff, get_liff_html
+except ImportError:
+    get_patient_labs_for_liff = None
+    get_liff_html = None
+
+
+@app.route("/admin/clinical-dashboard", methods=["GET"])
+def admin_clinical_dashboard():
+    """Kidney Clinical Intelligence Dashboard — Phase A."""
+    auth_param = request.args.get("secret", "")
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
+        return (
+            "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>"
+            "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
+            "<p>เข้าถึง: /admin/clinical-dashboard?secret=YOUR_ADMIN_SECRET</p>"
+            "</body></html>"
+        ), 401
+    return CLINICAL_DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/admin/api/clinical-kpi", methods=["GET"])
+def admin_api_clinical_kpi():
+    """API สำหรับดึงข้อมูล Clinical KPI — Phase A."""
+    auth_param = request.args.get("secret", "")
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if compute_clinical_kpi is None:
+        return jsonify({"error": "Clinical dashboard module not available"}), 500
+
+    try:
+        kpi = compute_clinical_kpi(
+            storage=storage,
+            patient_registry=master_registry if 'master_registry' in dir() else None,
+        )
+        return jsonify(kpi), 200
+    except Exception as e:
+        logger.error(f"Clinical KPI compute error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/admin/api/drug-review", methods=["POST"])
+def admin_api_drug_review():
+    """API ตรวจสอบยาผู้ป่วย CKD — Phase E.
+
+    Body: {"medications": ["drug1","drug2",...], "egfr": 25}
+
+    Safety: ผลเป็นข้อมูลประกอบ — ห้ามใช้สั่งยา
+    """
+    auth_param = request.args.get("secret", "")
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if review_ckd_medications is None:
+        return jsonify({"error": "Drug review module not available"}), 500
+
+    data = request.get_json(silent=True) or {}
+    meds = data.get("medications", [])
+    egfr = data.get("egfr")
+    owner_hash = data.get("owner_hash", "")
+
+    if not meds or egfr is None:
+        return jsonify({"error": "medications (list) and egfr (number) required"}), 400
+
+    try:
+        summary = review_ckd_medications(meds, float(egfr), owner_hash)
+        return jsonify(summary.to_dict()), 200
+    except Exception as e:
+        logger.error(f"Drug review error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/admin/api/monthly-report", methods=["GET"])
+def admin_api_monthly_report():
+    """API สร้างรายงาน KPI รายเดือน — Phase C.
+
+    Query params: ?secret=ADMIN_SECRET&month=2026-09 (optional)
+    Returns: JSON monthly report
+
+    Safety: aggregate only — ไม่มีข้อมูลระบุตัวผู้ป่วย
+    """
+    auth_param = request.args.get("secret", "")
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if generate_monthly_report is None:
+        return jsonify({"error": "Auto report module not available"}), 500
+
+    try:
+        ref_date = None
+        month_param = request.args.get("month")
+        if month_param:
+            ref_date = datetime.strptime(month_param, "%Y-%m")
+
+        report = generate_monthly_report(
+            storage=storage,
+            patient_registry=master_registry if 'master_registry' in dir() else None,
+            reference_date=ref_date,
+        )
+        result = report.to_dict()
+        result["line_text"] = report_to_line_text(report)
+        return jsonify(result), 200
+    except Exception as e:
+        logger.error(f"Monthly report error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/admin/api/send-report", methods=["POST"])
+def admin_api_send_report():
+    """API ส่งรายงาน KPI ผ่าน LINE — Phase C.
+
+    Body: {"month": "2026-09"} (optional, default: last month)
+
+    Safety:
+    - ส่งเฉพาะ aggregate data
+    - ส่งเฉพาะ PHYSICIAN_USERS
+    - ห้ามส่งข้อมูลผู้ป่วยออกภายนอก
+    """
+    auth_param = request.args.get("secret", "")
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
+        return jsonify({"error": "Unauthorized"}), 401
+
+    if generate_monthly_report is None:
+        return jsonify({"error": "Auto report module not available"}), 500
+
+    try:
+        data = request.get_json(silent=True) or {}
+        ref_date = None
+        month_param = data.get("month")
+        if month_param:
+            ref_date = datetime.strptime(month_param, "%Y-%m")
+
+        report = generate_monthly_report(
+            storage=storage,
+            patient_registry=master_registry if 'master_registry' in dir() else None,
+            reference_date=ref_date,
+        )
+
+        # Send via LINE — only to registered physician users
+        physician_ids = json.loads(os.environ.get("PHYSICIAN_LINE_IDS", "[]"))
+        if not physician_ids:
+            return jsonify({
+                "status": "report_generated",
+                "warning": "No PHYSICIAN_LINE_IDS configured — report not sent",
+                "report": report.to_dict(),
+                "line_text": report_to_line_text(report),
+            }), 200
+
+        # Use LINE Bot API to push
+        channel_token = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
+        sent = 0
+        errors = []
+        for uid in physician_ids:
+            try:
+                text = report_to_line_text(report)
+                resp = http_requests.post(
+                    "https://api.line.me/v2/bot/message/push",
+                    headers={
+                        "Authorization": f"Bearer {channel_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "to": uid,
+                        "messages": [{"type": "text", "text": text}],
+                    },
+                    timeout=10,
+                )
+                if resp.status_code == 200:
+                    sent += 1
+                else:
+                    errors.append(f"{uid[:8]}: HTTP {resp.status_code}")
+            except Exception as e:
+                errors.append(f"{uid[:8]}: {str(e)}")
+
+        return jsonify({
+            "status": "sent",
+            "sent_count": sent,
+            "failed_count": len(errors),
+            "errors": errors,
+            "period": report.period_th,
+        }), 200
+    except Exception as e:
+        logger.error(f"Send report error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/liff", methods=["GET"])
+def liff_page():
+    """LINE LIFF Mini-App — ผู้ป่วยดูผลแล็บ (Read-Only) — Phase F.
+
+    Safety:
+    - PDPA consent required
+    - Read-Only — ไม่มีปุ่มแก้ไข
+    - ข้อมูลกรองด้วย LINE userId (owner_hash)
+    """
+    if get_liff_html is None:
+        return "<html><body><h1>LIFF module not available</h1></body></html>", 500
+    api_base = request.host_url.rstrip("/")
+    return get_liff_html(api_base), 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/liff/api/my-labs", methods=["GET"])
+def liff_api_my_labs():
+    """API ดึงผลแล็บสำหรับ LIFF — Phase F.
+
+    Query: ?owner_hash=LINE_USER_ID
+
+    Safety:
+    - กรองเฉพาะ owner_hash ของผู้ป่วยเจ้าของ
+    - เฉพาะ approved labs
+    - ไม่ส่งข้อมูลผู้ป่วยรายอื่น
+    """
+    if get_patient_labs_for_liff is None:
+        return jsonify({"error": "LIFF module not available"}), 500
+
+    owner_hash = request.args.get("owner_hash", "")
+    if not owner_hash:
+        return jsonify({"error": "owner_hash required"}), 400
+
+    try:
+        data = get_patient_labs_for_liff(
+            storage=storage,
+            owner_hash=owner_hash,
+        )
+        return jsonify(data), 200
+    except Exception as e:
+        logger.error(f"LIFF API error: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/admin/dashboard", methods=["GET"])
 def admin_dashboard():
     """Admin Dashboard — Web UI สำหรับดูสถิติระบบ."""

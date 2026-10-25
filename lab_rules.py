@@ -270,6 +270,107 @@ ANALYTE_SPECS: dict[str, AnalyteSpec] = {
         physiologic_max=5.0,
         primary_unit="",
     ),
+    # ── Phase B: Proteinuria ──
+    # UPCR (Urine Protein-Creatinine Ratio)
+    # ⚠️ Reference range: <0.2 g/g = ปกติ, >3.5 = nephrotic range
+    "UPCR": AnalyteSpec(
+        name="UPCR",
+        valid_units=["g/g", "mg/mg", "mg/g", "g/gCr"],
+        reference_range=(0.0, 0.2),
+        critical_low=None,
+        critical_high=3.5,
+        physiologic_min=0.0,
+        physiologic_max=30.0,
+        primary_unit="g/g",
+    ),
+    # UACR (Urine Albumin-Creatinine Ratio)
+    # ⚠️ A1 <30, A2 30-300, A3 >300 mg/g (KDIGO albuminuria staging)
+    "UACR": AnalyteSpec(
+        name="UACR",
+        valid_units=["mg/g", "mg/gCr", "mg/mmol"],
+        reference_range=(0.0, 30.0),
+        critical_low=None,
+        critical_high=3000.0,
+        physiologic_min=0.0,
+        physiologic_max=30000.0,
+        primary_unit="mg/g",
+    ),
+    # ── Phase B: Glycemic ──
+    # HbA1c
+    # ⚠️ เป้าหมายอาจแตกต่างในผู้ป่วย CKD (ควร <7% ทั่วไป)
+    # ค่า HbA1c อาจไม่แม่นยำในผู้ป่วย CKD เนื่องจาก anemia, ESA, uremia
+    "HbA1c": AnalyteSpec(
+        name="HbA1c",
+        valid_units=["%", "mmol/mol"],
+        reference_range=(4.0, 5.6),
+        critical_low=None,
+        critical_high=14.0,
+        physiologic_min=2.0,
+        physiologic_max=20.0,
+        primary_unit="%",
+    ),
+    # ── Phase B: Lipid Panel ──
+    "Total Cholesterol": AnalyteSpec(
+        name="Total Cholesterol",
+        valid_units=["mg/dL", "mg/dl", "mmol/L", "mmol/l"],
+        reference_range=(0.0, 200.0),
+        critical_low=None,
+        critical_high=500.0,
+        physiologic_min=50.0,
+        physiologic_max=1000.0,
+        primary_unit="mg/dL",
+    ),
+    "LDL": AnalyteSpec(
+        name="LDL",
+        valid_units=["mg/dL", "mg/dl", "mmol/L", "mmol/l"],
+        reference_range=(0.0, 100.0),
+        critical_low=None,
+        critical_high=300.0,
+        physiologic_min=10.0,
+        physiologic_max=500.0,
+        primary_unit="mg/dL",
+    ),
+    "HDL": AnalyteSpec(
+        name="HDL",
+        valid_units=["mg/dL", "mg/dl", "mmol/L", "mmol/l"],
+        reference_range=(40.0, 60.0),
+        critical_low=None,
+        critical_high=None,
+        physiologic_min=5.0,
+        physiologic_max=150.0,
+        primary_unit="mg/dL",
+    ),
+    "Triglycerides": AnalyteSpec(
+        name="Triglycerides",
+        valid_units=["mg/dL", "mg/dl", "mmol/L", "mmol/l"],
+        reference_range=(0.0, 150.0),
+        critical_low=None,
+        critical_high=1000.0,
+        physiologic_min=10.0,
+        physiologic_max=10000.0,
+        primary_unit="mg/dL",
+    ),
+    # ── Phase B: Iron Studies ──
+    "Iron": AnalyteSpec(
+        name="Iron",
+        valid_units=["µg/dL", "ug/dL", "µg/dl", "ug/dl", "umol/L"],
+        reference_range=(60.0, 170.0),
+        critical_low=None,
+        critical_high=None,
+        physiologic_min=5.0,
+        physiologic_max=1000.0,
+        primary_unit="µg/dL",
+    ),
+    "TIBC": AnalyteSpec(
+        name="TIBC",
+        valid_units=["µg/dL", "ug/dL", "µg/dl", "ug/dl", "umol/L"],
+        reference_range=(250.0, 370.0),
+        critical_low=None,
+        critical_high=None,
+        physiologic_min=50.0,
+        physiologic_max=1000.0,
+        primary_unit="µg/dL",
+    ),
 }
 
 

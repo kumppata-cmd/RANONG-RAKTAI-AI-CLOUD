@@ -12,6 +12,10 @@ Analytes ที่รองรับ (15+):
   Electrolytes: Sodium, Potassium, Chloride, Bicarbonate
   Minerals: Calcium, Phosphate
   Others: Albumin, FBS/Glucose, PTH, Ferritin, TSAT, Kt/V
+  Proteinuria: UPCR, UACR
+  Glycemic: HbA1c
+  Lipids: Total Cholesterol, LDL, HDL, Triglycerides
+  Iron Studies: Iron, TIBC
 
 กฎความปลอดภัย:
   - ห้ามสร้างค่าที่ไม่มีอยู่ในเอกสาร
@@ -161,6 +165,77 @@ ANALYTE_ALIASES: dict[str, str] = {
     "kt/v": "Kt/V",
     "ktv": "Kt/V",
     "kt / v": "Kt/V",
+    # ── Phase B: New analytes ──
+    # UPCR (Urine Protein-Creatinine Ratio)
+    "upcr": "UPCR",
+    "urine protein creatinine ratio": "UPCR",
+    "urine protein/creatinine ratio": "UPCR",
+    "protein creatinine ratio": "UPCR",
+    "up/cr": "UPCR",
+    "up/ucr": "UPCR",
+    "อัตราส่วนโปรตีนต่อครีอะตินีนในปัสสาวะ": "UPCR",
+    # UACR (Urine Albumin-Creatinine Ratio)
+    "uacr": "UACR",
+    "urine albumin creatinine ratio": "UACR",
+    "urine albumin/creatinine ratio": "UACR",
+    "albumin creatinine ratio": "UACR",
+    "acr": "UACR",
+    "ua/cr": "UACR",
+    "microalbumin/creatinine": "UACR",
+    "microalbumin": "UACR",
+    "อัตราส่วนอัลบูมินต่อครีอะตินีนในปัสสาวะ": "UACR",
+    "ไมโครอัลบูมิน": "UACR",
+    # HbA1c
+    "hba1c": "HbA1c",
+    "hb a1c": "HbA1c",
+    "hemoglobin a1c": "HbA1c",
+    "glycated hemoglobin": "HbA1c",
+    "glycosylated hemoglobin": "HbA1c",
+    "a1c": "HbA1c",
+    "เอชบีเอวันซี": "HbA1c",
+    "ฮีโมโกลบินเอวันซี": "HbA1c",
+    # Total Cholesterol
+    "total cholesterol": "Total Cholesterol",
+    "cholesterol": "Total Cholesterol",
+    "cholesterol total": "Total Cholesterol",
+    "t.chol": "Total Cholesterol",
+    "t-chol": "Total Cholesterol",
+    "tc": "Total Cholesterol",
+    "คอเลสเตอรอล": "Total Cholesterol",
+    "โคเลสเตอรอลรวม": "Total Cholesterol",
+    # LDL
+    "ldl": "LDL",
+    "ldl cholesterol": "LDL",
+    "ldl-c": "LDL",
+    "ldl-chol": "LDL",
+    "low density lipoprotein": "LDL",
+    "แอลดีแอล": "LDL",
+    # HDL
+    "hdl": "HDL",
+    "hdl cholesterol": "HDL",
+    "hdl-c": "HDL",
+    "hdl-chol": "HDL",
+    "high density lipoprotein": "HDL",
+    "เอชดีแอล": "HDL",
+    # Triglycerides
+    "triglyceride": "Triglycerides",
+    "triglycerides": "Triglycerides",
+    "tg": "Triglycerides",
+    "trig": "Triglycerides",
+    "ไตรกลีเซอไรด์": "Triglycerides",
+    "ไตรกลีเซอร์ไรด์": "Triglycerides",
+    # Iron (Serum Iron)
+    "iron": "Iron",
+    "serum iron": "Iron",
+    "fe": "Iron",
+    "เหล็ก": "Iron",
+    "ธาตุเหล็ก": "Iron",
+    "เหล็กในเลือด": "Iron",
+    # TIBC (Total Iron Binding Capacity)
+    "tibc": "TIBC",
+    "total iron binding capacity": "TIBC",
+    "iron binding capacity": "TIBC",
+    "ความสามารถในการจับธาตุเหล็ก": "TIBC",
 }
 
 
@@ -171,7 +246,11 @@ ANALYTE_ALIASES: dict[str, str] = {
 UNIT_PATTERNS = [
     r"mg/[dD][lL]",
     r"g/[dD][lL]",
+    r"g/g(?:Cr)?",              # Phase B: UPCR (g/g, g/gCr)
+    r"mg/g(?:Cr)?",             # Phase B: UACR (mg/g, mg/gCr)
+    r"mg/mg",                   # Phase B: UPCR alt
     r"mmol/[lL]",
+    r"mmol/mol",                # Phase B: HbA1c (mmol/mol)
     r"mEq/[lL]",
     r"mL/min(?:/1\.73m2)?",
     r"ml/min(?:/1\.73m2)?",
@@ -180,6 +259,7 @@ UNIT_PATTERNS = [
     r"pg/[mM][lL]",
     r"ng/[mM][lL]",
     r"[pnuµ]mol/[lL]",
+    r"[µu]g/[dD][lL]",         # Phase B: Iron/TIBC (µg/dL)
     r"[µu]g/[lL]",
     r"%",
 ]
@@ -226,8 +306,8 @@ def extract_specimen_date(text: str) -> str:
 # e.g., "ครีอะตินีน (Cr)     5.2     mg/dL     0.6-1.2"
 # NOTE: Uses [^\S\n]+ to prevent cross-line matching (Phase 14.11).
 TABULAR_RE = re.compile(
-    r"(?P<name>[A-Za-z/\s()]+?)"       # analyte name (English)
-    r":?[^\S\n]+"                       # optional colon + horizontal whitespace (no newline)
+    r"(?P<name>[A-Za-z/ \t()0-9]+?)"    # analyte name (English, space/tab only, digits for HbA1c)
+    r":?[^\S\n]+"                        # optional colon + horizontal whitespace (no newline)
     r"(?P<value>\d+\.?\d*)"            # numeric value
     r"[^\S\n]+"
     r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
@@ -243,9 +323,9 @@ TABULAR_RE = re.compile(
 # NOTE: Uses [^\S\n]+ (horizontal whitespace) to prevent cross-line matching.
 #       The name group requires ≥2 chars to reduce false positives.
 TABULAR_THAI_RE = re.compile(
-    r"(?P<name>[ก-๙A-Za-z/ ()]{2,}?)"  # analyte name (Thai+English, ≥2 chars)
-    r":?[^\S\n]+"                        # optional colon + 1+ horizontal spaces (no newline)
-    r"(?P<value>\d+\.?\d*)"             # numeric value
+    r"(?P<name>[ก-๙A-Za-z/ ()0-9]{2,}?)"  # analyte name (Thai+English+digits, ≥2 chars)
+    r":?[^\S\n]+"                           # optional colon + 1+ horizontal spaces (no newline)
+    r"(?P<value>\d+\.?\d*)"                # numeric value
     r"[^\S\n]+"
     r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
     r"(?:[^\S\n]+"
