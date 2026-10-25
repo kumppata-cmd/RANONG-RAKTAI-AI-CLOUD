@@ -5999,15 +5999,19 @@ def _process_registration_image(
     ทำงานในเธรดแยก — ใช้ push_message แทน reply_token
     """
     try:
+        logger.info(f"[REG-IMG] เริ่มประมวลผลรูปลงทะเบียน ({len(data)} bytes, ext={ext})")
         # บันทึกรูปชั่วคราว
         tmp_dir = os.path.join(tempfile.gettempdir(), "ranong_raktai", "reg_tmp")
         os.makedirs(tmp_dir, exist_ok=True)
         tmp_path = os.path.join(tmp_dir, f"reg_{uuid.uuid4().hex[:8]}{ext}")
         with open(tmp_path, "wb") as f:
             f.write(data)
+        logger.info(f"[REG-IMG] บันทึกรูปชั่วคราว: {tmp_path}")
 
         # OCR
+        logger.info("[REG-IMG] เริ่ม OCR...")
         ocr_text = extract_text_with_ocr(tmp_path)
+        logger.info(f"[REG-IMG] OCR เสร็จ: {len(ocr_text or '')} chars")
 
         # ลบไฟล์ชั่วคราว
         try:
@@ -6016,6 +6020,7 @@ def _process_registration_image(
             pass
 
         if not ocr_text or len(ocr_text.strip()) < 10:
+            logger.warning(f"[REG-IMG] OCR text สั้นเกินไป: '{(ocr_text or '')[:50]}'")
             push_message(
                 line_user_id,
                 "❌ OCR อ่านรายชื่อจากรูปไม่ได้\n"
@@ -6024,8 +6029,10 @@ def _process_registration_image(
             )
             return
 
+        logger.info(f"[REG-IMG] OCR preview: {ocr_text[:100]}...")
         # แยก HN + ชื่อจาก OCR text
         patients_data = parse_patient_list_ocr(ocr_text)
+        logger.info(f"[REG-IMG] parsed {len(patients_data)} patients")
 
         if not patients_data:
             push_message(
@@ -6275,6 +6282,13 @@ def webhook():
     events = payload.get("events", [])
     logger.info(f"รับ {len(events)} event(s) จาก LINE")
 
+    # ─── DEBUG: log สรุป event types ที่เข้ามาทั้งหมด ──
+    for _i, _ev in enumerate(events):
+        _et = _ev.get("type", "?")
+        _mt = _ev.get("message", {}).get("type", "-") if _et == "message" else "-"
+        _mid = _ev.get("message", {}).get("id", "-") if _et == "message" else "-"
+        logger.info(f"[DEBUG] event[{_i}] type={_et} msg_type={_mt} msg_id={_mid}")
+
     for event in events:
         event_type = event.get("type")
         reply_token = event.get("replyToken")
@@ -6324,15 +6338,21 @@ def webhook():
                 ext = get_content_type_ext(msg_id)
                 if ext not in ALLOWED_EXTENSIONS:
                     ext = ".jpg"
+                logger.info(f"[DEBUG-IMG] ext={ext}, downloading content...")
                 data = download_line_content(msg_id)
                 if not data:
+                    logger.error(f"[DEBUG-IMG] download_line_content FAILED for msg_id={msg_id}")
                     reply_message(reply_token, "ไม่สามารถดาวน์โหลดภาพได้")
                     continue
+                logger.info(f"[DEBUG-IMG] downloaded {len(data)} bytes")
 
                 # ── ตรวจ Registration Mode (file-based, shared across workers) ──
-                if _check_registration_mode(user_hash):
+                reg_flag = _check_registration_mode(user_hash)
+                logger.info(f"[DEBUG-IMG] registration_mode={reg_flag} user_hash={user_hash[:8]}…")
+                if reg_flag:
                     # อยู่ในโหมดลงทะเบียน → OCR แล้วลงทะเบียน
                     _clear_registration_mode(user_hash)
+                    logger.info(f"[DEBUG-IMG] spawning _process_registration_image thread")
                     threading.Thread(
                         target=_process_registration_image,
                         args=(data, ext, user_hash, _line_user_id),
