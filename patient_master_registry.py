@@ -714,6 +714,65 @@ def _parse_patient_line(line: str) -> Optional[dict]:
                     "patient_name": name,
                 }
 
+    # ── Pattern 7: OCR Table Fallback — ไม่ต้องพึ่งตัวอักษรไทย ──
+    # สำหรับ OCR ที่อ่านภาษาไทยเป็นอักษรละตินแต่ตัวเลข HN ถูกต้อง
+    # เช่น "P35 | Sarr [situ annues | 00063895 | 63203"
+    # ต้องมีตัวเลข ≥5 หลักอย่างน้อย 2 กลุ่ม (hospital_hn + clinic_hn)
+    # ลบ pipe separators, วงเล็บ, เครื่องหมายพิเศษก่อน
+    cleaned = re.sub(r'[|"\[\](){}«»~=*;:,_]+', ' ', line)
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    # หาเลข ≥5 หลัก (HN จริงๆ) — ไม่นับเลข 1-4 หลักซึ่งเป็นลำดับแถว
+    long_nums = re.findall(r'\d{5,}', cleaned)
+    if len(long_nums) >= 2:
+        # แยก hospital_hn (ตัวยาวกว่า) กับ clinic_hn (ตัวสั้นกว่า)
+        # ถ้ายาวเท่ากัน: ตัวแรก = hospital, ตัวหลัง = clinic
+        nums_sorted = sorted(long_nums, key=len, reverse=True)
+        hospital_hn = nums_sorted[0]
+        clinic_hn = nums_sorted[-1]
+        if hospital_hn == clinic_hn and len(long_nums) > 1:
+            hospital_hn = long_nums[0]
+            clinic_hn = long_nums[-1]
+        # ดึงชื่อ: ข้อความระหว่างตัวเลข HN (แม้เป็นอักษรละติน)
+        # ลบตัวเลข HN และเลขลำดับแถว ออกจากบรรทัด
+        name_part = cleaned
+        for num in long_nums:
+            name_part = name_part.replace(num, ' ', 1)
+        # ลบเลขลำดับแถว (1-3 หลักที่ขึ้นต้น) รวมถึง hex-like (a1, 4a)
+        name_part = re.sub(r'^\s*[0-9a-fA-F]{1,3}\s+', '', name_part)
+        # ลบตัวอักษรเดี่ยว/noise ที่ไม่ใช่คำ
+        name_part = re.sub(r'\b[A-Z]{1,2}\b', '', name_part)
+        # ลบ prefix แปลกๆ จาก OCR (เช่น P, EP, CAD, QD, Tag)
+        name_part = re.sub(r'^\s*[A-Z][a-z]{0,2}\d*\s*', '', name_part)
+        # ลบ non-alpha noise (เช่น ——, —+, +)
+        name_part = re.sub(r'[—–+]+', ' ', name_part)
+        name_part = re.sub(r'\s+', ' ', name_part).strip()
+        # ลบ trailing/leading punctuation
+        name_part = name_part.strip(' .,;:-_|"\'')
+        # ถ้าชื่อว่างหรือสั้นเกินให้ใช้ placeholder
+        if not name_part or len(name_part) < 2:
+            name_part = f"ผู้ป่วย-{clinic_hn}"
+        return {
+            "clinic_hn": clinic_hn,
+            "hospital_hn": hospital_hn,
+            "patient_name": name_part,
+        }
+    elif len(long_nums) == 1:
+        # มี HN เดียว — ยังลงทะเบียนได้
+        hn = long_nums[0]
+        name_part = cleaned
+        name_part = name_part.replace(hn, ' ', 1)
+        name_part = re.sub(r'^\s*[0-9a-fA-F]{1,3}\s+', '', name_part)
+        name_part = re.sub(r'[—–+]+', ' ', name_part)
+        name_part = re.sub(r'\s+', ' ', name_part).strip()
+        name_part = name_part.strip(' .,;:-_|"\'')
+        if not name_part or len(name_part) < 2:
+            name_part = f"ผู้ป่วย-{hn}"
+        return {
+            "clinic_hn": hn if len(hn) <= 6 else "",
+            "hospital_hn": hn if len(hn) > 6 else "",
+            "patient_name": name_part,
+        }
+
     return None
 
 
