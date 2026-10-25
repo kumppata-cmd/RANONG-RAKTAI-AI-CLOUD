@@ -257,6 +257,45 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 
+# ─── CORS for Admin API (เฉพาะ /admin/api/ endpoints) ──────────
+# อนุญาตเฉพาะ claude.ai artifact เรียกใช้งาน admin API ได้
+_CORS_ALLOWED_ORIGINS = {
+    "https://claude.ai",
+    "https://preview.claude.ai",
+    "https://artifact.claude.ai",
+}
+
+@app.after_request
+def _add_cors_headers(response):
+    """เพิ่ม CORS headers สำหรับ admin API endpoints เท่านั้น."""
+    if request.path.startswith("/admin/api/"):
+        origin = request.headers.get("Origin", "")
+        # อนุญาต claude.ai origins หรือ origin ที่ลงท้ายด้วย .claude.site
+        if origin in _CORS_ALLOWED_ORIGINS or origin.endswith(".claude.site"):
+            response.headers["Access-Control-Allow-Origin"] = origin
+            response.headers["Access-Control-Allow-Headers"] = (
+                "Content-Type, X-Admin-Secret"
+            )
+            response.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+            response.headers["Access-Control-Max-Age"] = "3600"
+    return response
+
+@app.route("/admin/api/<path:_path>", methods=["OPTIONS"])
+def _cors_preflight(_path):
+    """Handle CORS preflight (OPTIONS) for admin API."""
+    from flask import Response as _Resp
+    origin = request.headers.get("Origin", "")
+    resp = _Resp("", status=204)
+    if origin in _CORS_ALLOWED_ORIGINS or origin.endswith(".claude.site"):
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Headers"] = (
+            "Content-Type, X-Admin-Secret"
+        )
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Max-Age"] = "3600"
+    return resp
+
+
 # ═══════════════════════════════════════════════════════════
 # One-Time Enrollment Token Store
 # ═══════════════════════════════════════════════════════════
