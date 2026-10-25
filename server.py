@@ -7896,6 +7896,27 @@ def admin_retroactive_route():
 
         # Copy blob ไป path ใหม่
         try:
+            # เช็ค destination ก่อน — ถ้ามีอยู่แล้วไม่ต้อง copy ซ้ำ
+            # (copy_blob ไป existing blob จะ Forbidden เพราะไม่มี delete perm)
+            dest_blob = storage._bucket.blob(new_blob_path)
+            if dest_blob.exists():
+                # อัปเดต doc index ให้ชี้ path ใหม่ (ถ้ายังไม่ได้อัปเดต)
+                new_gcs_uri = f"gs://{storage.bucket_name}/{new_blob_path}"
+                if doc.get("gcs_object_path") != new_gcs_uri:
+                    doc["gcs_object_path"] = new_gcs_uri
+                    idx_path = f"_index/docs/{doc_id}.json"
+                    try:
+                        idx_blob = storage._bucket.blob(idx_path)
+                        idx_blob.upload_from_string(
+                            json.dumps(doc, ensure_ascii=False),
+                            content_type="application/json",
+                        )
+                    except Exception:
+                        pass
+                entry["action"] = "already_copied"
+                already_in_folder += 1
+                continue
+
             src_blob = storage._bucket.blob(blob_path)
             if not src_blob.exists():
                 entry["action"] = "error"
