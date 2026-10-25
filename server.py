@@ -2650,7 +2650,22 @@ def _ocr_from_bytes(data: bytes, file_type: str) -> str:
             return "\n\n".join(texts)
         else:
             img = Image.open(tmp.name)
-            return pytesseract.image_to_string(img, lang="tha+eng")
+            # Apply same preprocessing as extract_text_with_ocr
+            gray = img.convert("L")
+            img.close()
+            w, h = gray.size
+            if w < 2000:
+                sf = 2000 / w
+                gray = gray.resize((int(w * sf), int(h * sf)), Image.LANCZOS)
+            sharpened = gray.filter(ImageFilter.SHARPEN)
+            processed = ImageOps.autocontrast(sharpened, cutoff=2)
+            sharpened.close()
+            gray.close()
+            text = pytesseract.image_to_string(
+                processed, lang="tha+eng", config="--psm 3",
+            ).strip()
+            processed.close()
+            return text
 
 
 def format_document_text_for_line(text: str, doc_meta: dict) -> str:
@@ -4885,41 +4900,100 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                     img.close()
                     img = None
 
-                    # 2. Upscale small images only (LINE photos ~1024px)
+                    # 2. Upscale — LINE photos are ~1024px, OCR needs ≥2000px
                     w, h = gray.size
-                    if w < 1400:
-                        sf = 1400 / w
+                    if w < 2000:
+                        sf = 2000 / w
                         gray = gray.resize(
                             (int(w * sf), int(h * sf)), Image.LANCZOS
                         )
                         logger.info(f"[OCR-PRE] Upscaled → {gray.size[0]}x{gray.size[1]}")
 
-                    # 3. Autocontrast only — no binary, no median
-                    #    Binary threshold destroys Thai characters
-                    #    Median filter blurs detail without helping
-                    processed = ImageOps.autocontrast(gray, cutoff=1)
-                    gray.close()
+                    _ocr_debug_store["processed_size"] = f"{gray.size[0]}x{gray.size[1]}"
 
-                    _ocr_debug_store["preprocess"] = "gray+autocontrast1"
-                    _ocr_debug_store["processed_size"] = f"{processed.size[0]}x{processed.size[1]}"
+                    # ── Multi-pass OCR: try different preprocessing + PSM ──
+                    # แต่ละ pass ใช้ preprocessing ต่างกันเพื่อรองรับ
+                    # ภาพถ่ายจาก LINE OA ที่มีคุณภาพหลากหลาย
+                    ocr_timeout = min(timeout_sec, 20)
+                    text = ""
 
-                    # ── OCR: Single pass — PSM 6, tha+eng ──
-                    # Multiple passes cause timeout on 512MB server
-                    # PSM 6 = uniform block of text (best for tables)
-                    ocr_timeout = min(timeout_sec, 25)
+                    # Pass 1: Sharpen + autocontrast + PSM 3 (auto segmentation)
+                    # PSM 3 handles mixed layouts (headers + tables + text)
+                    # better than PSM 6 for prescription/medical documents
                     try:
+                        sharpened = gray.filter(ImageFilter.SHARPEN)
+                        p1 = ImageOps.autocontrast(sharpened, cutoff=2)
+                        sharpened.close()
                         text = pytesseract.image_to_string(
-                            processed, lang="tha+eng",
-                            timeout=ocr_timeout, config="--psm 6",
+                            p1, lang="tha+eng",
+                            timeout=ocr_timeout, config="--psm 3",
                         ).strip()
-                        _ocr_debug_store["ocr_config"] = "psm6-tha+eng"
+                        p1.close()
+                        _ocr_debug_store["pass1"] = f"psm3-sharp-ac2: {len(text)} chars"
+                        logger.info(f"[OCR] Pass1 PSM3+sharp: {len(text)} chars")
                     except Exception as e:
-                        text = ""
-                        logger.warning(f"[OCR] psm6 error: {e}")
-                        _ocr_debug_store["ocr_config"] = f"psm6-ERROR: {e}"
+                        logger.warning(f"[OCR] Pass1 error: {e}")
+                        _ocr_debug_store["pass1"] = f"ERROR: {e}"
+
+                    # Pass 2: If pass 1 got < 15 chars, try binarization + PSM 6
+                    # Otsu-like: compute mean, use as threshold
+                    if len(text) < 15:
+                        try:
+                            # Enhance contrast first
+                            enhanced = ImageEnhance.Contrast(gray).enhance(2.0)
+                            sharpened2 = enhanced.filter(
+                                ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3)
+                            )
+                            enhanced.close()
+                            # Compute adaptive threshold using PIL histogram
+                            hist = sharpened2.histogram()
+                            total_px = sum(hist)
+                            cumsum = 0
+                            threshold = 128
+                            for i, count in enumerate(hist):
+                                cumsum += i * count
+                            mean_val = cumsum / max(total_px, 1)
+                            threshold = int(mean_val * 0.85)
+                            p2 = sharpened2.point(lambda x: 255 if x > threshold else 0)
+                            sharpened2.close()
+                            text2 = pytesseract.image_to_string(
+                                p2, lang="tha+eng",
+                                timeout=ocr_timeout, config="--psm 6",
+                            ).strip()
+                            p2.close()
+                            _ocr_debug_store["pass2"] = f"psm6-binary-t{threshold}: {len(text2)} chars"
+                            logger.info(f"[OCR] Pass2 PSM6+binary(t={threshold}): {len(text2)} chars")
+                            if len(text2) > len(text):
+                                text = text2
+                        except Exception as e:
+                            logger.warning(f"[OCR] Pass2 error: {e}")
+                            _ocr_debug_store["pass2"] = f"ERROR: {e}"
+
+                    # Pass 3: If still < 15 chars, try UnsharpMask + autocontrast + PSM 4
+                    # PSM 4 = single column of text (many prescriptions are columnar)
+                    if len(text) < 15:
+                        try:
+                            p3_sharp = gray.filter(
+                                ImageFilter.UnsharpMask(radius=3, percent=200, threshold=2)
+                            )
+                            p3 = ImageOps.autocontrast(p3_sharp, cutoff=5)
+                            p3_sharp.close()
+                            text3 = pytesseract.image_to_string(
+                                p3, lang="tha+eng",
+                                timeout=ocr_timeout, config="--psm 4",
+                            ).strip()
+                            p3.close()
+                            _ocr_debug_store["pass3"] = f"psm4-unsharp-ac5: {len(text3)} chars"
+                            logger.info(f"[OCR] Pass3 PSM4+unsharp: {len(text3)} chars")
+                            if len(text3) > len(text):
+                                text = text3
+                        except Exception as e:
+                            logger.warning(f"[OCR] Pass3 error: {e}")
+                            _ocr_debug_store["pass3"] = f"ERROR: {e}"
 
                     _ocr_debug_store["ocr_char_count"] = len(text)
-                    logger.info(f"[OCR] PSM6: {len(text)} chars")
+                    _ocr_debug_store["preprocess"] = "multi-pass-3"
+                    logger.info(f"[OCR] Final: {len(text)} chars")
                 finally:
                     if processed is not None:
                         try:
@@ -4931,6 +5005,10 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                             img.close()
                         except Exception:
                             pass
+                    try:
+                        gray.close()
+                    except Exception:
+                        pass
                 logger.info(f"OCR ภาพ: ได้ {len(text)} ตัวอักษร")
                 if text:
                     logger.info(f"[OCR-PRE] preview: {text[:200]}")
@@ -5509,7 +5587,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
         content = override_text
     elif ext in (".jpg", ".jpeg", ".png"):
         content = extract_text_with_ocr(filepath)
-        if not content or len(content.strip()) < 20:
+        if not content or len(content.strip()) < 5:
             return {
                 "category": "review",
                 "reason": "OCR อ่านข้อความจากภาพไม่ได้ — ต้องใช้ AI ตรวจสอบ",
