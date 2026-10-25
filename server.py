@@ -270,9 +270,10 @@ def _add_cors_headers(response):
     """เพิ่ม CORS headers สำหรับ admin API endpoints เท่านั้น."""
     if request.path.startswith("/admin/api/"):
         origin = request.headers.get("Origin", "")
-        # อนุญาต claude.ai origins หรือ origin ที่ลงท้ายด้วย .claude.site
-        if origin in _CORS_ALLOWED_ORIGINS or origin.endswith(".claude.site"):
-            response.headers["Access-Control-Allow-Origin"] = origin
+        # อนุญาตทุก origin เพราะ admin API ป้องกันด้วย Admin Secret อยู่แล้ว
+        # จำเป็นสำหรับ file:// (Origin: null) และ localhost
+        if True:  # Admin API ป้องกันด้วย Secret — อนุญาตทุก origin
+            response.headers["Access-Control-Allow-Origin"] = origin or "*"
             response.headers["Access-Control-Allow-Headers"] = (
                 "Content-Type, X-Admin-Secret"
             )
@@ -286,8 +287,8 @@ def _cors_preflight(_path):
     from flask import Response as _Resp
     origin = request.headers.get("Origin", "")
     resp = _Resp("", status=204)
-    if origin in _CORS_ALLOWED_ORIGINS or origin.endswith(".claude.site"):
-        resp.headers["Access-Control-Allow-Origin"] = origin
+    if True:  # Admin API ป้องกันด้วย Secret
+        resp.headers["Access-Control-Allow-Origin"] = origin or "*"
         resp.headers["Access-Control-Allow-Headers"] = (
             "Content-Type, X-Admin-Secret"
         )
