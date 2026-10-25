@@ -6674,24 +6674,30 @@ def process_file_async(
                 f"จัดเก็บเอกสารล้มเหลว (Production): "
                 f"{type(e).__name__} (doc_id={_doc_id})"
             )
+            _store_err_msg = (
+                "ขออภัย ระบบไม่สามารถจัดเก็บเอกสารได้ในขณะนี้\n"
+                "กรุณาลองส่งใหม่ในอีกสักครู่\n"
+                "หากยังไม่ได้ กรุณาแจ้งเจ้าหน้าที่"
+            )
             if reply_token:
-                reply_message(
-                    reply_token,
-                    "ขออภัย ระบบไม่สามารถจัดเก็บเอกสารได้ในขณะนี้\n"
-                    "กรุณาลองส่งใหม่ในอีกสักครู่\n"
-                    "หากยังไม่ได้ กรุณาแจ้งเจ้าหน้าที่",
-                )
+                reply_message(reply_token, _store_err_msg)
+            elif line_user_id:
+                # Multi-page flush: reply_token หมดอายุ → ใช้ push_message
+                push_message(line_user_id, _store_err_msg)
         except Exception as e:
             # ไม่ log str(e) — ข้อความ exception ของ I/O มักมี path พร้อมชื่อไฟล์
             logger.error(
                 f"ประมวลผลไฟล์ล้มเหลว: {type(e).__name__} (doc_id={_doc_id})"
             )
-            if IS_PRODUCTION and reply_token:
-                reply_message(
-                    reply_token,
-                    "ขออภัย เกิดข้อผิดพลาดในการประมวลผลเอกสาร\n"
-                    "กรุณาลองส่งใหม่อีกครั้ง",
-                )
+            _err_msg = (
+                "ขออภัย เกิดข้อผิดพลาดในการประมวลผลเอกสาร\n"
+                "กรุณาลองส่งใหม่อีกครั้ง"
+            )
+            if reply_token:
+                reply_message(reply_token, _err_msg)
+            elif line_user_id:
+                # Multi-page flush: reply_token หมดอายุ → ใช้ push_message
+                push_message(line_user_id, _err_msg)
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
@@ -6752,7 +6758,11 @@ def _mp_write_meta(user_hash: str, meta: dict):
 
 
 def _mp_clear(user_hash: str, page_count: int):
-    """Clear multipage buffer files from /tmp."""
+    """Clear multipage buffer files from /tmp.
+
+    NOTE: ไม่ลบ lock file (.lock) — เพราะ worker อื่นอาจยังถือ fd อยู่
+    lock file ขนาดเล็กมาก (0 bytes) ไม่กระทบ disk
+    """
     try:
         os.remove(_mp_meta_path(user_hash))
     except FileNotFoundError:
@@ -6762,10 +6772,7 @@ def _mp_clear(user_hash: str, page_count: int):
             os.remove(_mp_page_path(user_hash, i))
         except FileNotFoundError:
             pass
-    try:
-        os.remove(_mp_lock_path(user_hash))
-    except FileNotFoundError:
-        pass
+    # ไม่ลบ .lock file — ป้องกัน race condition กับ worker อื่นที่อาจถือ lock อยู่
 
 
 def _mp_acquire_lock(user_hash: str):
@@ -7020,8 +7027,12 @@ def _multipage_flush(user_hash: str):
     lock_fd = None
     try:
         lock_fd = _mp_acquire_lock(user_hash)
-    except Exception:
-        pass
+    except Exception as lock_err:
+        logger.warning(
+            f"Multi-page flush: lock acquisition failed: "
+            f"{type(lock_err).__name__} (user={user_hash[:8]}…) — "
+            f"proceeding without cross-worker lock"
+        )
 
     try:
         meta = _mp_read_meta(user_hash)
@@ -7378,8 +7389,12 @@ def _handle_incoming_document(
         lock_fd = None
         try:
             lock_fd = _mp_acquire_lock(user_hash)
-        except Exception:
-            pass
+        except Exception as lock_err:
+            logger.warning(
+                f"Multi-page buffer: lock acquisition failed: "
+                f"{type(lock_err).__name__} (user={user_hash[:8]}…) — "
+                f"proceeding without cross-worker lock"
+            )
 
         try:
             meta = _mp_read_meta(user_hash)
