@@ -68,6 +68,51 @@ def build_legacy_path(folder: str, filename: str, subfolder: str = "") -> str:
     return f"{folder}/{monthly}/{filename}"
 
 
+# หมวดเอกสารทางคลินิกที่ต้องแยก sub-folder รายไตรมาส/รายเดือน/รายผู้ป่วย
+CLINICAL_CATEGORIES = ("lab", "rx", "dialysis")
+
+
+def _safe_folder_component(name: str) -> str:
+    """ทำความสะอาดชื่อ folder — ป้องกัน path traversal."""
+    if not name:
+        return ""
+    cleaned = name.replace("..", "_").replace("/", "_").replace("\\", "_")
+    return cleaned.strip().strip(".")
+
+
+def build_document_path(
+    folder: str,
+    filename: str,
+    category: str,
+    patient_folder: str = "",
+    subfolder: str = "",
+    date: datetime | None = None,
+) -> str:
+    """สร้าง GCS path มาตรฐานเดียวสำหรับทุกหมวดเอกสาร (canonical builder).
+
+    ใช้ที่เดียวทุกจุดที่เขียนไฟล์ขึ้น GCS เพื่อให้โครงสร้างตรงกันเสมอ
+    (upload ใหม่, reclassify, retroactive routing)
+
+    โครงสร้าง:
+      lab / rx / dialysis  → folder/YYYY-QN/YYYY-MM/[HN_ชื่อ/]uuid.pdf
+      อื่นๆ (bills ฯลฯ)    → folder/[subfolder/]YYYY-MM/uuid.pdf
+
+    เอกสารฟอกเลือด (dialysis) ใช้โครงสร้างเดียวกับ lab/rx — แยกไตรมาส
+    แล้วแยกเดือน แล้วแยกรายผู้ป่วย
+    """
+    dt = date or datetime.now(timezone.utc)
+
+    if category in CLINICAL_CATEGORIES:
+        quarter = get_quarter(dt)
+        monthly = dt.strftime("%Y-%m")
+        safe_patient = _safe_folder_component(patient_folder)
+        if safe_patient:
+            return f"{folder}/{quarter}/{monthly}/{safe_patient}/{filename}"
+        return f"{folder}/{quarter}/{monthly}/{filename}"
+
+    return build_legacy_path(folder, filename, subfolder)
+
+
 # ─────────────────────────────────────────────────────────────
 # Lab Comparison — เปรียบเทียบผลแล็บ 2 ชุด
 # ─────────────────────────────────────────────────────────────

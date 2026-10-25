@@ -35,7 +35,7 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from flask import Flask, request, abort, jsonify, redirect
@@ -53,6 +53,8 @@ from quarterly_compare import (
     build_quarterly_path,
     build_monthly_patient_path,
     build_legacy_path,
+    build_document_path,
+    CLINICAL_CATEGORIES,
     compare_lab_reports,
     compare_latest_labs,
     compare_latest_rx,
@@ -760,37 +762,37 @@ class StorageGCS:
 
         folder = FOLDERS.get(category, FOLDERS["review"])
         # ──────────────────────────────────────────────────────
-        # Quarterly sub-folder organization:
-        #   - lab, rx → quarterly: folder/2026-Q4/2026-10/uuid.pdf
-        #   - dialysis → quarterly per patient: folder/2026-Q4/{hn}/uuid.pdf
-        #   - อื่นๆ → monthly (เดิม): folder/2026-10/uuid.pdf
+        # Sub-folder organization (ใช้ canonical builder ที่เดียว):
+        #   lab / rx / dialysis → folder/2026-Q4/2026-10/[HN_ชื่อ/]uuid.pdf
+        #   อื่นๆ (bills ฯลฯ)   → folder/[subfolder/]2026-10/uuid.pdf
+        #
+        # ใบยาและใบฟอกเลือดใช้โครงสร้างเดียวกับผลแล็บ — แยกไตรมาส
+        # แยกเดือน แล้วแยกรายผู้ป่วย
         # ──────────────────────────────────────────────────────
         owner_hash_for_path = (metadata or {}).get("owner_hash_short", "")
         patient_hn_folder = (metadata or {}).get("patient_hn_folder", "")
 
-        if category in ("lab", "rx"):
-            if patient_hn_folder:
-                # มี HN → จัดเก็บตามรายผู้ป่วย: folder/YYYY-QN/YYYY-MM/HN_Name/file
-                base_path = build_quarterly_path(folder, filename)
-                # แทรก patient folder ก่อนชื่อไฟล์
-                parts = base_path.rsplit("/", 1)
-                blob_path = f"{parts[0]}/{patient_hn_folder}/{parts[1]}"
-            else:
-                blob_path = build_quarterly_path(folder, filename)
-        elif category == "dialysis":
-            if patient_hn_folder:
-                # มี HN จาก master registry → ใช้ patient_hn_folder
-                blob_path = build_monthly_patient_path(folder, filename, patient_hn_folder)
-            elif owner_hash_for_path:
-                patient_folder = hn_registry.get_folder_name(owner_hash_for_path) if hn_registry else ""
-                blob_path = build_monthly_patient_path(folder, filename, patient_folder)
-            else:
-                blob_path = build_monthly_patient_path(folder, filename, "")
-        elif subfolder:
-            # ป้องกัน path traversal ใน subfolder
-            blob_path = build_legacy_path(folder, filename, subfolder)
-        else:
-            blob_path = build_legacy_path(folder, filename)
+        # ถ้ายังไม่รู้ผู้ป่วยจาก OCR → ลองจาก HN registry ของผู้ส่ง
+        if (
+            not patient_hn_folder
+            and category in CLINICAL_CATEGORIES
+            and owner_hash_for_path
+            and hn_registry
+        ):
+            try:
+                patient_hn_folder = hn_registry.get_folder_name(
+                    owner_hash_for_path
+                ) or ""
+            except Exception:
+                patient_hn_folder = ""
+
+        blob_path = build_document_path(
+            folder,
+            filename,
+            category,
+            patient_folder=patient_hn_folder,
+            subfolder=subfolder or "",
+        )
 
         content_type = self._get_content_type(filename)
 
@@ -6935,28 +6937,34 @@ def _reclassify_document(
         push_message(line_user_id, "❌ path ไม่ถูกต้อง — ไม่สามารถย้ายได้")
         return
 
-    # Build new path
+    # Build new path — ใช้ canonical builder เดียวกับ upload ปกติ
     dest_folder = FOLDERS.get(new_category, FOLDERS["review"])
     filename = object_path.rsplit("/", 1)[-1] if "/" in object_path else object_path
-    now = datetime.now()
 
-    if new_category == "lab":
-        # 04_LAB_RESULTS/2026-Q4/2026-10/file.jpg
-        quarter = f"Q{(now.month - 1) // 3 + 1}"
-        new_path = f"{dest_folder}/{now.year}-{quarter}/{now.strftime('%Y-%m')}/{filename}"
-    elif new_category == "rx":
-        # 03_PRESCRIPTIONS/2026-Q4/2026-10/file.jpg
-        quarter = f"Q{(now.month - 1) // 3 + 1}"
-        new_path = f"{dest_folder}/{now.year}-{quarter}/{now.strftime('%Y-%m')}/{filename}"
-    elif new_category == "dialysis":
-        # 05_DIALYSIS_RECORDS/2026-Q4/file.jpg (quarterly)
-        quarter = f"Q{(now.month - 1) // 3 + 1}"
-        new_path = f"{dest_folder}/{now.year}-{quarter}/{filename}"
-    elif new_category == "bills":
-        # 02_BILLS_RECEIPTS/2026-10/file.jpg
-        new_path = f"{dest_folder}/{now.strftime('%Y-%m')}/{filename}"
-    else:
-        new_path = f"{dest_folder}/{filename}"
+    # หา patient folder จาก HN ใน OCR text ของเอกสาร — ใบยา/ใบฟอกเลือด
+    # ต้องเข้าแฟ้มรายผู้ป่วยเหมือนผลแล็บ
+    patient_folder = ""
+    if new_category in CLINICAL_CATEGORIES and master_registry:
+        try:
+            doc_text = ""
+            for _d in doc_index._docs:
+                if _d.get("document_id") == doc_id:
+                    doc_text = _d.get("extracted_text", "")
+                    break
+            if doc_text:
+                for hn_candidate in extract_hn_from_document(doc_text):
+                    _folder = master_registry.get_folder_for_hn(hn_candidate)
+                    if _folder:
+                        patient_folder = _folder
+                        break
+        except Exception as _hn_err:
+            logger.warning(
+                "Reclassify: HN lookup failed: %s", type(_hn_err).__name__
+            )
+
+    new_path = build_document_path(
+        dest_folder, filename, new_category, patient_folder=patient_folder,
+    )
 
     try:
         from google.cloud import storage as gcs_storage
@@ -8634,20 +8642,10 @@ def admin_retroactive_route():
         doc_id = doc.get("document_id", "")
         doc_id_short = doc_id[:8] if doc_id else "unknown"
 
-        # ตรวจว่าอยู่ใน patient folder แล้วหรือยัง
-        # โดยเช็คว่า path มี pattern ของ patient folder (เช่น .../57042_นฤมล_ฤาชัย/...)
-        # Patient folder format: {clinic_hn}_{name} หรือ {hn}
-        # ตรวจจาก registry ว่ามี folder name ไหนอยู่ใน path
-        _already_routed = False
-        all_patients = master_registry.list_all()
-        for p in all_patients:
-            pf = p.folder_name
-            if pf and f"/{pf}/" in gcs_path:
-                _already_routed = True
-                break
-        if _already_routed:
-            already_in_folder += 1
-            continue
+        # ไม่ตัดเอกสารที่อยู่ใน patient folder แล้วออกตรงนี้ — เอกสารบางชุด
+        # ถูกย้ายด้วยตรรกะเดิมไปอยู่ใต้ path แบบเก่า (folder/YYYY-MM/HN_ชื่อ/)
+        # จึงต้องคำนวณ path มาตรฐานก่อน แล้วค่อยเทียบว่าตรงอยู่แล้วหรือไม่
+        # (เทียบที่ `new_blob_path == blob_path` ด้านล่าง)
 
         # ดึง HN จาก OCR text
         text = doc.get("extracted_text", "")
@@ -8694,12 +8692,33 @@ def admin_retroactive_route():
         if not blob_path:
             continue
 
-        # หา folder เดิมและแทรก patient folder
-        # lab/rx: folder/YYYY-QN/YYYY-MM/filename → folder/YYYY-QN/YYYY-MM/HN_Name/filename
-        # dialysis: folder/YYYY-QN/filename → folder/YYYY-QN/HN_Name/filename
+        # สร้าง path มาตรฐานใหม่ทั้งเส้น (ไม่ใช่แค่แทรก patient folder)
+        # เอกสารเก่าอยู่แบบ folder/YYYY-MM/filename ต้องย้ายเข้าโครงสร้าง
+        # folder/YYYY-QN/YYYY-MM/HN_ชื่อ/filename ให้ครบทั้งไตรมาส/เดือน/ผู้ป่วย
         filename = blob_path.rsplit("/", 1)[-1]
-        parent_path = blob_path.rsplit("/", 1)[0]
-        new_blob_path = f"{parent_path}/{matched_folder}/{filename}"
+        dest_folder = FOLDERS.get(cat, FOLDERS["review"])
+
+        # ใช้วันที่อัปโหลดของเอกสาร เพื่อให้เข้าไตรมาส/เดือนที่ถูกต้อง
+        doc_dt = None
+        _upload_date = doc.get("upload_date", "")
+        if _upload_date:
+            try:
+                doc_dt = datetime.strptime(_upload_date, "%Y-%m-%d").replace(
+                    tzinfo=timezone.utc
+                )
+            except (ValueError, TypeError):
+                doc_dt = None
+
+        new_blob_path = build_document_path(
+            dest_folder, filename, cat,
+            patient_folder=matched_folder,
+            date=doc_dt,
+        )
+
+        # ถ้า path เดิมตรงกับ path ใหม่อยู่แล้ว ไม่ต้องทำอะไร
+        if new_blob_path == blob_path:
+            already_in_folder += 1
+            continue
 
         entry = {
             "doc_id": doc_id_short,

@@ -25,6 +25,7 @@ from quarterly_compare import (
     build_quarterly_path,
     build_monthly_patient_path,
     build_legacy_path,
+    build_document_path,
     LabComparison,
     LabComparisonResult,
     RxComparison,
@@ -179,12 +180,13 @@ class TestPathBuilders(unittest.TestCase):
         self.assertEqual(parts[3], "test.pdf")
 
     def test_monthly_patient_path_with_folder(self):
+        # เอกสารฟอกเลือดแยกรายไตรมาส (ไม่ใช่รายเดือน) ตามที่ผู้ใช้กำหนด
         path = build_monthly_patient_path(
             "05_DIALYSIS_RECORDS", "test.pdf", "1234_56789"
         )
         parts = path.split("/")
         self.assertEqual(parts[0], "05_DIALYSIS_RECORDS")
-        self.assertRegex(parts[1], r"\d{4}-\d{2}")
+        self.assertRegex(parts[1], r"\d{4}-Q[1-4]")
         self.assertEqual(parts[2], "1234_56789")
         self.assertEqual(parts[3], "test.pdf")
 
@@ -210,6 +212,97 @@ class TestPathBuilders(unittest.TestCase):
         # subfolder path: FOLDER/sub/YYYY-MM/filename
         self.assertRegex(parts[2], r"\d{4}-\d{2}")
         self.assertEqual(parts[3], "test.pdf")
+
+
+# ═══════════════════════════════════════════════════════════
+# Canonical Document Path — ใบยา/ใบฟอกเลือด ต้องแยก sub-folder
+# เหมือนผลแล็บ (regression guard)
+# ═══════════════════════════════════════════════════════════
+
+class TestCanonicalDocumentPath(unittest.TestCase):
+    """ป้องกัน regression: ใบยา (rx) และใบฟอกเลือด (dialysis)
+    ต้องแยก sub-folder รายไตรมาส/เดือน/ผู้ป่วย เหมือน lab ทุกกรณี
+    """
+
+    FOLDERS = {
+        "rx": "03_PRESCRIPTIONS",
+        "lab": "04_LAB_RESULTS",
+        "dialysis": "05_DIALYSIS_RECORDS",
+    }
+    DT = datetime(2026, 10, 25, tzinfo=timezone.utc)
+    PATIENT = "57042_PatientName"
+
+    def test_all_clinical_categories_share_structure(self):
+        """lab, rx, dialysis ต้องได้โครงสร้าง sub-folder เหมือนกันทุกตัว"""
+        for cat, folder in self.FOLDERS.items():
+            with self.subTest(category=cat):
+                path = build_document_path(
+                    folder, "u.pdf", cat,
+                    patient_folder=self.PATIENT, date=self.DT,
+                )
+                self.assertEqual(
+                    path,
+                    f"{folder}/2026-Q4/2026-10/{self.PATIENT}/u.pdf",
+                )
+
+    def test_clinical_categories_without_patient(self):
+        """ไม่รู้ผู้ป่วย → ยังต้องแยกไตรมาส/เดือน ไม่ทิ้งไว้ใน folder หลัก"""
+        for cat, folder in self.FOLDERS.items():
+            with self.subTest(category=cat):
+                path = build_document_path(
+                    folder, "u.pdf", cat, date=self.DT,
+                )
+                self.assertEqual(path, f"{folder}/2026-Q4/2026-10/u.pdf")
+                # ต้องไม่ใช่ path แบบแบน folder/filename
+                self.assertGreaterEqual(len(path.split("/")), 4)
+
+    def test_dialysis_matches_lab_depth(self):
+        """ใบฟอกเลือดต้องลึกเท่าผลแล็บ — เดิมขาดชั้นเดือน"""
+        lab = build_document_path(
+            self.FOLDERS["lab"], "u.pdf", "lab",
+            patient_folder=self.PATIENT, date=self.DT,
+        )
+        dialysis = build_document_path(
+            self.FOLDERS["dialysis"], "u.pdf", "dialysis",
+            patient_folder=self.PATIENT, date=self.DT,
+        )
+        self.assertEqual(len(lab.split("/")), len(dialysis.split("/")))
+
+    def test_historical_date_lands_in_correct_quarter(self):
+        """เอกสารย้อนหลังต้องเข้าไตรมาสของวันที่เอกสาร ไม่ใช่วันนี้"""
+        cases = [
+            (datetime(2026, 1, 15, tzinfo=timezone.utc), "2026-Q1", "2026-01"),
+            (datetime(2026, 4, 1, tzinfo=timezone.utc), "2026-Q2", "2026-04"),
+            (datetime(2026, 7, 31, tzinfo=timezone.utc), "2026-Q3", "2026-07"),
+            (datetime(2026, 12, 31, tzinfo=timezone.utc), "2026-Q4", "2026-12"),
+        ]
+        for dt, want_q, want_m in cases:
+            with self.subTest(date=dt.date()):
+                path = build_document_path(
+                    "05_DIALYSIS_RECORDS", "u.pdf", "dialysis",
+                    patient_folder=self.PATIENT, date=dt,
+                )
+                self.assertEqual(
+                    path,
+                    f"05_DIALYSIS_RECORDS/{want_q}/{want_m}/{self.PATIENT}/u.pdf",
+                )
+
+    def test_non_clinical_stays_legacy(self):
+        """bills ยังใช้โครงสร้างเดิม — ไม่เปลี่ยนพฤติกรรม"""
+        path = build_document_path(
+            "02_BILLS_RECEIPTS", "u.jpg", "bills",
+            subfolder="NIKKISO", date=self.DT,
+        )
+        self.assertEqual(path, "02_BILLS_RECEIPTS/NIKKISO/2026-10/u.jpg")
+
+    def test_patient_folder_path_traversal_blocked(self):
+        """ชื่อแฟ้มผู้ป่วยต้องไม่หลุด path traversal"""
+        path = build_document_path(
+            "04_LAB_RESULTS", "u.pdf", "lab",
+            patient_folder="../../etc/passwd", date=self.DT,
+        )
+        self.assertNotIn("..", path)
+        self.assertTrue(path.startswith("04_LAB_RESULTS/2026-Q4/2026-10/"))
 
 
 # ═══════════════════════════════════════════════════════════

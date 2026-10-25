@@ -119,6 +119,8 @@ class MasterPatientRegistry:
         self._patients: list[MasterPatient] = []
         self._clinic_hn_index: dict[str, int] = {}   # clinic_hn -> list index
         self._hospital_hn_index: dict[str, int] = {}  # hospital_hn -> list index
+        # HN แบบตัด 0 นำหน้า -> list index (fallback matching)
+        self._normalized_hn_index: dict[str, int] = {}
         self._loaded = False
 
     def set_storage(self, storage) -> None:
@@ -244,11 +246,18 @@ class MasterPatientRegistry:
         """สร้าง index ใหม่จาก patient list"""
         self._clinic_hn_index.clear()
         self._hospital_hn_index.clear()
+        self._normalized_hn_index = {}
         for i, p in enumerate(self._patients):
             if p.clinic_hn:
                 self._clinic_hn_index[p.clinic_hn] = i
+                norm = _normalize_hn(p.clinic_hn)
+                if norm:
+                    self._normalized_hn_index.setdefault(norm, i)
             if p.hospital_hn:
                 self._hospital_hn_index[p.hospital_hn] = i
+                norm = _normalize_hn(p.hospital_hn)
+                if norm:
+                    self._normalized_hn_index.setdefault(norm, i)
 
     # ── Public API ──────────────────────────────────────────
 
@@ -392,7 +401,15 @@ class MasterPatientRegistry:
         return new_count, updated_count, messages
 
     def match_hn(self, hn: str) -> Optional[MasterPatient]:
-        """ค้นหาผู้ป่วยจาก HN (ทั้ง clinic_hn และ hospital_hn)"""
+        """ค้นหาผู้ป่วยจาก HN (ทั้ง clinic_hn และ hospital_hn)
+
+        ลำดับการค้นหา:
+          1. clinic_hn ตรงตัว
+          2. hospital_hn ตรงตัว
+          3. เทียบแบบตัด 0 นำหน้า — เอกสารจริงพิมพ์ HN ไม่สม่ำเสมอ
+             เช่น ทะเบียนเก็บ "00007567" แต่ใบยา/ใบฟอกเลือดพิมพ์ "7567"
+             (fallback ใช้เฉพาะเมื่อค้นแบบตรงตัวไม่พบ)
+        """
         # Force reload จาก GCS — ป้องกัน stale data ใน multi-worker
         self._loaded = False
         self._load()
@@ -407,6 +424,12 @@ class MasterPatientRegistry:
         idx = self._hospital_hn_index.get(hn)
         if idx is not None:
             return self._patients[idx]
+        # Fallback: เทียบแบบตัด 0 นำหน้า
+        norm = _normalize_hn(hn)
+        if norm:
+            idx = getattr(self, "_normalized_hn_index", {}).get(norm)
+            if idx is not None:
+                return self._patients[idx]
         return None
 
     def get_folder_for_hn(self, hn: str) -> str:
@@ -820,6 +843,30 @@ def parse_patient_text_input(text: str) -> list[dict]:
 # ─────────────────────────────────────────────────────────────
 
 # Regex patterns สำหรับ HN ในเอกสารทางการแพทย์ไทย
+def _normalize_hn(hn: str) -> str:
+    """ทำ HN ให้เป็นรูปแบบเทียบได้ — ตัด 0 นำหน้าและอักขระที่ไม่ใช่ตัวเลข/ตัวอักษร
+
+    เอกสารจริงพิมพ์ HN ไม่สม่ำเสมอ: ทะเบียนเก็บ "00007567"
+    แต่ใบยา/ใบฟอกเลือดอาจพิมพ์ "7567" หรือ "HN-7567"
+
+    คืน "" ถ้าผลลัพธ์สั้นกว่า 3 อักขระ — กัน false positive
+    จากตัวเลขสั้นที่ไม่ใช่ HN
+    """
+    if not hn:
+        return ""
+    cleaned = re.sub(r"[^0-9A-Za-z]", "", hn).upper()
+    if not cleaned:
+        return ""
+    # ตัด label นำหน้า เช่น "HN7567", "AN7567", "VN7567", "PID7567"
+    cleaned = re.sub(r"^(?:HN|AN|VN|PID)(?=\d)", "", cleaned)
+    # ตัด 0 นำหน้าเฉพาะเมื่อเป็นตัวเลขล้วน
+    if cleaned.isdigit():
+        cleaned = cleaned.lstrip("0")
+    if len(cleaned) < 3:
+        return ""
+    return cleaned
+
+
 _HN_PATTERNS = [
     # "HN: 12345" or "HN:12345" or "H.N. 12345" or "HN 12345"
     re.compile(r'(?:H\.?N\.?|HN)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
