@@ -2481,19 +2481,26 @@ def api_master_registry_debug_gcs():
     results["registry_patient_count"] = master_registry.count()
     results["registry_loaded"] = master_registry._loaded
 
-    # 3) ทดสอบ write test blob
+    # 3) ทดสอบ write test blob (ใช้ unique name + if_generation_match=0
+    #    เพื่อไม่ต้องมี delete permission)
     if master_registry._storage:
         try:
-            test_blob = master_registry._storage.blob("_patient_master/_write_test.txt")
-            test_blob.upload_from_string("write_test_ok", content_type="text/plain")
+            _ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+            test_blob = master_registry._storage.blob(
+                f"_patient_master/_write_test_{_ts}.txt"
+            )
+            test_blob.upload_from_string(
+                "write_test_ok", content_type="text/plain",
+                if_generation_match=0,
+            )
             results["write_test"] = "OK"
-            # cleanup
-            try:
-                test_blob.delete()
-            except Exception:
-                pass
         except Exception as e:
-            results["write_test"] = f"FAILED: {type(e).__name__}: {e}"
+            err_name = type(e).__name__
+            # 412 = object exists (ไม่น่าเกิดเพราะใช้ unique name)
+            if getattr(e, "code", None) == 412:
+                results["write_test"] = "OK (object existed)"
+            else:
+                results["write_test"] = f"FAILED: {err_name}"
 
     # 4) ทดสอบ write registry path
     if master_registry._storage:
