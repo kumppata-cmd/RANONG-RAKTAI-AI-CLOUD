@@ -361,6 +361,71 @@ class MasterPatientRegistry:
         self._load()
         return len(self._patients)
 
+    def update_patient(
+        self,
+        hn: str,
+        new_name: str = "",
+        new_clinic_hn: str = "",
+        new_hospital_hn: str = "",
+    ) -> tuple[bool, str]:
+        """แก้ไขข้อมูลผู้ป่วย — ค้นจาก HN แล้วอัปเดตชื่อหรือ HN
+
+        Args:
+            hn: HN ที่ใช้ค้นหา (clinic หรือ hospital)
+            new_name: ชื่อใหม่ (ถ้าต้องการแก้)
+            new_clinic_hn: HN คลินิกใหม่ (ถ้าต้องการแก้)
+            new_hospital_hn: HN โรงพยาบาลใหม่ (ถ้าต้องการแก้)
+
+        Returns: (success, message)
+        """
+        self._load()
+        patient = self.match_hn(hn.strip().upper())
+        if not patient:
+            return False, f"ไม่พบผู้ป่วย HN: {hn}"
+
+        old_display = f"{patient.hn_display} ({patient.patient_name})"
+        changes = []
+
+        if new_name and new_name.strip() != patient.patient_name:
+            patient.patient_name = new_name.strip()
+            changes.append(f"ชื่อ → {patient.patient_name}")
+
+        if new_clinic_hn:
+            new_chn = new_clinic_hn.strip().upper()
+            if new_chn != patient.clinic_hn:
+                if not _validate_hn(new_chn):
+                    return False, f"รูปแบบ HN คลินิกไม่ถูกต้อง: {new_chn}"
+                # ตรวจว่า HN ใหม่ไม่ซ้ำกับคนอื่น
+                if new_chn in self._clinic_hn_index:
+                    existing = self._patients[self._clinic_hn_index[new_chn]]
+                    return False, f"HN {new_chn} ใช้แล้วโดย: {existing.patient_name}"
+                patient.clinic_hn = new_chn
+                changes.append(f"HN คลินิก → {new_chn}")
+
+        if new_hospital_hn:
+            new_hhn = new_hospital_hn.strip().upper()
+            if new_hhn != patient.hospital_hn:
+                if not _validate_hn(new_hhn):
+                    return False, f"รูปแบบ HN โรงพยาบาลไม่ถูกต้อง: {new_hhn}"
+                if new_hhn in self._hospital_hn_index:
+                    existing = self._patients[self._hospital_hn_index[new_hhn]]
+                    return False, f"HN {new_hhn} ใช้แล้วโดย: {existing.patient_name}"
+                patient.hospital_hn = new_hhn
+                changes.append(f"HN รพ → {new_hhn}")
+
+        if not changes:
+            return False, f"ไม่มีอะไรเปลี่ยนแปลง — ข้อมูลเดิม: {old_display}"
+
+        patient.updated_at = datetime.now(timezone.utc).isoformat()
+        self._rebuild_index()
+        if self._save():
+            return True, (
+                f"✅ แก้ไขสำเร็จ\n"
+                f"เดิม: {old_display}\n"
+                f"แก้ไข: {', '.join(changes)}"
+            )
+        return False, "❌ บันทึกไม่สำเร็จ"
+
     def delete(self, clinic_hn: str) -> tuple[bool, str]:
         """ลบผู้ป่วยจาก registry"""
         self._load()

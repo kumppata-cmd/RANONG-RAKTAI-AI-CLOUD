@@ -6518,6 +6518,48 @@ def webhook():
                                 lines.append(f"\n...และอีก {len(patients)-30} คน")
                             reply_message(reply_token, "\n".join(lines))
 
+                # ── แก้ไขชื่อผู้ป่วย ──
+                elif text.strip().startswith(("แก้ไข ", "แก้ชื่อ ", "edit ")):
+                    _admin_hash = os.getenv("ADMIN_LINE_HASH", "").strip()
+                    if _admin_hash and user_hash != _admin_hash:
+                        reply_message(
+                            reply_token,
+                            "⚠️ เฉพาะผู้ดูแลระบบเท่านั้นที่แก้ไขข้อมูลได้",
+                        )
+                    else:
+                        # รูปแบบ: แก้ไข HN ชื่อใหม่
+                        # เช่น: แก้ไข 56001 สมชาย ใจดี
+                        #       แก้ชื่อ HN:56001 สมหญิง ดีใจ
+                        import re as _re
+                        _edit_text = text.strip()
+                        # ตัด prefix command ออก
+                        for _prefix in ("แก้ไข ", "แก้ชื่อ ", "edit "):
+                            if _edit_text.startswith(_prefix):
+                                _edit_text = _edit_text[len(_prefix):].strip()
+                                break
+                        # แยก HN กับชื่อใหม่
+                        _hn_match = _re.match(
+                            r"(?:HN[:\s]*)?(\d{4,8})\s+(.+)",
+                            _edit_text, _re.IGNORECASE,
+                        )
+                        if not _hn_match:
+                            reply_message(
+                                reply_token,
+                                "❌ รูปแบบไม่ถูกต้อง\n\n"
+                                "วิธีใช้:\n"
+                                "  แก้ไข [HN] [ชื่อใหม่]\n\n"
+                                "ตัวอย่าง:\n"
+                                "  แก้ไข 56001 สมชาย ใจดี\n"
+                                "  แก้ชื่อ HN:56001 สมหญิง ดีใจ",
+                            )
+                        else:
+                            _hn = _hn_match.group(1)
+                            _new_name = _hn_match.group(2).strip()
+                            _ok, _msg = master_registry.update_patient(
+                                hn=_hn, new_name=_new_name,
+                            )
+                            reply_message(reply_token, _msg)
+
                 elif text.strip().lower() in ("สถานะ", "status"):
                     inbox_path = os.path.join(BASE_DIR, FOLDERS["inbox"])
                     inbox_count = len(os.listdir(inbox_path)) if os.path.exists(inbox_path) else 0
@@ -6541,6 +6583,7 @@ def webhook():
                         "  สถิติ — ดูสถิติเอกสาร\n"
                         "  ลงทะเบียนรายชื่อ — ลงทะเบียนผู้ป่วย (admin)\n"
                         "  ทะเบียนผู้ป่วย — ดูรายชื่อ (admin)\n"
+                        "  แก้ไข [HN] [ชื่อใหม่] — แก้ชื่อผู้ป่วย (admin)\n"
                         "  ช่วยเหลือ — ดูคำสั่งทั้งหมด",
                     )
             else:
