@@ -4872,64 +4872,46 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                     _ocr_debug_store["image_original_size"] = f"{orig_w}x{orig_h}"
                     _ocr_debug_store["image_mode"] = img.mode
 
-                    # 1. Convert to RGB
-                    if img.mode not in ("RGB", "L"):
-                        img = img.convert("RGB")
-
-                    # 2. Upscale small images only (LINE photos ~1024px)
-                    w, h = img.size
-                    if w < 1800:
-                        sf = 1800 / w
-                        img = img.resize(
-                            (int(w * sf), int(h * sf)), Image.LANCZOS
-                        )
-                        logger.info(f"[OCR-PRE] Upscaled → {img.size[0]}x{img.size[1]}")
-
-                    # 3. Grayscale
+                    # 1. Convert to grayscale
                     gray = img.convert("L")
-                    # Free color image early
                     img.close()
                     img = None
 
-                    # 4. Median filter — kills moiré from screen photos
-                    processed = gray.filter(ImageFilter.MedianFilter(size=3))
+                    # 2. Upscale small images only (LINE photos ~1024px)
+                    w, h = gray.size
+                    if w < 1400:
+                        sf = 1400 / w
+                        gray = gray.resize(
+                            (int(w * sf), int(h * sf)), Image.LANCZOS
+                        )
+                        logger.info(f"[OCR-PRE] Upscaled → {gray.size[0]}x{gray.size[1]}")
+
+                    # 3. Autocontrast only — no binary, no median
+                    #    Binary threshold destroys Thai characters
+                    #    Median filter blurs detail without helping
+                    processed = ImageOps.autocontrast(gray, cutoff=1)
                     gray.close()
 
-                    # 5. Autocontrast → binary threshold
-                    processed = ImageOps.autocontrast(processed, cutoff=2)
-                    processed = processed.point(lambda x: 255 if x > 140 else 0)
-
-                    _ocr_debug_store["preprocess"] = "median3+autocontrast+binary140"
+                    _ocr_debug_store["preprocess"] = "gray+autocontrast1"
                     _ocr_debug_store["processed_size"] = f"{processed.size[0]}x{processed.size[1]}"
 
-                    # ── OCR: 3 passes — tha+eng PSM 4, PSM 6, eng PSM 4 ──
-                    best_text = ""
-                    best_label = ""
-                    pass_results = []
+                    # ── OCR: Single pass — PSM 6, tha+eng ──
+                    # Multiple passes cause timeout on 512MB server
+                    # PSM 6 = uniform block of text (best for tables)
+                    ocr_timeout = min(timeout_sec, 25)
+                    try:
+                        text = pytesseract.image_to_string(
+                            processed, lang="tha+eng",
+                            timeout=ocr_timeout, config="--psm 6",
+                        ).strip()
+                        _ocr_debug_store["ocr_config"] = "psm6-tha+eng"
+                    except Exception as e:
+                        text = ""
+                        logger.warning(f"[OCR] psm6 error: {e}")
+                        _ocr_debug_store["ocr_config"] = f"psm6-ERROR: {e}"
 
-                    for tess_cfg, lang, label in [
-                        ("--psm 4", "tha+eng", "col-tha"),
-                        ("--psm 6", "tha+eng", "blk-tha"),
-                        ("--psm 4", "eng",     "col-eng"),
-                    ]:
-                        try:
-                            t = pytesseract.image_to_string(
-                                processed, lang=lang,
-                                timeout=timeout_sec, config=tess_cfg,
-                            ).strip()
-                            pass_results.append(f"{label}={len(t)}c")
-                            if len(t) > len(best_text):
-                                best_text = t
-                                best_label = label
-                        except Exception as e:
-                            pass_results.append(f"{label}=ERR")
-                            logger.warning(f"[OCR] {label} error: {e}")
-
-                    _ocr_debug_store["ocr_passes"] = pass_results
-                    _ocr_debug_store["ocr_best_config"] = best_label
-                    logger.info(f"[OCR] Passes: {pass_results} → best={best_label}")
-
-                    text = best_text
+                    _ocr_debug_store["ocr_char_count"] = len(text)
+                    logger.info(f"[OCR] PSM6: {len(text)} chars")
                 finally:
                     if processed is not None:
                         try:
@@ -6518,24 +6500,20 @@ def _process_registration_image(
         except OSError:
             pass
 
-        if not ocr_text or len(ocr_text.strip()) < 10:
-            logger.warning(f"[REG-IMG] OCR text สั้นเกินไป: '{(ocr_text or '')[:50]}'")
-            push_message(
-                line_user_id,
-                "❌ OCR อ่านรายชื่อจากรูปไม่ได้\n\n"
-                "💡 แนะนำ: พิมพ์รายชื่อแทนรูปภาพ\n"
-                "รูปแบบ: ชื่อ-สกุล | HN รพ | HN คลินิก\n"
-                "ตัวอย่าง:\n"
-                "สมชาย ใจดี | 00012345 | 63001\n"
-                "สมหญิง รักดี | 00067890 | 63002\n\n"
-                "หรือถ่ายรูปใหม่ให้ชัดขึ้น (ไม่ถ่ายหน้าจอ)",
-            )
-            return
+        # ── Garbage detection: ตรวจว่า OCR ได้ข้อความจริงหรือไม่ ──
+        import re as _re
+        _ocr_clean = (ocr_text or "").strip()
+        _thai_count = len(_re.findall(r'[฀-๿]', _ocr_clean))
+        _digit_groups = _re.findall(r'\d{5,}', _ocr_clean)
+        _is_garbage = (
+            len(_ocr_clean) < 10
+            or (_thai_count < 3 and len(_digit_groups) < 1)
+        )
 
         # ── Debug: เก็บ OCR text ไว้ใน memory (ไม่ลง log) ──
         from patient_master_registry import _parse_patient_line
         _debug_lines = []
-        for _dl in ocr_text.strip().split("\n"):
+        for _dl in _ocr_clean.split("\n"):
             _dl_stripped = _dl.strip()
             if _dl_stripped:
                 _result = _parse_patient_line(_dl_stripped)
@@ -6545,27 +6523,55 @@ def _process_registration_image(
                 })
         _ocr_debug_store.clear()
         _ocr_debug_store["timestamp"] = datetime.now().isoformat()
-        _ocr_debug_store["ocr_char_count"] = len(ocr_text)
-        _ocr_debug_store["ocr_line_count"] = len(ocr_text.strip().split("\n"))
-        _ocr_debug_store["ocr_text"] = ocr_text[:3000]  # เก็บ preview
+        _ocr_debug_store["ocr_char_count"] = len(_ocr_clean)
+        _ocr_debug_store["ocr_line_count"] = len(_ocr_clean.split("\n"))
+        _ocr_debug_store["ocr_text"] = _ocr_clean[:3000]
+        _ocr_debug_store["thai_chars"] = _thai_count
+        _ocr_debug_store["digit_groups_5plus"] = _digit_groups[:10]
+        _ocr_debug_store["is_garbage"] = _is_garbage
         _ocr_debug_store["line_parse_detail"] = _debug_lines[:30]
 
-        logger.info(f"[REG-IMG] OCR {len(ocr_text)} chars, {len(_debug_lines)} lines")
+        if _is_garbage:
+            logger.warning(
+                f"[REG-IMG] OCR garbage detected: "
+                f"{len(_ocr_clean)}c, thai={_thai_count}, nums={len(_digit_groups)}"
+            )
+            _ocr_debug_store["result"] = "garbage_detected"
+            push_message(
+                line_user_id,
+                "📸 ระบบอ่านรูปไม่ออก\n"
+                "(รูปถ่ายหน้าจอมีลายมัวเร)\n\n"
+                "✅ วิธีที่ดีที่สุด: พิมพ์รายชื่อ\n"
+                "ส่งข้อความรูปแบบนี้:\n\n"
+                "สมชาย ใจดี | 00012345 | 63001\n"
+                "สมหญิง รักดี | 00067890 | 63002\n\n"
+                "หรือ:\n"
+                "63001 สมชาย ใจดี\n"
+                "63002/00067890 สมหญิง รักดี\n\n"
+                "📋 วิธีก็อปจากคอม:\n"
+                "เปิดตาราง → เลือกข้อมูล → Copy\n"
+                "→ วางใน LINE แล้วส่ง",
+            )
+            return
+
+        logger.info(f"[REG-IMG] OCR {len(_ocr_clean)} chars, thai={_thai_count}, "
+                     f"nums={len(_digit_groups)}, lines={len(_debug_lines)}")
+
         # แยก HN + ชื่อจาก OCR text
         patients_data = parse_patient_list_ocr(ocr_text)
         _ocr_debug_store["parsed_patient_count"] = len(patients_data)
         logger.info(f"[REG-IMG] parsed {len(patients_data)} patients")
 
         if not patients_data:
+            _ocr_debug_store["result"] = "no_patients_parsed"
             push_message(
                 line_user_id,
-                "❌ ไม่พบ HN + ชื่อผู้ป่วยในรูป\n\n"
-                "ลองใหม่:\n"
-                "📸 ถ่ายรูปใหม่ให้ชัดขึ้น หรือ\n"
-                "⌨️ พิมพ์ข้อความ เช่น:\n"
-                "  56001 สมชาย ใจดี\n"
-                "  56001/00002567 สมชาย\n\n"
-                "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อเริ่มใหม่",
+                "❌ ไม่พบรายชื่อผู้ป่วยในรูป\n\n"
+                "✅ แนะนำ: พิมพ์รายชื่อแทน\n"
+                "รูปแบบ: ชื่อ | HN รพ | HN คลินิก\n\n"
+                "ตัวอย่าง:\n"
+                "สมชาย ใจดี | 00012345 | 63001\n"
+                "สมหญิง รักดี | 00067890 | 63002",
             )
             return
 
@@ -7269,7 +7275,7 @@ def health():
     """
     health_info = {
         "status": "running",
-        "version": "cloud-2.0-production-p7fix",
+        "version": "cloud-2.0-production-ocrfix2",
         "app_env": APP_ENV,
         "testing_mode": IS_TESTING,
         "production_mode": IS_PRODUCTION,
