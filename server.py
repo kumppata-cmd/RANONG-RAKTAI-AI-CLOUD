@@ -162,6 +162,9 @@ AUTHORIZED_USERS: set[str] = {
 # Admin secret สำหรับ backfill endpoint
 ADMIN_SECRET = os.getenv("ADMIN_SECRET", "").strip()
 
+# ── OCR Debug Storage (ชั่วคราว เก็บใน memory เท่านั้น ไม่ลง log) ──
+_ocr_debug_store: dict = {}
+
 # จำนวนผลค้นหาสูงสุดต่อครั้ง
 SEARCH_MAX_RESULTS = 5
 
@@ -6521,9 +6524,28 @@ def _process_registration_image(
             )
             return
 
-        logger.info(f"[REG-IMG] OCR preview: {ocr_text[:100]}...")
+        # ── Debug: เก็บ OCR text ไว้ใน memory (ไม่ลง log) ──
+        from patient_master_registry import _parse_patient_line
+        _debug_lines = []
+        for _dl in ocr_text.strip().split("\n"):
+            _dl_stripped = _dl.strip()
+            if _dl_stripped:
+                _result = _parse_patient_line(_dl_stripped)
+                _debug_lines.append({
+                    "line": _dl_stripped[:120],
+                    "parsed": _result,
+                })
+        _ocr_debug_store.clear()
+        _ocr_debug_store["timestamp"] = datetime.now().isoformat()
+        _ocr_debug_store["ocr_char_count"] = len(ocr_text)
+        _ocr_debug_store["ocr_line_count"] = len(ocr_text.strip().split("\n"))
+        _ocr_debug_store["ocr_text"] = ocr_text[:3000]  # เก็บ preview
+        _ocr_debug_store["line_parse_detail"] = _debug_lines[:30]
+
+        logger.info(f"[REG-IMG] OCR {len(ocr_text)} chars, {len(_debug_lines)} lines")
         # แยก HN + ชื่อจาก OCR text
         patients_data = parse_patient_list_ocr(ocr_text)
+        _ocr_debug_store["parsed_patient_count"] = len(patients_data)
         logger.info(f"[REG-IMG] parsed {len(patients_data)} patients")
 
         if not patients_data:
@@ -7319,6 +7341,18 @@ def index():
         "health_check": "/health",
         "webhook": "/webhook",
     }), 200
+
+
+# ─── OCR Debug Endpoint (ชั่วคราว — ไม่เก็บ PHI ลง disk/log) ──────────
+@app.route("/admin/ocr-debug", methods=["GET"])
+def admin_ocr_debug():
+    """คืนค่า OCR debug จาก memory — ต้องมี secret parameter"""
+    secret = request.args.get("secret", "")
+    if secret != ADMIN_SECRET:
+        return jsonify({"error": "unauthorized"}), 401
+    if not _ocr_debug_store:
+        return jsonify({"status": "no_data", "message": "ยังไม่มีข้อมูล OCR — ส่งรูปผ่าน LINE OA ก่อน"}), 200
+    return jsonify(_ocr_debug_store), 200
 
 
 # ─── Document Search V1: Admin Enrollment Endpoint ───────
