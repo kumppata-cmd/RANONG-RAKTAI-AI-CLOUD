@@ -4837,7 +4837,7 @@ def is_scanned_pdf(filepath: str) -> bool:
 MAX_OCR_PAGES = int(os.getenv("MAX_OCR_PAGES", "5"))
 
 
-def extract_text_with_ocr(filepath: str) -> str:
+def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
     """ดึงข้อความด้วย Tesseract OCR (tha+eng).
 
     การจัดการหน่วยความจำ:
@@ -4847,6 +4847,7 @@ def extract_text_with_ocr(filepath: str) -> str:
         แทนที่จะสะสมไว้จนจบลูป → พีคเท่ากับหนึ่งหน้า ไม่ใช่ทุกหน้ารวมกัน
       - จำกัดงาน OCR พร้อมกันต่อ worker ด้วย semaphore — ป้องกัน OOM
         บน Render instance 512 MB ที่รัน 2 workers
+      - timeout_sec: จำกัดเวลา Tesseract ต่อหน้า — ป้องกัน hang
     """
     if not HAS_TESSERACT or not HAS_PIL:
         logger.warning("OCR ไม่พร้อม — ขาด pytesseract หรือ Pillow")
@@ -4862,7 +4863,9 @@ def extract_text_with_ocr(filepath: str) -> str:
                 img = None
                 try:
                     img = Image.open(filepath)
-                    text = pytesseract.image_to_string(img, lang=ocr_lang)
+                    text = pytesseract.image_to_string(
+                        img, lang=ocr_lang, timeout=timeout_sec
+                    )
                 finally:
                     if img is not None:
                         img.close()
@@ -4889,7 +4892,9 @@ def extract_text_with_ocr(filepath: str) -> str:
                             img = Image.frombytes(
                                 "RGB", [pix.width, pix.height], pix.samples
                             )
-                            page_text = pytesseract.image_to_string(img, lang=ocr_lang)
+                            page_text = pytesseract.image_to_string(
+                                img, lang=ocr_lang, timeout=timeout_sec
+                            )
                             if page_text.strip():
                                 texts.append(page_text.strip())
                         finally:
@@ -4908,6 +4913,9 @@ def extract_text_with_ocr(filepath: str) -> str:
                 )
                 return full_text
 
+        except RuntimeError as e:
+            # pytesseract timeout raises RuntimeError
+            logger.error(f"OCR timeout หรือ Tesseract error: {type(e).__name__}")
         except Exception as e:
             # ไม่ log filepath หรือ str(e) — ทั้งสองอย่างอาจมีชื่อไฟล์ของผู้ป่วย
             logger.error(f"OCR ล้มเหลว: {type(e).__name__}")
@@ -6394,46 +6402,6 @@ def _multipage_flush(user_hash: str):
     )
 
 
-def _safe_ocr_with_timeout(filepath: str, timeout_sec: int = 60) -> str:
-    """เรียก extract_text_with_ocr พร้อม timeout ป้องกัน hang.
-
-    ใช้ threading.Timer + Event เพื่อจำกัดเวลา OCR
-    — ป้องกัน Tesseract แฮงค์บนรูปเสียหายหรือใหญ่เกินไป
-    """
-    import threading as _th
-
-    result_container: list[str] = []
-    error_container: list[str] = []
-    done_event = _th.Event()
-
-    def _run_ocr():
-        try:
-            text = extract_text_with_ocr(filepath)
-            result_container.append(text or "")
-        except Exception as e:
-            error_container.append(f"{type(e).__name__}: {e}")
-        finally:
-            done_event.set()
-
-    ocr_thread = _th.Thread(target=_run_ocr, daemon=True)
-    ocr_thread.start()
-
-    finished = done_event.wait(timeout=timeout_sec)
-
-    if not finished:
-        logger.error(
-            f"[REG-IMG] OCR timeout ({timeout_sec}s) — "
-            "Tesseract อาจแฮงค์หรือรูปใหญ่เกินไป"
-        )
-        return ""
-
-    if error_container:
-        logger.error(f"[REG-IMG] OCR error in thread: {error_container[0]}")
-        return ""
-
-    return result_container[0] if result_container else ""
-
-
 def _process_registration_image(
     data: bytes,
     ext: str,
@@ -6463,9 +6431,9 @@ def _process_registration_image(
             f.write(data)
         logger.info(f"[REG-IMG] บันทึกรูปชั่วคราว: {tmp_path}")
 
-        # ── OCR (with timeout via subprocess) ──────────────
+        # ── OCR (with pytesseract timeout) ──────────────
         logger.info("[REG-IMG] เริ่ม OCR...")
-        ocr_text = _safe_ocr_with_timeout(tmp_path, timeout_sec=60)
+        ocr_text = extract_text_with_ocr(tmp_path, timeout_sec=60)
         logger.info(f"[REG-IMG] OCR เสร็จ: {len(ocr_text or '')} chars")
 
         # ลบไฟล์ชั่วคราว
