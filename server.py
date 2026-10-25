@@ -6702,12 +6702,89 @@ def process_file_async(
 # ระบบจะรอรวมรูปทั้งหมดเป็นเอกสารเดียว แทนที่จะแยกประมวลผลทีละรูป
 # Window: 30 วินาที — หลังรูปสุดท้ายจะเริ่มประมวลผลรวม
 # ใช้ได้เฉพาะภาพ (image) — ไฟล์ PDF/TXT ประมวลผลทันทีเหมือนเดิม
+#
+# [FIX] ใช้ /tmp filesystem แทน in-memory dict เพื่อให้ทุก Gunicorn
+# worker เข้าถึงข้อมูลเดียวกัน — แก้ปัญหาภาพจาก user เดียวกัน
+# hit worker คนละตัว แล้วบัฟเฟอร์แยกกัน
 # ─────────────────────────────────────────────────────────────
 
 _MULTIPAGE_WINDOW_SECS = int(os.environ.get("MULTIPAGE_WINDOW_SECS", "30"))
 _MULTIPAGE_MAX_PAGES = int(os.environ.get("MULTIPAGE_MAX_PAGES", "10"))
+
+# /tmp-based multipage buffer (shared across Gunicorn workers)
+_MULTIPAGE_DIR = os.path.join(tempfile.gettempdir(), "ranong_raktai", "multipage")
+os.makedirs(_MULTIPAGE_DIR, exist_ok=True)
+
+# Per-worker timer tracking (for cancellation only — data is in /tmp)
 _multipage_lock = threading.Lock()
-_multipage_buffers: dict[str, dict] = {}
+_multipage_timers: dict[str, threading.Timer] = {}
+
+
+def _mp_meta_path(user_hash: str) -> str:
+    return os.path.join(_MULTIPAGE_DIR, f"{user_hash}.json")
+
+
+def _mp_page_path(user_hash: str, page_num: int) -> str:
+    return os.path.join(_MULTIPAGE_DIR, f"{user_hash}_p{page_num}.dat")
+
+
+def _mp_lock_path(user_hash: str) -> str:
+    return os.path.join(_MULTIPAGE_DIR, f"{user_hash}.lock")
+
+
+def _mp_read_meta(user_hash: str) -> dict | None:
+    """Read multipage buffer metadata from /tmp."""
+    path = _mp_meta_path(user_hash)
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError, ValueError):
+        return None
+
+
+def _mp_write_meta(user_hash: str, meta: dict):
+    """Write multipage buffer metadata to /tmp atomically."""
+    path = _mp_meta_path(user_hash)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(meta, f)
+    os.replace(tmp, path)
+
+
+def _mp_clear(user_hash: str, page_count: int):
+    """Clear multipage buffer files from /tmp."""
+    try:
+        os.remove(_mp_meta_path(user_hash))
+    except FileNotFoundError:
+        pass
+    for i in range(1, page_count + 1):
+        try:
+            os.remove(_mp_page_path(user_hash, i))
+        except FileNotFoundError:
+            pass
+    try:
+        os.remove(_mp_lock_path(user_hash))
+    except FileNotFoundError:
+        pass
+
+
+def _mp_acquire_lock(user_hash: str):
+    """Acquire file-based lock for cross-worker synchronization."""
+    import fcntl
+    lock_path = _mp_lock_path(user_hash)
+    fd = open(lock_path, "w")
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def _mp_release_lock(fd):
+    """Release file-based lock."""
+    import fcntl
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        fd.close()
+    except Exception:
+        pass
 
 # ── Registration Mode: admin ถ่ายรูปรายชื่อผู้ป่วย ──────────
 # เมื่อ admin พิมพ์ "ลงทะเบียนรายชื่อ" → เข้าโหมดรอรับรูป
@@ -6921,31 +6998,100 @@ def _reclassify_document(
         )
 
 
-# Structure: { user_hash: {
-#   "pages": [(data, ext, sha256_hex, doc_id, filename), ...],
+# /tmp metadata structure (per user_hash):
+# {
+#   "pages": [{"ext": ".jpg", "sha256": "...", "doc_id": "...", "filename": "..."}, ...],
 #   "line_user_id": str,
-#   "timer": threading.Timer,
-#   "first_reply_token": str | None,
-# }}
+#   "last_image_ts": float (time.time())
+# }
+# Page image data: /tmp/ranong_raktai/multipage/{user_hash}_p{N}.dat
 
 
 def _multipage_flush(user_hash: str):
     """ประมวลผลรูปภาพทั้งหมดในบัฟเฟอร์ของผู้ใช้เมื่อหมดเวลารอ.
 
+    [FIX] อ่านข้อมูลจาก /tmp filesystem แทน in-memory dict
+    เพื่อให้ทุก Gunicorn worker เข้าถึงได้
+
     ถ้ามีรูปเดียว → ประมวลผลปกติ (เหมือนไม่มีบัฟเฟอร์)
     ถ้ามีหลายรูป → รวมเป็นเอกสารเดียว, OCR ทุกหน้า, ต่อข้อความ
     """
-    with _multipage_lock:
-        buf = _multipage_buffers.pop(user_hash, None)
-    if not buf:
-        return
+    # Acquire cross-worker lock
+    lock_fd = None
+    try:
+        lock_fd = _mp_acquire_lock(user_hash)
+    except Exception:
+        pass
 
-    pages = buf["pages"]
-    line_user_id = buf["line_user_id"]
+    try:
+        meta = _mp_read_meta(user_hash)
+        if not meta or not meta.get("pages"):
+            return
 
-    if len(pages) == 1:
+        # ตรวจว่ามีรูปใหม่เข้ามาหลัง timer เริ่ม — ถ้ามี, เริ่ม timer ใหม่
+        last_ts = meta.get("last_image_ts", 0)
+        elapsed = time.time() - last_ts
+        if elapsed < _MULTIPAGE_WINDOW_SECS - 1:
+            # ยังไม่หมดเวลา — มีรูปใหม่เข้ามาจาก worker อื่น
+            remaining = _MULTIPAGE_WINDOW_SECS - elapsed + 0.5
+            logger.info(
+                f"Multi-page flush deferred: {remaining:.0f}s remaining "
+                f"(user={user_hash[:8]}…)"
+            )
+            new_timer = threading.Timer(remaining, _multipage_flush, args=[user_hash])
+            new_timer.daemon = True
+            with _multipage_lock:
+                _multipage_timers[user_hash] = new_timer
+            new_timer.start()
+            return
+
+        page_entries = meta["pages"]
+        line_user_id = meta.get("line_user_id", "")
+        page_count = len(page_entries)
+
+        # อ่านข้อมูลภาพจาก /tmp files
+        pages_data = []
+        for i, entry in enumerate(page_entries, 1):
+            page_file = _mp_page_path(user_hash, i)
+            try:
+                with open(page_file, "rb") as f:
+                    page_data = f.read()
+                pages_data.append((
+                    page_data,
+                    entry["ext"],
+                    entry["sha256"],
+                    entry["doc_id"],
+                    entry["filename"],
+                ))
+            except FileNotFoundError:
+                logger.warning(
+                    f"Multi-page buffer: page {i} file missing "
+                    f"(user={user_hash[:8]}…)"
+                )
+
+        if not pages_data:
+            logger.warning(
+                f"Multi-page buffer: no page files found "
+                f"(user={user_hash[:8]}…)"
+            )
+            _mp_clear(user_hash, page_count)
+            return
+
+        # ลบไฟล์ buffer ก่อนประมวลผล
+        _mp_clear(user_hash, page_count)
+        with _multipage_lock:
+            _multipage_timers.pop(user_hash, None)
+
+    finally:
+        if lock_fd:
+            _mp_release_lock(lock_fd)
+
+    # จากนี้ทำงานนอก lock — ประมวลผลข้อมูลที่อ่านมาแล้ว
+    actual_count = len(pages_data)
+
+    if actual_count == 1:
         # รูปเดียว — ประมวลผลปกติ
-        data, ext, sha256_hex, doc_id, filename = pages[0]
+        data, ext, sha256_hex, doc_id, filename = pages_data[0]
         filepath = save_to_inbox(data, filename)
         process_file_async(
             filepath, None, doc_id=doc_id, sha256_hex=sha256_hex,
@@ -6954,36 +7100,34 @@ def _multipage_flush(user_hash: str):
         return
 
     # หลายรูป — รวมเป็นเอกสารเดียว
-    page_count = len(pages)
     logger.info(
-        f"Multi-page merge: user={user_hash[:8]}…, pages={page_count}"
+        f"Multi-page merge: user={user_hash[:8]}…, pages={actual_count}"
     )
 
     # แจ้งผู้ใช้ว่าเริ่มประมวลผลรวม
     if line_user_id:
         push_message(
             line_user_id,
-            f"📄 กำลังรวมผลแล็บ {page_count} หน้าเป็นเอกสารเดียว…",
+            f"📄 กำลังรวมผลแล็บ {actual_count} หน้าเป็นเอกสารเดียว…",
         )
 
     # ใช้ doc_id ของหน้าแรกเป็นตัวแทนเอกสารรวม
-    primary_doc_id = pages[0][3]
-    primary_ext = pages[0][1]
+    primary_doc_id = pages_data[0][3]
 
     # รวม SHA256 ของทุกหน้าเป็น combined hash
-    combined_sha_input = "|".join(p[2] for p in pages)
+    combined_sha_input = "|".join(p[2] for p in pages_data)
     combined_sha256 = hashlib.sha256(
         combined_sha_input.encode("utf-8")
     ).hexdigest()
 
     # บันทึกหน้าแรกลง inbox เป็นไฟล์หลัก
-    primary_data = pages[0][0]
-    primary_filename = pages[0][4]
+    primary_data = pages_data[0][0]
+    primary_filename = pages_data[0][4]
     primary_filepath = save_to_inbox(primary_data, primary_filename)
 
     # OCR ทุกหน้าและรวมข้อความ
     combined_texts = []
-    for i, (page_data, page_ext, _, _, _) in enumerate(pages, 1):
+    for i, (page_data, page_ext, _, _, _) in enumerate(pages_data, 1):
         page_text = ""
         if HAS_TESSERACT and HAS_PIL:
             try:
@@ -6994,18 +7138,17 @@ def _multipage_flush(user_hash: str):
                     f"{type(ocr_err).__name__}"
                 )
         if page_text.strip():
-            combined_texts.append(f"[หน้า {i}/{page_count}]\n{page_text.strip()}")
+            combined_texts.append(f"[หน้า {i}/{actual_count}]\n{page_text.strip()}")
         else:
-            combined_texts.append(f"[หน้า {i}/{page_count}]\n(ไม่สามารถอ่านข้อความได้)")
+            combined_texts.append(f"[หน้า {i}/{actual_count}]\n(ไม่สามารถอ่านข้อความได้)")
 
     merged_text = "\n\n".join(combined_texts)
     logger.info(
-        f"Multi-page OCR สำเร็จ: pages={page_count}, "
+        f"Multi-page OCR สำเร็จ: pages={actual_count}, "
         f"total_chars={len(merged_text)}"
     )
 
     # ประมวลผลด้วยข้อความรวม — เรียก process_file_async
-    # แต่แทรก merged_text เข้าไปเพื่อใช้แทน OCR ของไฟล์เดียว
     process_file_async(
         primary_filepath,
         None,  # reply_token หมดอายุแล้ว — ใช้ push_message แทน
@@ -7014,7 +7157,7 @@ def _multipage_flush(user_hash: str):
         owner_hash=user_hash,
         line_user_id=line_user_id,
         merged_ocr_text=merged_text,
-        merged_page_count=page_count,
+        merged_page_count=actual_count,
     )
 
 
@@ -7229,14 +7372,20 @@ def _handle_incoming_document(
     doc_id, filename = build_storage_filename(ext)
 
     # ── Multi-page buffer: เฉพาะภาพเท่านั้น ──
+    # [FIX] ใช้ /tmp filesystem + file lock แทน in-memory dict
+    # เพื่อให้ทุก Gunicorn worker เข้าถึงบัฟเฟอร์เดียวกัน
     if ext in (".jpg", ".jpeg", ".png"):
-        with _multipage_lock:
-            buf = _multipage_buffers.get(user_hash)
-            if buf is not None:
-                # ยกเลิก timer เดิม แล้วเริ่มใหม่
-                if buf["timer"] is not None:
-                    buf["timer"].cancel()
-                page_num = len(buf["pages"]) + 1
+        lock_fd = None
+        try:
+            lock_fd = _mp_acquire_lock(user_hash)
+        except Exception:
+            pass
+
+        try:
+            meta = _mp_read_meta(user_hash)
+            if meta is not None and meta.get("pages"):
+                # มีบัฟเฟอร์อยู่แล้ว — เพิ่มหน้าใหม่
+                page_num = len(meta["pages"]) + 1
 
                 if page_num > _MULTIPAGE_MAX_PAGES:
                     # เกินจำนวนสูงสุด — ปฏิเสธ
@@ -7245,28 +7394,54 @@ def _handle_incoming_document(
                         f"⚠️ รองรับสูงสุด {_MULTIPAGE_MAX_PAGES} หน้าต่อครั้ง\n"
                         "กรุณาส่งผลแล็บชุดใหม่หลังจากชุดนี้ประมวลผลเสร็จ",
                     )
-                    # เริ่ม timer ใหม่สำหรับหน้าที่มีอยู่
+                    # อัปเดต timestamp เพื่อให้ timer defer ได้
+                    meta["last_image_ts"] = time.time()
+                    _mp_write_meta(user_hash, meta)
+                    # เริ่ม timer ใหม่ (ใน worker นี้)
+                    with _multipage_lock:
+                        old_timer = _multipage_timers.pop(user_hash, None)
+                        if old_timer:
+                            old_timer.cancel()
                     new_timer = threading.Timer(
                         _MULTIPAGE_WINDOW_SECS,
                         _multipage_flush,
                         args=[user_hash],
                     )
                     new_timer.daemon = True
-                    buf["timer"] = new_timer
+                    with _multipage_lock:
+                        _multipage_timers[user_hash] = new_timer
                     new_timer.start()
                     return
 
-                buf["pages"].append((data, ext, sha256_hex, doc_id, filename))
-                # อัปเดต line_user_id ถ้ามี
+                # บันทึกข้อมูลภาพลง /tmp
+                page_file = _mp_page_path(user_hash, page_num)
+                with open(page_file, "wb") as f:
+                    f.write(data)
+
+                meta["pages"].append({
+                    "ext": ext,
+                    "sha256": sha256_hex,
+                    "doc_id": doc_id,
+                    "filename": filename,
+                })
                 if line_user_id:
-                    buf["line_user_id"] = line_user_id
+                    meta["line_user_id"] = line_user_id
+                meta["last_image_ts"] = time.time()
+                _mp_write_meta(user_hash, meta)
+
+                # ยกเลิก timer เดิม แล้วเริ่มใหม่
+                with _multipage_lock:
+                    old_timer = _multipage_timers.pop(user_hash, None)
+                    if old_timer:
+                        old_timer.cancel()
                 new_timer = threading.Timer(
                     _MULTIPAGE_WINDOW_SECS,
                     _multipage_flush,
                     args=[user_hash],
                 )
                 new_timer.daemon = True
-                buf["timer"] = new_timer
+                with _multipage_lock:
+                    _multipage_timers[user_hash] = new_timer
                 new_timer.start()
 
                 reply_message(
@@ -7277,18 +7452,30 @@ def _handle_incoming_document(
                 return
             else:
                 # สร้างบัฟเฟอร์ใหม่ — หน้าแรก
+                page_file = _mp_page_path(user_hash, 1)
+                with open(page_file, "wb") as f:
+                    f.write(data)
+
+                new_meta = {
+                    "pages": [{
+                        "ext": ext,
+                        "sha256": sha256_hex,
+                        "doc_id": doc_id,
+                        "filename": filename,
+                    }],
+                    "line_user_id": line_user_id,
+                    "last_image_ts": time.time(),
+                }
+                _mp_write_meta(user_hash, new_meta)
+
                 new_timer = threading.Timer(
                     _MULTIPAGE_WINDOW_SECS,
                     _multipage_flush,
                     args=[user_hash],
                 )
                 new_timer.daemon = True
-                _multipage_buffers[user_hash] = {
-                    "pages": [(data, ext, sha256_hex, doc_id, filename)],
-                    "line_user_id": line_user_id,
-                    "timer": new_timer,
-                    "first_reply_token": reply_token,
-                }
+                with _multipage_lock:
+                    _multipage_timers[user_hash] = new_timer
                 new_timer.start()
 
                 reply_message(
@@ -7298,6 +7485,9 @@ def _handle_incoming_document(
                     "ถ้ามีหน้าเดียว ไม่ต้องทำอะไร — จะประมวลผลอัตโนมัติ",
                 )
                 return
+        finally:
+            if lock_fd:
+                _mp_release_lock(lock_fd)
 
     # ── ไฟล์อื่น (PDF, TXT) — ประมวลผลทันทีเหมือนเดิม ──
     filepath = save_to_inbox(data, filename)
