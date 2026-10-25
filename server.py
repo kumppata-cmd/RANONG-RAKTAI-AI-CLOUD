@@ -1545,6 +1545,51 @@ class DocumentIndex:
         self._ensure_fresh()
         return sum(1 for d in self._docs if not d.get("owner_hash", ""))
 
+    def update_category(
+        self, doc_id: str, new_category: str, new_gcs_path: str,
+    ) -> bool:
+        """อัปเดต category และ gcs_object_path ของเอกสาร.
+
+        ใช้เมื่อ reclassify จาก interactive classification
+        เขียน per-doc JSON file ใน GCS ทับ doc เดิม
+        คืน True ถ้าพบและอัปเดตสำเร็จ
+        """
+        self._ensure_fresh()
+        doc = self._doc_map.get(doc_id)
+        if doc is None:
+            for d in self._docs:
+                if d.get("document_id", "").startswith(doc_id):
+                    doc = d
+                    break
+        if doc is None:
+            return False
+        doc["category"] = new_category
+        if new_gcs_path:
+            if new_gcs_path.startswith("gs://"):
+                parts = new_gcs_path.split("/", 3)
+                doc["gcs_object_path"] = parts[3] if len(parts) > 3 else ""
+            else:
+                doc["gcs_object_path"] = new_gcs_path
+        # เขียน GCS — overwrite per-doc JSON
+        if self._storage.is_ready:
+            try:
+                blob_path = f"{INDEX_DOC_PREFIX}{doc_id}.json"
+                doc_json = json.dumps(doc, ensure_ascii=False)
+                blob = self._storage._bucket.blob(blob_path)
+                blob.upload_from_string(
+                    doc_json, content_type="application/json",
+                )
+                logger.info(
+                    f"Document index: updated category "
+                    f"doc={doc_id[:8]}… → {new_category}"
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Document index update GCS write failed: "
+                    f"{type(e).__name__}"
+                )
+        return True
+
     def assign_owner(self, doc_id: str, owner_hash: str) -> bool:
         """กำหนด owner_hash ให้เอกสาร — สำหรับ admin เท่านั้น.
 
@@ -4991,8 +5036,48 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                             logger.warning(f"[OCR] Pass3 error: {e}")
                             _ocr_debug_store["pass3"] = f"ERROR: {e}"
 
+                    # Pass 4: English-only OCR — ใบยามีชื่อยาภาษาอังกฤษ
+                    # เช่น losartan, amlodipine, mg, tab
+                    # Tesseract eng-only มักอ่านได้แม้ tha+eng จะล้มเหลว
+                    if len(text) < 15:
+                        try:
+                            p4_sharp = gray.filter(ImageFilter.SHARPEN)
+                            p4 = ImageOps.autocontrast(p4_sharp, cutoff=2)
+                            p4_sharp.close()
+                            text4 = pytesseract.image_to_string(
+                                p4, lang="eng",
+                                timeout=ocr_timeout, config="--psm 3",
+                            ).strip()
+                            p4.close()
+                            _ocr_debug_store["pass4"] = f"psm3-eng-only: {len(text4)} chars"
+                            logger.info(f"[OCR] Pass4 ENG-only: {len(text4)} chars")
+                            if len(text4) > len(text):
+                                text = text4
+                        except Exception as e:
+                            logger.warning(f"[OCR] Pass4 error: {e}")
+                            _ocr_debug_store["pass4"] = f"ERROR: {e}"
+
+                    # Pass 5: English-only with binarization + PSM 6
+                    if len(text) < 15:
+                        try:
+                            enhanced5 = ImageEnhance.Contrast(gray).enhance(2.5)
+                            p5 = enhanced5.point(lambda x: 255 if x > 140 else 0)
+                            enhanced5.close()
+                            text5 = pytesseract.image_to_string(
+                                p5, lang="eng",
+                                timeout=ocr_timeout, config="--psm 6",
+                            ).strip()
+                            p5.close()
+                            _ocr_debug_store["pass5"] = f"psm6-eng-binary: {len(text5)} chars"
+                            logger.info(f"[OCR] Pass5 ENG+binary: {len(text5)} chars")
+                            if len(text5) > len(text):
+                                text = text5
+                        except Exception as e:
+                            logger.warning(f"[OCR] Pass5 error: {e}")
+                            _ocr_debug_store["pass5"] = f"ERROR: {e}"
+
                     _ocr_debug_store["ocr_char_count"] = len(text)
-                    _ocr_debug_store["preprocess"] = "multi-pass-3"
+                    _ocr_debug_store["preprocess"] = "multi-pass-5"
                     logger.info(f"[OCR] Final: {len(text)} chars")
                 finally:
                     if processed is not None:
@@ -6470,7 +6555,40 @@ def process_file_async(
                     f"👤 แฟ้มผู้ป่วย: {metadata['patient_hn_folder']}"
                 )
             _result_text = "\n".join(_reply_lines)
-            if reply_token:
+
+            # ── Interactive Classification: ถามผู้ใช้เมื่อ OCR ล้มเหลว ──
+            if category == "review" and line_user_id:
+                # OCR ไม่สามารถจำแนกได้ → ถามผู้ใช้ผ่าน LINE
+                _pending_user_hash = owner_hash or ""
+                if _pending_user_hash and dest:
+                    _set_pending_classification(
+                        _pending_user_hash,
+                        _doc_id,
+                        dest,
+                        _pending_user_hash,
+                        line_user_id,
+                        sha256_hex or "",
+                    )
+                    _ask_text = (
+                        "📋 ระบบไม่สามารถจำแนกเอกสารอัตโนมัติได้\n"
+                        "กรุณาเลือกประเภทเอกสาร:\n\n"
+                        "ตอบ 1 = ใบสั่งยา 💊\n"
+                        "ตอบ 2 = ผลตรวจแล็บ 🔬\n"
+                        "ตอบ 3 = เอกสารฟอกเลือด 🩸\n"
+                        "ตอบ 4 = ใบเสร็จ/บิล 🧾\n\n"
+                        "⏱️ กรุณาตอบภายใน 5 นาที"
+                    )
+                    if reply_token:
+                        reply_message(reply_token, _ask_text)
+                    else:
+                        push_message(line_user_id, _ask_text)
+                else:
+                    # ไม่มี owner_hash หรือ dest → ส่ง reply ปกติ
+                    if reply_token:
+                        reply_message(reply_token, _result_text)
+                    elif line_user_id:
+                        push_message(line_user_id, _result_text)
+            elif reply_token:
                 reply_message(reply_token, _result_text)
             elif line_user_id:
                 # Multi-page merge: reply_token หมดอายุ → ใช้ push_message
@@ -6558,6 +6676,156 @@ def _clear_registration_mode(user_hash: str):
         os.remove(filepath)
     except FileNotFoundError:
         pass
+
+
+# ── Pending Classification: ถามผู้ใช้ผ่าน LINE เมื่อ OCR ล้มเหลว ──────
+# เมื่อ classify_with_keywords returns "review" เพราะ OCR อ่านไม่ได้
+# ระบบจะเก็บข้อมูลเอกสาร + ส่งข้อความถามผู้ใช้ให้เลือกประเภท
+# ผู้ใช้ตอบเลข 1-4 → ระบบย้ายเอกสารไปยัง folder ที่ถูกต้อง
+_PENDING_CLASS_DIR = os.path.join(
+    tempfile.gettempdir(), "ranong_raktai", "pending_classify"
+)
+os.makedirs(_PENDING_CLASS_DIR, exist_ok=True)
+_PENDING_CLASS_TIMEOUT = 300  # 5 นาที
+
+
+def _set_pending_classification(
+    user_hash: str, doc_id: str, gcs_path: str,
+    owner_hash: str, line_user_id: str, sha256_hex: str,
+):
+    """บันทึก pending classification สำหรับเอกสารที่ OCR ล้มเหลว"""
+    filepath = os.path.join(_PENDING_CLASS_DIR, f"{user_hash}.json")
+    data = {
+        "timestamp": time.time(),
+        "doc_id": doc_id,
+        "gcs_path": gcs_path,
+        "owner_hash": owner_hash,
+        "line_user_id": line_user_id,
+        "sha256_hex": sha256_hex,
+    }
+    with open(filepath, "w") as f:
+        json.dump(data, f)
+
+
+def _get_pending_classification(user_hash: str) -> dict | None:
+    """ดึง pending classification — คืน None ถ้าไม่มีหรือหมดเวลา"""
+    filepath = os.path.join(_PENDING_CLASS_DIR, f"{user_hash}.json")
+    try:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+        if (time.time() - data.get("timestamp", 0)) < _PENDING_CLASS_TIMEOUT:
+            return data
+        else:
+            _clear_pending_classification(user_hash)
+            return None
+    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _clear_pending_classification(user_hash: str):
+    """ลบ pending classification"""
+    filepath = os.path.join(_PENDING_CLASS_DIR, f"{user_hash}.json")
+    try:
+        os.remove(filepath)
+    except FileNotFoundError:
+        pass
+
+
+def _reclassify_document(
+    pending: dict, new_category: str, line_user_id: str,
+):
+    """ย้ายเอกสารจาก 06_AI_REVIEW ไป folder ที่ถูกต้องใน GCS.
+
+    ใช้ GCS server-side copy (bucket.copy_blob) — ไม่ต้อง download/upload
+    หมายเหตุ: ไม่สามารถลบ source ได้ (ไม่มี delete permission)
+    """
+    gcs_path = pending.get("gcs_path", "")
+    doc_id = pending.get("doc_id", "")
+
+    if not gcs_path or not gcs_path.startswith("gs://"):
+        push_message(
+            line_user_id,
+            "❌ ไม่สามารถย้ายเอกสารได้ — ไม่พบไฟล์ใน cloud storage",
+        )
+        return
+
+    # Parse GCS path: gs://bucket/06_AI_REVIEW/2026-10/uuid.jpg
+    try:
+        bucket_name = gcs_path.split("/")[2]
+        object_path = "/".join(gcs_path.split("/")[3:])
+    except (IndexError, ValueError):
+        push_message(line_user_id, "❌ path ไม่ถูกต้อง — ไม่สามารถย้ายได้")
+        return
+
+    # Build new path
+    dest_folder = FOLDERS.get(new_category, FOLDERS["review"])
+    filename = object_path.rsplit("/", 1)[-1] if "/" in object_path else object_path
+    now = datetime.now()
+
+    if new_category == "lab":
+        # 04_LAB_RESULTS/2026-Q4/2026-10/file.jpg
+        quarter = f"Q{(now.month - 1) // 3 + 1}"
+        new_path = f"{dest_folder}/{now.year}-{quarter}/{now.strftime('%Y-%m')}/{filename}"
+    elif new_category == "rx":
+        # 03_PRESCRIPTIONS/2026-Q4/2026-10/file.jpg
+        quarter = f"Q{(now.month - 1) // 3 + 1}"
+        new_path = f"{dest_folder}/{now.year}-{quarter}/{now.strftime('%Y-%m')}/{filename}"
+    elif new_category == "dialysis":
+        # 05_DIALYSIS_RECORDS/2026-10/file.jpg
+        new_path = f"{dest_folder}/{now.strftime('%Y-%m')}/{filename}"
+    elif new_category == "bills":
+        # 02_BILLS_RECEIPTS/2026-10/file.jpg
+        new_path = f"{dest_folder}/{now.strftime('%Y-%m')}/{filename}"
+    else:
+        new_path = f"{dest_folder}/{filename}"
+
+    try:
+        from google.cloud import storage as gcs_storage
+        client = gcs_storage.Client()
+        bucket = client.bucket(bucket_name)
+        src_blob = bucket.blob(object_path)
+        if not src_blob.exists():
+            push_message(
+                line_user_id,
+                "❌ ไม่พบไฟล์ต้นฉบับใน cloud storage\n"
+                "เอกสารอาจถูกย้ายแล้ว กรุณาส่งใหม่",
+            )
+            return
+        # Server-side copy
+        bucket.copy_blob(src_blob, bucket, new_path)
+        logger.info(
+            f"Reclassify: copied doc {doc_id[:8]} → {new_category}"
+        )
+
+        # ── อัปเดต document index ──
+        try:
+            doc_index.update_category(doc_id, new_category, new_path)
+        except Exception:
+            pass  # Index update ล้มเหลว — ไม่ร้ายแรง
+
+        cat_names = {
+            "bills": "ใบเสร็จ/บิล",
+            "rx": "ใบสั่งยา",
+            "lab": "ผลตรวจแล็บ",
+            "dialysis": "เอกสารฟอกเลือด",
+        }
+        cat_name = cat_names.get(new_category, new_category)
+        push_message(
+            line_user_id,
+            f"✅ จำแนกเอกสารสำเร็จ\n"
+            f"📁 ประเภท: {cat_name}\n"
+            f"📂 จัดเก็บใน: {new_path.rsplit('/', 1)[0]}",
+        )
+    except Exception as e:
+        logger.error(
+            f"Reclassify failed: {type(e).__name__} (doc={doc_id[:8]})"
+        )
+        push_message(
+            line_user_id,
+            "❌ ย้ายเอกสารไม่สำเร็จ — กรุณาส่งเอกสารใหม่อีกครั้ง",
+        )
+
+
 # Structure: { user_hash: {
 #   "pages": [(data, ext, sha256_hex, doc_id, filename), ...],
 #   "line_user_id": str,
@@ -7194,6 +7462,28 @@ def webhook():
                             "  • สมชาย ใจดี 00002567 56001\n\n"
                             "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อลองใหม่",
                         )
+                    continue
+
+                # ── Pending Classification: ตรวจว่าผู้ใช้ตอบเลข 1-4 ──
+                _pending = _get_pending_classification(user_hash)
+                if _pending and text.strip() in ("1", "2", "3", "4"):
+                    _class_map = {
+                        "1": "rx", "2": "lab",
+                        "3": "dialysis", "4": "bills",
+                    }
+                    _new_cat = _class_map[text.strip()]
+                    _clear_pending_classification(user_hash)
+                    reply_message(
+                        reply_token,
+                        f"⏳ กำลังย้ายเอกสาร...",
+                    )
+                    # รัน reclassify ใน thread แยก
+                    _reclass_uid = _pending.get("line_user_id", "")
+                    threading.Thread(
+                        target=_reclassify_document,
+                        args=(_pending, _new_cat, _reclass_uid),
+                        daemon=True,
+                    ).start()
                     continue
 
                 # ── Document Search V1: ตรวจคำสั่งค้นหาก่อน ──
