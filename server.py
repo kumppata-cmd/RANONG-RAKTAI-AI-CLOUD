@@ -7762,6 +7762,200 @@ def admin_debug_hn_extract():
 
 # ─── Admin Dashboard: Stats API ──────────────────────────
 
+@app.route("/admin/api/v2/retroactive-route", methods=["POST"])
+def admin_retroactive_route():
+    """จัดเอกสารเก่าเข้า folder ผู้ป่วยย้อนหลัง (retroactive routing).
+
+    Scan เอกสาร lab/rx/dialysis ที่ยังไม่ได้จัดเข้า patient folder
+    → ดึง HN จาก OCR text → จับคู่กับ master registry
+    → copy blob ไป path ใหม่ใน patient folder
+    → อัปเดต doc index ให้ชี้ไปที่ path ใหม่
+
+    ไม่ลบไฟล์เดิม (ไม่มี delete permission)
+
+    Query params:
+      secret: ADMIN_SECRET
+      dry_run: "true" เพื่อดู preview ก่อน (ไม่ copy จริง)
+      category: "all" (default) หรือ "lab", "rx", "dialysis"
+    """
+    auth_param = request.args.get("secret", "")
+    if not ADMIN_SECRET or auth_param != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    dry_run = request.args.get("dry_run", "true").lower() == "true"
+    cat_filter = request.args.get("category", "all")
+
+    if not storage.is_ready:
+        return jsonify({"error": "GCS not ready"}), 500
+
+    # Force reload doc index + registry
+    doc_index._reload_from_gcs()
+    reg_count = master_registry.count()
+
+    if reg_count == 0:
+        return jsonify({"error": "Registry empty — ไม่มีผู้ป่วยลงทะเบียน"}), 400
+
+    categories = ["lab", "rx", "dialysis"] if cat_filter == "all" else [cat_filter]
+    routed = []
+    skipped = []
+    errors = []
+    already_in_folder = 0
+
+    for doc in doc_index._docs:
+        cat = doc.get("category", "")
+        if cat not in categories:
+            continue
+
+        gcs_path = doc.get("gcs_object_path", "")
+        if not gcs_path:
+            continue
+
+        doc_id = doc.get("document_id", "")
+        doc_id_short = doc_id[:8] if doc_id else "unknown"
+
+        # ตรวจว่าอยู่ใน patient folder แล้วหรือยัง
+        # โดยเช็คว่า path มี pattern ของ patient folder (เช่น .../57042_นฤมล_ฤาชัย/...)
+        # Patient folder format: {clinic_hn}_{name} หรือ {hn}
+        # ตรวจจาก registry ว่ามี folder name ไหนอยู่ใน path
+        _already_routed = False
+        all_patients = master_registry.list_all()
+        for p in all_patients:
+            pf = p.folder_name
+            if pf and f"/{pf}/" in gcs_path:
+                _already_routed = True
+                break
+        if _already_routed:
+            already_in_folder += 1
+            continue
+
+        # ดึง HN จาก OCR text
+        text = doc.get("extracted_text", "")
+        if not text:
+            skipped.append({
+                "doc_id": doc_id_short, "category": cat,
+                "reason": "no OCR text",
+            })
+            continue
+
+        found_hns = extract_hn_from_document(text)
+        if not found_hns:
+            skipped.append({
+                "doc_id": doc_id_short, "category": cat,
+                "reason": "no HN found in OCR",
+            })
+            continue
+
+        # จับคู่ HN กับ registry
+        matched_folder = ""
+        matched_hn = ""
+        for hn in found_hns:
+            folder = master_registry.get_folder_for_hn(hn)
+            if folder:
+                matched_folder = folder
+                matched_hn = hn
+                break
+
+        if not matched_folder:
+            skipped.append({
+                "doc_id": doc_id_short, "category": cat,
+                "reason": f"HN found but no registry match",
+                "hns": found_hns,
+            })
+            continue
+
+        # สร้าง path ใหม่ที่มี patient folder
+        # gcs_path เป็น gs://bucket/... ต้องตัดเอาเฉพาะ blob path
+        if gcs_path.startswith("gs://"):
+            blob_path = gcs_path.split("/", 3)[3] if gcs_path.count("/") >= 3 else ""
+        else:
+            blob_path = gcs_path
+
+        if not blob_path:
+            continue
+
+        # หา folder เดิมและแทรก patient folder
+        # lab/rx: folder/YYYY-QN/YYYY-MM/filename → folder/YYYY-QN/YYYY-MM/HN_Name/filename
+        # dialysis: folder/YYYY-MM/filename → folder/YYYY-MM/HN_Name/filename
+        filename = blob_path.rsplit("/", 1)[-1]
+        parent_path = blob_path.rsplit("/", 1)[0]
+        new_blob_path = f"{parent_path}/{matched_folder}/{filename}"
+
+        entry = {
+            "doc_id": doc_id_short,
+            "category": cat,
+            "matched_hn": matched_hn,
+            "patient_folder": matched_folder,
+            "old_path_suffix": blob_path.split("/", 1)[-1][:40] + "...",
+            "new_path_suffix": new_blob_path.split("/", 1)[-1][:50] + "...",
+        }
+
+        if dry_run:
+            entry["action"] = "would_copy"
+            routed.append(entry)
+            continue
+
+        # Copy blob ไป path ใหม่
+        try:
+            src_blob = storage._bucket.blob(blob_path)
+            if not src_blob.exists():
+                entry["action"] = "error"
+                entry["error"] = "source blob not found"
+                errors.append(entry)
+                continue
+
+            # Server-side copy (ไม่ต้อง download)
+            new_blob = storage._bucket.copy_blob(
+                src_blob, storage._bucket, new_blob_path,
+            )
+
+            # อัปเดต doc index — เขียน per-doc JSON ใหม่ ด้วย gcs_object_path ใหม่
+            new_gcs_uri = f"gs://{storage.bucket_name}/{new_blob_path}"
+            doc["gcs_object_path"] = new_gcs_uri
+
+            # เขียน per-doc index file ใหม่
+            idx_path = f"_index/docs/{doc_id}.json"
+            try:
+                idx_blob = storage._bucket.blob(idx_path)
+                idx_blob.upload_from_string(
+                    json.dumps(doc, ensure_ascii=False),
+                    content_type="application/json",
+                )
+            except Exception as idx_err:
+                logger.warning(
+                    "Retroactive route: index update failed for %s: %s",
+                    doc_id_short, type(idx_err).__name__,
+                )
+
+            entry["action"] = "copied"
+            routed.append(entry)
+            logger.info(
+                "Retroactive route: copied doc %s → patient folder (cat=%s)",
+                doc_id_short, cat,
+            )
+
+        except Exception as copy_err:
+            entry["action"] = "error"
+            entry["error"] = type(copy_err).__name__
+            errors.append(entry)
+            logger.warning(
+                "Retroactive route: copy failed for %s: %s",
+                doc_id_short, type(copy_err).__name__,
+            )
+
+    return jsonify({
+        "dry_run": dry_run,
+        "registry_count": reg_count,
+        "categories": categories,
+        "already_in_folder": already_in_folder,
+        "routed_count": len(routed),
+        "skipped_count": len(skipped),
+        "error_count": len(errors),
+        "routed": routed,
+        "skipped": skipped,
+        "errors": errors,
+    }), 200
+
+
 @app.route("/admin/api/stats", methods=["GET"])
 def admin_api_stats():
     """API สำหรับดึงข้อมูลสถิติระบบ — ใช้โดย Dashboard."""
