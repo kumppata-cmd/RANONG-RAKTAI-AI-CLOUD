@@ -7696,6 +7696,70 @@ def admin_debug_paths():
     return jsonify({"count": len(paths), "paths": paths}), 200
 
 
+# ─── Admin Debug: HN Extraction Test ─────────────────────
+
+@app.route("/admin/api/v2/debug-hn-extract", methods=["GET"])
+def admin_debug_hn_extract():
+    """ทดสอบ HN extraction จากเอกสารที่มีอยู่ — ไม่แสดง PHI.
+
+    ตรวจว่า extract_hn_from_document พบ HN ในข้อความ OCR หรือไม่
+    และ master_registry จับคู่ได้หรือไม่
+    """
+    auth_param = request.args.get("secret", "")
+    if not ADMIN_SECRET or auth_param != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    cat_filter = request.args.get("category", "lab")
+    limit = min(int(request.args.get("limit", "5")), 20)
+
+    results = []
+    checked = 0
+    for doc in doc_index._docs:
+        if doc.get("category") != cat_filter:
+            continue
+        if checked >= limit:
+            break
+        checked += 1
+
+        text = doc.get("extracted_text", "")
+        doc_id_short = doc.get("document_id", "")[:8]
+
+        entry = {
+            "doc_id": doc_id_short,
+            "category": cat_filter,
+            "has_text": bool(text),
+            "text_length": len(text),
+        }
+
+        if text:
+            found_hns = extract_hn_from_document(text)
+            entry["extracted_hns"] = found_hns
+            entry["hn_count"] = len(found_hns)
+
+            # ทดสอบ match กับ registry
+            matched = []
+            for hn in found_hns:
+                folder = master_registry.get_folder_for_hn(hn)
+                matched.append({
+                    "hn": hn,
+                    "matched_folder": folder or "(no match)",
+                })
+            entry["registry_matches"] = matched
+        else:
+            entry["extracted_hns"] = []
+            entry["hn_count"] = 0
+            entry["note"] = "no OCR text in index"
+
+        results.append(entry)
+
+    return jsonify({
+        "category": cat_filter,
+        "checked": checked,
+        "registry_count": master_registry.count(),
+        "results": results,
+    }), 200
+
+
 # ─── Admin Dashboard: Stats API ──────────────────────────
 
 @app.route("/admin/api/stats", methods=["GET"])
