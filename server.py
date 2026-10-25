@@ -55,6 +55,7 @@ from quarterly_compare import (
     build_legacy_path,
     compare_lab_reports,
     compare_latest_labs,
+    compare_latest_rx,
     get_patient_lab_history,
 )
 
@@ -4329,13 +4330,18 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
 
     # ── เปรียบเทียบใบยา ──
     if parsed.command_type == CommandType.COMPARE_RX:
-        return (
-            "📋 ฟีเจอร์เปรียบเทียบใบยากำลังพัฒนา\n\n"
-            "ขณะนี้ระบบรองรับ:\n"
-            "• เปรียบเทียบแล็บ — ดูผลแล็บเก่า vs ใหม่\n"
-            "• ตรวจยา [ชื่อยา] — ตรวจยาที่อาจเป็นอันตราย\n\n"
-            "พิมพ์ 'เปรียบเทียบแล็บ' เพื่อเริ่มต้น"
-        )
+        try:
+            result = compare_latest_rx(storage, doc_index, user_hash)
+            if "error" in result:
+                return result["error"]
+            audit_logger.log("compare_rx", user_hash, {
+                "old_doc": result.get("old_doc_id", "")[:8],
+                "new_doc": result.get("new_doc_id", "")[:8],
+            })
+            return result.get("text_th", "ไม่สามารถเปรียบเทียบได้")
+        except Exception as e:
+            logger.warning(f"Compare rx error: {type(e).__name__}")
+            return "ขออภัย ไม่สามารถเปรียบเทียบใบยาได้ในขณะนี้"
 
     # ── ลงทะเบียน HN ──
     if parsed.command_type == CommandType.REGISTER_HN:
@@ -6749,10 +6755,8 @@ def _clear_registration_mode(user_hash: str):
 # เมื่อ classify_with_keywords returns "review" เพราะ OCR อ่านไม่ได้
 # ระบบจะเก็บข้อมูลเอกสาร + ส่งข้อความถามผู้ใช้ให้เลือกประเภท
 # ผู้ใช้ตอบเลข 1-4 → ระบบย้ายเอกสารไปยัง folder ที่ถูกต้อง
-_PENDING_CLASS_DIR = os.path.join(
-    tempfile.gettempdir(), "ranong_raktai", "pending_classify"
-)
-os.makedirs(_PENDING_CLASS_DIR, exist_ok=True)
+# ใช้ GCS-based state แทน /tmp เพื่อให้ทุก Gunicorn worker เข้าถึงได้
+_PENDING_CLASS_GCS_PREFIX = "_state/pending/"
 _PENDING_CLASS_TIMEOUT = 300  # 5 นาที
 
 
@@ -6760,8 +6764,7 @@ def _set_pending_classification(
     user_hash: str, doc_id: str, gcs_path: str,
     owner_hash: str, line_user_id: str, sha256_hex: str,
 ):
-    """บันทึก pending classification สำหรับเอกสารที่ OCR ล้มเหลว"""
-    filepath = os.path.join(_PENDING_CLASS_DIR, f"{user_hash}.json")
+    """บันทึก pending classification ไปยัง GCS (shared across workers)"""
     data = {
         "timestamp": time.time(),
         "doc_id": doc_id,
@@ -6770,31 +6773,55 @@ def _set_pending_classification(
         "line_user_id": line_user_id,
         "sha256_hex": sha256_hex,
     }
-    with open(filepath, "w") as f:
-        json.dump(data, f)
+    try:
+        if not storage.is_ready or not hasattr(storage, '_bucket'):
+            logger.warning("Storage not ready for pending classification")
+            return
+        blob_path = f"{_PENDING_CLASS_GCS_PREFIX}{user_hash}.json"
+        blob = storage._bucket.blob(blob_path)
+        blob.upload_from_string(
+            json.dumps(data), content_type="application/json"
+        )
+    except Exception as e:
+        logger.warning(f"Failed to set pending classification: {type(e).__name__}")
 
 
 def _get_pending_classification(user_hash: str) -> dict | None:
-    """ดึง pending classification — คืน None ถ้าไม่มีหรือหมดเวลา"""
-    filepath = os.path.join(_PENDING_CLASS_DIR, f"{user_hash}.json")
+    """ดึง pending classification จาก GCS — คืน None ถ้าไม่มีหรือหมดเวลา"""
     try:
-        with open(filepath, "r") as f:
-            data = json.load(f)
+        if not storage.is_ready or not hasattr(storage, '_bucket'):
+            return None
+        blob_path = f"{_PENDING_CLASS_GCS_PREFIX}{user_hash}.json"
+        blob = storage._bucket.blob(blob_path)
+        if not blob.exists():
+            return None
+        content = blob.download_as_text()
+        data = json.loads(content)
+        # ตรวจว่า expired หรือหมดเวลา
+        if data.get("expired"):
+            return None
         if (time.time() - data.get("timestamp", 0)) < _PENDING_CLASS_TIMEOUT:
             return data
         else:
             _clear_pending_classification(user_hash)
             return None
-    except (FileNotFoundError, ValueError, json.JSONDecodeError):
+    except Exception:
         return None
 
 
 def _clear_pending_classification(user_hash: str):
-    """ลบ pending classification"""
-    filepath = os.path.join(_PENDING_CLASS_DIR, f"{user_hash}.json")
+    """เคลียร์ pending classification — เขียนทับด้วย expired marker
+    (ไม่สามารถลบ blob ได้เนื่องจากไม่มี delete permission)"""
     try:
-        os.remove(filepath)
-    except FileNotFoundError:
+        if not storage.is_ready or not hasattr(storage, '_bucket'):
+            return
+        blob_path = f"{_PENDING_CLASS_GCS_PREFIX}{user_hash}.json"
+        blob = storage._bucket.blob(blob_path)
+        blob.upload_from_string(
+            json.dumps({"expired": True, "timestamp": 0}),
+            content_type="application/json",
+        )
+    except Exception:
         pass
 
 

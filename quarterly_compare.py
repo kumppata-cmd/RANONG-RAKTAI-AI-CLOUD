@@ -13,6 +13,7 @@
 
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -533,3 +534,292 @@ def _date_to_quarter(date_str: str) -> str:
         return get_quarter(dt)
     except (ValueError, TypeError):
         return ""
+
+
+# ─────────────────────────────────────────────────────────────
+# RX (Prescription) Comparison — Service Layer
+# ─────────────────────────────────────────────────────────────
+
+# ── รายชื่อยาที่พบบ่อยในคลินิกไต (ใช้สำหรับ extraction) ──
+_KNOWN_DRUGS = [
+    # Antihypertensives
+    "losartan", "enalapril", "amlodipine", "carvedilol", "metoprolol",
+    "nifedipine", "diltiazem", "verapamil", "hydralazine",
+    "spironolactone", "hydrochlorothiazide", "doxazosin", "atenolol",
+    "prazosin", "furosemide", "manidipine", "felodipine",
+    # Statins / Lipid
+    "atorvastatin", "simvastatin", "rosuvastatin", "fenofibrate",
+    # Anti-platelet / Anticoagulant
+    "aspirin", "clopidogrel", "warfarin",
+    # DM
+    "metformin", "insulin", "glipizide", "gliclazide", "sitagliptin",
+    # CKD-specific
+    "calcium carbonate", "folic acid", "ferrous sulfate", "calcitriol",
+    "sodium bicarbonate", "sevelamer", "lanthanum", "cinacalcet",
+    "epo", "erythropoietin", "darbepoetin", "epoetin", "venofer",
+    # GI
+    "omeprazole", "pantoprazole", "ranitidine", "domperidone",
+    "ondansetron",
+    # Pain / Neuro
+    "paracetamol", "tramadol", "gabapentin", "pregabalin",
+    "amitriptyline",
+    # Psych
+    "fluoxetine", "diazepam", "alprazolam",
+    # Anti-convulsant
+    "phenytoin", "levetiracetam",
+    # Antibiotics
+    "ciprofloxacin", "amoxicillin", "cephalexin", "clindamycin",
+    "metronidazole", "doxycycline", "azithromycin", "levofloxacin",
+    "co-trimoxazole",
+    # Gout
+    "allopurinol", "colchicine", "febuxostat",
+    # Steroids
+    "prednisolone", "dexamethasone",
+    # Others
+    "multivitamin", "vitamin b", "vitamin d", "iron",
+]
+
+# ── Regex สำหรับจับชื่อยาจาก OCR text ──
+# Pattern: ชื่อยา (1-3 คำ) ตามด้วย ขนาดยา + หน่วย (เช่น "Losartan 50 mg")
+# ต้องมีขนาดยา+หน่วย ตามหลังเสมอ เพื่อลด false positive
+_RX_WITH_DOSE_RE = re.compile(
+    r"(?:^|\n)\s*\d*\.?\s*"                              # optional numbering
+    r"([A-Za-z][A-Za-z\-]{2,20}"                         # first word of drug name
+    r"(?:\s+[A-Za-z][A-Za-z\-]{2,20}){0,2})"             # optional 1-2 more words
+    r"\s+[\d,.]+\s*(?:mg|mcg|g|ml|iu|unit|เม็ด|แคปซูล)",  # REQUIRED: dose + unit
+    re.IGNORECASE,
+)
+
+
+def extract_drugs_from_text(ocr_text: str) -> list[str]:
+    """ดึงรายชื่อยาจาก OCR text ของใบสั่งยา.
+
+    ใช้ 2 วิธีร่วมกัน:
+    1. Known drug matching — จับคู่กับรายชื่อยาที่รู้จัก
+    2. Pattern matching — regex จับชื่อยา + ขนาด
+
+    Returns: list ของชื่อยา (deduplicated, sorted)
+    """
+    if not ocr_text or len(ocr_text.strip()) < 10:
+        return []
+
+    text_lower = ocr_text.lower()
+    found_drugs: set[str] = set()
+
+    # ── Method 1: Known drug matching ──
+    for drug in _KNOWN_DRUGS:
+        if drug.lower() in text_lower:
+            # Normalize: capitalize first letter
+            found_drugs.add(drug.strip().title())
+
+    # ── Method 2: Pattern-based extraction ──
+    # จับชื่อยาจาก pattern เช่น "Losartan 50 mg" (ต้องมี dose+unit ตามหลัง)
+    for match in _RX_WITH_DOSE_RE.finditer(ocr_text):
+        candidate = match.group(1).strip()
+        if _is_likely_drug_name(candidate):
+            found_drugs.add(_normalize_drug_name(candidate))
+
+    return sorted(found_drugs)
+
+
+def _is_likely_drug_name(name: str) -> bool:
+    """ตรวจสอบว่า string น่าจะเป็นชื่อยา (ไม่ใช่ header, label, etc.)"""
+    if not name or len(name) < 3:
+        return False
+    name_lower = name.lower().strip()
+
+    # ชื่อยาส่วนใหญ่ไม่เกิน 3 คำ (เช่น "Calcium Carbonate", "Folic Acid")
+    if len(name_lower.split()) > 3:
+        return False
+
+    # ชื่อยาไม่ยาวเกิน 30 ตัวอักษร
+    if len(name_lower) > 30:
+        return False
+
+    # ── คำที่ไม่ใช่ชื่อยา ──
+    _non_drug_words = {
+        "name", "date", "patient", "doctor", "hospital", "clinic",
+        "diagnosis", "note", "page", "total", "quantity", "amount",
+        "prescription", "medication", "drug", "tablet", "capsule",
+        "frequency", "duration", "route", "oral", "injection",
+        "morning", "evening", "night", "before", "after", "meal",
+        "refill", "dispense", "instruction", "warning", "caution",
+        "visit", "department", "ward", "bed", "room",
+        "hello", "world", "test", "document", "this",
+        "ชื่อ", "วันที่", "แพทย์", "โรงพยาบาล", "คลินิก",
+        "ผู้ป่วย", "ครั้งละ", "วันละ", "เม็ด", "แคปซูล",
+        "หลังอาหาร", "ก่อนอาหาร", "ก่อนนอน", "เช้า", "เย็น",
+        "sig", "prn", "bid", "tid", "qid", "stat", "hs",
+        "tab", "cap", "inj", "supp", "top", "inh",
+    }
+    if name_lower in _non_drug_words:
+        return False
+
+    # ต้องมีตัวอักษรอย่างน้อย 3 ตัว
+    alpha_count = sum(1 for c in name if c.isalpha())
+    if alpha_count < 3:
+        return False
+
+    # ถ้ามีแต่ตัวเลข ไม่ใช่ชื่อยา
+    if name.replace(" ", "").replace("-", "").isdigit():
+        return False
+
+    # ถ้ามีคำทั่วไปมากกว่า 1 คำใน string → ไม่ใช่ชื่อยา
+    _common_words = {"is", "a", "the", "this", "that", "and", "or", "for",
+                     "in", "on", "at", "to", "of", "it", "be", "as", "by"}
+    words = name_lower.split()
+    common_count = sum(1 for w in words if w in _common_words)
+    if common_count >= 2:
+        return False
+
+    return True
+
+
+def _normalize_drug_name(name: str) -> str:
+    """Normalize ชื่อยาให้เป็นรูปแบบมาตรฐาน"""
+    # ลบ whitespace ซ้ำ
+    name = re.sub(r"\s+", " ", name.strip())
+    # Title case
+    return name.title()
+
+
+def get_patient_rx_history(
+    storage,
+    doc_index,
+    owner_hash: str,
+) -> list[dict]:
+    """ดึงประวัติใบยาของผู้ป่วย — เรียงตามวันที่.
+
+    ดึงจาก DocumentIndex: เอกสาร category=rx ของ owner
+    แล้วใช้ extracted_text ดึงรายชื่อยาจาก OCR text
+    """
+    try:
+        all_docs = (
+            doc_index.list_by_owner(owner_hash)
+            if hasattr(doc_index, "list_by_owner")
+            else []
+        )
+        rx_docs = [d for d in all_docs if d.get("category") == "rx"]
+
+        results = []
+        for doc in rx_docs:
+            doc_id = doc.get("document_id", "")
+            extracted_text = doc.get("extracted_text", "").strip()
+
+            if not extracted_text:
+                # ถ้าไม่มี extracted_text ใน index → ข้ามเอกสารนี้
+                logger.info(
+                    "get_patient_rx_history: doc %s has no extracted_text",
+                    doc_id[:8],
+                )
+                continue
+
+            # ดึงรายชื่อยาจาก OCR text
+            drugs = extract_drugs_from_text(extracted_text)
+            if not drugs:
+                logger.info(
+                    "get_patient_rx_history: doc %s extracted 0 drugs "
+                    "from %d chars",
+                    doc_id[:8], len(extracted_text),
+                )
+                continue
+
+            results.append({
+                "doc_id": doc_id,
+                "upload_date": doc.get("upload_date", ""),
+                "quarter": _date_to_quarter(doc.get("upload_date", "")),
+                "drug_count": len(drugs),
+                "drugs": drugs,
+            })
+
+        # เรียงตามวันที่ (ใหม่สุดก่อน)
+        results.sort(key=lambda x: x.get("upload_date", ""), reverse=True)
+        return results
+
+    except Exception as e:
+        logger.error("get_patient_rx_history failed: %s", e)
+        return []
+
+
+def compare_latest_rx(
+    storage,
+    doc_index,
+    owner_hash: str,
+) -> dict:
+    """เปรียบเทียบใบยาล่าสุด vs ก่อนหน้า — สำหรับ LINE command.
+
+    ใช้ pattern เดียวกับ compare_latest_labs:
+    1. ดึงประวัติใบยาของผู้ป่วย
+    2. เปรียบเทียบ 2 ชุดล่าสุด
+    3. คืนผลเปรียบเทียบเป็น dict พร้อม text_th
+    """
+    history = get_patient_rx_history(storage, doc_index, owner_hash)
+
+    if len(history) == 0:
+        return {
+            "error": "ไม่พบใบยาในระบบ กรุณาส่งรูปใบยาก่อน",
+            "available": 0,
+        }
+
+    if len(history) < 2:
+        # มีแค่ 1 ใบ — แสดงรายการยาปัจจุบัน
+        current = history[0]
+        drugs_text = "\n".join(f"  • {d}" for d in current["drugs"])
+        return {
+            "error": (
+                f"💊 ใบยาปัจจุบัน ({current['upload_date']})\n"
+                f"พบ {current['drug_count']} รายการ:\n"
+                f"{drugs_text}\n\n"
+                "ต้องมีใบยาอย่างน้อย 2 ครั้งจึงจะเปรียบเทียบได้\n"
+                "กรุณาส่งใบยาเพิ่มอีก 1 ครั้ง"
+            ),
+            "available": 1,
+        }
+
+    new = history[0]
+    old = history[1]
+
+    comp = RxComparison(
+        old_doc_id=old["doc_id"],
+        new_doc_id=new["doc_id"],
+    )
+    comp.compare(old.get("drugs", []), new.get("drugs", []))
+
+    result = comp.to_dict()
+
+    # ── สร้าง text_th พร้อมวันที่ ──
+    lines = []
+    lines.append("💊 เปรียบเทียบใบยา")
+    if old.get("upload_date") and new.get("upload_date"):
+        lines.append(f"📅 {old['upload_date']} → {new['upload_date']}")
+    if old.get("quarter") and new.get("quarter"):
+        if old["quarter"] != new["quarter"]:
+            lines.append(f"📆 {old['quarter']} → {new['quarter']}")
+    lines.append("")
+
+    added = [r for r in comp.results if r.status == "added"]
+    removed = [r for r in comp.results if r.status == "removed"]
+
+    if added:
+        lines.append("🟢 ยาที่เพิ่มใหม่:")
+        for r in added:
+            lines.append(f"  + {r.drug_name}")
+    if removed:
+        lines.append("🔴 ยาที่หยุด:")
+        for r in removed:
+            lines.append(f"  - {r.drug_name}")
+    if not added and not removed:
+        lines.append("✅ ไม่มีการเปลี่ยนแปลงรายการยา")
+
+    s = comp.summary
+    lines.append("")
+    lines.append(
+        f"📋 สรุป: เดิม {s.get('total_old', 0)} รายการ → "
+        f"ใหม่ {s.get('total_new', 0)} รายการ "
+        f"(เพิ่ม {s.get('added', 0)} / หยุด {s.get('removed', 0)})"
+    )
+
+    result["text_th"] = "\n".join(lines)
+    result["old_date"] = old.get("upload_date", "")
+    result["new_date"] = new.get("upload_date", "")
+    return result
