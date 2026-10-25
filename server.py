@@ -70,7 +70,7 @@ except ImportError:
     HAS_TESSERACT = False
 
 try:
-    from PIL import Image
+    from PIL import Image, ImageEnhance, ImageFilter, ImageOps
     HAS_PIL = True
 except ImportError:
     HAS_PIL = False
@@ -4861,15 +4861,82 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
         try:
             if ext in (".jpg", ".jpeg", ".png"):
                 img = None
+                processed = None
                 try:
                     img = Image.open(filepath)
+                    # ── Image preprocessing for better OCR ──
+                    # 1. Convert to RGB if needed (handle RGBA, palette, etc.)
+                    if img.mode not in ("RGB", "L"):
+                        img = img.convert("RGB")
+                    # 2. Upscale small images (LINE compresses photos)
+                    #    Target: min width 2000px for table text readability
+                    w, h = img.size
+                    min_width = 2000
+                    if w < min_width:
+                        scale_factor = min_width / w
+                        new_w = int(w * scale_factor)
+                        new_h = int(h * scale_factor)
+                        img = img.resize((new_w, new_h), Image.LANCZOS)
+                        logger.info(
+                            f"[OCR-PRE] Upscaled {w}x{h} → {new_w}x{new_h} "
+                            f"(x{scale_factor:.1f})"
+                        )
+                    # 3. Convert to grayscale
+                    processed = img.convert("L")
+                    # 4. Sharpen
+                    processed = ImageEnhance.Sharpness(processed).enhance(2.0)
+                    # 5. Increase contrast
+                    processed = ImageEnhance.Contrast(processed).enhance(1.5)
+                    # 6. Adaptive threshold (binarize) for table/document text
+                    #    Use autocontrast to maximize dynamic range first
+                    processed = ImageOps.autocontrast(processed, cutoff=1)
+
+                    # ── OCR with table-optimized config ──
+                    # PSM 6: Assume a single uniform block of text
+                    # PSM 4: Assume a single column of text of variable sizes
+                    # Try PSM 6 first (works well with tables)
+                    tess_config = "--psm 6"
                     text = pytesseract.image_to_string(
-                        img, lang=ocr_lang, timeout=timeout_sec
+                        processed, lang=ocr_lang,
+                        timeout=timeout_sec, config=tess_config,
                     )
+                    logger.info(
+                        f"[OCR-PRE] PSM 6 result: {len(text.strip())} chars"
+                    )
+                    # If PSM 6 got very little, try PSM 3 (auto) as fallback
+                    if len(text.strip()) < 10:
+                        logger.info("[OCR-PRE] PSM 6 ไม่พอ — ลอง PSM 3 (auto)")
+                        text_auto = pytesseract.image_to_string(
+                            processed, lang=ocr_lang,
+                            timeout=timeout_sec, config="--psm 3",
+                        )
+                        if len(text_auto.strip()) > len(text.strip()):
+                            text = text_auto
+                            logger.info(
+                                f"[OCR-PRE] PSM 3 ดีกว่า: {len(text.strip())} chars"
+                            )
+                    # If still very little, try on original (unprocessed) image
+                    if len(text.strip()) < 10:
+                        logger.info("[OCR-PRE] preprocessed ไม่พอ — ลองภาพต้นฉบับ")
+                        text_orig = pytesseract.image_to_string(
+                            img, lang=ocr_lang, timeout=timeout_sec,
+                        )
+                        if len(text_orig.strip()) > len(text.strip()):
+                            text = text_orig
+                            logger.info(
+                                f"[OCR-PRE] ภาพต้นฉบับดีกว่า: "
+                                f"{len(text.strip())} chars"
+                            )
                 finally:
+                    if processed is not None:
+                        processed.close()
                     if img is not None:
                         img.close()
                 logger.info(f"OCR ภาพ: ได้ {len(text.strip())} ตัวอักษร")
+                if text.strip():
+                    logger.info(
+                        f"[OCR-PRE] preview: {text.strip()[:200]}"
+                    )
                 return text.strip()
 
             if ext == ".pdf":
