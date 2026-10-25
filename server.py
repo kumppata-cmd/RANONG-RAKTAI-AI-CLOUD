@@ -759,9 +759,9 @@ class StorageGCS:
 
         folder = FOLDERS.get(category, FOLDERS["review"])
         # ──────────────────────────────────────────────────────
-        # Quarterly/Monthly sub-folder organization:
+        # Quarterly sub-folder organization:
         #   - lab, rx → quarterly: folder/2026-Q4/2026-10/uuid.pdf
-        #   - dialysis → monthly per patient: folder/2026-10/{hn}/uuid.pdf
+        #   - dialysis → quarterly per patient: folder/2026-Q4/{hn}/uuid.pdf
         #   - อื่นๆ → monthly (เดิม): folder/2026-10/uuid.pdf
         # ──────────────────────────────────────────────────────
         owner_hash_for_path = (metadata or {}).get("owner_hash_short", "")
@@ -5076,8 +5076,35 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                             logger.warning(f"[OCR] Pass5 error: {e}")
                             _ocr_debug_store["pass5"] = f"ERROR: {e}"
 
+                    # Pass 6: ALWAYS run English-only OCR and COMBINE with existing text
+                    # ใบฟอกเลือด/ใบยามีคำภาษาอังกฤษสำคัญ (Hemodialysis, Heparin, Dialyzer)
+                    # ที่ tha+eng OCR อาจอ่านผิด แต่ eng-only อ่านได้ชัด
+                    # รวมข้อความ eng เข้ากับ text ที่มีอยู่เพื่อเพิ่มโอกาส keyword match
+                    try:
+                        p6_sharp = gray.filter(ImageFilter.SHARPEN)
+                        p6 = ImageOps.autocontrast(p6_sharp, cutoff=2)
+                        p6_sharp.close()
+                        text6 = pytesseract.image_to_string(
+                            p6, lang="eng",
+                            timeout=ocr_timeout, config="--psm 3",
+                        ).strip()
+                        p6.close()
+                        _ocr_debug_store["pass6"] = f"psm3-eng-always: {len(text6)} chars"
+                        logger.info(f"[OCR] Pass6 ENG-always: {len(text6)} chars")
+                        if text6 and len(text6) >= 10:
+                            # รวม eng text เข้ากับ text ที่มีอยู่ (ไม่ใช่แทนที่)
+                            # เพื่อให้ keyword matcher เห็นทั้งคำไทยและอังกฤษ
+                            if len(text) > 0:
+                                text = text + "\n" + text6
+                            else:
+                                text = text6
+                            logger.info(f"[OCR] Combined thai+eng: {len(text)} chars")
+                    except Exception as e:
+                        logger.warning(f"[OCR] Pass6 error: {e}")
+                        _ocr_debug_store["pass6"] = f"ERROR: {e}"
+
                     _ocr_debug_store["ocr_char_count"] = len(text)
-                    _ocr_debug_store["preprocess"] = "multi-pass-5"
+                    _ocr_debug_store["preprocess"] = "multi-pass-6"
                     logger.info(f"[OCR] Final: {len(text)} chars")
                 finally:
                     if processed is not None:
@@ -5803,7 +5830,20 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "pre-HD", "post-HD", "KT/V", "Kt/V",
              "URR", "access", "fistula", "catheter",
              "ultrafiltration", "UF", "transmembrane",
-             "ไตเทียม", "ล้างไต", "บันทึกฟอก"],
+             "ไตเทียม", "ล้างไต", "บันทึกฟอก",
+             # ── เพิ่มจาก Hemodialysis work sheet จริง ──
+             "hemodialysis work sheet", "HD No", "HD sheet",
+             "pre-dialysis", "nursing diagnosis", "nursing care plan",
+             "dialysate temp", "dialysate flow", "Total UF",
+             "BFR", "UFR", "vascular access", "nephrologist",
+             "pre HD", "post HD", "HD note",
+             "anticoagulant", "surface area",
+             "conduct", "repletement", "complication",
+             "hypotension", "muscle cramp", "dialyzer clot",
+             "clotted bloodline", "discharge by",
+             "last TCV", "use No", "loading", "maintenance",
+             "flush Nss", "machine", "SADL",
+             ],
             2,
         ),
     }
@@ -5857,6 +5897,33 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
                 ),
                 "confidence": min((_company_hits + _money_hits) / 5.0, 1.0),
             }
+
+    # ── Pre-check: ใบฟอกเลือด (Hemodialysis) ──
+    # ถ้าพบ strong HD keywords ≥2 → บังคับ dialysis
+    # ป้องกันใบ HD ที่มี Hb/Hct/EPO จากการถูกจำแนกเป็น lab/rx
+    _hd_strong_kws = [
+        "hemodialysis", "dialysis", "dialyzer", "dialysate",
+        "hemodialysis work sheet", "HD No", "HD sheet",
+        "ฟอกเลือด", "ฟอกไต", "ไตเทียม", "ล้างไต",
+        "pre-HD", "post-HD", "pre HD", "post HD",
+        "vascular access", "nephrologist",
+        "ultrafiltration", "Total UF", "UFR", "BFR",
+        "dry weight", "น้ำหนักแห้ง", "บันทึกการฟอก",
+        "nursing diagnosis", "nursing care plan",
+        "anticoagulant", "dialysate temp", "dialysate flow",
+        "flush Nss", "repletement", "clotted bloodline",
+    ]
+    _hd_hits = [kw for kw in _hd_strong_kws if kw.lower() in content_lower]
+    if len(_hd_hits) >= 2:
+        logger.info(
+            f"  pre-check: hemodialysis detected "
+            f"({len(_hd_hits)} strong HD kws) → dialysis"
+        )
+        return {
+            "category": "dialysis",
+            "reason": f"hemodialysis pre-check ({len(_hd_hits)} strong HD hits)",
+            "confidence": min(len(_hd_hits) / 4.0, 1.0),
+        }
 
     # ── Pre-check: ใบสั่งยา / ใบตรวจรักษาผู้ป่วย ──
     # ถ้าพบชื่อยา ≥3 ตัว + keyword ทางการแพทย์ → บังคับ rx
@@ -6771,8 +6838,9 @@ def _reclassify_document(
         quarter = f"Q{(now.month - 1) // 3 + 1}"
         new_path = f"{dest_folder}/{now.year}-{quarter}/{now.strftime('%Y-%m')}/{filename}"
     elif new_category == "dialysis":
-        # 05_DIALYSIS_RECORDS/2026-10/file.jpg
-        new_path = f"{dest_folder}/{now.strftime('%Y-%m')}/{filename}"
+        # 05_DIALYSIS_RECORDS/2026-Q4/file.jpg (quarterly)
+        quarter = f"Q{(now.month - 1) // 3 + 1}"
+        new_path = f"{dest_folder}/{now.year}-{quarter}/{filename}"
     elif new_category == "bills":
         # 02_BILLS_RECEIPTS/2026-10/file.jpg
         new_path = f"{dest_folder}/{now.strftime('%Y-%m')}/{filename}"
@@ -8316,7 +8384,7 @@ def admin_retroactive_route():
 
         # หา folder เดิมและแทรก patient folder
         # lab/rx: folder/YYYY-QN/YYYY-MM/filename → folder/YYYY-QN/YYYY-MM/HN_Name/filename
-        # dialysis: folder/YYYY-MM/filename → folder/YYYY-MM/HN_Name/filename
+        # dialysis: folder/YYYY-QN/filename → folder/YYYY-QN/HN_Name/filename
         filename = blob_path.rsplit("/", 1)[-1]
         parent_path = blob_path.rsplit("/", 1)[0]
         new_blob_path = f"{parent_path}/{matched_folder}/{filename}"

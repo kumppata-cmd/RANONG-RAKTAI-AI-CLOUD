@@ -42,16 +42,17 @@ def build_monthly_patient_path(
     patient_folder: str = "",
     date: datetime | None = None,
 ) -> str:
-    """สร้าง GCS path สำหรับเอกสารฟอกไตรายเดือน/รายคน.
+    """สร้าง GCS path สำหรับเอกสารฟอกไตราย 3 เดือน/รายคน.
 
-    เช่น: 05_DIALYSIS_RECORDS/2026-10/1234_56789/uuid.pdf
-    ถ้าไม่มี patient_folder จะใช้ path เดิม (backward compatible)
+    เช่น: 05_DIALYSIS_RECORDS/2026-Q4/HN58072_ชื่อ/uuid.pdf
+    ถ้าไม่มี patient_folder จะใช้ quarterly path (backward compatible)
+    เปลี่ยนจาก monthly เป็น quarterly ตามที่ผู้ใช้ต้องการ
     """
     dt = date or datetime.now(timezone.utc)
-    monthly = dt.strftime("%Y-%m")
+    quarter = get_quarter(dt)
     if patient_folder:
-        return f"{folder}/{monthly}/{patient_folder}/{filename}"
-    return f"{folder}/{monthly}/{filename}"
+        return f"{folder}/{quarter}/{patient_folder}/{filename}"
+    return f"{folder}/{quarter}/{filename}"
 
 
 def build_legacy_path(folder: str, filename: str, subfolder: str = "") -> str:
