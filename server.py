@@ -4864,101 +4864,76 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
         try:
             if ext in (".jpg", ".jpeg", ".png"):
                 img = None
-                variants = []  # list of (label, PIL.Image) to OCR
+                processed = None
                 try:
                     img = Image.open(filepath)
                     orig_w, orig_h = img.size
-                    logger.info(f"[OCR-PRE] Original image: {orig_w}x{orig_h} mode={img.mode}")
-
-                    # ── Store image info in debug ──
+                    logger.info(f"[OCR-PRE] Original: {orig_w}x{orig_h} mode={img.mode}")
                     _ocr_debug_store["image_original_size"] = f"{orig_w}x{orig_h}"
                     _ocr_debug_store["image_mode"] = img.mode
 
-                    # 1. Convert to RGB if needed
+                    # 1. Convert to RGB
                     if img.mode not in ("RGB", "L"):
                         img = img.convert("RGB")
 
-                    # 2. Upscale — aggressive: min 2500px width
+                    # 2. Upscale small images only (LINE photos ~1024px)
                     w, h = img.size
-                    min_width = 2500
-                    if w < min_width:
-                        sf = min_width / w
-                        new_w = int(w * sf)
-                        new_h = int(h * sf)
-                        img = img.resize((new_w, new_h), Image.LANCZOS)
-                        logger.info(f"[OCR-PRE] Upscaled → {new_w}x{new_h} (x{sf:.1f})")
+                    if w < 1800:
+                        sf = 1800 / w
+                        img = img.resize(
+                            (int(w * sf), int(h * sf)), Image.LANCZOS
+                        )
+                        logger.info(f"[OCR-PRE] Upscaled → {img.size[0]}x{img.size[1]}")
 
-                    # ── Create multiple preprocessed variants ──
+                    # 3. Grayscale
                     gray = img.convert("L")
+                    # Free color image early
+                    img.close()
+                    img = None
 
-                    # Variant A: Sharpen + Contrast + Autocontrast (original approach)
-                    va = ImageEnhance.Sharpness(gray.copy()).enhance(2.0)
-                    va = ImageEnhance.Contrast(va).enhance(1.5)
-                    va = ImageOps.autocontrast(va, cutoff=1)
-                    variants.append(("sharpen+contrast", va))
+                    # 4. Median filter — kills moiré from screen photos
+                    processed = gray.filter(ImageFilter.MedianFilter(size=3))
+                    gray.close()
 
-                    # Variant B: Binary threshold (hard B&W at 128)
-                    vb = gray.copy()
-                    vb = ImageOps.autocontrast(vb, cutoff=2)
-                    vb = vb.point(lambda x: 255 if x > 128 else 0)
-                    variants.append(("binary128", vb))
+                    # 5. Autocontrast → binary threshold
+                    processed = ImageOps.autocontrast(processed, cutoff=2)
+                    processed = processed.point(lambda x: 255 if x > 140 else 0)
 
-                    # Variant C: Binary threshold at 160 (lighter cutoff)
-                    vc = gray.copy()
-                    vc = ImageOps.autocontrast(vc, cutoff=2)
-                    vc = vc.point(lambda x: 255 if x > 160 else 0)
-                    variants.append(("binary160", vc))
+                    _ocr_debug_store["preprocess"] = "median3+autocontrast+binary140"
+                    _ocr_debug_store["processed_size"] = f"{processed.size[0]}x{processed.size[1]}"
 
-                    # Variant D: Invert + binary (for dark background tables)
-                    vd = ImageOps.invert(gray.copy())
-                    vd = ImageOps.autocontrast(vd, cutoff=2)
-                    vd = vd.point(lambda x: 255 if x > 128 else 0)
-                    variants.append(("invert+binary", vd))
-
-                    # Variant E: Original grayscale (no preprocessing)
-                    variants.append(("gray-raw", gray.copy()))
-
-                    # ── Multi-pass OCR: try all variants × configs ──
-                    ocr_configs = [
-                        ("--psm 6", "tha+eng"),   # table block
-                        ("--psm 4", "tha+eng"),   # single column
-                        ("--psm 3", "tha+eng"),   # fully auto
-                        ("--psm 6", "eng"),        # table block, eng-only
-                        ("--psm 4", "eng"),        # single column, eng-only
-                    ]
-
+                    # ── OCR: 3 passes — tha+eng PSM 4, PSM 6, eng PSM 4 ──
                     best_text = ""
                     best_label = ""
                     pass_results = []
 
-                    for v_label, v_img in variants:
-                        for tess_cfg, lang in ocr_configs:
-                            try:
-                                t = pytesseract.image_to_string(
-                                    v_img, lang=lang,
-                                    timeout=timeout_sec, config=tess_cfg,
-                                ).strip()
-                                combo = f"{v_label}/{tess_cfg}/{lang}"
-                                pass_results.append(f"{combo}={len(t)}c")
-                                if len(t) > len(best_text):
-                                    best_text = t
-                                    best_label = combo
-                            except Exception as e:
-                                logger.warning(f"[OCR-MULTI] {v_label}/{tess_cfg}/{lang} error: {e}")
+                    for tess_cfg, lang, label in [
+                        ("--psm 4", "tha+eng", "col-tha"),
+                        ("--psm 6", "tha+eng", "blk-tha"),
+                        ("--psm 4", "eng",     "col-eng"),
+                    ]:
+                        try:
+                            t = pytesseract.image_to_string(
+                                processed, lang=lang,
+                                timeout=timeout_sec, config=tess_cfg,
+                            ).strip()
+                            pass_results.append(f"{label}={len(t)}c")
+                            if len(t) > len(best_text):
+                                best_text = t
+                                best_label = label
+                        except Exception as e:
+                            pass_results.append(f"{label}=ERR")
+                            logger.warning(f"[OCR] {label} error: {e}")
 
-                    logger.info(f"[OCR-MULTI] Best: {best_label} ({len(best_text)} chars)")
-                    logger.info(f"[OCR-MULTI] All passes: {', '.join(pass_results[:15])}")
-
-                    # Store multi-pass results in debug
                     _ocr_debug_store["ocr_passes"] = pass_results
                     _ocr_debug_store["ocr_best_config"] = best_label
+                    logger.info(f"[OCR] Passes: {pass_results} → best={best_label}")
 
                     text = best_text
-
                 finally:
-                    for _lbl, _vimg in variants:
+                    if processed is not None:
                         try:
-                            _vimg.close()
+                            processed.close()
                         except Exception:
                             pass
                     if img is not None:
@@ -6547,9 +6522,13 @@ def _process_registration_image(
             logger.warning(f"[REG-IMG] OCR text สั้นเกินไป: '{(ocr_text or '')[:50]}'")
             push_message(
                 line_user_id,
-                "❌ OCR อ่านรายชื่อจากรูปไม่ได้\n"
-                "กรุณาถ่ายรูปให้ชัดเจนขึ้นแล้วลองใหม่\n"
-                "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อเริ่มใหม่",
+                "❌ OCR อ่านรายชื่อจากรูปไม่ได้\n\n"
+                "💡 แนะนำ: พิมพ์รายชื่อแทนรูปภาพ\n"
+                "รูปแบบ: ชื่อ-สกุล | HN รพ | HN คลินิก\n"
+                "ตัวอย่าง:\n"
+                "สมชาย ใจดี | 00012345 | 63001\n"
+                "สมหญิง รักดี | 00067890 | 63002\n\n"
+                "หรือถ่ายรูปใหม่ให้ชัดขึ้น (ไม่ถ่ายหน้าจอ)",
             )
             return
 
@@ -6605,6 +6584,12 @@ def _process_registration_image(
             f"✅ ใหม่: {new_count} คน",
             f"🔄 อัปเดต: {updated_count} คน",
         ]
+        # ถ้าพบน้อยกว่า 5 คน — แนะนำพิมพ์ข้อความแทน
+        if len(patients_data) < 5:
+            report_lines.append("")
+            report_lines.append("⚠️ พบน้อย? ลองพิมพ์รายชื่อแทนรูป:")
+            report_lines.append("ชื่อ | HN รพ | HN คลินิก")
+            report_lines.append("เช่น: สมชาย ใจดี | 00012345 | 63001")
         if messages:
             report_lines.append("")
             report_lines.extend(messages)
