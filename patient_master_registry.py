@@ -889,6 +889,12 @@ def _is_likely_hn(hn: str, text: str, pos: int) -> bool:
     if hn.startswith("0") and len(hn) >= 9:
         return False
 
+    # ตัวเลขยาวเกินไป (> 8 หลัก) — ไม่น่าจะเป็น HN
+    # HN คลินิก/โรงพยาบาลทั่วไปยาว 2-8 หลัก
+    # ตัวเลข 9-10 หลักมักเป็น เลขบัตรประชาชน, วันที่, หรือเบอร์โทร
+    if len(hn) > 8:
+        return False
+
     # สั้นเกินไป (1 หลัก)
     if len(hn) < 2:
         return False
