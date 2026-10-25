@@ -2477,8 +2477,9 @@ def api_master_registry_debug_gcs():
     # 2) ตรวจ master_registry._storage
     results["registry_has_storage"] = master_registry._storage is not None
     results["registry_storage_type"] = type(master_registry._storage).__name__ if master_registry._storage else None
+    # ใช้ count() ซึ่ง force-reload จาก GCS (ไม่ใช่แค่อ่าน raw state)
+    results["registry_patient_count"] = master_registry.count()
     results["registry_loaded"] = master_registry._loaded
-    results["registry_patient_count"] = len(master_registry._patients)
 
     # 3) ทดสอบ write test blob
     if master_registry._storage:
@@ -5857,7 +5858,18 @@ def process_file_async(
             if extracted_text and category in ("lab", "rx", "dialysis"):
                 try:
                     found_hns = extract_hn_from_document(extracted_text)
+                    logger.info(
+                        "Auto HN route: extracted %d HN(s) from OCR "
+                        "(category=%s, text_len=%d)",
+                        len(found_hns), category, len(extracted_text),
+                    )
                     if found_hns and master_registry:
+                        _reg_count = master_registry.count()
+                        logger.info(
+                            "Auto HN route: registry has %d patients, "
+                            "checking %d HN candidates",
+                            _reg_count, len(found_hns),
+                        )
                         for hn_candidate in found_hns:
                             patient_folder = master_registry.get_folder_for_hn(
                                 hn_candidate
@@ -5869,6 +5881,16 @@ def process_file_async(
                                     "(category=%s)", category
                                 )
                                 break
+                            else:
+                                logger.info(
+                                    "Auto HN route: no match for HN candidate "
+                                    "(category=%s)", category
+                                )
+                    elif not found_hns:
+                        logger.info(
+                            "Auto HN route: no HN found in OCR text "
+                            "(category=%s)", category
+                        )
                 except Exception as hn_err:
                     logger.warning(
                         "HN extraction failed: %s", type(hn_err).__name__
