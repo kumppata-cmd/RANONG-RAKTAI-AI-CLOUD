@@ -4864,83 +4864,112 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
         try:
             if ext in (".jpg", ".jpeg", ".png"):
                 img = None
-                processed = None
+                variants = []  # list of (label, PIL.Image) to OCR
                 try:
                     img = Image.open(filepath)
-                    # ── Image preprocessing for better OCR ──
-                    # 1. Convert to RGB if needed (handle RGBA, palette, etc.)
+                    orig_w, orig_h = img.size
+                    logger.info(f"[OCR-PRE] Original image: {orig_w}x{orig_h} mode={img.mode}")
+
+                    # ── Store image info in debug ──
+                    _ocr_debug_store["image_original_size"] = f"{orig_w}x{orig_h}"
+                    _ocr_debug_store["image_mode"] = img.mode
+
+                    # 1. Convert to RGB if needed
                     if img.mode not in ("RGB", "L"):
                         img = img.convert("RGB")
-                    # 2. Upscale small images (LINE compresses photos)
-                    #    Target: min width 2000px for table text readability
-                    w, h = img.size
-                    min_width = 2000
-                    if w < min_width:
-                        scale_factor = min_width / w
-                        new_w = int(w * scale_factor)
-                        new_h = int(h * scale_factor)
-                        img = img.resize((new_w, new_h), Image.LANCZOS)
-                        logger.info(
-                            f"[OCR-PRE] Upscaled {w}x{h} → {new_w}x{new_h} "
-                            f"(x{scale_factor:.1f})"
-                        )
-                    # 3. Convert to grayscale
-                    processed = img.convert("L")
-                    # 4. Sharpen
-                    processed = ImageEnhance.Sharpness(processed).enhance(2.0)
-                    # 5. Increase contrast
-                    processed = ImageEnhance.Contrast(processed).enhance(1.5)
-                    # 6. Adaptive threshold (binarize) for table/document text
-                    #    Use autocontrast to maximize dynamic range first
-                    processed = ImageOps.autocontrast(processed, cutoff=1)
 
-                    # ── OCR with table-optimized config ──
-                    # PSM 6: Assume a single uniform block of text
-                    # PSM 4: Assume a single column of text of variable sizes
-                    # Try PSM 6 first (works well with tables)
-                    tess_config = "--psm 6"
-                    text = pytesseract.image_to_string(
-                        processed, lang=ocr_lang,
-                        timeout=timeout_sec, config=tess_config,
-                    )
-                    logger.info(
-                        f"[OCR-PRE] PSM 6 result: {len(text.strip())} chars"
-                    )
-                    # If PSM 6 got very little, try PSM 3 (auto) as fallback
-                    if len(text.strip()) < 10:
-                        logger.info("[OCR-PRE] PSM 6 ไม่พอ — ลอง PSM 3 (auto)")
-                        text_auto = pytesseract.image_to_string(
-                            processed, lang=ocr_lang,
-                            timeout=timeout_sec, config="--psm 3",
-                        )
-                        if len(text_auto.strip()) > len(text.strip()):
-                            text = text_auto
-                            logger.info(
-                                f"[OCR-PRE] PSM 3 ดีกว่า: {len(text.strip())} chars"
-                            )
-                    # If still very little, try on original (unprocessed) image
-                    if len(text.strip()) < 10:
-                        logger.info("[OCR-PRE] preprocessed ไม่พอ — ลองภาพต้นฉบับ")
-                        text_orig = pytesseract.image_to_string(
-                            img, lang=ocr_lang, timeout=timeout_sec,
-                        )
-                        if len(text_orig.strip()) > len(text.strip()):
-                            text = text_orig
-                            logger.info(
-                                f"[OCR-PRE] ภาพต้นฉบับดีกว่า: "
-                                f"{len(text.strip())} chars"
-                            )
+                    # 2. Upscale — aggressive: min 2500px width
+                    w, h = img.size
+                    min_width = 2500
+                    if w < min_width:
+                        sf = min_width / w
+                        new_w = int(w * sf)
+                        new_h = int(h * sf)
+                        img = img.resize((new_w, new_h), Image.LANCZOS)
+                        logger.info(f"[OCR-PRE] Upscaled → {new_w}x{new_h} (x{sf:.1f})")
+
+                    # ── Create multiple preprocessed variants ──
+                    gray = img.convert("L")
+
+                    # Variant A: Sharpen + Contrast + Autocontrast (original approach)
+                    va = ImageEnhance.Sharpness(gray.copy()).enhance(2.0)
+                    va = ImageEnhance.Contrast(va).enhance(1.5)
+                    va = ImageOps.autocontrast(va, cutoff=1)
+                    variants.append(("sharpen+contrast", va))
+
+                    # Variant B: Binary threshold (hard B&W at 128)
+                    vb = gray.copy()
+                    vb = ImageOps.autocontrast(vb, cutoff=2)
+                    vb = vb.point(lambda x: 255 if x > 128 else 0)
+                    variants.append(("binary128", vb))
+
+                    # Variant C: Binary threshold at 160 (lighter cutoff)
+                    vc = gray.copy()
+                    vc = ImageOps.autocontrast(vc, cutoff=2)
+                    vc = vc.point(lambda x: 255 if x > 160 else 0)
+                    variants.append(("binary160", vc))
+
+                    # Variant D: Invert + binary (for dark background tables)
+                    vd = ImageOps.invert(gray.copy())
+                    vd = ImageOps.autocontrast(vd, cutoff=2)
+                    vd = vd.point(lambda x: 255 if x > 128 else 0)
+                    variants.append(("invert+binary", vd))
+
+                    # Variant E: Original grayscale (no preprocessing)
+                    variants.append(("gray-raw", gray.copy()))
+
+                    # ── Multi-pass OCR: try all variants × configs ──
+                    ocr_configs = [
+                        ("--psm 6", "tha+eng"),   # table block
+                        ("--psm 4", "tha+eng"),   # single column
+                        ("--psm 3", "tha+eng"),   # fully auto
+                        ("--psm 6", "eng"),        # table block, eng-only
+                        ("--psm 4", "eng"),        # single column, eng-only
+                    ]
+
+                    best_text = ""
+                    best_label = ""
+                    pass_results = []
+
+                    for v_label, v_img in variants:
+                        for tess_cfg, lang in ocr_configs:
+                            try:
+                                t = pytesseract.image_to_string(
+                                    v_img, lang=lang,
+                                    timeout=timeout_sec, config=tess_cfg,
+                                ).strip()
+                                combo = f"{v_label}/{tess_cfg}/{lang}"
+                                pass_results.append(f"{combo}={len(t)}c")
+                                if len(t) > len(best_text):
+                                    best_text = t
+                                    best_label = combo
+                            except Exception as e:
+                                logger.warning(f"[OCR-MULTI] {v_label}/{tess_cfg}/{lang} error: {e}")
+
+                    logger.info(f"[OCR-MULTI] Best: {best_label} ({len(best_text)} chars)")
+                    logger.info(f"[OCR-MULTI] All passes: {', '.join(pass_results[:15])}")
+
+                    # Store multi-pass results in debug
+                    _ocr_debug_store["ocr_passes"] = pass_results
+                    _ocr_debug_store["ocr_best_config"] = best_label
+
+                    text = best_text
+
                 finally:
-                    if processed is not None:
-                        processed.close()
+                    for _lbl, _vimg in variants:
+                        try:
+                            _vimg.close()
+                        except Exception:
+                            pass
                     if img is not None:
-                        img.close()
-                logger.info(f"OCR ภาพ: ได้ {len(text.strip())} ตัวอักษร")
-                if text.strip():
-                    logger.info(
-                        f"[OCR-PRE] preview: {text.strip()[:200]}"
-                    )
-                return text.strip()
+                        try:
+                            img.close()
+                        except Exception:
+                            pass
+                logger.info(f"OCR ภาพ: ได้ {len(text)} ตัวอักษร")
+                if text:
+                    logger.info(f"[OCR-PRE] preview: {text[:200]}")
+                return text
 
             if ext == ".pdf":
                 if not HAS_PYMUPDF:
