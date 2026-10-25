@@ -51,6 +51,13 @@ COPY monitoring_schedule.py .
 COPY nephrology_kpi.py .
 COPY patient_master_registry.py .
 
+# Phase A-F: Clinical Intelligence Platform 2.0
+COPY clinical_dashboard.py .
+COPY auto_report.py .
+COPY ckd_progression.py .
+COPY nephrology_drug_db.py .
+COPY liff_app.py .
+
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \
     useradd -r -g appuser -d /app -s /sbin/nologin appuser
