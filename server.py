@@ -5581,7 +5581,22 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "tablet", "capsule", "แคปซูล", "ขนาดยา",
              "วันละ", "ครั้งละ", "เช้า", "กลางวัน", "เย็น",
              "ก่อนนอน", "tab", "cap", "sig", "prn",
-             "ยา", "สั่งยา", "จ่ายยา", "เภสัชกร", "pharmacist"],
+             "ยา", "สั่งยา", "จ่ายยา", "เภสัชกร", "pharmacist",
+             # ── ใบตรวจรักษาผู้ป่วย / OPD card ──
+             "ใบตรวจรักษา", "visit note", "diag text",
+             "diagnosis", "cc:", "hpi:", "pe text",
+             "mh/pe", "อาการสำคัญ", "ประวัติปัจจุบัน",
+             "ประวัติโรคประจำตัว", "ประวัติการแพ้ยา",
+             "โรงพยาบาลระนอง",
+             # ชื่อยาสามัญที่พบบ่อยในคลินิกไต
+             "losartan", "enalapril", "amlodipine",
+             "atorvastatin", "omeprazole", "aspirin",
+             "carvedilol", "calcium carbonate", "folic acid",
+             "ferrous", "fumarate", "calcitriol",
+             "sodium bicarbonate", "venofer", "epo",
+             "erythropoietin", "darbepoetin",
+             "hold", "ครั้ง/สัปดาห์",
+             ],
             2,
         ),
         "lab": (
@@ -5680,6 +5695,49 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
                 "confidence": min((_company_hits + _money_hits) / 5.0, 1.0),
             }
 
+    # ── Pre-check: ใบสั่งยา / ใบตรวจรักษาผู้ป่วย ──
+    # ถ้าพบชื่อยา ≥3 ตัว + keyword ทางการแพทย์ → บังคับ rx
+    # ป้องกัน "บาท" ท้ายใบยาจากการดึงเอกสารเข้า bills
+    _rx_drug_names = [
+        "losartan", "enalapril", "amlodipine", "atorvastatin",
+        "omeprazole", "aspirin", "carvedilol", "metformin",
+        "calcium carbonate", "folic acid", "ferrous", "calcitriol",
+        "sodium bicarbonate", "venofer", "furosemide", "simvastatin",
+        "clopidogrel", "warfarin", "insulin", "metoprolol",
+        "nifedipine", "diltiazem", "verapamil", "hydralazine",
+        "spironolactone", "hydrochlorothiazide", "doxazosin",
+        "allopurinol", "colchicine", "prednisolone", "dexamethasone",
+        "pantoprazole", "ranitidine", "domperidone", "ondansetron",
+        "paracetamol", "tramadol", "gabapentin", "pregabalin",
+        "amitriptyline", "fluoxetine", "diazepam", "alprazolam",
+        "phenytoin", "levetiracetam", "ciprofloxacin", "amoxicillin",
+        "cephalexin", "clindamycin", "metronidazole", "doxycycline",
+        "azithromycin", "levofloxacin", "co-trimoxazole",
+        "sevelamer", "lanthanum", "cinacalcet", "epo",
+        "erythropoietin", "darbepoetin", "epoetin",
+    ]
+    _rx_medical_kws = [
+        "mg", "mcg", "tab", "cap", "เม็ด", "หลังอาหาร",
+        "ก่อนอาหาร", "ก่อนนอน", "วันละ", "ครั้งละ",
+        "hold", "diagnosis", "diag text", "visit note",
+        "ใบตรวจรักษา", "mh/pe", "cc:",
+    ]
+    _drug_hits = [d for d in _rx_drug_names if d.lower() in content_lower]
+    _rx_med_hits = [k for k in _rx_medical_kws if k.lower() in content_lower]
+    if len(_drug_hits) >= 3 and len(_rx_med_hits) >= 2:
+        logger.info(
+            f"  pre-check: prescription detected "
+            f"({len(_drug_hits)} drugs, {len(_rx_med_hits)} medical kws) → rx"
+        )
+        return {
+            "category": "rx",
+            "reason": (
+                f"prescription pre-check "
+                f"({len(_drug_hits)} drugs, {len(_rx_med_hits)} medical kws)"
+            ),
+            "confidence": min((len(_drug_hits) + len(_rx_med_hits)) / 8.0, 1.0),
+        }
+
     best, best_score = "review", 0
     all_matches = {}
     for cat, (kws, min_match) in rules.items():
@@ -5688,6 +5746,21 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
         all_matches[cat] = matched
         if score >= min_match and score > best_score:
             best, best_score = cat, score
+
+    # ── Tie-breaker: rx vs bills ──
+    # ถ้า bills ชนะแต่ rx มี hits สูงเกือบเท่า → ตรวจสอบว่ามีชื่อยาจริง
+    # ใบยาที่มีราคาท้ายใบมักถูกจัดเป็น bills เพราะ "บาท"
+    if best == "bills" and "rx" in all_matches:
+        rx_hits = len(all_matches["rx"])
+        bills_hits = len(all_matches["bills"])
+        drug_in_text = len(_drug_hits)
+        if rx_hits >= 2 and drug_in_text >= 2:
+            logger.info(
+                f"  tie-breaker: bills({bills_hits}) vs rx({rx_hits}) "
+                f"+ {drug_in_text} drug names → rx wins"
+            )
+            best = "rx"
+            best_score = rx_hits
 
     # log เฉพาะจำนวน hits — ไม่ log รายการคำที่ match
     # เพราะคำที่พบเปิดเผยเนื้อหาเชิงคลินิกของเอกสาร
