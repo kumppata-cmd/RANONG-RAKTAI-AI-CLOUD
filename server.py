@@ -2185,6 +2185,279 @@ def api_master_registry_update():
     return jsonify({"success": success, "message": msg}), 200 if success else 400
 
 
+@app.route("/admin/registry")
+def admin_registry_page():
+    """หน้าเว็บทะเบียนผู้ป่วย — เปิดจาก browser ได้เลย (same-origin)"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    auth = request.args.get("secret", "")
+    if not admin_secret or auth != admin_secret:
+        return "<h2>Unauthorized</h2><p>กรุณาเพิ่ม ?secret=... ใน URL</p>", 401
+    return REGISTRY_HTML.replace("__ADMIN_SECRET__", admin_secret)
+
+
+REGISTRY_HTML = r'''<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ทะเบียนผู้ป่วย — คลินิกระนอง รักษ์ไต</title>
+<style>
+  :root {
+    --bg: #f8f9fb; --surface: #fff; --fg: #1a1d23; --fg2: #5a6070;
+    --accent: #2563eb; --accent-light: #dbeafe;
+    --success: #059669; --success-light: #d1fae5;
+    --warning: #d97706; --danger: #dc2626; --danger-light: #fee2e2;
+    --border: #e2e5ea; --input-bg: #f1f3f6;
+    --shadow: 0 1px 3px rgba(0,0,0,.06);
+    --font: system-ui, -apple-system, sans-serif;
+    --mono: 'Courier New', monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1117; --surface: #1a1d26; --fg: #e8eaef; --fg2: #8b90a0;
+      --accent: #60a5fa; --accent-light: #1e3a5f;
+      --success: #34d399; --success-light: #064e3b;
+      --danger: #f87171; --danger-light: #7f1d1d;
+      --border: #2a2d38; --input-bg: #252830;
+      --shadow: 0 1px 3px rgba(0,0,0,.3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1117; --surface: #1a1d26; --fg: #e8eaef; --fg2: #8b90a0;
+    --accent: #60a5fa; --accent-light: #1e3a5f;
+    --success: #34d399; --success-light: #064e3b;
+    --danger: #f87171; --danger-light: #7f1d1d;
+    --border: #2a2d38; --input-bg: #252830;
+    --shadow: 0 1px 3px rgba(0,0,0,.3);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--fg); font-family: var(--font); padding: 0 16px; }
+  .app { max-width: 960px; margin: 0 auto; padding: 24px 0 60px; }
+  .header { display: flex; align-items: center; gap: 14px; margin-bottom: 20px; flex-wrap: wrap; }
+  .header h1 { font-size: 1.4rem; font-weight: 700; }
+  .badge { background: var(--accent-light); color: var(--accent); font-size: .75rem; font-weight: 600; padding: 3px 10px; border-radius: 20px; }
+  .conn-ok { color: var(--success); font-size: .85rem; font-weight: 500; }
+  .stats { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; }
+  .stat { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 18px; flex: 1; min-width: 130px; box-shadow: var(--shadow); }
+  .stat .val { font-size: 1.5rem; font-weight: 700; }
+  .stat .lbl { font-size: .75rem; color: var(--fg2); margin-top: 2px; }
+  .toolbar { display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; align-items: center; }
+  .search-box { flex: 1; min-width: 180px; position: relative; }
+  .search-box input { width: 100%; padding: 9px 12px 9px 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--fg); font-size: .88rem; }
+  .search-box input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .search-box svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); width: 18px; height: 18px; color: var(--fg2); }
+  .btn { display: inline-flex; align-items: center; gap: 6px; padding: 8px 16px; border: none; border-radius: 8px; font-size: .85rem; font-weight: 500; cursor: pointer; transition: opacity .15s; }
+  .btn:hover { opacity: .85; } .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-success { background: var(--success); color: #fff; }
+  .btn-danger { background: var(--danger); color: #fff; }
+  .btn-outline { background: transparent; color: var(--accent); border: 1px solid var(--accent); }
+  .btn-sm { padding: 5px 10px; font-size: .78rem; }
+  .table-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow-x: auto; box-shadow: var(--shadow); }
+  table { width: 100%; border-collapse: collapse; font-size: .88rem; }
+  th { text-align: left; padding: 12px 16px; font-weight: 600; font-size: .75rem; text-transform: uppercase; letter-spacing: .04em; color: var(--fg2); border-bottom: 2px solid var(--border); white-space: nowrap; }
+  td { padding: 10px 16px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--accent-light); }
+  .hn { font-family: var(--mono); font-weight: 500; }
+  .name-cell { font-weight: 500; }
+  .actions { display: flex; gap: 6px; }
+  .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); display: none; align-items: center; justify-content: center; z-index: 100; padding: 20px; }
+  .modal-overlay.show { display: flex; }
+  .modal { background: var(--surface); border-radius: 14px; width: 100%; max-width: 460px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+  .modal-head { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+  .modal-head h2 { font-size: 1rem; font-weight: 600; }
+  .modal-body { padding: 20px; display: flex; flex-direction: column; gap: 14px; }
+  .modal-foot { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; }
+  .field label { display: block; font-size: .78rem; font-weight: 500; color: var(--fg2); margin-bottom: 4px; }
+  .field input { width: 100%; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--input-bg); color: var(--fg); font-size: .9rem; }
+  .field input:focus { outline: 2px solid var(--accent); border-color: transparent; }
+  .toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); padding: 12px 22px; border-radius: 10px; font-size: .88rem; font-weight: 500; z-index: 200; opacity: 0; transition: opacity .3s; max-width: calc(100% - 40px); }
+  .toast.show { opacity: 1; } .toast.ok { background: var(--success); color: #fff; } .toast.err { background: var(--danger); color: #fff; }
+  .empty { text-align: center; padding: 50px 20px; color: var(--fg2); }
+  .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="header">
+    <h1>🏥 ทะเบียนผู้ป่วย — คลินิกระนอง รักษ์ไต</h1>
+    <div class="badge" id="countBadge">0 คน</div>
+    <div class="conn-ok" id="connStatus"></div>
+  </div>
+  <div class="stats" id="statsBar">
+    <div class="stat"><div class="val" id="totalCount">-</div><div class="lbl">ผู้ป่วยทั้งหมด</div></div>
+    <div class="stat"><div class="val" id="withHospHN">-</div><div class="lbl">มี HN โรงพยาบาล</div></div>
+    <div class="stat"><div class="val" id="withoutName">-</div><div class="lbl">ยังไม่มีชื่อ</div></div>
+  </div>
+  <div class="toolbar">
+    <div class="search-box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+      <input type="text" id="searchInput" placeholder="ค้นหาชื่อ หรือ HN..." oninput="filterTable()">
+    </div>
+    <button class="btn btn-success btn-sm" onclick="showAddModal()">+ เพิ่มผู้ป่วย</button>
+    <button class="btn btn-outline btn-sm" onclick="loadPatients()" id="refreshBtn">รีเฟรช</button>
+  </div>
+  <div class="table-wrap">
+    <table><thead><tr><th>#</th><th>HN คลินิก</th><th>HN รพ.</th><th>ชื่อ-สกุล</th><th>วันลงทะเบียน</th><th>จัดการ</th></tr></thead>
+    <tbody id="tbody"><tr><td colspan="6"><div class="empty"><span class="spinner"></span> กำลังโหลด...</div></td></tr></tbody></table>
+  </div>
+</div>
+
+<div class="modal-overlay" id="editModal">
+  <div class="modal">
+    <div class="modal-head"><h2 id="modalTitle">แก้ไขข้อมูลผู้ป่วย</h2><button class="btn" onclick="closeModal('editModal')" style="background:none;font-size:1.2rem">✕</button></div>
+    <div class="modal-body">
+      <input type="hidden" id="editHN">
+      <div class="field"><label>HN คลินิก</label><input type="text" id="editClinicHN"></div>
+      <div class="field"><label>HN โรงพยาบาล</label><input type="text" id="editHospHN"></div>
+      <div class="field"><label>ชื่อ-สกุล</label><input type="text" id="editName"></div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-outline btn-sm" onclick="closeModal('editModal')">ยกเลิก</button><button class="btn btn-primary btn-sm" id="saveEditBtn" onclick="saveEdit()">บันทึก</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="addModal">
+  <div class="modal">
+    <div class="modal-head"><h2>เพิ่มผู้ป่วยใหม่</h2><button class="btn" onclick="closeModal('addModal')" style="background:none;font-size:1.2rem">✕</button></div>
+    <div class="modal-body">
+      <div class="field"><label>HN คลินิก *</label><input type="text" id="addClinicHN" placeholder="เช่น 56001"></div>
+      <div class="field"><label>HN โรงพยาบาล</label><input type="text" id="addHospHN" placeholder="เช่น 0002567"></div>
+      <div class="field"><label>ชื่อ-สกุล *</label><input type="text" id="addName" placeholder="ชื่อ นามสกุล"></div>
+    </div>
+    <div class="modal-foot"><button class="btn btn-outline btn-sm" onclick="closeModal('addModal')">ยกเลิก</button><button class="btn btn-success btn-sm" onclick="saveAdd()">เพิ่ม</button></div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="delModal">
+  <div class="modal">
+    <div class="modal-head"><h2>ยืนยันลบผู้ป่วย</h2></div>
+    <div class="modal-body"><p id="delMsg"></p><input type="hidden" id="delHN"></div>
+    <div class="modal-foot"><button class="btn btn-outline btn-sm" onclick="closeModal('delModal')">ยกเลิก</button><button class="btn btn-danger btn-sm" onclick="confirmDelete()">ลบ</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const SECRET = "__ADMIN_SECRET__";
+let patients = [];
+
+function api(path, opts={}) {
+  const url = new URL(path, location.origin);
+  url.searchParams.set("secret", SECRET);
+  const h = {"X-Admin-Secret": SECRET};
+  if (opts.body) h["Content-Type"] = "application/json";
+  return fetch(url, {method: opts.method||"GET", headers: h, body: opts.body ? JSON.stringify(opts.body) : undefined}).then(r => r.json());
+}
+
+function toast(msg, ok=true) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.className = "toast show " + (ok?"ok":"err");
+  setTimeout(() => t.className = "toast", 3500);
+}
+function closeModal(id) { document.getElementById(id).classList.remove("show"); }
+function esc(s) { return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/"/g,"&quot;"); }
+
+async function loadPatients() {
+  try {
+    const d = await api("/admin/api/v2/master-registry/list");
+    if (d.error) throw new Error(d.error);
+    patients = d.patients || [];
+    renderTable(); updateStats();
+    document.getElementById("connStatus").textContent = "✅ เชื่อมต่อแล้ว";
+  } catch(e) { toast("โหลดไม่ได้: "+e.message, false); }
+}
+
+function updateStats() {
+  document.getElementById("totalCount").textContent = patients.length;
+  document.getElementById("countBadge").textContent = patients.length + " คน";
+  document.getElementById("withHospHN").textContent = patients.filter(p=>p.hospital_hn).length;
+  document.getElementById("withoutName").textContent = patients.filter(p=>!p.patient_name).length;
+}
+
+function filterTable() {
+  const q = document.getElementById("searchInput").value.toLowerCase().trim();
+  renderTable(q);
+}
+
+function renderTable(q="") {
+  const tbody = document.getElementById("tbody");
+  let list = patients;
+  if (q) list = patients.filter(p=>(p.clinic_hn||"").toLowerCase().includes(q)||(p.hospital_hn||"").toLowerCase().includes(q)||(p.patient_name||"").toLowerCase().includes(q));
+  if (!list.length) { tbody.innerHTML = '<tr><td colspan="6"><div class="empty">'+(q?"ไม่พบผู้ป่วยที่ค้นหา":"ยังไม่มีรายชื่อ")+"</div></td></tr>"; return; }
+  tbody.innerHTML = list.map((p,i) => {
+    const dt = p.registered_at ? new Date(p.registered_at).toLocaleDateString("th-TH",{day:"numeric",month:"short",year:"numeric"}) : "-";
+    return `<tr><td>${i+1}</td><td class="hn">${esc(p.clinic_hn||"-")}</td><td class="hn">${esc(p.hospital_hn||"-")}</td><td class="name-cell">${esc(p.patient_name||"ไม่มีชื่อ")}</td><td style="color:var(--fg2);font-size:.82rem">${dt}</td><td><div class="actions"><button class="btn btn-outline btn-sm" onclick="showEditModal('${esc(p.clinic_hn)}','${esc(p.hospital_hn)}','${esc(p.patient_name)}')" title="แก้ไข">✏️</button><button class="btn btn-sm" style="background:var(--danger-light);color:var(--danger)" onclick="showDelModal('${esc(p.clinic_hn)}','${esc(p.patient_name)}')" title="ลบ">🗑️</button></div></td></tr>`;
+  }).join("");
+}
+
+function showEditModal(chn,hhn,name) {
+  document.getElementById("editHN").value = chn||hhn;
+  document.getElementById("editClinicHN").value = chn;
+  document.getElementById("editHospHN").value = hhn;
+  document.getElementById("editName").value = name;
+  document.getElementById("modalTitle").textContent = "แก้ไข: "+(name||chn);
+  document.getElementById("editModal").classList.add("show");
+}
+
+async function saveEdit() {
+  const hn = document.getElementById("editHN").value;
+  const newName = document.getElementById("editName").value.trim();
+  const newChn = document.getElementById("editClinicHN").value.trim();
+  const newHhn = document.getElementById("editHospHN").value.trim();
+  if (!newName) { toast("กรุณากรอกชื่อ",false); return; }
+  const btn = document.getElementById("saveEditBtn"); btn.disabled = true;
+  try {
+    const d = await api("/admin/api/v2/master-registry/update",{method:"POST",body:{hn,new_name:newName,new_clinic_hn:newChn,new_hospital_hn:newHhn}});
+    if (!d.success) throw new Error(d.message||d.error);
+    toast(d.message||"แก้ไขสำเร็จ"); closeModal("editModal"); await loadPatients();
+  } catch(e) { toast(e.message,false); }
+  btn.disabled = false;
+}
+
+function showAddModal() {
+  document.getElementById("addClinicHN").value = "";
+  document.getElementById("addHospHN").value = "";
+  document.getElementById("addName").value = "";
+  document.getElementById("addModal").classList.add("show");
+}
+
+async function saveAdd() {
+  const chn = document.getElementById("addClinicHN").value.trim();
+  const name = document.getElementById("addName").value.trim();
+  const hhn = document.getElementById("addHospHN").value.trim();
+  if (!chn) { toast("กรุณากรอก HN คลินิก",false); return; }
+  if (!name) { toast("กรุณากรอกชื่อ",false); return; }
+  try {
+    const d = await api("/admin/api/v2/master-registry/register",{method:"POST",body:{clinic_hn:chn,hospital_hn:hhn,patient_name:name}});
+    if (!d.success) throw new Error(d.message||d.error);
+    toast(d.message||"เพิ่มสำเร็จ"); closeModal("addModal"); await loadPatients();
+  } catch(e) { toast(e.message,false); }
+}
+
+function showDelModal(chn,name) {
+  document.getElementById("delHN").value = chn;
+  document.getElementById("delMsg").textContent = "ต้องการลบ "+(name||chn)+" (HN: "+chn+") จริงหรือไม่?";
+  document.getElementById("delModal").classList.add("show");
+}
+
+async function confirmDelete() {
+  const chn = document.getElementById("delHN").value;
+  try {
+    const d = await api("/admin/api/v2/master-registry/delete",{method:"POST",body:{clinic_hn:chn}});
+    if (!d.success) throw new Error(d.message||d.error);
+    toast("ลบสำเร็จ"); closeModal("delModal"); await loadPatients();
+  } catch(e) { toast(e.message,false); }
+}
+
+loadPatients();
+</script>
+</body>
+</html>'''
+
+
 logger.info("Master Patient Registry API: endpoints registered")
 
 
