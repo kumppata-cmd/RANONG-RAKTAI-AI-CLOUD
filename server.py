@@ -43,6 +43,11 @@ import requests as http_requests
 
 # ─── Quarterly/Monthly Organization & HN Registry ──────────
 from patient_hn_registry import HNRegistry, get_quarter
+from patient_master_registry import (
+    MasterPatientRegistry,
+    parse_patient_list_ocr,
+    extract_hn_from_document,
+)
 from quarterly_compare import (
     build_quarterly_path,
     build_monthly_patient_path,
@@ -716,11 +721,26 @@ class StorageGCS:
         #   - อื่นๆ → monthly (เดิม): folder/2026-10/uuid.pdf
         # ──────────────────────────────────────────────────────
         owner_hash_for_path = (metadata or {}).get("owner_hash_short", "")
+        patient_hn_folder = (metadata or {}).get("patient_hn_folder", "")
+
         if category in ("lab", "rx"):
-            blob_path = build_quarterly_path(folder, filename)
-        elif category == "dialysis" and owner_hash_for_path:
-            patient_folder = hn_registry.get_folder_name(owner_hash_for_path) if hn_registry else ""
-            blob_path = build_monthly_patient_path(folder, filename, patient_folder)
+            if patient_hn_folder:
+                # มี HN → จัดเก็บตามรายผู้ป่วย: folder/YYYY-QN/YYYY-MM/HN_Name/file
+                base_path = build_quarterly_path(folder, filename)
+                # แทรก patient folder ก่อนชื่อไฟล์
+                parts = base_path.rsplit("/", 1)
+                blob_path = f"{parts[0]}/{patient_hn_folder}/{parts[1]}"
+            else:
+                blob_path = build_quarterly_path(folder, filename)
+        elif category == "dialysis":
+            if patient_hn_folder:
+                # มี HN จาก master registry → ใช้ patient_hn_folder
+                blob_path = build_monthly_patient_path(folder, filename, patient_hn_folder)
+            elif owner_hash_for_path:
+                patient_folder = hn_registry.get_folder_name(owner_hash_for_path) if hn_registry else ""
+                blob_path = build_monthly_patient_path(folder, filename, patient_folder)
+            else:
+                blob_path = build_monthly_patient_path(folder, filename, "")
         elif subfolder:
             # ป้องกัน path traversal ใน subfolder
             blob_path = build_legacy_path(folder, filename, subfolder)
@@ -1056,6 +1076,12 @@ hn_registry = HNRegistry()
 if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
     hn_registry.set_storage(storage._bucket)
     logger.info("HNRegistry initialized with GCS bucket")
+
+# ─── Master Patient Registry: ทะเบียนผู้ป่วยกลาง ─────────
+master_registry = MasterPatientRegistry()
+if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
+    master_registry.set_storage(storage._bucket)
+    logger.info("MasterPatientRegistry initialized with GCS bucket")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1980,6 +2006,114 @@ def api_hn_search():
 
 
 logger.info("Comparison API & HN Registry: endpoints registered")
+
+
+# ─── Master Patient Registry API ──────────────────────────
+
+@app.route("/admin/api/v2/master-registry/list", methods=["GET"])
+def api_master_registry_list():
+    """แสดงรายชื่อทะเบียนผู้ป่วย — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    patients = master_registry.list_all()
+    return jsonify({
+        "count": len(patients),
+        "patients": [
+            {
+                "clinic_hn": p.clinic_hn,
+                "hospital_hn": p.hospital_hn,
+                "patient_name": p.patient_name,
+                "folder_name": p.folder_name,
+                "registered_at": p.registered_at,
+                "registered_by": p.registered_by,
+            }
+            for p in patients
+        ],
+    })
+
+
+@app.route("/admin/api/v2/master-registry/register", methods=["POST"])
+def api_master_registry_register():
+    """ลงทะเบียนผู้ป่วย — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    clinic_hn = data.get("clinic_hn", "").strip()
+    hospital_hn = data.get("hospital_hn", "").strip()
+    patient_name = data.get("patient_name", "").strip()
+
+    if not clinic_hn and not hospital_hn:
+        return jsonify({"error": "ต้องระบุ clinic_hn หรือ hospital_hn"}), 400
+
+    success, msg = master_registry.register(
+        clinic_hn=clinic_hn,
+        hospital_hn=hospital_hn,
+        patient_name=patient_name,
+        registered_by="admin_api",
+    )
+    return jsonify({"success": success, "message": msg}), 200 if success else 400
+
+
+@app.route("/admin/api/v2/master-registry/search", methods=["GET"])
+def api_master_registry_search():
+    """ค้นหาทะเบียนผู้ป่วย — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    q = request.args.get("q", "").strip()
+    if not q:
+        return jsonify({"error": "ต้องระบุ ?q=KEYWORD"}), 400
+
+    results = master_registry.search(q)
+    return jsonify({
+        "query": q,
+        "count": len(results),
+        "results": [
+            {
+                "clinic_hn": p.clinic_hn,
+                "hospital_hn": p.hospital_hn,
+                "patient_name": p.patient_name,
+                "folder_name": p.folder_name,
+            }
+            for p in results
+        ],
+    })
+
+
+@app.route("/admin/api/v2/master-registry/delete", methods=["POST"])
+def api_master_registry_delete():
+    """ลบผู้ป่วยจากทะเบียน — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    clinic_hn = data.get("clinic_hn", "").strip()
+    if not clinic_hn:
+        return jsonify({"error": "ต้องระบุ clinic_hn"}), 400
+
+    success, msg = master_registry.delete(clinic_hn)
+    return jsonify({"success": success, "message": msg}), 200 if success else 400
+
+
+logger.info("Master Patient Registry API: endpoints registered")
 
 
 # ─── Document Content Reading from GCS ────────────────────
@@ -5248,6 +5382,27 @@ def process_file_async(
                     ocr_status = "failed"
             extracted_text = extracted_text[:MAX_INDEX_TEXT_LENGTH]
 
+            # ── Auto HN Routing: ดึง HN จาก OCR → จับคู่กับทะเบียน ──
+            if extracted_text and category in ("lab", "rx", "dialysis"):
+                try:
+                    found_hns = extract_hn_from_document(extracted_text)
+                    if found_hns and master_registry:
+                        for hn_candidate in found_hns:
+                            patient_folder = master_registry.get_folder_for_hn(
+                                hn_candidate
+                            )
+                            if patient_folder:
+                                metadata["patient_hn_folder"] = patient_folder
+                                logger.info(
+                                    "Auto HN route: matched HN → patient folder "
+                                    "(category=%s)", category
+                                )
+                                break
+                except Exception as hn_err:
+                    logger.warning(
+                        "HN extraction failed: %s", type(hn_err).__name__
+                    )
+
             dest = copy_to_category(
                 filepath, category, metadata=metadata,
                 subfolder=bill_company,
@@ -5694,6 +5849,12 @@ _MULTIPAGE_WINDOW_SECS = int(os.environ.get("MULTIPAGE_WINDOW_SECS", "30"))
 _MULTIPAGE_MAX_PAGES = int(os.environ.get("MULTIPAGE_MAX_PAGES", "10"))
 _multipage_lock = threading.Lock()
 _multipage_buffers: dict[str, dict] = {}
+
+# ── Registration Mode: admin ถ่ายรูปรายชื่อผู้ป่วย ──────────
+# เมื่อ admin พิมพ์ "ลงทะเบียนรายชื่อ" → เข้าโหมดรอรับรูป
+# รูปถัดไปที่ส่งจะถูก OCR แล้วแปลงเป็นทะเบียนผู้ป่วย
+_REGISTRATION_TIMEOUT_SECS = 120  # หมดเวลาหลัง 2 นาที
+_registration_mode: dict[str, float] = {}  # user_hash -> timestamp
 # Structure: { user_hash: {
 #   "pages": [(data, ext, sha256_hex, doc_id, filename), ...],
 #   "line_user_id": str,
@@ -5789,6 +5950,98 @@ def _multipage_flush(user_hash: str):
         merged_ocr_text=merged_text,
         merged_page_count=page_count,
     )
+
+
+def _process_registration_image(
+    data: bytes,
+    ext: str,
+    user_hash: str,
+    line_user_id: str,
+):
+    """ประมวลผลรูปรายชื่อผู้ป่วย → OCR → ลงทะเบียน
+
+    ทำงานในเธรดแยก — ใช้ push_message แทน reply_token
+    """
+    try:
+        # บันทึกรูปชั่วคราว
+        tmp_dir = os.path.join(tempfile.gettempdir(), "ranong_raktai", "reg_tmp")
+        os.makedirs(tmp_dir, exist_ok=True)
+        tmp_path = os.path.join(tmp_dir, f"reg_{uuid.uuid4().hex[:8]}{ext}")
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+
+        # OCR
+        ocr_text = extract_text_with_ocr(tmp_path)
+
+        # ลบไฟล์ชั่วคราว
+        try:
+            os.remove(tmp_path)
+        except OSError:
+            pass
+
+        if not ocr_text or len(ocr_text.strip()) < 10:
+            push_message(
+                line_user_id,
+                "❌ OCR อ่านรายชื่อจากรูปไม่ได้\n"
+                "กรุณาถ่ายรูปให้ชัดเจนขึ้นแล้วลองใหม่\n"
+                "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อเริ่มใหม่",
+            )
+            return
+
+        # แยก HN + ชื่อจาก OCR text
+        patients_data = parse_patient_list_ocr(ocr_text)
+
+        if not patients_data:
+            push_message(
+                line_user_id,
+                "❌ ไม่พบ HN + ชื่อผู้ป่วยในรูป\n\n"
+                "รูปแบบที่รองรับ:\n"
+                "  • 1234 สมชาย ใจดี\n"
+                "  • HN:1234 สมชาย\n"
+                "  • 1234/56789 สมชาย\n\n"
+                "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อลองใหม่",
+            )
+            return
+
+        # ลงทะเบียน batch
+        new_count, updated_count, messages = master_registry.register_batch(
+            patients_data, registered_by="admin_ocr"
+        )
+
+        # แจ้งผล
+        report_lines = [
+            f"📋 ลงทะเบียนรายชื่อเสร็จสิ้น",
+            f"",
+            f"👤 พบ {len(patients_data)} รายการจากรูป",
+            f"✅ ใหม่: {new_count} คน",
+            f"🔄 อัปเดต: {updated_count} คน",
+        ]
+        if messages:
+            report_lines.append("")
+            report_lines.extend(messages)
+
+        # แสดงรายชื่อที่ลงทะเบียน (ไม่เกิน 15 รายการ)
+        report_lines.append("")
+        report_lines.append("รายชื่อ:")
+        for i, pd in enumerate(patients_data[:15], 1):
+            hn = pd.get("clinic_hn", "?")
+            name = pd.get("patient_name", "-")
+            report_lines.append(f"  {i}. {hn} — {name}")
+        if len(patients_data) > 15:
+            report_lines.append(f"  ...และอีก {len(patients_data)-15} คน")
+
+        push_message(line_user_id, "\n".join(report_lines))
+        logger.info(
+            "Registration image processed: %d new, %d updated",
+            new_count, updated_count,
+        )
+    except Exception as e:
+        logger.error("Registration image processing failed: %s", e)
+        push_message(
+            line_user_id,
+            "❌ เกิดข้อผิดพลาดในการลงทะเบียน\n"
+            "กรุณาลองใหม่ หรือแจ้งผู้ดูแลระบบ",
+        )
 
 
 def _handle_incoming_document(
@@ -6036,6 +6289,27 @@ def webhook():
                 if not data:
                     reply_message(reply_token, "ไม่สามารถดาวน์โหลดภาพได้")
                     continue
+
+                # ── ตรวจ Registration Mode ──
+                reg_ts = _registration_mode.get(user_hash)
+                if reg_ts and (time.time() - reg_ts) < _REGISTRATION_TIMEOUT_SECS:
+                    # อยู่ในโหมดลงทะเบียน → OCR แล้วลงทะเบียน
+                    del _registration_mode[user_hash]
+                    threading.Thread(
+                        target=_process_registration_image,
+                        args=(data, ext, user_hash, _line_user_id),
+                        daemon=True,
+                    ).start()
+                    reply_message(
+                        reply_token,
+                        "📋 กำลัง OCR รายชื่อผู้ป่วย...\n"
+                        "จะแจ้งผลเมื่อเสร็จ",
+                    )
+                    continue
+                elif reg_ts:
+                    # หมดเวลา → ลบ mode แล้วดำเนินการปกติ
+                    del _registration_mode[user_hash]
+
                 _handle_incoming_document(data, ext, user_hash, reply_token, _line_user_id)
 
             elif msg_type == "file":
@@ -6076,6 +6350,65 @@ def webhook():
                         reply_line_message(reply_token, search_response)
                     else:
                         reply_message(reply_token, search_response)
+                # ── Master Patient Registry: ลงทะเบียนรายชื่อ ──
+                elif text.strip() in (
+                    "ลงทะเบียนรายชื่อ", "ลงทะเบียน",
+                    "register", "register patients",
+                ):
+                    # ตรวจสิทธิ์ admin (เฉพาะ admin เท่านั้น)
+                    _admin_hash = os.getenv("ADMIN_LINE_HASH", "").strip()
+                    if _admin_hash and user_hash != _admin_hash:
+                        reply_message(
+                            reply_token,
+                            "⚠️ เฉพาะผู้ดูแลระบบเท่านั้นที่ลงทะเบียนรายชื่อได้",
+                        )
+                    else:
+                        _registration_mode[user_hash] = time.time()
+                        reply_message(
+                            reply_token,
+                            "📋 โหมดลงทะเบียนรายชื่อผู้ป่วย\n\n"
+                            "📸 ถ่ายรูปรายชื่อผู้ป่วยแล้วส่งมาได้เลย\n"
+                            "รองรับรูปแบบ:\n"
+                            "  • HN ชื่อ-นามสกุล (เช่น 1234 สมชาย ใจดี)\n"
+                            "  • HN/HN-รพ. ชื่อ (เช่น 1234/56789 สมชาย)\n\n"
+                            "⏱️ มีเวลา 2 นาทีในการส่งรูป\n"
+                            "พิมพ์ 'ยกเลิก' เพื่อออกจากโหมด",
+                        )
+                elif text.strip() in ("ยกเลิก", "cancel"):
+                    if user_hash in _registration_mode:
+                        del _registration_mode[user_hash]
+                        reply_message(
+                            reply_token,
+                            "❌ ยกเลิกโหมดลงทะเบียนรายชื่อแล้ว",
+                        )
+                    else:
+                        reply_message(reply_token, "ไม่มีโหมดที่ต้องยกเลิก")
+                elif text.strip() in ("ทะเบียนผู้ป่วย", "ดูรายชื่อ", "patient list"):
+                    # แสดงรายชื่อผู้ป่วย (admin only)
+                    _admin_hash = os.getenv("ADMIN_LINE_HASH", "").strip()
+                    if _admin_hash and user_hash != _admin_hash:
+                        reply_message(
+                            reply_token,
+                            "⚠️ เฉพาะผู้ดูแลระบบเท่านั้น",
+                        )
+                    else:
+                        patients = master_registry.list_all()
+                        if not patients:
+                            reply_message(
+                                reply_token,
+                                "📋 ยังไม่มีรายชื่อในทะเบียน\n"
+                                "พิมพ์ 'ลงทะเบียนรายชื่อ' แล้วส่งรูปรายชื่อ",
+                            )
+                        else:
+                            lines = [f"📋 ทะเบียนผู้ป่วย ({len(patients)} คน)\n"]
+                            for i, p in enumerate(patients[:30], 1):
+                                lines.append(
+                                    f"{i}. {p.hn_display} — {p.patient_name or 'ไม่มีชื่อ'}"
+                                )
+                            if len(patients) > 30:
+                                lines.append(f"\n...และอีก {len(patients)-30} คน")
+                            reply_message(reply_token, "\n".join(lines))
+
                 elif text.strip().lower() in ("สถานะ", "status"):
                     inbox_path = os.path.join(BASE_DIR, FOLDERS["inbox"])
                     inbox_count = len(os.listdir(inbox_path)) if os.path.exists(inbox_path) else 0
@@ -6097,6 +6430,8 @@ def webhook():
                         "  ค้นหา [คำค้น] — ค้นหาเอกสาร\n"
                         "  ผลแล็บล่าสุด — ดูผลตรวจล่าสุด\n"
                         "  สถิติ — ดูสถิติเอกสาร\n"
+                        "  ลงทะเบียนรายชื่อ — ลงทะเบียนผู้ป่วย (admin)\n"
+                        "  ทะเบียนผู้ป่วย — ดูรายชื่อ (admin)\n"
                         "  ช่วยเหลือ — ดูคำสั่งทั้งหมด",
                     )
             else:

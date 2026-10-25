@@ -437,6 +437,7 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,san
     <div class="tab" data-tab="dialysis">🫁 ฟอกไต</div>
     <div class="tab" data-tab="alerts">🚨 ค่าผิดปกติ</div>
     <div class="tab" data-tab="compare">🔄 เปรียบเทียบ</div>
+    <div class="tab" data-tab="registry">👥 ทะเบียนผู้ป่วย</div>
   </div>
 
   <!-- Tab content -->
@@ -446,6 +447,7 @@ body{background:var(--bg);color:var(--text);font-family:'Segoe UI',system-ui,san
   <div id="tab-dialysis" class="tab-content" style="display:none"></div>
   <div id="tab-alerts" class="tab-content" style="display:none"></div>
   <div id="tab-compare" class="tab-content" style="display:none"></div>
+  <div id="tab-registry" class="tab-content" style="display:none"></div>
 </div>
 
 <script>
@@ -837,6 +839,53 @@ async function runCompare() {
   }
 }
 
+async function loadRegistry() {
+  const el = document.getElementById('tab-registry');
+  el.innerHTML = '<div style="color:var(--muted);padding:20px">กำลังโหลดทะเบียนผู้ป่วย...</div>';
+  try {
+    const regApi = '/admin/api/v2/master-registry';
+    const sep = '?';
+    const r = await fetch(regApi + '/list' + sep + 'secret=' + encodeURIComponent(SECRET));
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const data = await r.json();
+    const patients = data.patients || [];
+    let html = '<div class="section"><h3>👥 ทะเบียนผู้ป่วย (Master Patient Registry)</h3>';
+    html += '<div class="summary-grid" style="margin-bottom:16px">';
+    html += '<div class="summary-card"><div class="s-value" style="color:var(--accent)">' + patients.length + '</div><div class="s-label">จำนวนผู้ป่วยทั้งหมด</div></div>';
+    html += '</div>';
+    if (patients.length === 0) {
+      html += '<p style="color:var(--muted);padding:12px">ยังไม่มีผู้ป่วยในทะเบียน — ส่ง "ลงทะเบียนรายชื่อ" ทาง LINE เพื่อเริ่มลงทะเบียน</p>';
+    } else {
+      html += '<div style="margin-bottom:12px"><input type="text" id="reg-search" placeholder="🔍 ค้นหา HN หรือชื่อ..." style="width:100%;max-width:400px;padding:8px 12px;background:var(--bg);border:1px solid var(--bg3);border-radius:8px;color:var(--text);font-size:.85rem" /></div>';
+      html += '<table class="data-table"><thead><tr><th>HN คลินิก</th><th>HN รพ.</th><th>ชื่อผู้ป่วย</th><th>โฟลเดอร์</th><th>วันที่ลงทะเบียน</th></tr></thead><tbody id="reg-tbody">';
+      patients.forEach(p => {
+        html += '<tr class="reg-row" data-search="' + (p.clinic_hn + ' ' + (p.hospital_hn||'') + ' ' + p.patient_name).toLowerCase() + '">';
+        html += '<td style="color:var(--accent);font-weight:600">' + (p.clinic_hn||'-') + '</td>';
+        html += '<td>' + (p.hospital_hn||'-') + '</td>';
+        html += '<td>' + (p.patient_name||'-') + '</td>';
+        html += '<td style="font-size:.75rem;color:var(--muted)">' + (p.folder_name||'-') + '</td>';
+        html += '<td style="font-size:.75rem">' + (p.registered_at||'-').slice(0,10) + '</td>';
+        html += '</tr>';
+      });
+      html += '</tbody></table>';
+    }
+    html += '</div>';
+    el.innerHTML = html;
+    // Search filter
+    const searchInput = document.getElementById('reg-search');
+    if (searchInput) {
+      searchInput.addEventListener('input', () => {
+        const q = searchInput.value.toLowerCase();
+        document.querySelectorAll('.reg-row').forEach(row => {
+          row.style.display = row.dataset.search.includes(q) ? '' : 'none';
+        });
+      });
+    }
+  } catch(e) {
+    el.innerHTML = '<div style="color:var(--red);padding:12px">โหลดทะเบียนผู้ป่วยไม่สำเร็จ: '+e.message+'</div>';
+  }
+}
+
 function loadTab(tab) {
   switch(tab) {
     case 'overview': loadOverview(); break;
@@ -845,6 +894,7 @@ function loadTab(tab) {
     case 'dialysis': loadDialysis(); break;
     case 'alerts': loadAlerts(); break;
     case 'compare': loadCompare(); break;
+    case 'registry': loadRegistry(); break;
   }
 }
 

@@ -49,6 +49,7 @@ COPY patient_hn_registry.py .
 COPY quarterly_compare.py .
 COPY monitoring_schedule.py .
 COPY nephrology_kpi.py .
+COPY patient_master_registry.py .
 
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \
