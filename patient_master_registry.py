@@ -264,6 +264,8 @@ class MasterPatientRegistry:
 
         Returns: (success, message)
         """
+        # Force reload จาก GCS ทุกครั้ง — ป้องกัน Gunicorn multi-worker data overwrite
+        self._loaded = False
         self._load()
 
         clinic_hn = clinic_hn.strip().upper() if clinic_hn else ""
@@ -330,6 +332,8 @@ class MasterPatientRegistry:
 
         Returns: (new_count, updated_count, messages)
         """
+        # Force reload จาก GCS ทุกครั้ง — ป้องกัน Gunicorn multi-worker data overwrite
+        self._loaded = False
         self._load()
         new_count = 0
         updated_count = 0
@@ -389,6 +393,8 @@ class MasterPatientRegistry:
 
     def match_hn(self, hn: str) -> Optional[MasterPatient]:
         """ค้นหาผู้ป่วยจาก HN (ทั้ง clinic_hn และ hospital_hn)"""
+        # Force reload จาก GCS — ป้องกัน stale data ใน multi-worker
+        self._loaded = False
         self._load()
         hn = hn.strip().upper()
         if not hn:
@@ -412,6 +418,8 @@ class MasterPatientRegistry:
 
     def search(self, query: str) -> list[MasterPatient]:
         """ค้นหาผู้ป่วย (HN หรือชื่อ)"""
+        # Force reload จาก GCS — ป้องกัน stale data ใน multi-worker
+        self._loaded = False
         self._load()
         q = query.strip().upper()
         results = []
@@ -424,11 +432,15 @@ class MasterPatientRegistry:
 
     def list_all(self) -> list[MasterPatient]:
         """แสดงรายชื่อทั้งหมด"""
+        # Force reload จาก GCS — ป้องกัน stale data ใน multi-worker
+        self._loaded = False
         self._load()
         return sorted(self._patients, key=lambda p: p.clinic_hn or p.hospital_hn)
 
     def count(self) -> int:
         """จำนวนผู้ป่วยทั้งหมด"""
+        # Force reload จาก GCS — ป้องกัน stale data ใน multi-worker
+        self._loaded = False
         self._load()
         return len(self._patients)
 
@@ -449,6 +461,8 @@ class MasterPatientRegistry:
 
         Returns: (success, message)
         """
+        # Force reload จาก GCS ทุกครั้ง — ป้องกัน Gunicorn multi-worker data overwrite
+        self._loaded = False
         self._load()
         patient = self.match_hn(hn.strip().upper())
         if not patient:
@@ -500,6 +514,8 @@ class MasterPatientRegistry:
 
     def delete(self, clinic_hn: str) -> tuple[bool, str]:
         """ลบผู้ป่วยจาก registry"""
+        # Force reload จาก GCS ทุกครั้ง — ป้องกัน Gunicorn multi-worker data overwrite
+        self._loaded = False
         self._load()
         clinic_hn = clinic_hn.strip().upper()
         idx = self._clinic_hn_index.get(clinic_hn)
