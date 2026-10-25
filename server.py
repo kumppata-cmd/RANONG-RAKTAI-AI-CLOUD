@@ -8574,6 +8574,34 @@ def admin_debug_hn_extract():
                     "matched_folder": folder or "(no match)",
                 })
             entry["registry_matches"] = matched
+
+            # ── วินิจฉัยว่าทำไมหา HN ไม่พบ (ไม่เปิดเผย PHI) ──
+            # รายงานเฉพาะว่า "มี label นี้ในเอกสารหรือไม่" (boolean)
+            # และรูปแบบความยาวของกลุ่มตัวเลข — ไม่คืนตัวเลขหรือชื่อจริง
+            import re as _re_dbg
+
+            labels = {
+                "HN": r"H\.?N\.?",
+                "เลขที่": r"เลข(?:ที่)?",
+                "รหัส": r"รหัส",
+                "ผู้ป่วย": r"ผู้ป่วย",
+                "Patient": r"patient",
+                "AN": r"\bA\.?N\.?\b",
+                "VN": r"\bV\.?N\.?\b",
+                "ชื่อ": r"ชื่อ",
+            }
+            entry["labels_present"] = {
+                name: bool(_re_dbg.search(pat, text, _re_dbg.IGNORECASE))
+                for name, pat in labels.items()
+            }
+            # ความยาวของกลุ่มตัวเลขที่พบ (histogram) — ไม่ใช่ค่าตัวเลข
+            digit_runs = _re_dbg.findall(r"\d+", text)
+            hist: dict[str, int] = {}
+            for run in digit_runs:
+                key = str(len(run))
+                hist[key] = hist.get(key, 0) + 1
+            entry["digit_run_length_histogram"] = hist
+            entry["digit_run_total"] = len(digit_runs)
         else:
             entry["extracted_hns"] = []
             entry["hn_count"] = 0
