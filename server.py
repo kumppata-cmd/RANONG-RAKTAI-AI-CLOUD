@@ -6245,14 +6245,22 @@ def process_file_async(
                 ".jpg": "JPG", ".jpeg": "JPEG", ".png": "PNG",
             }.get(ext, ext)
 
-            # แสดง subfolder (บริษัท) ใน reply ถ้าเป็นบิล
+            # ── แสดง sub-folder path ที่จัดเก็บจริง ──
+            # ดึง relative path จาก dest (gs://bucket/path)
             _storage_display = FOLDERS.get(category, FOLDERS['review'])
-            if bill_company and category == "bills":
+            if dest and dest.startswith("gs://"):
+                # dest = gs://bucket/04_LAB_RESULTS/2026-Q4/2026-10/uuid.pdf
+                # ตัดเอาเฉพาะ folder path (ไม่รวม filename)
+                _gcs_rel = dest.split("/", 3)[-1] if "/" in dest else dest
+                # ตัด filename ออก เหลือแค่ folder structure
+                _folder_path = _gcs_rel.rsplit("/", 1)[0] if "/" in _gcs_rel else _gcs_rel
+                _storage_display = _folder_path
+            elif bill_company and category == "bills":
                 _storage_display = f"{_storage_display}/{bill_company}"
             _reply_lines = [
                 f"รับเอกสารแล้ว ({file_type_name})",
-                f"ประเภท: {cat_name}",
-                f"จัดเก็บใน: {_storage_display}",
+                f"📁 ประเภท: {cat_name}",
+                f"📂 จัดเก็บใน: {_storage_display}",
             ]
             if bill_company and category == "bills":
                 _reply_lines.append(f"🏢 บริษัท: {bill_company}")
@@ -6265,12 +6273,21 @@ def process_file_async(
                 _reply_lines.append(
                     f"พิมพ์ 'ผลแล็บ {_doc_id[:8]}' เพื่อดูผลตรวจ"
                 )
+                # แนะนำให้เปรียบเทียบกับผลเก่า
+                _reply_lines.append(
+                    "📊 พิมพ์ 'เปรียบเทียบแล็บ' เพื่อเทียบกับผลครั้งก่อน"
+                )
             if clinical_analyzed:
                 _reply_lines.append(
                     f"🔬 วิเคราะห์ทางคลินิกเสร็จสิ้น"
                 )
                 _reply_lines.append(
                     f"พิมพ์ 'วิเคราะห์แล็บ {_doc_id[:8]}' เพื่อดูผลวิเคราะห์"
+                )
+            # แสดง patient folder สำหรับ dialysis
+            if category == "dialysis" and metadata.get("patient_hn_folder"):
+                _reply_lines.append(
+                    f"👤 แฟ้มผู้ป่วย: {metadata['patient_hn_folder']}"
                 )
             _result_text = "\n".join(_reply_lines)
             if reply_token:
@@ -7277,7 +7294,7 @@ def health():
     """
     health_info = {
         "status": "running",
-        "version": "cloud-2.0-production-textfirst",
+        "version": "cloud-2.0-production-docroute",
         "app_env": APP_ENV,
         "testing_mode": IS_TESTING,
         "production_mode": IS_PRODUCTION,
