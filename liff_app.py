@@ -12,10 +12,15 @@ Kidney Clinical Intelligence Platform 2.0
 กฎความปลอดภัย:
   - Read-Only — ผู้ป่วยดูได้อย่างเดียว ไม่มีปุ่มแก้ไข
   - PDPA Consent — ต้องยินยอมก่อนเข้าถึง
-  - ใช้ LINE userId (owner_hash) ยืนยันตัวตน
-  - แสดงเฉพาะข้อมูลของผู้ป่วยเจ้าของ userId
+  - ยืนยันตัวตนด้วย LIFF ID token ที่ตรวจกับ LINE ฝั่ง server เท่านั้น
+    แล้วจึงคำนวณ owner_hash จาก sub ที่ยืนยันแล้ว
+    ห้ามรับ owner_hash หรือ userId จากฝั่ง client มาใช้กรองข้อมูล
+  - แสดงเฉพาะข้อมูลของผู้ป่วยเจ้าของ token
   - ไม่แสดงข้อมูลผู้ป่วยรายอื่น
   - ห้ามส่งข้อมูลผู้ป่วยออกภายนอก
+
+ต้องตั้ง env: LIFF_ID (สำหรับหน้าเว็บ) และ LIFF_CHANNEL_ID
+(LINE Login channel ID ใช้ตรวจ aud ของ ID token)
 """
 
 from __future__ import annotations
@@ -34,6 +39,108 @@ logger = logging.getLogger(__name__)
 # ═══════════════════════════════════════════════════════════
 
 LIFF_ID = os.environ.get("LIFF_ID", "")  # Set in Render env
+
+# Channel ID ของ LINE Login channel ที่ผูกกับ LIFF app
+# ใช้เป็น client_id ตอนยืนยัน ID token กับ LINE — ต้องตรงกับ aud ใน token
+LIFF_CHANNEL_ID = os.environ.get("LIFF_CHANNEL_ID", "").strip()
+
+LINE_VERIFY_URL = "https://api.line.me/oauth2/v2.1/verify"
+
+
+# ═══════════════════════════════════════════════════════════
+# [SEC-1] LIFF Identity Verification
+#
+# ปัญหาเดิม: /liff/api/my-labs รับ owner_hash จาก query string ตรง ๆ
+# แล้วใช้ค่านั้นกรองข้อมูลผู้ป่วย — เท่ากับให้ผู้เรียกประกาศเองว่า
+# ตัวเองเป็นใคร (broken authorization / IDOR) และไม่มีการยืนยัน
+# LIFF ID token ที่ใดในระบบเลย
+#
+# พร้อมกันนั้นยังใช้งานไม่ได้จริง เพราะ client ส่ง LINE userId ดิบ
+# ขณะที่ทุกที่ในระบบเก็บ owner_hash แบบ salted SHA-256 → เทียบไม่ตรง
+# ผู้ป่วยจริงจึงไม่เห็นข้อมูลของตัวเองเลย
+#
+# แก้: ยืนยัน ID token กับ LINE ที่ฝั่ง server แล้วคำนวณ owner_hash
+# จาก sub ที่ยืนยันแล้วเท่านั้น — ไม่รับ owner_hash จากผู้เรียกอีกต่อไป
+# ═══════════════════════════════════════════════════════════
+
+class LiffAuthError(Exception):
+    """ยืนยันตัวตน LIFF ไม่สำเร็จ
+
+    ข้อความใน exception นี้ใช้สำหรับ log ฝั่ง server เท่านั้น
+    ห้ามส่งกลับไปให้ client (กันการรั่วไหลของรายละเอียดภายใน)
+    """
+
+
+def verify_liff_id_token(
+    id_token: str,
+    http_post=None,
+    channel_id: str | None = None,
+) -> str:
+    """ยืนยัน LIFF ID token กับ LINE แล้วคืน LINE userId (sub)
+
+    Args:
+        id_token: ID token จาก liff.getIDToken() ฝั่ง client
+        http_post: ฟังก์ชัน post(url, data=..., timeout=...) — ใส่เพื่อทดสอบ
+        channel_id: override LIFF_CHANNEL_ID (สำหรับทดสอบ)
+
+    Returns:
+        LINE userId ที่ยืนยันแล้ว (claim "sub")
+
+    Raises:
+        LiffAuthError: token ไม่ถูกต้อง หมดอายุ aud ไม่ตรง หรือยืนยันไม่ได้
+
+    หมายเหตุด้านความปลอดภัย:
+        - ต้องตรวจ aud ว่าตรงกับ channel ของเราเอง มิฉะนั้น token ที่ออก
+          ให้ channel อื่นจะใช้เข้าระบบเราได้
+        - ไม่ถอดรหัส token เอง ให้ LINE เป็นผู้ตรวจลายเซ็น
+    """
+    cid = (channel_id if channel_id is not None else LIFF_CHANNEL_ID).strip()
+    if not cid:
+        raise LiffAuthError("LIFF_CHANNEL_ID not configured")
+    if not id_token or not isinstance(id_token, str):
+        raise LiffAuthError("missing id_token")
+    # กันส่ง payload ใหญ่ผิดปกติไปยัง LINE
+    if len(id_token) > 8192:
+        raise LiffAuthError("id_token too large")
+
+    if http_post is None:
+        import requests as _requests
+        http_post = _requests.post
+
+    try:
+        resp = http_post(
+            LINE_VERIFY_URL,
+            data={"id_token": id_token, "client_id": cid},
+            timeout=10,
+        )
+    except Exception as e:
+        raise LiffAuthError(
+            f"verify request failed: {type(e).__name__}"
+        ) from None
+
+    status = getattr(resp, "status_code", None)
+    if status != 200:
+        raise LiffAuthError(f"verify returned status {status}")
+
+    try:
+        payload = resp.json()
+    except Exception:
+        raise LiffAuthError("verify returned non-JSON") from None
+
+    if not isinstance(payload, dict):
+        raise LiffAuthError("verify returned unexpected payload")
+
+    # ตรวจ aud ซ้ำฝั่งเรา ไม่พึ่ง LINE อย่างเดียว
+    aud = payload.get("aud")
+    aud_list = aud if isinstance(aud, list) else [aud]
+    if cid not in [str(a) for a in aud_list if a is not None]:
+        raise LiffAuthError("aud mismatch")
+
+    sub = payload.get("sub")
+    if not sub or not isinstance(sub, str):
+        raise LiffAuthError("missing sub claim")
+
+    return sub
 
 
 # ═══════════════════════════════════════════════════════════
@@ -461,7 +568,8 @@ body {
 <script>
 const LIFF_ID = '__LIFF_ID__';
 const API_BASE = '__API_BASE__';
-let userId = null;
+// [SEC-1] เก็บ ID token ไว้ส่งให้ server ยืนยัน — ไม่เก็บ/ไม่ส่ง userId ดิบ
+let idToken = null;
 let labData = null;
 
 // ── PDPA Consent ──
@@ -482,11 +590,13 @@ function declineConsent() {
 }
 
 // ── LIFF Init ──
+// [SEC-1] ส่ง ID token ให้ server ยืนยันกับ LINE แทนการส่ง userId ดิบ
+// server จะคำนวณ owner_hash จาก token ที่ยืนยันแล้วเอง
+// ห้ามส่งตัวระบุตัวตนใด ๆ ที่ client กำหนดเองไปใช้กรองข้อมูลผู้ป่วย
 async function initLiff() {
     if (!LIFF_ID || LIFF_ID === '__LIFF_ID__') {
-        // Dev mode — use test data
-        userId = 'dev_test_user';
-        checkConsent();
+        document.getElementById('loadingLabs').innerHTML =
+            '<div>❌ ระบบยังไม่ได้ตั้งค่า LIFF — กรุณาติดต่อเจ้าหน้าที่</div>';
         return;
     }
     try {
@@ -495,8 +605,12 @@ async function initLiff() {
             liff.login();
             return;
         }
-        const profile = await liff.getProfile();
-        userId = profile.userId;
+        idToken = liff.getIDToken();
+        if (!idToken) {
+            document.getElementById('loadingLabs').innerHTML =
+                '<div>❌ ไม่สามารถยืนยันตัวตนได้ กรุณาเข้าใหม่อีกครั้ง</div>';
+            return;
+        }
         checkConsent();
     } catch (e) {
         console.error('LIFF init error:', e);
@@ -518,7 +632,18 @@ function checkConsent() {
 // ── Load Data ──
 async function initApp() {
     try {
-        const resp = await fetch(API_BASE + '/liff/api/my-labs?owner_hash=' + encodeURIComponent(userId));
+        // [SEC-1] POST พร้อม ID token — ตัวระบุตัวตนไม่อยู่ใน URL อีกต่อไป
+        // (query string ถูกบันทึกลง access log ของ proxy/แพลตฟอร์ม)
+        const resp = await fetch(API_BASE + '/liff/api/my-labs', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id_token: idToken}),
+        });
+        if (resp.status === 401) {
+            document.getElementById('loadingLabs').innerHTML =
+                '<div>❌ ยืนยันตัวตนไม่สำเร็จ กรุณาเปิดจาก LINE อีกครั้ง</div>';
+            return;
+        }
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         labData = await resp.json();
         renderLabs();

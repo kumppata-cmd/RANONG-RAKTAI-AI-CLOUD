@@ -8583,6 +8583,11 @@ def health():
             ),
             "external_ai_locked": not EXTERNAL_AI_CLASSIFICATION_ALLOWED,
             "user_id_salt_set": not _USER_ID_SALT_MISSING,
+            # [SEC-1] LIFF ยืนยันตัวตนด้วย ID token ซึ่งต้องมี channel id
+            # ถ้าไม่ได้ตั้ง endpoint จะปฏิเสธทุกคำขอ (fail-closed)
+            "liff_channel_id_set": bool(
+                os.getenv("LIFF_CHANNEL_ID", "").strip()
+            ),
         }
         if _USER_ID_SALT_MISSING:
             health_info["status"] = "misconfigured"
@@ -9490,10 +9495,17 @@ except ImportError:
     report_to_flex_message = None
 
 try:
-    from liff_app import get_patient_labs_for_liff, get_liff_html
+    from liff_app import (
+        get_patient_labs_for_liff, get_liff_html,
+        verify_liff_id_token, LiffAuthError,
+    )
 except ImportError:
     get_patient_labs_for_liff = None
     get_liff_html = None
+    verify_liff_id_token = None
+
+    class LiffAuthError(Exception):
+        """Fallback เมื่อโหลด liff_app ไม่ได้"""
 
 
 @app.route("/admin/clinical-dashboard", methods=["GET"])
@@ -9696,23 +9708,45 @@ def liff_page():
     return get_liff_html(api_base), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
-@app.route("/liff/api/my-labs", methods=["GET"])
+@app.route("/liff/api/my-labs", methods=["POST"])
 def liff_api_my_labs():
     """API ดึงผลแล็บสำหรับ LIFF — Phase F.
 
-    Query: ?owner_hash=LINE_USER_ID
+    Body (JSON): {"id_token": "<LIFF ID token>"}
 
-    Safety:
-    - กรองเฉพาะ owner_hash ของผู้ป่วยเจ้าของ
-    - เฉพาะ approved labs
-    - ไม่ส่งข้อมูลผู้ป่วยรายอื่น
+    [SEC-1] เดิม endpoint นี้รับ owner_hash จาก query string ตรง ๆ แล้ว
+    ใช้ค่านั้นกรองข้อมูลผู้ป่วย = ให้ผู้เรียกประกาศเองว่าตัวเองเป็นใคร
+    (broken authorization) และข้อมูลผู้ป่วยยังไปอยู่ใน URL ซึ่งถูกบันทึก
+    ลง access log ด้วย
+
+    ตอนนี้:
+    - ยืนยัน ID token กับ LINE ที่ฝั่ง server (ตรวจ aud ซ้ำด้วย)
+    - คำนวณ owner_hash จาก sub ที่ยืนยันแล้วเท่านั้น ไม่รับจากผู้เรียก
+    - ใช้ POST เพื่อให้ตัวระบุตัวตนไม่อยู่ใน query string
+    - ไม่คืนรายละเอียด exception กลับไปให้ client
     """
-    if get_patient_labs_for_liff is None:
+    if get_patient_labs_for_liff is None or verify_liff_id_token is None:
         return jsonify({"error": "LIFF module not available"}), 500
 
-    owner_hash = request.args.get("owner_hash", "")
-    if not owner_hash:
-        return jsonify({"error": "owner_hash required"}), 400
+    body = request.get_json(silent=True) or {}
+    id_token = body.get("id_token", "")
+    if not id_token:
+        return jsonify({"error": "id_token required"}), 400
+
+    # ── ยืนยันตัวตนกับ LINE ──
+    try:
+        line_user_id = verify_liff_id_token(id_token)
+    except LiffAuthError as auth_err:
+        # เหตุผลละเอียดลง log ฝั่ง server เท่านั้น
+        logger.warning("LIFF auth failed: %s", auth_err)
+        audit_logger.log("liff_auth_failed", "", {})
+        return jsonify({"error": "unauthorized"}), 401
+    except Exception as e:
+        logger.error("LIFF auth error: %s", type(e).__name__)
+        return jsonify({"error": "unauthorized"}), 401
+
+    # owner_hash มาจาก sub ที่ยืนยันแล้ว ใช้ salt เดียวกับทั้งระบบ
+    owner_hash = hash_user_id(line_user_id)
 
     try:
         data = get_patient_labs_for_liff(
@@ -9721,8 +9755,8 @@ def liff_api_my_labs():
         )
         return jsonify(data), 200
     except Exception as e:
-        logger.error(f"LIFF API error: {e}")
-        return jsonify({"error": str(e)}), 500
+        logger.error("LIFF API error: %s", type(e).__name__)
+        return jsonify({"error": "internal error"}), 500
 
 
 @app.route("/admin/dashboard", methods=["GET"])
