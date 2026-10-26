@@ -53,37 +53,55 @@ class TestSafeImageFormats(unittest.TestCase):
     # ── รายการที่อนุญาต ────────────────────────────────────
 
     def test_รายการไม่มีรูปแบบที่มีช่องโหว่(self):
-        """PSD, FITS, PDF, EPS ต้องไม่อยู่ในรายการที่อนุญาต"""
-        for bad in ("PSD", "FITS", "PDF", "EPS", "PPM", "TGA", "DDS"):
+        """ตัวถอดรหัสที่มี CVE ค้างต้องไม่อยู่ในรายการที่อนุญาต
+
+        TIFF และ GIF เคยอยู่ในรายการนี้ ทั้งคู่มี CVE ค้างใน Pillow
+        12.3.0 (TIFF _decodeTile OOB, GIF seek) จึงถูกตัดออก
+        """
+        for bad in ("PSD", "FITS", "PDF", "EPS", "PPM", "PGM",
+                    "TGA", "DDS", "TIFF", "GIF", "WEBP", "BMP"):
             self.assertNotIn(
                 bad, self.formats,
                 f"{bad} อยู่ในรายการที่อนุญาต — เป็นตัวถอดรหัสที่ระบบไม่ใช้",
             )
 
     def test_รายการครอบคลุมรูปแบบที่ใช้จริง(self):
-        """ภาพจาก LINE และกล้องมือถือต้องอยู่ในรายการ"""
-        for need in ("JPEG", "PNG"):
-            self.assertIn(need, self.formats)
+        """ภาพจาก LINE ต้องอยู่ในรายการ และต้องมีแค่เท่านี้
+
+        เส้นทางเข้าทุกทางผ่านด่าน ext in (.jpg/.jpeg/.png) มาก่อน
+        รูปแบบอื่นจึงไม่ได้ประโยชน์ แต่เพิ่มพื้นที่ที่ถูกโจมตีได้
+        """
+        self.assertEqual(sorted(self.formats), ["JPEG", "PNG"])
 
     # ── รูปแบบนอกรายการต้องเปิดไม่ได้ ──────────────────────
 
-    def test_ppm_ที่ตั้งชื่อเป็น_png_ต้องเปิดไม่ได้(self):
+    def test_รูปแบบนอกรายการที่ตั้งชื่อเป็น_png_ต้องเปิดไม่ได้(self):
         """แกนหลักของการแข็งขึ้น: เนื้อหานอกรายการต้องถูกปฏิเสธ
 
-        PPM เป็นตัวแทนของทุกรูปแบบที่ Pillow รองรับแต่ระบบไม่ใช้
-        (PSD, FITS, PDF ก็ถูกกันด้วยกลไกเดียวกันนี้) ที่ใช้ PPM
-        เพราะสร้างไฟล์ถูกต้องได้โดยไม่ต้องมีไฟล์มุ่งร้าย
+        PPM, TIFF, GIF, BMP เป็นตัวแทนของทุกรูปแบบที่ Pillow รองรับ
+        แต่ระบบไม่ใช้ (PSD, FITS, EPS ก็ถูกกันด้วยกลไกเดียวกันนี้)
+        ที่ใช้รูปแบบเหล่านี้เพราะสร้างไฟล์ถูกต้องได้ โดยไม่ต้องมีไฟล์
+        มุ่งร้ายในชุดทดสอบ
         """
-        p = self._path("looks_like_a_photo.png")
-        Image.new("RGB", (8, 8), (10, 20, 30)).save(p, format="PPM")
+        for fmt in ("PPM", "TIFF", "GIF", "BMP"):
+            with self.subTest(format=fmt):
+                p = self._path(f"looks_like_a_photo_{fmt}.png")
+                img = Image.new("RGB", (8, 8), (10, 20, 30))
+                if fmt == "GIF":
+                    img = img.convert("P")
+                img.save(p, format=fmt)
 
-        # ไม่จำกัด → Pillow ถอดรหัสได้ตามเนื้อหา ไม่สนนามสกุล
-        with Image.open(p) as im:
-            self.assertEqual(im.format, "PPM")
+                # ไม่จำกัด → Pillow ถอดรหัสตามเนื้อหา ไม่สนนามสกุล
+                with Image.open(p) as im:
+                    self.assertEqual(
+                        im.format, fmt,
+                        "ด่านนามสกุลกันรูปแบบนี้ไม่ได้ — "
+                        "Pillow เลือกตัวถอดรหัสจากเนื้อหา",
+                    )
 
-        # จำกัด → ต้องปฏิเสธ
-        with self.assertRaises(UnidentifiedImageError):
-            Image.open(p, formats=self.formats)
+                # จำกัด → ต้องปฏิเสธ
+                with self.assertRaises(UnidentifiedImageError):
+                    Image.open(p, formats=self.formats)
 
     def test_ไฟล์ขยะที่ตั้งชื่อเป็น_jpg_ต้องเปิดไม่ได้(self):
         p = self._path("garbage.jpg")
@@ -109,19 +127,32 @@ class TestSafeImageFormats(unittest.TestCase):
         """รายการที่อนุญาตต้องเป็นชื่อที่ Pillow รู้จักทั้งหมด
 
         ชื่อที่พิมพ์ผิดจะไม่ error แต่จะทำให้รูปแบบนั้นถูกปฏิเสธเงียบ ๆ
+        — ภาพของคลินิกจะ OCR ไม่ออกโดยไม่มีใครรู้สาเหตุ
         """
         for fmt in self.formats:
-            ext = {"JPEG": ".jpg", "TIFF": ".tif"}.get(fmt, "." + fmt.lower())
-            p = self._path(f"sample{ext}")
-            img = Image.new("RGB", (8, 8), (90, 90, 90))
-            if fmt == "GIF":
-                img = img.convert("P")
-            img.save(p, format=fmt)
-            with Image.open(p, formats=self.formats) as im:
-                self.assertEqual(
-                    im.format, fmt,
-                    f"{fmt} อยู่ในรายการแต่เปิดกลับมาไม่ตรง",
-                )
+            with self.subTest(format=fmt):
+                ext = ".jpg" if fmt == "JPEG" else "." + fmt.lower()
+                p = self._path(f"sample{ext}")
+                Image.new("RGB", (8, 8), (90, 90, 90)).save(p, format=fmt)
+                with Image.open(p, formats=self.formats) as im:
+                    self.assertEqual(
+                        im.format, fmt,
+                        f"{fmt} อยู่ในรายการแต่เปิดกลับมาไม่ตรง",
+                    )
+
+    def test_resize_ใช้_Resampling_enum_ไม่ใช่ค่าคงที่ที่เลิกใช้(self):
+        """Image.LANCZOS ถูก deprecate ตั้งแต่ Pillow 9.1
+
+        ค่าคงที่ระดับ module อาจถูกถอดออกใน Pillow major ถัดไป
+        ถ้าหายไปจะเป็น AttributeError กลางเส้นทาง OCR — ภาพทุกใบ
+        OCR ไม่ออกทันทีที่ deploy
+        """
+        self.assertTrue(hasattr(Image, "Resampling"))
+        self.assertTrue(hasattr(Image.Resampling, "LANCZOS"))
+        with open("server.py", encoding="utf-8") as fh:
+            src = fh.read()
+        self.assertNotIn("Image.LANCZOS", src)
+        self.assertIn("Image.Resampling.LANCZOS", src)
 
     # ── ยืนยันว่าโค้ดจริงใช้ข้อจำกัดนี้ ────────────────────
 

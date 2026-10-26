@@ -16,9 +16,11 @@ PyMuPDF==1.25.1
 
 # OCR
 pytesseract==0.3.13
-# Pillow 12.3.0: ปิด CVE-2026-42308/42310/42311/40192/25990
+# Pillow 13.0.0: 12.3.0 ยังมี CVE ค้าง 10 รายการ (EPS Ghostscript cmdline
+# injection, TIFF _decodeTile OOB, GIF seek, PPM width 0, PDF append OOB,
+# double free) ทั้งหมดแก้ใน 13.0.0 — ก่อนหน้านี้ 11.1.0 มีอีก 5 รายการ
 # (PSD memory corruption, PDF CPU hang, FITS decompression bomb)
-Pillow==12.3.0
+Pillow==13.0.0
 
 # Google Cloud Storage
 google-cloud-storage==2.18.2

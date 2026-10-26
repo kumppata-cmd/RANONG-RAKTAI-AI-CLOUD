@@ -401,6 +401,28 @@ class TestExternalAIProtection(unittest.TestCase):
         self.assertEqual(calls, [], "มีการเรียกเครือข่ายออกนอกระบบ")
         self.assertFalse(server.EXTERNAL_AI_CLASSIFICATION_ALLOWED)
 
+    def test_health_รายงานสถานะที่เป็นผลจริง(self):
+        """/health ต้องไม่บอกว่าใช้ AI ภายนอกเมื่อมันถูกปิดอยู่
+
+        ของเดิมรายงาน ai_classify จาก ENABLE_AI_CLASSIFY ตัวเดียว
+        บน production ที่ไม่ได้ตั้ง ENV ค่านั้นเป็น true (ค่าเริ่มต้นใน
+        โค้ด) /health จึงขึ้น ai_classify: true ทั้งที่ข้อมูลผู้ป่วย
+        ไม่ได้ออกนอกระบบเลย — ยืนยันแล้วจาก production วันที่ 26 ต.ค.
+        2026 ว่าขึ้น true จริง
+
+        ตัวเลขที่อ่านผิดได้แบบนี้เป็นอันตรายกับการตรวจสอบ PDPA
+        """
+        data = server.app.test_client().get("/health").get_json()
+
+        self.assertFalse(
+            data["ai_classify"],
+            "/health บอกว่าใช้ AI ภายนอก ทั้งที่ถูกปิดที่ระดับโค้ด",
+        )
+        self.assertEqual(data["document_classifier"], "internal_keywords")
+        self.assertFalse(data["external_ai_allowed"])
+        # ค่า ENV ดิบต้องยังดูได้ — ไม่ซ่อนการตั้งค่าที่แท้จริง
+        self.assertIn("ai_classify_env_setting", data)
+
     def test_source_code_hardcoded_false(self):
         """ตรวจสอบว่า source code hardcode EXTERNAL_AI = False."""
         with open("server.py", "r") as f:

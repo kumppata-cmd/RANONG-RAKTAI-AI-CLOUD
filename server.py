@@ -103,17 +103,25 @@ except ImportError:
 # ตัวถอดรหัสของรูปแบบนั้นแทน — ด่านกรองนามสกุลจึงกันไม่ได้
 #
 # ช่องโหว่ที่ปิดด้วยการจำกัดนี้ (พบจาก pip-audit 2026-10-26):
-#   CVE-2026-42311 / CVE-2026-25990  PSD   — memory corruption / OOB write
-#   CVE-2026-40192                   FITS  — decompression bomb (OOM)
-#   CVE-2026-42310                   PDF   — ค้างกิน CPU 100% ไม่สิ้นสุด
+#   PSD   CVE-2026-42311, CVE-2026-25990   memory corruption / OOB write
+#   FITS  CVE-2026-40192                   decompression bomb (OOM)
+#   PDF   CVE-2026-42310, CVE-2026-112895  ค้างกิน CPU 100% / OOB
+#   EPS   CVE-2026-112900, 112899, 112402  Ghostscript cmdline injection
+#   TIFF  CVE-2026-112395, 112896, 112897  _decodeTile OOB
+#   GIF   CVE-2026-112400                  seek
+#   PPM   CVE-2026-112397                  width 0
 #
-# การ upgrade Pillow เป็น 12.x ปิดช่องโหว่เหล่านี้แล้ว แต่ยังคง
-# ข้อจำกัดนี้ไว้เป็นชั้นที่สอง เพราะเป็นวิธีที่ advisory เองแนะนำ
-# และยังกันช่องโหว่ในอนาคตของตัวถอดรหัสที่ระบบนี้ไม่ได้ใช้เลย
+# เหลือเฉพาะ JPEG และ PNG ตามที่เส้นทางเข้าจริงจำกัดไว้แล้ว:
+# ทุกจุดที่เรียก Image.open ผ่านด่าน ext in (.jpg/.jpeg/.png) มาก่อน
+# และ LINE ส่งภาพมาเป็น JPEG หรือ PNG เท่านั้น การอนุญาตรูปแบบอื่น
+# จึงไม่ได้ประโยชน์ แต่เปิดตัวถอดรหัสที่มีช่องโหว่อยู่จริงให้เข้าถึงได้
+# (เคยใส่ GIF WEBP BMP TIFF ไว้ด้วย — TIFF กับ GIF มี CVE ค้างอยู่)
 #
-# ครอบคลุมรูปแบบที่กล้องมือถือและ LINE ส่งมาจริงทั้งหมด
+# กรณีที่ยังต้องรองรับ: นามสกุลไม่ตรงเนื้อหา เช่น JPEG ในไฟล์ .png
+# ซึ่งเกิดขึ้นจริงกับภาพที่ส่งทาง LINE — ครอบคลุมด้วยสองรูปแบบนี้แล้ว
+#
 # เอกสาร PDF ไม่ได้ใช้เส้นทางนี้ — ใช้ PyMuPDF แปลงเป็น pixmap ก่อน
-SAFE_IMAGE_FORMATS = ["JPEG", "PNG", "GIF", "WEBP", "BMP", "TIFF"]
+SAFE_IMAGE_FORMATS = ["JPEG", "PNG"]
 
 try:
     import fitz as pymupdf  # PyMuPDF
@@ -3390,7 +3398,7 @@ def _ocr_from_bytes(data: bytes, file_type: str) -> str:
             w, h = gray.size
             if w < 2000:
                 sf = 2000 / w
-                gray = gray.resize((int(w * sf), int(h * sf)), Image.LANCZOS)
+                gray = gray.resize((int(w * sf), int(h * sf)), Image.Resampling.LANCZOS)
             sharpened = gray.filter(ImageFilter.SHARPEN)
             processed = ImageOps.autocontrast(sharpened, cutoff=2)
             sharpened.close()
@@ -5739,7 +5747,7 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                     if w < 2000:
                         sf = 2000 / w
                         gray = gray.resize(
-                            (int(w * sf), int(h * sf)), Image.LANCZOS
+                            (int(w * sf), int(h * sf)), Image.Resampling.LANCZOS
                         )
                         logger.info(f"[OCR-PRE] Upscaled → {gray.size[0]}x{gray.size[1]}")
 
@@ -9637,7 +9645,33 @@ def health():
         "testing_mode": IS_TESTING,
         "production_mode": IS_PRODUCTION,
         "timestamp": datetime.now().isoformat(),
-        "ai_classify": ENABLE_AI_CLASSIFY and not IS_TESTING,
+        # ── สถานะการจำแนกเอกสาร ──────────────────────────────
+        # ต้องรายงาน "ผลจริง" ไม่ใช่ค่า ENV ที่ตั้งไว้
+        #
+        # ของเดิมรายงาน ai_classify จาก ENABLE_AI_CLASSIFY เพียงตัวเดียว
+        # บน production ที่ไม่ได้ตั้ง ENV ค่านั้นเป็น true (ค่าเริ่มต้นใน
+        # โค้ด) /health จึงขึ้นว่า ai_classify: true ทั้งที่
+        # EXTERNAL_AI_CLASSIFICATION_ALLOWED = False บังคับให้ตกไปใช้การ
+        # จำแนกด้วยคำสำคัญภายในเสมอ ไม่มีข้อมูลผู้ป่วยออกนอกระบบเลย
+        #
+        # ตัวเลขที่อ่านผิดได้แบบนี้เป็นอันตรายกับการตรวจสอบ PDPA —
+        # ผู้ตรวจที่อ่าน /health จะสรุปว่าระบบส่งข้อมูลไป AI ภายนอก
+        "ai_classify": (
+            EXTERNAL_AI_CLASSIFICATION_ALLOWED
+            and ENABLE_AI_CLASSIFY
+            and not IS_TESTING
+        ),
+        "document_classifier": (
+            "external_ai"
+            if (
+                EXTERNAL_AI_CLASSIFICATION_ALLOWED
+                and ENABLE_AI_CLASSIFY
+                and not IS_TESTING
+            )
+            else "internal_keywords"
+        ),
+        "external_ai_allowed": EXTERNAL_AI_CLASSIFICATION_ALLOWED,
+        "ai_classify_env_setting": ENABLE_AI_CLASSIFY,
         "storage_backend": STORAGE_BACKEND,
         "ocr_ready": HAS_TESSERACT and HAS_PIL,
         "ocr_dpi": OCR_DPI,
