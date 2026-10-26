@@ -126,5 +126,19 @@ class TestPipAuditTargetVersion(unittest.TestCase):
         self.assertIn("1.10.0", out, "ต้องรายงานเวอร์ชันสูงสุด")
         self.assertIn("pip-audit target", out)
 
+        # ต้องมาก่อนรายการย่อยเสมอ
+        #
+        # GitHub เก็บ annotation ได้ 10 รายการต่อ step ส่วนที่เกินถูกตัด
+        # ทิ้งเงียบ ๆ รอบแรกที่ใส่ฟีเจอร์นี้ annotation เป้าหมายหายไป
+        # ทั้งหมดเพราะ CVE สิบรายการกินโควตาไปก่อน
+        # (ยืนยันจาก /check-runs/{id}/annotations ของ run จริง)
+        lines = [l for l in out.split("\n") if l.startswith("::warning")]
+        self.assertTrue(lines)
+        self.assertIn(
+            "pip-audit target", lines[0],
+            "annotation เวอร์ชันเป้าหมายต้องเป็นตัวแรก ไม่งั้นจะถูกตัด"
+            "เมื่อมี CVE ครบ 10 รายการ",
+        )
+
 if __name__ == "__main__":
     unittest.main()
