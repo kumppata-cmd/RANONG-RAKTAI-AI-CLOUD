@@ -8,7 +8,14 @@ flask==3.1.3
 gunicorn==23.0.0
 
 # HTTP Client
-requests==2.32.3
+# requests 2.33.0: ปิด CVE-2024-47081 (ข้อผิดพลาดการ parse URL ทำให้
+# credential ใน .netrc รั่วไปยังปลายทางอื่นเมื่อ URL ถูกสร้างมาเพื่อโจมตี)
+# และ CVE-2026-25645 (extract_zipped_paths ใช้ชื่อไฟล์ที่เดาได้ใน temp dir
+# แล้วใช้ไฟล์เดิมซ้ำโดยไม่ตรวจ — local privilege issue)
+#
+# ตัวนี้เป็นไลบรารีที่ระบบใช้เรียก LINE API ทั้งหมด รวมถึง push ข้อความ
+# ที่ต้องแนบ LINE_CHANNEL_ACCESS_TOKEN
+requests==2.33.0
 
 # PDF Processing
 # pypdf 6.19.0
