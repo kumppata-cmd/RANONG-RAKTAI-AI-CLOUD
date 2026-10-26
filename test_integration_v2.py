@@ -391,23 +391,47 @@ class TestRebuildDedupCache(unittest.TestCase):
 class TestBuildAlertRecipients(unittest.TestCase):
     """Test build_alert_recipients_from_env."""
 
+    # ID ต้องเป็นรูปแบบ LINE จริง (U/C/R + hex 32 ตัว)
+    #
+    # เดิมเทสต์นี้ใช้ค่าอย่าง "uid_a" ซึ่งผ่านได้เพราะโค้ดไม่ตรวจรูปแบบ
+    # เลย — และนั่นคือสาเหตุที่การตั้ง PHYSICIAN_USERS (ซึ่งเก็บ hash)
+    # ดูเหมือนตั้งค่าสำเร็จ แต่ push ล้มทุกครั้งแบบเงียบ ๆ
+    # เทสต์ที่รับค่าปลอมจึงยืนยันพฤติกรรมที่ทำให้เกิดปัญหา
+    GOOD_A = "Uaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    GOOD_B = "Ubbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    GOOD_C = "Ucccccccccccccccccccccccccccccccc"
+    GOOD_X = "Udddddddddddddddddddddddddddddddd"
+    GOOD_Y = "Ueeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+
     def test_from_alert_recipients_env(self):
         """ALERT_RECIPIENTS env var is used first."""
         with patch.dict(os.environ, {
-            "ALERT_RECIPIENTS": "uid_a,uid_b",
-            "PHYSICIAN_USERS": "uid_c",
+            "ALERT_RECIPIENTS": f"{self.GOOD_A},{self.GOOD_B}",
+            "PHYSICIAN_USERS": self.GOOD_C,
         }):
             recipients = build_alert_recipients_from_env()
-            self.assertEqual(recipients["physician"], ["uid_a", "uid_b"])
+            self.assertEqual(
+                recipients["physician"], [self.GOOD_A, self.GOOD_B],
+            )
 
     def test_fallback_to_physician_users(self):
         """Falls back to PHYSICIAN_USERS when ALERT_RECIPIENTS is empty."""
         with patch.dict(os.environ, {
             "ALERT_RECIPIENTS": "",
-            "PHYSICIAN_USERS": "uid_x,uid_y",
+            "PHYSICIAN_USERS": f"{self.GOOD_X},{self.GOOD_Y}",
         }):
             recipients = build_alert_recipients_from_env()
-            self.assertEqual(recipients["physician"], ["uid_x", "uid_y"])
+            self.assertEqual(
+                recipients["physician"], [self.GOOD_X, self.GOOD_Y],
+            )
+
+    def test_hashed_values_are_rejected(self):
+        """hash จาก PHYSICIAN_USERS push ไม่ได้ — ต้องถูกคัดออก"""
+        with patch.dict(os.environ, {
+            "ALERT_RECIPIENTS": "",
+            "PHYSICIAN_USERS": "e" * 64,
+        }):
+            self.assertEqual(build_alert_recipients_from_env(), {})
 
     def test_no_env_vars_set(self):
         """Returns empty dict when neither env var is set."""

@@ -44,6 +44,21 @@ jobs:
             python -m py_compile "$f" && echo "OK: $f" || { echo "FAIL: $f"; exit 1; }
           done
 
+      # ── ด่านที่เคยไม่มี และเป็นเหตุให้ deploy ล้ม ───────────────
+      #
+      # 26 ต.ค. 2026 deploy dep-dbfmtvbphbkc73ajme0g ล้มด้วย
+      #   ModuleNotFoundError: No module named 'vendor_registry'
+      # ขณะที่ CI เขียวทุก job — เพราะ py_compile และ unittest รันใน
+      # โฟลเดอร์ repo ที่มีไฟล์อยู่ ส่วน Dockerfile ใช้ COPY รายไฟล์
+      # 31 บรรทัดที่ต้องแก้มือ และไฟล์ใหม่ไม่ได้ถูกเพิ่มเข้าไป
+      #
+      # ด่านนี้ใช้เวลาไม่ถึงวินาที จึงรันได้ทุก push
+      # (job docker-boot ด้านล่างเป็นด่านยืนยันจริงอีกชั้น)
+      - name: "Dockerfile — ตรวจว่าคัดลอก module ครบ"
+        run: |
+          echo "=== เทียบ import ของแอปกับรายการ COPY ใน Dockerfile ==="
+          python scripts/check_dockerfile_modules.py
+
       - name: "Flake8 basic lint"
         run: |
           echo "=== Flake8 lint (E9,F63,F7,F82) ==="
@@ -291,3 +306,103 @@ jobs:
           # ตรวจว่าทุก package ใน requirements.txt ติดตั้งได้
           pip check || echo "WARNING: พบปัญหา dependency compatibility"
           echo "OK: requirements.txt consistent"
+
+  # ---------------------------------------------------------------------------
+  # Job 5: Docker Boot — ด่านที่สะท้อน production จริง
+  #
+  # ทำไมต้องมีใน ci.yml ไม่ใช่แค่ deploy-check.yml
+  # ─────────────────────────────────────────────
+  # deploy-check.yml มี job ตรวจ docker build + container start อยู่แล้ว
+  # และจะจับความล้มของ 26 ต.ค. 2026 ได้ แต่มันรันเฉพาะ workflow_dispatch
+  # (สั่งมือ) จึงไม่เคยรันตอน merge — deploy ล้มโดย CI เขียวทั้งแถว
+  #
+  # job นี้ build image จาก Dockerfile จริงแล้วพิสูจน์ว่า gunicorn
+  # ตอบ /health ได้ ไม่ใช่แค่ "process ยังไม่ตาย"
+  # ---------------------------------------------------------------------------
+  docker-boot:
+    name: "Docker Build & Boot"
+    runs-on: ubuntu-latest
+    needs: lint
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: "Build image จาก Dockerfile จริง"
+        run: docker build -t ranong-raktai-ai:ci .
+
+      # ยืนยันว่าทุก module import ได้ใน image — จับ ModuleNotFoundError
+      # ก่อนถึงขั้น boot ทำให้ข้อความผิดพลาดชี้ตรงจุด
+      - name: "import server ใน image"
+        run: |
+          docker run --rm \
+            -e LINE_CHANNEL_ACCESS_TOKEN=ci-test-dummy-token \
+            -e LINE_CHANNEL_SECRET=ci-test-dummy-secret \
+            -e ADMIN_SECRET=ci-test-admin-secret \
+            -e GCS_BUCKET_NAME=ci-test-bucket \
+            ranong-raktai-ai:ci \
+            python -c "import server; print('import server OK')"
+
+      # ด่านจริง: gunicorn ต้อง boot แล้วตอบ /health ได้
+      # ของเดิมใน deploy-check.yml ใช้ sleep 5 + docker ps ซึ่งผ่านได้
+      # แม้ worker จะกำลังตายอยู่ — ที่นี่รอจน /health ตอบ 200 จริง
+      - name: "gunicorn ต้องตอบ /health ได้"
+        run: |
+          docker run -d --name ranong-ci \
+            -e PORT=10000 \
+            -e LINE_CHANNEL_ACCESS_TOKEN=ci-test-dummy-token \
+            -e LINE_CHANNEL_SECRET=ci-test-dummy-secret \
+            -e ADMIN_SECRET=ci-test-admin-secret \
+            -e GCS_BUCKET_NAME=ci-test-bucket \
+            -p 10000:10000 \
+            ranong-raktai-ai:ci
+
+          ok=0
+          for i in $(seq 1 30); do
+            if ! docker ps --format '{{.Names}}' | grep -q '^ranong-ci$'; then
+              echo "FAIL: container ออกก่อนตอบ /health"
+              break
+            fi
+            code=$(curl -s -o /tmp/health.json -w '%{http_code}' \
+                   http://localhost:10000/health || true)
+            if [ "$code" = "200" ]; then ok=1; break; fi
+            sleep 2
+          done
+
+          echo "--- container logs ---"
+          docker logs ranong-ci 2>&1 | tail -40
+
+          if [ "$ok" != "1" ]; then
+            echo "::error::gunicorn boot ไม่ขึ้นหรือ /health ไม่ตอบ 200"
+            docker rm -f ranong-ci >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          echo "--- /health ---"
+          cat /tmp/health.json
+
+          # ตรวจ control ที่ห้ามเปลี่ยนจาก image ที่ boot จริง
+          python - <<'PY'
+          import json, sys
+          d = json.load(open("/tmp/health.json"))
+          fails = []
+          if d.get("external_ai_allowed") is not False:
+              fails.append("external_ai_allowed ต้องเป็น false")
+          if d.get("document_classifier") != "internal_keywords":
+              fails.append("document_classifier ต้องเป็น internal_keywords")
+          if d.get("ai_classify") is not False:
+              fails.append("ai_classify ต้องเป็น false")
+          for f in fails:
+              print(f"::error::{f}")
+          sys.exit(1 if fails else 0)
+          PY
+
+          # ตรวจว่า log ตอน boot ไม่มี traceback
+          if docker logs ranong-ci 2>&1 | grep -q "Traceback (most recent call last)"; then
+            echo "::error::พบ Traceback ใน log ตอน boot"
+            docker rm -f ranong-ci >/dev/null 2>&1 || true
+            exit 1
+          fi
+
+          docker rm -f ranong-ci >/dev/null 2>&1 || true
+          echo "OK: image boot ได้และ /health ตอบ 200 พร้อม control ครบ"

@@ -96,6 +96,33 @@ try:
 except ImportError:
     HAS_PIL = False
 
+# ─── รูปแบบภาพที่อนุญาตให้ Pillow ถอดรหัส ───────────────────
+#
+# ทำไมต้องจำกัด: Pillow เลือกตัวถอดรหัสจาก "เนื้อหาไฟล์" ไม่ใช่นามสกุล
+# ไฟล์ที่ชื่อ .png แต่ข้างในเป็น PSD, FITS หรือ PDF จะถูกส่งเข้า
+# ตัวถอดรหัสของรูปแบบนั้นแทน — ด่านกรองนามสกุลจึงกันไม่ได้
+#
+# ช่องโหว่ที่ปิดด้วยการจำกัดนี้ (พบจาก pip-audit 2026-10-26):
+#   PSD   CVE-2026-42311, CVE-2026-25990   memory corruption / OOB write
+#   FITS  CVE-2026-40192                   decompression bomb (OOM)
+#   PDF   CVE-2026-42310, CVE-2026-112895  ค้างกิน CPU 100% / OOB
+#   EPS   CVE-2026-112900, 112899, 112402  Ghostscript cmdline injection
+#   TIFF  CVE-2026-112395, 112896, 112897  _decodeTile OOB
+#   GIF   CVE-2026-112400                  seek
+#   PPM   CVE-2026-112397                  width 0
+#
+# เหลือเฉพาะ JPEG และ PNG ตามที่เส้นทางเข้าจริงจำกัดไว้แล้ว:
+# ทุกจุดที่เรียก Image.open ผ่านด่าน ext in (.jpg/.jpeg/.png) มาก่อน
+# และ LINE ส่งภาพมาเป็น JPEG หรือ PNG เท่านั้น การอนุญาตรูปแบบอื่น
+# จึงไม่ได้ประโยชน์ แต่เปิดตัวถอดรหัสที่มีช่องโหว่อยู่จริงให้เข้าถึงได้
+# (เคยใส่ GIF WEBP BMP TIFF ไว้ด้วย — TIFF กับ GIF มี CVE ค้างอยู่)
+#
+# กรณีที่ยังต้องรองรับ: นามสกุลไม่ตรงเนื้อหา เช่น JPEG ในไฟล์ .png
+# ซึ่งเกิดขึ้นจริงกับภาพที่ส่งทาง LINE — ครอบคลุมด้วยสองรูปแบบนี้แล้ว
+#
+# เอกสาร PDF ไม่ได้ใช้เส้นทางนี้ — ใช้ PyMuPDF แปลงเป็น pixmap ก่อน
+SAFE_IMAGE_FORMATS = ["JPEG", "PNG"]
+
 try:
     import fitz as pymupdf  # PyMuPDF
     HAS_PYMUPDF = True
@@ -1912,6 +1939,7 @@ try:
     from alert_delivery import (
         AlertDeliveryService, AlertSeverity,
         create_line_push_fn, build_alert_recipients_from_env,
+        describe_alert_recipients,
         AlertRetryManager, rebuild_dedup_cache,
         format_active_alerts,
     )
@@ -1939,6 +1967,7 @@ try:
     logger.info("Phase 2A: Alert delivery service initialized with LINE push")
 except ImportError:
     alert_service = None
+    describe_alert_recipients = None
     logger.warning("Phase 2A: alert_delivery module not available")
 
 # ─── Phase 2A: Patient Identity ─────────────────────────
@@ -2348,7 +2377,12 @@ def _admin_api_auth() -> "tuple | None":
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
     auth = request.headers.get("X-Admin-Secret", "")
-    if not auth or not hmac.compare_digest(auth, admin_secret):
+    # เทียบเป็น bytes — compare_digest โยน TypeError ถ้า str มีอักขระนอก
+    # ASCII (header latin-1 ส่งค่านั้นมาได้) ซึ่งจะกลายเป็น 500 แทน 401
+    if not auth or not hmac.compare_digest(
+        auth.encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
+    ):
         return jsonify({"error": "Unauthorized"}), 401
     return None
 
@@ -2895,7 +2929,12 @@ def admin_registry_page():
     """หน้าเว็บทะเบียนผู้ป่วย — เปิดจาก browser ได้เลย (same-origin)"""
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     auth = request.args.get("secret", "")
-    if not admin_secret or auth != admin_secret:
+    # compare_digest — เทียบเวลาคงที่ เหมือน _admin_api_auth
+    # เทียบเป็น bytes เพราะ compare_digest โยน TypeError ถ้า str มีอักขระ
+    # นอก ASCII (เช่น ?secret=ไทย) ซึ่งจะกลายเป็น 500 แทนที่จะเป็น 401
+    if not admin_secret or not hmac.compare_digest(
+        auth.encode("utf-8"), admin_secret.encode("utf-8")
+    ):
         return "<h2>Unauthorized</h2><p>กรุณาเพิ่ม ?secret=... ใน URL</p>", 401
     return REGISTRY_HTML.replace("__ADMIN_SECRET__", admin_secret)
 
@@ -3050,8 +3089,10 @@ const SECRET = "__ADMIN_SECRET__";
 let patients = [];
 
 function api(path, opts={}) {
+  // ส่ง secret ทาง header เท่านั้น — ไม่ใส่ใน query string
+  // เพราะ query string ถูกบันทึกลง access log ของ proxy และแพลตฟอร์ม
+  // (ฝั่ง server ก็ไม่อ่านจาก query string อยู่แล้ว — ดู _admin_api_auth)
   const url = new URL(path, location.origin);
-  url.searchParams.set("secret", SECRET);
   const h = {"X-Admin-Secret": SECRET};
   if (opts.body) h["Content-Type"] = "application/json";
   return fetch(url, {method: opts.method||"GET", headers: h, body: opts.body ? JSON.stringify(opts.body) : undefined}).then(r => r.json());
@@ -3351,14 +3392,15 @@ def _ocr_from_bytes(data: bytes, file_type: str) -> str:
             pdf_doc.close()
             return "\n\n".join(texts)
         else:
-            img = Image.open(tmp.name)
+            # formats= จำกัดตัวถอดรหัสที่ Pillow จะเรียก — ดู SAFE_IMAGE_FORMATS
+            img = Image.open(tmp.name, formats=SAFE_IMAGE_FORMATS)
             # Apply same preprocessing as extract_text_with_ocr
             gray = img.convert("L")
             img.close()
             w, h = gray.size
             if w < 2000:
                 sf = 2000 / w
-                gray = gray.resize((int(w * sf), int(h * sf)), Image.LANCZOS)
+                gray = gray.resize((int(w * sf), int(h * sf)), Image.Resampling.LANCZOS)
             sharpened = gray.filter(ImageFilter.SHARPEN)
             processed = ImageOps.autocontrast(sharpened, cutoff=2)
             sharpened.close()
@@ -5690,7 +5732,8 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                 img = None
                 processed = None
                 try:
-                    img = Image.open(filepath)
+                    # formats= จำกัดตัวถอดรหัส — ดู SAFE_IMAGE_FORMATS
+                    img = Image.open(filepath, formats=SAFE_IMAGE_FORMATS)
                     orig_w, orig_h = img.size
                     logger.info(f"[OCR-PRE] Original: {orig_w}x{orig_h} mode={img.mode}")
                     _ocr_debug_store["image_original_size"] = f"{orig_w}x{orig_h}"
@@ -5706,7 +5749,7 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                     if w < 2000:
                         sf = 2000 / w
                         gray = gray.resize(
-                            (int(w * sf), int(h * sf)), Image.LANCZOS
+                            (int(w * sf), int(h * sf)), Image.Resampling.LANCZOS
                         )
                         logger.info(f"[OCR-PRE] Upscaled → {gray.size[0]}x{gray.size[1]}")
 
@@ -7953,6 +7996,202 @@ def _parse_move_document(text: str):
     return (m.group(1), m.group(2))
 
 
+_CATEGORY_WORDS = {
+    "lab": "lab", "แล็บ": "lab", "ผลแล็บ": "lab", "ผลตรวจ": "lab",
+    "rx": "rx", "ยา": "rx", "ใบยา": "rx", "ใบสั่งยา": "rx",
+    "dialysis": "dialysis", "ฟอกเลือด": "dialysis", "ใบฟอกเลือด": "dialysis",
+    "bills": "bills", "bill": "bills", "บิล": "bills", "ใบเสร็จ": "bills",
+    "review": "review", "ตรวจสอบ": "review", "รอตรวจ": "review",
+}
+
+
+def _parse_change_category(text: str):
+    """แยกคำสั่งเปลี่ยนประเภทเอกสารที่จัดหมวดไว้ผิด
+
+    รองรับ:
+      เปลี่ยนประเภท a1b2c3d4 ใบยา
+      เปลี่ยนประเภท a1b2c3d4 rx 57042
+      recategorize a1b2c3d4 dialysis
+
+    คืน (doc_id_prefix, category, hn_or_empty) หรือ None ถ้าไม่ใช่คำสั่งนี้
+    """
+    import re as _re_cc
+
+    m = _re_cc.match(
+        r"^\s*(?:เปลี่ยนประเภท|เปลี่ยนหมวด|recategorize|recat)\s+"
+        r"([0-9a-fA-F]{6,32})\s+"
+        r"([^\s]{2,20})"
+        r"(?:\s+([A-Za-z0-9\-/]{2,20}))?\s*$",
+        (text or "").strip(),
+        _re_cc.IGNORECASE,
+    )
+    if not m:
+        return None
+    cat = _CATEGORY_WORDS.get(m.group(2).strip().lower())
+    if not cat:
+        return None
+    return (m.group(1), cat, (m.group(3) or "").strip())
+
+
+def _change_document_category(
+    doc_id_prefix: str, new_category: str, hn: str, actor_hash: str,
+) -> dict:
+    """เปลี่ยนประเภทเอกสารที่ถูกจัดหมวดไว้ผิด
+
+    เหตุผลที่ต้องมี:
+      ตัวจำแนกอัตโนมัติจัดหมวดผิดได้ และของเดิมแก้ได้เฉพาะ "ตอนเพิ่ง
+      ส่งเข้ามา" ผ่านการตอบเลข 1-4 ตามที่ระบบถาม (pending
+      classification) พอเลยช่วงนั้นไปแล้วก็ไม่มีวิธีแก้อีกเลย
+      ตรวจ production 26 ต.ค. 2026 พบเอกสาร 2 ใบถูกจัดเป็น lab
+      ทั้งที่ไม่มีชื่อรายการตรวจแม้แต่ชนิดเดียว — แก้ไม่ได้ด้วยคำสั่งใด
+
+    หลักที่ยึด:
+      ไม่ลบไฟล์ต้นฉบับ — ใช้ GCS server-side copy แล้วชี้ index ไป path
+        ใหม่ (ระบบไม่มีสิทธิ์ลบอยู่แล้ว และห้ามลบตามข้อกำหนด)
+      ไม่เดาประเภทจากชื่อไฟล์หรือรูปร่างเอกสาร — คนระบุประเภทเท่านั้น
+      บันทึก audit ทุกครั้ง พร้อมประเภทเดิมและประเภทใหม่
+    """
+    if not storage.is_ready:
+        return {"error": "ระบบจัดเก็บยังไม่พร้อม"}
+    if new_category not in FOLDERS:
+        return {"error": f"ไม่รู้จักประเภท '{new_category}'"}
+
+    doc, err = _find_doc_by_prefix(doc_id_prefix)
+    if doc is None:
+        return {"error": err}
+
+    doc_id = doc.get("document_id", "")
+    old_category = doc.get("category", "")
+    if old_category == new_category:
+        return {
+            "status": "unchanged",
+            "message": f"เอกสารนี้เป็นประเภท '{new_category}' อยู่แล้ว",
+        }
+
+    gcs_path = doc.get("gcs_object_path", "")
+    blob_path = (
+        gcs_path.split("/", 3)[3]
+        if gcs_path.startswith("gs://") and gcs_path.count("/") >= 3
+        else gcs_path
+    )
+    if not blob_path:
+        return {"error": "เอกสารนี้ไม่มีไฟล์ใน cloud storage"}
+
+    doc_text = doc.get("extracted_text", "")
+    doc_dt = _doc_submitted_date(doc)
+
+    # ── แฟ้มรายผู้ป่วย (เฉพาะเอกสารทางคลินิก) ──
+    patient_folder = ""
+    patient_label = ""
+    if new_category in CLINICAL_CATEGORIES and master_registry is not None:
+        if hn:
+            patient = master_registry.match_hn(hn)
+            if patient is None:
+                return {"error": f"ไม่พบ HN {hn} ในทะเบียนผู้ป่วย"}
+            patient_folder = patient.folder_name
+            patient_label = (
+                f"{patient.hn_display} — "
+                f"{patient.patient_name or 'ไม่มีชื่อ'}"
+            )
+        elif doc_text:
+            # ไม่ระบุ HN มา — ลองหาจาก HN ในเอกสาร เหมือนเส้นทางอัตโนมัติ
+            try:
+                for hn_candidate in extract_hn_from_document(doc_text):
+                    _p = master_registry.match_hn(hn_candidate)
+                    if _p is not None:
+                        patient_folder = _p.folder_name
+                        patient_label = (
+                            f"{_p.hn_display} — "
+                            f"{_p.patient_name or 'ไม่มีชื่อ'}"
+                        )
+                        break
+            except Exception as _hn_err:
+                logger.warning(
+                    "change-category: HN lookup ล้มเหลว: %s",
+                    type(_hn_err).__name__,
+                )
+        if not patient_folder:
+            return {"error": (
+                f"ประเภท '{new_category}' ต้องเข้าแฟ้มรายผู้ป่วย "
+                "แต่หา HN ในเอกสารไม่ได้\n"
+                f"กรุณาระบุ HN ต่อท้าย เช่น\n"
+                f"  เปลี่ยนประเภท {doc_id[:8]} {new_category} 57042"
+            )}
+
+    # ── แฟ้มบริษัท (เฉพาะบิล) ──
+    vendor_subfolder = ""
+    if new_category == "bills":
+        vendor_subfolder = resolve_bill_vendor(doc_text).folder
+
+    filename = blob_path.rsplit("/", 1)[-1]
+    new_blob_path = build_document_path(
+        FOLDERS.get(new_category, FOLDERS["review"]),
+        filename, new_category,
+        patient_folder=patient_folder,
+        subfolder=vendor_subfolder,
+        date=doc_dt,
+    )
+
+    # ผลแล็บที่อ่านไว้แล้วจะค้างอยู่ถ้าย้ายออกจากหมวด lab — เตือนให้รู้
+    # ไม่ลบให้เอง เพราะห้ามลบข้อมูล และการลบต้องเป็นการตัดสินใจของคน
+    stale_lab = False
+    if old_category == "lab" and new_category != "lab":
+        try:
+            stale_lab = storage.get(
+                f"{LAB_RESULTS_PREFIX}{doc_id}.json"
+            ) is not None
+        except Exception:
+            stale_lab = False
+
+    try:
+        src = storage._bucket.blob(blob_path)
+        if not src.exists():
+            return {"error": "ไม่พบไฟล์ต้นฉบับใน cloud storage"}
+        dest = storage._bucket.blob(new_blob_path)
+        if not dest.exists():
+            storage._bucket.copy_blob(src, storage._bucket, new_blob_path)
+
+        doc_index.update_category(doc_id, new_category, new_blob_path)
+
+        audit_logger.log("document_category_changed", actor_hash, {
+            "doc_id": doc_id[:8],
+            "from_category": old_category,
+            "to_category": new_category,
+            "to_patient_folder": patient_folder,
+            "stale_lab_results": stale_lab,
+        })
+        logger.info(
+            "เปลี่ยนประเภทเอกสาร %s: %s → %s",
+            doc_id[:8], old_category, new_category,
+        )
+
+        cat_names = {
+            "bills": "ใบเสร็จ/บิล", "rx": "ใบสั่งยา",
+            "lab": "ผลตรวจแล็บ", "dialysis": "เอกสารฟอกเลือด",
+            "review": "รอตรวจสอบ",
+        }
+        lines = [
+            "✅ เปลี่ยนประเภทเอกสารเรียบร้อย",
+            f"📄 รหัส: {doc_id[:8]}",
+            f"📁 {cat_names.get(old_category, old_category)}"
+            f" → {cat_names.get(new_category, new_category)}",
+        ]
+        if patient_label:
+            lines.append(f"👤 แฟ้ม: {patient_label}")
+        lines.append(f"📂 ที่เก็บ: {new_blob_path.rsplit('/', 1)[0]}")
+        lines.append("")
+        lines.append("หมายเหตุ: ไฟล์เดิมยังอยู่ ระบบชี้ไปที่แฟ้มใหม่แล้ว")
+        if stale_lab:
+            lines.append(
+                "⚠️ เอกสารนี้มีผลแล็บที่ระบบอ่านไว้แล้ว "
+                "ค่าเหล่านั้นยังอยู่ในระบบ กรุณาตรวจทานอีกครั้ง"
+            )
+        return {"status": "changed", "message": "\n".join(lines)}
+    except Exception as e:
+        logger.error("เปลี่ยนประเภทเอกสารไม่สำเร็จ: %s", type(e).__name__)
+        return {"error": f"เปลี่ยนประเภทไม่สำเร็จ ({type(e).__name__})"}
+
+
 def _parse_alert_ack(text: str):
     """แยกคำสั่งรับทราบ/ปิด alert วิกฤต
 
@@ -9294,6 +9533,36 @@ def webhook():
                                 reply_token,
                                 _mv_res.get("message", "✅ ดำเนินการแล้ว"),
                             )
+                # ── เปลี่ยนประเภทเอกสารที่จัดหมวดไว้ผิด ─────────────
+                # ของเดิมแก้ได้เฉพาะตอนเพิ่งส่งเข้ามา (ตอบเลข 1-4)
+                # พอเลยช่วงนั้นไปแล้วไม่มีวิธีแก้เลย — ตรวจ production
+                # 26 ต.ค. 2026 พบเอกสาร 2 ใบถูกจัดเป็น lab ทั้งที่ไม่มี
+                # ชื่อรายการตรวจแม้แต่ชนิดเดียว และแก้ไม่ได้ด้วยคำสั่งใด
+                elif _parse_change_category(text) is not None:
+                    _cc_doc, _cc_cat, _cc_hn = _parse_change_category(text)
+                    if (user_hash not in PHYSICIAN_USERS
+                            and user_hash not in ADMIN_USERS):
+                        audit_logger.log(
+                            "document_category_change_denied", user_hash, {},
+                        )
+                        reply_message(
+                            reply_token,
+                            "⚠️ เฉพาะแพทย์หรือผู้ดูแลระบบเท่านั้น"
+                            "ที่เปลี่ยนประเภทเอกสารได้",
+                        )
+                    else:
+                        _cc_res = _change_document_category(
+                            _cc_doc, _cc_cat, _cc_hn, user_hash,
+                        )
+                        if _cc_res.get("error"):
+                            reply_message(
+                                reply_token, f"❌ {_cc_res['error']}"
+                            )
+                        else:
+                            reply_message(
+                                reply_token,
+                                _cc_res.get("message", "✅ ดำเนินการแล้ว"),
+                            )
                 # ── [CS-2] ดูรายการแจ้งเตือนที่ยังค้าง ──────────────
                 # แพทย์ต้องเห็นรายการก่อนจึงจะรับทราบได้ ลำพังคำสั่ง
                 # 'รับทราบ <id>' ใช้ไม่ได้ถ้าหา id ไม่ได้
@@ -9604,8 +9873,48 @@ def health():
         "testing_mode": IS_TESTING,
         "production_mode": IS_PRODUCTION,
         "timestamp": datetime.now().isoformat(),
-        "ai_classify": ENABLE_AI_CLASSIFY and not IS_TESTING,
+        # ── สถานะการจำแนกเอกสาร ──────────────────────────────
+        # ต้องรายงาน "ผลจริง" ไม่ใช่ค่า ENV ที่ตั้งไว้
+        #
+        # ของเดิมรายงาน ai_classify จาก ENABLE_AI_CLASSIFY เพียงตัวเดียว
+        # บน production ที่ไม่ได้ตั้ง ENV ค่านั้นเป็น true (ค่าเริ่มต้นใน
+        # โค้ด) /health จึงขึ้นว่า ai_classify: true ทั้งที่
+        # EXTERNAL_AI_CLASSIFICATION_ALLOWED = False บังคับให้ตกไปใช้การ
+        # จำแนกด้วยคำสำคัญภายในเสมอ ไม่มีข้อมูลผู้ป่วยออกนอกระบบเลย
+        #
+        # ตัวเลขที่อ่านผิดได้แบบนี้เป็นอันตรายกับการตรวจสอบ PDPA —
+        # ผู้ตรวจที่อ่าน /health จะสรุปว่าระบบส่งข้อมูลไป AI ภายนอก
+        "ai_classify": (
+            EXTERNAL_AI_CLASSIFICATION_ALLOWED
+            and ENABLE_AI_CLASSIFY
+            and not IS_TESTING
+        ),
+        "document_classifier": (
+            "external_ai"
+            if (
+                EXTERNAL_AI_CLASSIFICATION_ALLOWED
+                and ENABLE_AI_CLASSIFY
+                and not IS_TESTING
+            )
+            else "internal_keywords"
+        ),
+        "external_ai_allowed": EXTERNAL_AI_CLASSIFICATION_ALLOWED,
+        "ai_classify_env_setting": ENABLE_AI_CLASSIFY,
         "storage_backend": STORAGE_BACKEND,
+        # ── ความพร้อมของเส้นทางแจ้งเตือนค่าวิกฤต ──────────────
+        # เดิมไม่มีทางรู้เลยว่าการแจ้งเตือนส่งถึงใครได้หรือไม่ นอกจาก
+        # ไปอ่าน log ซึ่งไม่มีใครอ่าน จนตรวจพบเมื่อ 26 ต.ค. 2026 ว่า
+        # ALERT_RECIPIENTS ไม่ได้ตั้งค่าเลย และ alert ค่าวิกฤตทุกใบ
+        # ถูกตีตรา delivery_failed แบบเงียบ ๆ
+        #
+        # คืนเฉพาะจำนวนและสาเหตุ ไม่มี LINE user ID — /health
+        # เปิดอ่านได้โดยไม่ต้องยืนยันตัวตน
+        "critical_alert_delivery": (
+            describe_alert_recipients()
+            if describe_alert_recipients is not None
+            else {"can_deliver": False, "problem": "โมดูลแจ้งเตือนไม่พร้อม"}
+        ),
+        "alert_push_configured": bool(line_push_fn),
         "ocr_ready": HAS_TESSERACT and HAS_PIL,
         "ocr_dpi": OCR_DPI,
         "pymupdf_ready": HAS_PYMUPDF,

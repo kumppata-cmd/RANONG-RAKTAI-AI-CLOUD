@@ -47,6 +47,7 @@ COPY line_patient_assistant.py .
 COPY document_workflow.py .
 COPY patient_hn_registry.py .
 COPY quarterly_compare.py .
+COPY vendor_registry.py .
 COPY monitoring_schedule.py .
 COPY nephrology_kpi.py .
 COPY patient_master_registry.py .

@@ -23,6 +23,7 @@ import hmac
 import hashlib
 import base64
 import json
+import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -36,7 +37,18 @@ os.environ.setdefault("STORAGE_BACKEND", "local")
 import server
 
 
-def _make_signature(body: bytes, secret: str = "test_secret_for_unit_test") -> str:
+def _make_signature(body: bytes, secret: str = None) -> str:
+    """เซ็น body ด้วย secret เดียวกับที่ server ใช้ตรวจ
+
+    ต้องอ่านจาก server.LINE_CHANNEL_SECRET ไม่ใช่ค่าคงที่ในไฟล์นี้
+    เพราะ server อ่าน env ครั้งเดียวตอน import (server.py:137) ส่วน
+    test module อื่นตั้ง env ที่ import time ด้วย — ใครถูก import ก่อน
+    จึงเป็นตัวกำหนดค่าที่ server ใช้ ค่าคงที่ในไฟล์นี้จะตรงกันเฉพาะ
+    ลำดับ import บางแบบ ทำให้เทสต์นี้ล้มเมื่อรันสลับลำดับ
+    (ยืนยันแล้ว: รันเรียงย้อนกลับได้ 403 != 200)
+    """
+    if secret is None:
+        secret = server.LINE_CHANNEL_SECRET
     mac = hmac.new(secret.encode("utf-8"), body, hashlib.sha256)
     return base64.b64encode(mac.digest()).decode("utf-8")
 
@@ -343,9 +355,73 @@ class TestExternalAIProtection(unittest.TestCase):
         self.assertFalse(server.EXTERNAL_AI_CLASSIFICATION_ALLOWED)
 
     def test_ai_classify_disabled(self):
-        """AI classification ต้องไม่ถูกเรียกใช้."""
-        # ENABLE_AI_CLASSIFY set to "false" ใน env
-        self.assertFalse(server.ENABLE_AI_CLASSIFY)
+        """เส้นทาง AI ภายนอกต้องถูกปิด แม้ ENABLE_AI_CLASSIFY จะเปิด
+
+        เดิมเทสต์นี้ยืนยันแค่ `server.ENABLE_AI_CLASSIFY is False` ซึ่ง
+        เป็นค่าที่อ่านจาก ENV ครั้งเดียวตอน import (server.py:144 ค่า
+        เริ่มต้นคือ "true") ผลคือเทสต์ยืนยันแค่ว่า test module ไหนถูก
+        import ก่อน — ไม่ได้ยืนยัน control จริง และล้มเมื่อสลับลำดับรัน
+        (ยืนยันแล้ว: AssertionError True is not false)
+
+        ตัวที่กันข้อมูลผู้ป่วยไว้จริงคือ
+        EXTERNAL_AI_CLASSIFICATION_ALLOWED ที่ hardcode เป็น False
+        เทสต์นี้จึงบังคับ ENABLE_AI_CLASSIFY = True แล้วพิสูจน์ว่า
+        classify_with_claude ยังตกไปใช้การจำแนกภายใน และไม่มีการ
+        ต่อเครือข่ายออกไปเลย
+        """
+        sentinel = {"category": "lab", "_from": "keywords"}
+        calls = []
+
+        def _no_network(*a, **kw):
+            calls.append(a[:1])
+            raise AssertionError(
+                "เรียกเครือข่ายออกนอกระบบ — ข้อมูลผู้ป่วยต้องไม่ถูกส่งออก"
+            )
+
+        with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+            tmp.write(b"\x89PNG\r\n\x1a\n")
+            path = tmp.name
+        self.addCleanup(lambda: os.path.exists(path) and os.unlink(path))
+
+        orig_enable = server.ENABLE_AI_CLASSIFY
+        orig_kw = server.classify_with_keywords
+        orig_post = server.http_requests.post
+        try:
+            server.ENABLE_AI_CLASSIFY = True          # จำลองกรณีที่ ENV เปิด
+            server.classify_with_keywords = lambda *a, **kw: dict(sentinel)
+            server.http_requests.post = _no_network
+
+            result = server.classify_with_claude(path)
+        finally:
+            server.ENABLE_AI_CLASSIFY = orig_enable
+            server.classify_with_keywords = orig_kw
+            server.http_requests.post = orig_post
+
+        self.assertEqual(result.get("_from"), "keywords")
+        self.assertEqual(calls, [], "มีการเรียกเครือข่ายออกนอกระบบ")
+        self.assertFalse(server.EXTERNAL_AI_CLASSIFICATION_ALLOWED)
+
+    def test_health_รายงานสถานะที่เป็นผลจริง(self):
+        """/health ต้องไม่บอกว่าใช้ AI ภายนอกเมื่อมันถูกปิดอยู่
+
+        ของเดิมรายงาน ai_classify จาก ENABLE_AI_CLASSIFY ตัวเดียว
+        บน production ที่ไม่ได้ตั้ง ENV ค่านั้นเป็น true (ค่าเริ่มต้นใน
+        โค้ด) /health จึงขึ้น ai_classify: true ทั้งที่ข้อมูลผู้ป่วย
+        ไม่ได้ออกนอกระบบเลย — ยืนยันแล้วจาก production วันที่ 26 ต.ค.
+        2026 ว่าขึ้น true จริง
+
+        ตัวเลขที่อ่านผิดได้แบบนี้เป็นอันตรายกับการตรวจสอบ PDPA
+        """
+        data = server.app.test_client().get("/health").get_json()
+
+        self.assertFalse(
+            data["ai_classify"],
+            "/health บอกว่าใช้ AI ภายนอก ทั้งที่ถูกปิดที่ระดับโค้ด",
+        )
+        self.assertEqual(data["document_classifier"], "internal_keywords")
+        self.assertFalse(data["external_ai_allowed"])
+        # ค่า ENV ดิบต้องยังดูได้ — ไม่ซ่อนการตั้งค่าที่แท้จริง
+        self.assertIn("ai_classify_env_setting", data)
 
     def test_source_code_hardcoded_false(self):
         """ตรวจสอบว่า source code hardcode EXTERNAL_AI = False."""

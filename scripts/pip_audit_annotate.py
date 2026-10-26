@@ -40,6 +40,19 @@ def _ann_escape(text: str) -> str:
     )
 
 
+def _ver_key(version: str) -> tuple:
+    """เรียงเวอร์ชันแบบตัวเลข — "6.9.1" ต้องน้อยกว่า "6.10.0"
+
+    การเทียบเป็นสตริงจะได้ผลกลับกัน และทำให้เลือกเวอร์ชันเป้าหมายผิด
+    ส่วนที่ไม่ใช่ตัวเลข (rc, post) ถือเป็น 0 — พอสำหรับการเลือกตัวสูงสุด
+    """
+    parts = []
+    for chunk in str(version).split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
 def _fix_hint(name: str, fix_versions: list) -> str:
     if fix_versions:
         return f"แก้ได้: upgrade {name} -> {', '.join(fix_versions)}"
@@ -101,6 +114,42 @@ def main() -> int:
             "| แพ็กเกจ | เวอร์ชันที่ใช้ | Advisory | CVE | เวอร์ชันที่แก้แล้ว |",
             "|---|---|---|---|---|",
         ]
+        # ── เวอร์ชันเป้าหมายต่อแพ็กเกจ — ส่งก่อนรายการย่อยเสมอ ──
+        #
+        # ทำไมต้องมี: advisory แต่ละรายการบอก "เวอร์ชันที่แก้รายการนั้น"
+        # ซึ่งมักไม่ใช่ตัวเดียวกัน การ upgrade ไปตามตัวแรกที่เห็นจึงยัง
+        # เหลือ CVE ค้างและต้อง upgrade ซ้ำหลายรอบ — เกิดขึ้นจริงกับ
+        # pypdf ห้ารอบติดเมื่อ 26 ต.ค. 2026
+        #   5.1.0 -> 6.7.1 -> 6.10.2 -> 6.13.1 -> 6.15.0 -> 6.19.0
+        #
+        # ทำไมต้องพิมพ์ "ก่อน" รายการย่อย: GitHub เก็บ annotation ได้
+        # 10 รายการต่อ step ส่วนที่เกินถูกตัดทิ้งเงียบ ๆ รอบแรกที่ใส่
+        # ฟีเจอร์นี้ annotation เป้าหมายจึงหายไปทั้งหมด เพราะ CVE
+        # สิบรายการกินโควตาไปก่อน (ยืนยันจาก /check-runs/{id}/annotations)
+        targets = {}
+        for f in findings:
+            for v in f["fix_versions"]:
+                cur = targets.get(f["name"])
+                if cur is None or _ver_key(v) > _ver_key(cur):
+                    targets[f["name"]] = v
+
+        target_lines = []
+        if targets:
+            target_lines = ["", "### เวอร์ชันเป้าหมาย", ""]
+            for name, v in sorted(targets.items()):
+                target_lines.append(f"- `{name}` → **{v}**")
+                hint = (
+                    f"{name}: upgrade ไปที่ {v} "
+                    f"(เวอร์ชันสูงสุดที่ advisory ทั้งหมดของแพ็กเกจนี้ระบุ)"
+                    f" — อย่า upgrade ตามตัวแรกที่เห็น"
+                )
+                print(
+                    f"::warning file=requirements.txt,line=1,"
+                    f"title=pip-audit target::{_ann_escape(hint)}"
+                )
+
+        # รายการย่อย — เหลือโควตาเท่าไรก็ส่งเท่านั้น ที่เกินยังอยู่ใน
+        # step summary ครบทุกรายการ
         for f in findings:
             cves = ", ".join(f["aliases"]) or "—"
             fixes = ", ".join(f["fix_versions"]) or "ยังไม่มี"
@@ -119,10 +168,13 @@ def main() -> int:
             print(f"::warning file=requirements.txt,line=1,"
                   f"title=pip-audit {f['id']}::{_ann_escape(msg)}")
 
+        summary_lines += target_lines
         summary_lines += [
             "",
             "รายละเอียดแต่ละรายการอยู่ใน annotation ของ job นี้ "
             "(อ่านทาง API ได้ที่ `/check-runs/{id}/annotations`)",
+            "GitHub เก็บ annotation ได้ 10 รายการต่อ step — "
+            "ตารางข้างบนคือรายการครบทุกตัว",
         ]
 
     step_summary = os.getenv("GITHUB_STEP_SUMMARY")

@@ -58,3 +58,35 @@ services:
         sync: false
       - key: LIFF_CHANNEL_ID
         sync: false
+
+      # ─── สิทธิ์ผู้ใช้ และผู้รับการแจ้งเตือนค่าวิกฤต ───────────
+      #
+      # สี่ค่านี้เคยไม่ได้ประกาศไว้ที่นี่ จึงไม่มีช่องให้กรอกใน Render
+      # Dashboard ใครไม่รู้ว่ามีก็จะไม่ได้ตั้ง — และระบบไม่บอกอะไร
+      # จนกระทั่งตรวจเจอว่า alert ค่าวิกฤตไม่เคยถึงใคร (26 ต.ค. 2026)
+      #
+      # ⚠️ รูปแบบค่าไม่เหมือนกัน และนี่คือจุดที่พลาดได้ง่ายที่สุด
+      #
+      #   AUTHORIZED_USERS  SHA-256 hash ของ LINE userId (hex 64 ตัว)
+      #   ADMIN_USERS       SHA-256 hash  (hex 64 ตัว)
+      #   PHYSICIAN_USERS   SHA-256 hash  (hex 64 ตัว)
+      #     ทั้งสามใช้ "ตรวจสิทธิ์" จึงเก็บเป็น hash ไม่เก็บ ID ดิบ
+      #     ขอ hash ของตัวเองได้จาก LINE ด้วยคำสั่งลงทะเบียนของระบบ
+      #
+      #   ALERT_RECIPIENTS  LINE userId ดิบ (U + hex 32 ตัว)
+      #     ใช้ "ส่งข้อความ" ซึ่ง LINE push API ต้องใช้ ID ดิบ
+      #     ใส่ hash ที่นี่จะ push ไม่ได้เลย — ระบบจะคัดออกและขึ้น
+      #     ERROR ใน log พร้อมบอกสาเหตุ
+      #     รองรับหลายคนด้วยการคั่นด้วยจุลภาค และรับ group id (C...)
+      #     ได้ด้วย ถ้าคลินิกใช้กลุ่มพยาบาล
+      #
+      # ตรวจผลได้ที่ /health → critical_alert_delivery
+      #   can_deliver / recipients / problem  (ไม่แสดง ID ของใคร)
+      - key: AUTHORIZED_USERS
+        sync: false
+      - key: ADMIN_USERS
+        sync: false
+      - key: PHYSICIAN_USERS
+        sync: false
+      - key: ALERT_RECIPIENTS
+        sync: false

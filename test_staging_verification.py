@@ -322,14 +322,17 @@ class TestLinePushAPISimulation(unittest.TestCase):
 
     def test_build_alert_recipients_physician_users(self):
         """build_alert_recipients_from_env reads PHYSICIAN_USERS env."""
+        # ต้องเป็นรูปแบบ LINE ID จริง (U/C/R + hex 32 ตัว)
+        # ค่าอย่าง "U_dr_alpha" push ไม่ได้ — ดู build_alert_recipients_from_env
+        dr_a, dr_b, dr_c = "U11111111111111111111111111111111", "U22222222222222222222222222222222", "U33333333333333333333333333333333"
         with patch.dict(os.environ, {
-            "PHYSICIAN_USERS": "U_dr_alpha,U_dr_beta,U_dr_gamma",
+            "PHYSICIAN_USERS": f"{dr_a},{dr_b},{dr_c}",
             "ALERT_RECIPIENTS": "",
         }):
             recipients = build_alert_recipients_from_env()
             self.assertIn("physician", recipients)
             self.assertEqual(len(recipients["physician"]), 3)
-            self.assertIn("U_dr_alpha", recipients["physician"])
+            self.assertIn(dr_a, recipients["physician"])
 
 
 # ══════════════════════════════════════════════════════════════
