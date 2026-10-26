@@ -96,6 +96,25 @@ try:
 except ImportError:
     HAS_PIL = False
 
+# ─── รูปแบบภาพที่อนุญาตให้ Pillow ถอดรหัส ───────────────────
+#
+# ทำไมต้องจำกัด: Pillow เลือกตัวถอดรหัสจาก "เนื้อหาไฟล์" ไม่ใช่นามสกุล
+# ไฟล์ที่ชื่อ .png แต่ข้างในเป็น PSD, FITS หรือ PDF จะถูกส่งเข้า
+# ตัวถอดรหัสของรูปแบบนั้นแทน — ด่านกรองนามสกุลจึงกันไม่ได้
+#
+# ช่องโหว่ที่ปิดด้วยการจำกัดนี้ (พบจาก pip-audit 2026-10-26):
+#   CVE-2026-42311 / CVE-2026-25990  PSD   — memory corruption / OOB write
+#   CVE-2026-40192                   FITS  — decompression bomb (OOM)
+#   CVE-2026-42310                   PDF   — ค้างกิน CPU 100% ไม่สิ้นสุด
+#
+# การ upgrade Pillow เป็น 12.x ปิดช่องโหว่เหล่านี้แล้ว แต่ยังคง
+# ข้อจำกัดนี้ไว้เป็นชั้นที่สอง เพราะเป็นวิธีที่ advisory เองแนะนำ
+# และยังกันช่องโหว่ในอนาคตของตัวถอดรหัสที่ระบบนี้ไม่ได้ใช้เลย
+#
+# ครอบคลุมรูปแบบที่กล้องมือถือและ LINE ส่งมาจริงทั้งหมด
+# เอกสาร PDF ไม่ได้ใช้เส้นทางนี้ — ใช้ PyMuPDF แปลงเป็น pixmap ก่อน
+SAFE_IMAGE_FORMATS = ["JPEG", "PNG", "GIF", "WEBP", "BMP", "TIFF"]
+
 try:
     import fitz as pymupdf  # PyMuPDF
     HAS_PYMUPDF = True
@@ -2348,7 +2367,12 @@ def _admin_api_auth() -> "tuple | None":
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
     auth = request.headers.get("X-Admin-Secret", "")
-    if not auth or not hmac.compare_digest(auth, admin_secret):
+    # เทียบเป็น bytes — compare_digest โยน TypeError ถ้า str มีอักขระนอก
+    # ASCII (header latin-1 ส่งค่านั้นมาได้) ซึ่งจะกลายเป็น 500 แทน 401
+    if not auth or not hmac.compare_digest(
+        auth.encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
+    ):
         return jsonify({"error": "Unauthorized"}), 401
     return None
 
@@ -2895,7 +2919,12 @@ def admin_registry_page():
     """หน้าเว็บทะเบียนผู้ป่วย — เปิดจาก browser ได้เลย (same-origin)"""
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     auth = request.args.get("secret", "")
-    if not admin_secret or auth != admin_secret:
+    # compare_digest — เทียบเวลาคงที่ เหมือน _admin_api_auth
+    # เทียบเป็น bytes เพราะ compare_digest โยน TypeError ถ้า str มีอักขระ
+    # นอก ASCII (เช่น ?secret=ไทย) ซึ่งจะกลายเป็น 500 แทนที่จะเป็น 401
+    if not admin_secret or not hmac.compare_digest(
+        auth.encode("utf-8"), admin_secret.encode("utf-8")
+    ):
         return "<h2>Unauthorized</h2><p>กรุณาเพิ่ม ?secret=... ใน URL</p>", 401
     return REGISTRY_HTML.replace("__ADMIN_SECRET__", admin_secret)
 
@@ -3050,8 +3079,10 @@ const SECRET = "__ADMIN_SECRET__";
 let patients = [];
 
 function api(path, opts={}) {
+  // ส่ง secret ทาง header เท่านั้น — ไม่ใส่ใน query string
+  // เพราะ query string ถูกบันทึกลง access log ของ proxy และแพลตฟอร์ม
+  // (ฝั่ง server ก็ไม่อ่านจาก query string อยู่แล้ว — ดู _admin_api_auth)
   const url = new URL(path, location.origin);
-  url.searchParams.set("secret", SECRET);
   const h = {"X-Admin-Secret": SECRET};
   if (opts.body) h["Content-Type"] = "application/json";
   return fetch(url, {method: opts.method||"GET", headers: h, body: opts.body ? JSON.stringify(opts.body) : undefined}).then(r => r.json());
@@ -3351,7 +3382,8 @@ def _ocr_from_bytes(data: bytes, file_type: str) -> str:
             pdf_doc.close()
             return "\n\n".join(texts)
         else:
-            img = Image.open(tmp.name)
+            # formats= จำกัดตัวถอดรหัสที่ Pillow จะเรียก — ดู SAFE_IMAGE_FORMATS
+            img = Image.open(tmp.name, formats=SAFE_IMAGE_FORMATS)
             # Apply same preprocessing as extract_text_with_ocr
             gray = img.convert("L")
             img.close()
@@ -5690,7 +5722,8 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                 img = None
                 processed = None
                 try:
-                    img = Image.open(filepath)
+                    # formats= จำกัดตัวถอดรหัส — ดู SAFE_IMAGE_FORMATS
+                    img = Image.open(filepath, formats=SAFE_IMAGE_FORMATS)
                     orig_w, orig_h = img.size
                     logger.info(f"[OCR-PRE] Original: {orig_w}x{orig_h} mode={img.mode}")
                     _ocr_debug_store["image_original_size"] = f"{orig_w}x{orig_h}"
