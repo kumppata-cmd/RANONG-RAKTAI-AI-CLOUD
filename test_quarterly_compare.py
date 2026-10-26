@@ -15,6 +15,7 @@ from patient_hn_registry import (
     PatientHN,
     HNRegistry,
     _validate_hn,
+    resolve_patient_folder,
     get_quarter,
     get_quarter_range,
     get_month_range,
@@ -303,6 +304,109 @@ class TestCanonicalDocumentPath(unittest.TestCase):
         )
         self.assertNotIn("..", path)
         self.assertTrue(path.startswith("04_LAB_RESULTS/2026-Q4/2026-10/"))
+
+
+# ═══════════════════════════════════════════════════════════
+# LINE → HN linking: หาแฟ้มผู้ป่วยโดยไม่พึ่ง OCR
+# ═══════════════════════════════════════════════════════════
+
+class _FakeMasterPatient:
+    def __init__(self, clinic_hn, hospital_hn, folder_name):
+        self.clinic_hn = clinic_hn
+        self.hospital_hn = hospital_hn
+        self.folder_name = folder_name
+
+
+class _FakeMasterRegistry:
+    def __init__(self, patients):
+        self._by_hn = {}
+        for p in patients:
+            for hn in (p.clinic_hn, p.hospital_hn):
+                if hn:
+                    self._by_hn[hn] = p.folder_name
+
+    def get_folder_for_hn(self, hn):
+        return self._by_hn.get(hn, "")
+
+
+class _FakeHNRegistry:
+    def __init__(self, mapping):
+        self._mapping = mapping
+
+    def get_by_owner(self, owner_hash):
+        return self._mapping.get(owner_hash)
+
+
+class TestResolvePatientFolder(unittest.TestCase):
+    """เอกสารของผู้ป่วยคนเดียวกันต้องอยู่แฟ้มเดียว ไม่แตกเป็นสองแฟ้ม
+    และต้องไม่ใช้ owner_hash เป็นชื่อแฟ้ม
+    """
+
+    FULL_HASH = "a" * 64
+
+    def setUp(self):
+        self.master = _FakeMasterRegistry([
+            _FakeMasterPatient("57042", "00060578", "57042_PatientName"),
+        ])
+        self.linked = PatientHN(
+            owner_hash=self.FULL_HASH,
+            clinic_hn="57042",
+            hospital_hn="00060578",
+        )
+        self.hn_reg = _FakeHNRegistry({self.FULL_HASH: self.linked})
+
+    def test_resolves_to_master_registry_folder(self):
+        """ต้องได้แฟ้มของ master registry (มีชื่อผู้ป่วย)
+        ไม่ใช่ชื่อแฟ้มดิบของทะเบียน LINE
+        """
+        folder = resolve_patient_folder(
+            self.FULL_HASH, self.hn_reg, self.master,
+        )
+        self.assertEqual(folder, "57042_PatientName")
+        # ยืนยันว่าชื่อแฟ้มดิบของทะเบียน LINE ต่างกันจริง
+        self.assertNotEqual(self.linked.folder_name, folder)
+
+    def test_line_only_patient_uses_line_folder(self):
+        """ผูก LINE ไว้แต่ยังไม่อยู่ในทะเบียนกลาง → ใช้ชื่อแฟ้มจาก LINE"""
+        h = "b" * 64
+        reg = _FakeHNRegistry({h: PatientHN(owner_hash=h, clinic_hn="99999")})
+        self.assertEqual(
+            resolve_patient_folder(h, reg, self.master), "99999",
+        )
+
+    def test_unlinked_sender_gets_no_patient_folder(self):
+        """ยังไม่ผูกบัญชี → ต้องคืน "" ให้เอกสารอยู่ระดับไตรมาส/เดือน"""
+        self.assertEqual(
+            resolve_patient_folder("c" * 64, self.hn_reg, self.master), "",
+        )
+
+    def test_never_uses_owner_hash_as_folder_name(self):
+        """ต้องไม่ใช้ owner_hash เป็นชื่อแฟ้ม — อ่านไม่ออก ไม่สื่อความหมาย"""
+        h = "deadbeefcafe1234" + "0" * 48
+
+        class _HashFallbackReg:
+            def get_by_owner(self, owner_hash):
+                # เลียนแบบ HNRegistry.get_folder_name ที่คืน owner_hash[:8]
+                return PatientHN(owner_hash=owner_hash)
+
+        folder = resolve_patient_folder(h, _HashFallbackReg(), self.master)
+        self.assertEqual(folder, "")
+        self.assertNotIn(h[:8], folder)
+
+    def test_missing_registry_is_safe(self):
+        """ไม่มีทะเบียน → ไม่ throw และคืน "" """
+        self.assertEqual(resolve_patient_folder(self.FULL_HASH, None, None), "")
+        self.assertEqual(resolve_patient_folder("", self.hn_reg, self.master), "")
+
+    def test_registry_error_is_contained(self):
+        """ทะเบียนพังต้องไม่ทำให้การจัดเก็บเอกสารล้มเหลว"""
+        class _Broken:
+            def get_by_owner(self, owner_hash):
+                raise RuntimeError("GCS down")
+
+        self.assertEqual(
+            resolve_patient_folder(self.FULL_HASH, _Broken(), self.master), "",
+        )
 
 
 # ═══════════════════════════════════════════════════════════

@@ -42,7 +42,11 @@ from flask import Flask, request, abort, jsonify, redirect
 import requests as http_requests
 
 # ─── Quarterly/Monthly Organization & HN Registry ──────────
-from patient_hn_registry import HNRegistry, get_quarter
+from patient_hn_registry import (
+    HNRegistry,
+    get_quarter,
+    resolve_patient_folder,
+)
 from patient_master_registry import (
     MasterPatientRegistry,
     parse_patient_list_ocr,
@@ -727,6 +731,7 @@ class StorageGCS:
         filename: str,
         metadata: dict | None = None,
         subfolder: str | None = None,
+        owner_hash_full: str = "",
     ) -> str:
         """อัปโหลดไฟล์ไป GCS.
 
@@ -740,6 +745,9 @@ class StorageGCS:
 
         subfolder: subfolder เพิ่มเติม เช่น ชื่อบริษัทสำหรับ bills
                    → path จะเป็น folder/subfolder/YYYY-MM/filename
+
+        owner_hash_full: owner_hash แบบเต็มสำหรับค้นทะเบียน LINE→HN
+                         (ไม่เขียนลง object metadata — ใช้หา path เท่านั้น)
         """
         # ป้องกัน path traversal (ต้องทำก่อน is_ready check เพราะ fallback ก็ต้องใช้ชื่อที่ปลอดภัย)
         filename = os.path.basename(filename)
@@ -769,21 +777,27 @@ class StorageGCS:
         # ใบยาและใบฟอกเลือดใช้โครงสร้างเดียวกับผลแล็บ — แยกไตรมาส
         # แยกเดือน แล้วแยกรายผู้ป่วย
         # ──────────────────────────────────────────────────────
-        owner_hash_for_path = (metadata or {}).get("owner_hash_short", "")
         patient_hn_folder = (metadata or {}).get("patient_hn_folder", "")
 
-        # ถ้ายังไม่รู้ผู้ป่วยจาก OCR → ลองจาก HN registry ของผู้ส่ง
+        # ถ้า OCR หา HN ไม่ได้ → ใช้ทะเบียน LINE→HN ของผู้ส่งแทน
+        # (ผู้ป่วยพิมพ์ "ลงทะเบียนHN <HN>" ใน LINE ไว้ล่วงหน้า)
+        #
+        # สำคัญ: ต้องใช้ owner_hash แบบเต็ม เพราะทะเบียน index ด้วยค่าเต็ม
+        # และต้องแปลง HN → ชื่อแฟ้มของ master registry เพื่อให้เอกสาร
+        # ของผู้ป่วยคนเดียวกันอยู่แฟ้มเดียว ไม่แตกเป็นสองแฟ้ม
         if (
             not patient_hn_folder
             and category in CLINICAL_CATEGORIES
-            and owner_hash_for_path
-            and hn_registry
+            and owner_hash_full
         ):
             try:
-                patient_hn_folder = hn_registry.get_folder_name(
-                    owner_hash_for_path
-                ) or ""
-            except Exception:
+                patient_hn_folder = resolve_patient_folder(
+                    owner_hash_full, hn_registry, master_registry,
+                )
+            except Exception as _link_err:
+                logger.warning(
+                    "LINE→HN lookup failed: %s", type(_link_err).__name__
+                )
                 patient_hn_folder = ""
 
         blob_path = build_document_path(
@@ -6021,7 +6035,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
 
 def copy_to_category(
     src_path: str, category: str, metadata: dict | None = None,
-    subfolder: str | None = None,
+    subfolder: str | None = None, owner_hash_full: str = "",
 ) -> str:
     """คัดลอกไฟล์ไปยังโฟลเดอร์ตามประเภท + cloud storage.
 
@@ -6057,7 +6071,8 @@ def copy_to_category(
             with open(src_path, "rb") as f:
                 data = f.read()
             cloud_path = storage.save(
-                data, category, filename, metadata, subfolder=subfolder
+                data, category, filename, metadata, subfolder=subfolder,
+                owner_hash_full=owner_hash_full,
             )
         except RuntimeError:
             # Production mode — GCS ล้มเหลว ห้าม fallback
@@ -6217,6 +6232,7 @@ def process_file_async(
             dest = copy_to_category(
                 filepath, category, metadata=metadata,
                 subfolder=bill_company,
+                owner_hash_full=owner_hash or "",
             )
 
             # ── Document Search V1: add to index after GCS upload ──

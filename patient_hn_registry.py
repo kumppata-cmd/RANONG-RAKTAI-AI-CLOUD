@@ -280,6 +280,56 @@ def _validate_hn(hn: str) -> bool:
     return bool(re.match(r'^[A-Za-z0-9\-/]{1,20}$', hn.strip()))
 
 
+def resolve_patient_folder(
+    owner_hash_full: str,
+    hn_reg=None,
+    master_reg=None,
+) -> str:
+    """หาชื่อแฟ้มผู้ป่วยจากบัญชี LINE ของผู้ส่ง (ไม่พึ่ง OCR)
+
+    ใช้เมื่อ OCR อ่าน HN จากเอกสารไม่ได้ — ผู้ป่วยพิมพ์
+    "ลงทะเบียนHN <HN>" ใน LINE ไว้ล่วงหน้า
+
+    ลำดับ:
+      1. ทะเบียน LINE→HN หา HN ของผู้ส่ง
+      2. แปลง HN → ชื่อแฟ้มของ master registry (มีชื่อผู้ป่วย)
+         เพื่อให้เอกสารของคนเดียวกันอยู่แฟ้มเดียว ไม่แตกเป็นสองแฟ้ม
+      3. ถ้าไม่มีในทะเบียนกลาง ใช้ชื่อแฟ้มจากทะเบียน LINE
+
+    คืน "" เมื่อหาไม่ได้ — เอกสารจะอยู่ระดับไตรมาส/เดือนเท่านั้น
+    ไม่ใช้ owner_hash เป็นชื่อแฟ้ม เพราะอ่านไม่ออกและไม่สื่อความหมาย
+    """
+    if not owner_hash_full or not hn_reg:
+        return ""
+
+    try:
+        linked = hn_reg.get_by_owner(owner_hash_full)
+    except Exception:
+        return ""
+    if not linked:
+        return ""
+
+    # แปลง HN → แฟ้มมาตรฐานของ master registry
+    for hn in (
+        getattr(linked, "clinic_hn", ""),
+        getattr(linked, "hospital_hn", ""),
+    ):
+        if not hn:
+            continue
+        try:
+            folder = master_reg.get_folder_for_hn(hn) if master_reg else ""
+        except Exception:
+            folder = ""
+        if folder:
+            return folder
+
+    folder = getattr(linked, "folder_name", "") or ""
+    # กัน fallback ที่คืน owner_hash มาเป็นชื่อแฟ้ม
+    if folder and folder == owner_hash_full[:8]:
+        return ""
+    return folder
+
+
 def get_quarter(date: datetime) -> str:
     """คืนค่าไตรมาส เช่น '2026-Q4'"""
     q = (date.month - 1) // 3 + 1
