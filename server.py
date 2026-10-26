@@ -1613,9 +1613,16 @@ class DocumentIndex:
             else:
                 doc["gcs_object_path"] = new_gcs_path
         # เขียน GCS — overwrite per-doc JSON
+        #
+        # ต้องใช้ document_id จริงของเอกสารที่หาเจอ ไม่ใช่ค่าที่ส่งเข้ามา
+        # เพราะเมธอดนี้ยอมให้ค้นด้วยคำนำหน้า (startswith) ถ้าใช้ค่าที่
+        # ส่งเข้ามาตรง ๆ แล้วมีคนเรียกด้วยคำนำหน้า จะเขียน index ไปที่
+        # path ผิด กลายเป็นไฟล์ index ปลอมและของจริงไม่ถูกอัปเดต
+        # (ปัจจุบันผู้เรียกส่ง id เต็มเสมอ จึงยังไม่เกิดจริง — แก้กันไว้)
+        _real_doc_id = doc.get("document_id", "") or doc_id
         if self._storage.is_ready:
             try:
-                blob_path = f"{INDEX_DOC_PREFIX}{doc_id}.json"
+                blob_path = f"{INDEX_DOC_PREFIX}{_real_doc_id}.json"
                 doc_json = json.dumps(doc, ensure_ascii=False)
                 blob = self._storage._bucket.blob(blob_path)
                 blob.upload_from_string(
@@ -1623,7 +1630,7 @@ class DocumentIndex:
                 )
                 logger.info(
                     f"Document index: updated category "
-                    f"doc={doc_id[:8]}… → {new_category}"
+                    f"doc={_real_doc_id[:8]}… → {new_category}"
                 )
             except Exception as e:
                 logger.warning(
@@ -7180,6 +7187,30 @@ def _clear_patient_context(user_hash: str):
         pass
 
 
+def _parse_move_document(text: str):
+    """แยกคำสั่งย้ายเอกสารไปแฟ้มผู้ป่วยที่ถูกต้อง
+
+    รองรับ:
+      ย้ายเอกสาร a1b2c3d4 57042
+      ย้าย a1b2c3d4 57042
+      move a1b2c3d4 57042
+
+    คืน (doc_id_prefix, hn) หรือ None ถ้าไม่ใช่คำสั่งนี้
+    """
+    import re as _re_mv
+
+    m = _re_mv.match(
+        r"^\s*(?:ย้ายเอกสาร|ย้าย|move)\s+"
+        r"([0-9a-fA-F]{6,32})\s+"
+        r"([A-Za-z0-9\-/]{2,20})\s*$",
+        (text or "").strip(),
+        _re_mv.IGNORECASE,
+    )
+    if not m:
+        return None
+    return (m.group(1), m.group(2))
+
+
 def _parse_alert_ack(text: str):
     """แยกคำสั่งรับทราบ/ปิด alert วิกฤต
 
@@ -7326,6 +7357,134 @@ def _reclassify_document(
             line_user_id,
             "❌ ย้ายเอกสารไม่สำเร็จ — กรุณาส่งเอกสารใหม่อีกครั้ง",
         )
+
+
+def _find_doc_by_prefix(doc_id_prefix: str):
+    """หาเอกสารจากคำนำหน้า document_id
+
+    คืน (doc, error_message) — doc เป็น None เมื่อหาไม่ได้
+    ปฏิเสธเมื่อกำกวม ไม่เดา เพราะปลายทางคือการย้ายเวชระเบียน
+    """
+    prefix = (doc_id_prefix or "").strip().lower()
+    if len(prefix) < 6:
+        return None, "รหัสเอกสารสั้นเกินไป (ต้องอย่างน้อย 6 ตัว)"
+    try:
+        doc_index._ensure_fresh()
+    except Exception:
+        pass
+    matches = [
+        d for d in doc_index._docs
+        if d.get("document_id", "").lower().startswith(prefix)
+    ]
+    if not matches:
+        return None, f"ไม่พบเอกสารรหัส {prefix}"
+    if len(matches) > 1:
+        return None, (
+            f"รหัส {prefix} ตรงกับ {len(matches)} เอกสาร — "
+            "กรุณาระบุให้ยาวขึ้น"
+        )
+    return matches[0], ""
+
+
+def _move_document_to_patient(
+    doc_id_prefix: str, hn: str, actor_hash: str,
+) -> dict:
+    """ย้ายเอกสารไปแฟ้มของผู้ป่วยที่ถูกต้อง
+
+    เหตุผลที่ต้องมี:
+      workflow จริงของคลินิกคือเจ้าหน้าที่เลือกผู้ป่วยก่อนส่งเอกสาร
+      ถ้าลืมเปลี่ยนผู้ป่วย เอกสารชุดถัดไปจะเข้าแฟ้มคนก่อนทั้งชุด
+      ก่อนหน้านี้ "ไม่มีวิธีแก้เลย" ต้องส่งเอกสารใหม่อย่างเดียว
+
+    วิธีทำงาน: ใช้ GCS server-side copy เหมือน retroactive routing
+      - ไม่ลบไฟล์ต้นฉบับ (ระบบไม่มีสิทธิ์ลบอยู่แล้ว) ต้นฉบับยังอยู่ครบ
+      - อัปเดต index ให้ชี้ไปที่ path ใหม่
+      - บันทึก audit ทุกครั้ง
+    """
+    if master_registry is None or not storage.is_ready:
+        return {"error": "ระบบจัดเก็บยังไม่พร้อม"}
+
+    doc, err = _find_doc_by_prefix(doc_id_prefix)
+    if doc is None:
+        return {"error": err}
+
+    patient = master_registry.match_hn(hn)
+    if patient is None:
+        return {"error": f"ไม่พบ HN {hn} ในทะเบียนผู้ป่วย"}
+
+    cat = doc.get("category", "")
+    if cat not in CLINICAL_CATEGORIES:
+        return {"error": (
+            f"เอกสารนี้เป็นประเภท '{cat}' ซึ่งไม่ได้จัดเก็บตามรายผู้ป่วย"
+        )}
+
+    gcs_path = doc.get("gcs_object_path", "")
+    blob_path = (
+        gcs_path.split("/", 3)[3]
+        if gcs_path.startswith("gs://") and gcs_path.count("/") >= 3
+        else gcs_path
+    )
+    if not blob_path:
+        return {"error": "เอกสารนี้ไม่มีไฟล์ใน cloud storage"}
+
+    # ใช้วันที่ของเอกสาร เพื่อให้ยังอยู่ไตรมาส/เดือนเดิม ไม่ย้ายข้ามช่วงเวลา
+    doc_dt = None
+    try:
+        if doc.get("upload_date"):
+            doc_dt = datetime.strptime(
+                doc["upload_date"], "%Y-%m-%d"
+            ).replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        doc_dt = None
+
+    filename = blob_path.rsplit("/", 1)[-1]
+    new_blob_path = build_document_path(
+        FOLDERS.get(cat, FOLDERS["review"]), filename, cat,
+        patient_folder=patient.folder_name, date=doc_dt,
+    )
+
+    if new_blob_path == blob_path:
+        return {
+            "status": "unchanged",
+            "message": (
+                f"เอกสารนี้อยู่ในแฟ้มของ {patient.hn_display} อยู่แล้ว"
+            ),
+        }
+
+    try:
+        src = storage._bucket.blob(blob_path)
+        if not src.exists():
+            return {"error": "ไม่พบไฟล์ต้นฉบับใน cloud storage"}
+        dest = storage._bucket.blob(new_blob_path)
+        if not dest.exists():
+            storage._bucket.copy_blob(src, storage._bucket, new_blob_path)
+
+        doc_index.update_category(
+            doc.get("document_id", ""), cat, new_blob_path,
+        )
+
+        audit_logger.log("document_refiled", actor_hash, {
+            "doc_id": doc.get("document_id", "")[:8],
+            "category": cat,
+            "to_patient_folder": patient.folder_name,
+        })
+        logger.info(
+            "Re-filed document %s → patient folder (cat=%s)",
+            doc.get("document_id", "")[:8], cat,
+        )
+        return {
+            "status": "moved",
+            "message": (
+                f"✅ ย้ายเอกสารเรียบร้อย\n"
+                f"📄 รหัส: {doc.get('document_id', '')[:8]}\n"
+                f"👤 แฟ้มใหม่: {patient.hn_display} — "
+                f"{patient.patient_name or 'ไม่มีชื่อ'}\n\n"
+                f"หมายเหตุ: ไฟล์เดิมยังอยู่ ระบบชี้ไปที่แฟ้มใหม่แล้ว"
+            ),
+        }
+    except Exception as e:
+        logger.error("Re-file failed: %s", type(e).__name__)
+        return {"error": f"ย้ายเอกสารไม่สำเร็จ ({type(e).__name__})"}
 
 
 # /tmp metadata structure (per user_hash):
@@ -8324,6 +8483,35 @@ def webhook():
                                     reply_token,
                                     _res.get("message", "✅ บันทึกแล้ว"),
                                 )
+                # ── ย้ายเอกสารที่เข้าแฟ้มผิดคน ──────────────────────
+                # workflow จริงใช้เจ้าหน้าที่เลือกผู้ป่วยก่อนส่ง ถ้าลืม
+                # เปลี่ยนผู้ป่วย เอกสารชุดถัดไปเข้าแฟ้มคนก่อนทั้งชุด
+                # ก่อนหน้านี้ไม่มีวิธีแก้เลย ต้องส่งใหม่อย่างเดียว
+                elif _parse_move_document(text) is not None:
+                    _mv_doc, _mv_hn = _parse_move_document(text)
+                    if (user_hash not in PHYSICIAN_USERS
+                            and user_hash not in ADMIN_USERS):
+                        audit_logger.log(
+                            "document_refile_denied", user_hash, {},
+                        )
+                        reply_message(
+                            reply_token,
+                            "⚠️ เฉพาะแพทย์หรือผู้ดูแลระบบเท่านั้น"
+                            "ที่ย้ายเอกสารได้",
+                        )
+                    else:
+                        _mv_res = _move_document_to_patient(
+                            _mv_doc, _mv_hn, user_hash,
+                        )
+                        if _mv_res.get("error"):
+                            reply_message(
+                                reply_token, f"❌ {_mv_res['error']}"
+                            )
+                        else:
+                            reply_message(
+                                reply_token,
+                                _mv_res.get("message", "✅ ดำเนินการแล้ว"),
+                            )
                 # ── [CS-2] ดูรายการแจ้งเตือนที่ยังค้าง ──────────────
                 # แพทย์ต้องเห็นรายการก่อนจึงจะรับทราบได้ ลำพังคำสั่ง
                 # 'รับทราบ <id>' ใช้ไม่ได้ถ้าหา id ไม่ได้
