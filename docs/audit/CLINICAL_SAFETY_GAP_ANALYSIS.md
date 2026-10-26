@@ -2,6 +2,25 @@
 
 **Audit date:** 2026-10-26
 **Commit audited:** `b4a6619` (`main`)
+**Last updated:** 2026-10-26 — P0-A alert pipeline **RESOLVED (TESTED)**
+
+> ## Batch 2 status — CS-1, CS-2, CS-3, CS-4 → **RESOLVED (TESTED)**
+>
+> Commit: `27ea4ae` · New test file: `test_critical_alert_pipeline.py` (31 cases) · Suite: **1,179 tests, 0 failures, 0 errors**
+>
+> | ID | Fix | Verification |
+> |---|---|---|
+> | **CS-2** | `find_alert_id_by_prefix()` resolves the 8-char code shown to clinicians (refuses ambiguous or too-short input); LINE commands `รับทราบ`/`แก้ไขแล้ว`/`ack`/`resolve` restricted to `PHYSICIAN_USERS` or `ADMIN_USERS`; new `แจ้งเตือนค้าง` listing | Full round-trip test: code parsed out of the **actual notification text** → resolved → acknowledged → state `ACKNOWLEDGED`, `alert_acknowledged` audited |
+> | **CS-1** | Dedicated driver thread (120s, `ALERT_DRIVER_INTERVAL`/`ALERT_DRIVER_ENABLED`) replacing the `/health/ready` piggyback nothing called | Retry proven to fire and deliver; backoff respected; **lock proven by call counting** — free→1, held→stays 1, released→2 |
+> | **CS-3** | `ack_timeout_sec` (900s), `seconds_awaiting_ack()`, `should_escalate_unacknowledged()`, wired into driver; `_escalate(reason=…)` with distinct messages, admin-first targeting, and ack instructions included | `SENT` + overdue → state `ESCALATED`, `escalation_reason="acknowledgement_overdue"`, audited; in-window not escalated; escalation message contains no owner hash or lab value |
+> | **CS-4** | `allow_simulated_delivery` defaults **False**; server passes `not IS_PRODUCTION` | No sender → `DELIVERY_FAILED` with `no_sender_configured`, and **no** `alert_sent` audit entry |
+>
+> ### Additional defect found and fixed during the repair
+> `format_active_alerts()` displayed only `doc_id`, never the **alert code** that the acknowledgment command requires — so even after adding the command, a clinician reading the pending-alerts list would have had no code to reply with. This is the *same* class of defect as CS-2 itself (an instruction referencing something the user cannot act on) and is now covered by a test.
+>
+> ### Still open in P0-A
+> - **Multi-recipient redundancy** (was noted P2): `attempt_delivery` still `break`s after the first successful recipient. Unchanged in this batch.
+> - **Production verification: BLOCKED.** Everything above is verified by test, not against the live service. The highest-value outstanding check remains reading the live `_alerts/` prefix to see whether real critical alerts were already lost while the pipeline was broken — this needs GCS credentials.
 **Method:** static code audit. **Every P0 finding below was independently re-verified against source by the lead auditor.**
 **Access:** no production, no GCS credentials → no finding is marked `VERIFIED IN PRODUCTION`.
 
