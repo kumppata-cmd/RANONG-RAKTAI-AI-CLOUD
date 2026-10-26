@@ -792,3 +792,108 @@ class TestNoRegression(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ═══════════════════════════════════════════════════════════
+# ความเข้ากันได้กับ Windows Cloud Sync (gcs_sync_v22.py)
+#
+# ตัว sync agent ไม่อยู่ใน repository นี้ (ติดตั้งบนเครื่องคลินิก)
+# แต่ path ที่ฝั่ง cloud สร้างต้องผ่านการตรวจของมัน เทสต์ชุดนี้จึง
+# เข้ารหัส "สัญญา" ที่ validate_blob_path() และ discover_prefixes()
+# ของ sync agent กำหนดไว้ เพื่อให้การแก้โครงสร้างแฟ้มในอนาคต
+# ไม่ทำให้เอกสารตกค้างไม่ลงเครื่องคลินิก
+#
+# ยืนยันกับโค้ดจริงของ sync agent แล้วเมื่อ 26 ต.ค. 2026:
+#   - validate_blob_path mirror blob name ทั้งเส้นใต้ BASE_DIR
+#     ไม่สนความลึก และไม่จำกัดชุดอักขระ (ชื่อไทยใช้ได้)
+#   - discover_prefixes sync เฉพาะ prefix ใน EXPECTED_PREFIXES
+#     ดังนั้น _vendors/ (ทะเบียนบริษัท) ไม่ถูก sync ลงเครื่องคลินิก
+# ═══════════════════════════════════════════════════════════
+
+class TestWindowsSyncCompatibility(unittest.TestCase):
+
+    # ชุด prefix ที่ sync agent ยอม sync (EXPECTED_PREFIXES ใน gcs_sync_v22)
+    SYNCED_PREFIXES = frozenset({
+        "01_LINE_INBOX", "02_BILLS_RECEIPTS", "03_PRESCRIPTIONS",
+        "04_LAB_RESULTS", "05_DIALYSIS_RECORDS", "06_AI_REVIEW",
+        "07_APPROVED_DOCUMENTS",
+    })
+
+    # ชื่อที่ sync agent ปฏิเสธในทุกส่วนของ path
+    WIN_RESERVED = frozenset(
+        ["CON", "PRN", "AUX", "NUL"]
+        + [f"COM{i}" for i in range(1, 10)]
+        + [f"LPT{i}" for i in range(1, 10)]
+    )
+
+    DATE = datetime(2026, 10, 14, 9, 0, tzinfo=timezone.utc)
+
+    def _bill_path(self, vendor):
+        return build_document_path(
+            "02_BILLS_RECEIPTS", "uuid.jpg", "bills",
+            subfolder=vendor, date=self.DATE,
+        )
+
+    def test_bill_paths_stay_under_a_synced_prefix(self):
+        """ถ้า prefix บนสุดเปลี่ยน เอกสารจะไม่ถูก sync ลงเครื่องคลินิกเลย"""
+        for vendor in ("NIKKISO", "ซันไรส์_เมดิคัล",
+                       vr.REVIEW_VENDOR_FOLDER, vr.UNKNOWN_VENDOR_FOLDER):
+            with self.subTest(vendor=vendor):
+                top = self._bill_path(vendor).split("/")[0]
+                self.assertIn(top, self.SYNCED_PREFIXES)
+
+    def test_no_path_component_is_a_windows_reserved_name(self):
+        """sync agent ปฏิเสธทั้ง path ถ้ามีส่วนใดชื่อตรงกับชื่อสงวน"""
+        for vendor in ("NIKKISO", "ซันไรส์_เมดิคัล",
+                       vr.REVIEW_VENDOR_FOLDER, vr.UNKNOWN_VENDOR_FOLDER):
+            with self.subTest(vendor=vendor):
+                for part in self._bill_path(vendor).split("/"):
+                    self.assertNotIn(part.split(".")[0].upper(),
+                                     self.WIN_RESERVED)
+
+    def test_paths_contain_nothing_sync_agent_rejects(self):
+        """ไม่มี traversal, null byte, drive letter หรือขึ้นต้นด้วย /"""
+        for vendor in list(TestPathSafety.ATTACKS) + ["NIKKISO", "ซันไรส์"]:
+            with self.subTest(vendor=vendor):
+                path = self._bill_path(vendor)
+                self.assertNotIn("..", path)
+                self.assertNotIn("\x00", path)
+                self.assertFalse(path.startswith("/"))
+                self.assertFalse(path.startswith("\\"))
+                self.assertNotEqual(path[1:2], ":")
+
+    def test_vendor_registry_lives_outside_synced_prefixes(self):
+        """ทะเบียนบริษัทเป็นข้อมูลภายใน ต้องไม่ถูก sync ลงแฟ้มเอกสาร
+
+        sync agent sync เฉพาะ prefix ใน allowlist ทะเบียนจึงต้องอยู่
+        นอก allowlist เหมือน _state/ และ _alerts/ ที่มีอยู่เดิม
+        """
+        for path in (vr.VendorRegistry.GCS_FILE,
+                     vr.VendorRegistry.GCS_VERSIONED_PREFIX,
+                     vr.VendorRegistry.PENDING_PREFIX):
+            with self.subTest(path=path):
+                self.assertNotIn(path.split("/")[0], self.SYNCED_PREFIXES)
+
+    def test_review_folders_are_synced_so_staff_can_see_them(self):
+        """แฟ้มรอตรวจต้องอยู่ใต้ 02_BILLS_RECEIPTS เพื่อให้เห็นบนเครื่องคลินิก
+
+        ถ้าย้ายไปไว้นอก allowlist เอกสารที่รอตรวจจะไม่ปรากฏบนเครื่อง
+        และไม่มีใครรู้ว่าต้องตรวจ
+        """
+        for folder in (vr.REVIEW_VENDOR_FOLDER, vr.UNKNOWN_VENDOR_FOLDER):
+            with self.subTest(folder=folder):
+                self.assertTrue(
+                    self._bill_path(folder).startswith("02_BILLS_RECEIPTS/")
+                )
+
+    def test_clinical_paths_unchanged_in_shape(self):
+        """เอกสารคลินิกต้องคงรูป folder/ไตรมาส/เดือน/ผู้ป่วย/ไฟล์"""
+        path = build_document_path(
+            "04_LAB_RESULTS", "uuid.pdf", "lab",
+            patient_folder="57042_สมชาย", date=self.DATE,
+        )
+        parts = path.split("/")
+        self.assertEqual(len(parts), 5)
+        self.assertEqual(parts[0], "04_LAB_RESULTS")
+        self.assertEqual(parts[1], "2026-Q4")
+        self.assertEqual(parts[2], "2026-10")

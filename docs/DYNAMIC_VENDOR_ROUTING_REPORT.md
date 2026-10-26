@@ -212,11 +212,11 @@ Endpoint ใหม่ทั้งหมดรับ secret ทาง header `X-A
 
 ```
 $ python3 -m unittest $(ls test_*.py | sed 's/\.py$//' | tr '\n' ' ')
-Ran 1358 tests in 8.866s
+Ran 1364 tests in 8.102s
 OK (skipped=15)
 ```
 
-เดิม 1,298 ข้อ → ตอนนี้ 1,358 ข้อ (เพิ่ม 60 ข้อใน `test_vendor_routing.py`) **ชุดทดสอบเดิมผ่านครบไม่มี regression**
+เดิม 1,298 ข้อ → ตอนนี้ 1,364 ข้อ (เพิ่ม 66 ข้อใน `test_vendor_routing.py`) **ชุดทดสอบเดิมผ่านครบไม่มี regression**
 
 ### 4.2 การทดสอบทั้งสาย (end-to-end) ผ่าน `process_file_async` จริง
 
@@ -251,21 +251,53 @@ OK (skipped=15)
 | 7 | จัดประเภทด้วยมือ → แฟ้มบริษัท/เดือนถูกต้อง | ✅ PASS |
 | 8 | LINE event ซ้ำ → ไม่เกิดเอกสารซ้ำ | ✅ PASS (กลไกเดิม 3 ชั้น ยังทำงาน) |
 | 9 | GCS upload ล้มเหลว → ไม่รายงานว่าสำเร็จ | ✅ PASS |
-| 10 | Windows Sync ช้า → รายงานสถานะรออยู่ | 🚫 **BLOCKED** |
+| 10 | Windows Sync ช้า → รายงานสถานะรออยู่ | ⚠️ **NOT IMPLEMENTED** (ดูข้อ 4.5) |
 | 11 | path traversal → ถูกปฏิเสธ | ✅ PASS |
 | 12 | เลขใบเดียวกัน เนื้อหาต่าง → จัดการปลอดภัย | ✅ PASS (`if_generation_match=0`) |
 | 13 | เวลาใกล้เที่ยงคืน → เดือนไทยถูกต้อง | ✅ PASS |
 | 14 | ชุดทดสอบเดิมผ่าน | ✅ PASS (1,298/1,298) |
 
-**ข้อ 10 BLOCKED เพราะ:** ส่วน Windows Cloud Sync **ไม่อยู่ใน repository นี้** ตรวจแล้วทั้ง repo พบคำว่า sync เพียงจุดเดียวซึ่งเป็นคอมเมนต์เรื่อง file lock ตัว sync agent ทำงานบนเครื่องคลินิก จึงไม่มีโค้ดให้ทดสอบจากที่นี่ ไม่รายงาน PASS จากการเดา
+### 4.5 ข้อ 10 — แก้ข้อสรุปเดิมของผม
+
+**ฉบับแรกของรายงานนี้เขียนว่า BLOCKED เพราะ "Windows Cloud Sync ไม่อยู่ใน repository นี้" — ข้อสรุปนั้นผิด** ผมค้นเฉพาะใน git repo ไม่ได้ค้นที่ workspace ชั้นนอก ตัว sync agent อยู่จริงที่ `/home/claude/gcs_sync_v22.py` (1,059 บรรทัด) และ `/home/claude/cloud_sync/gcs_sync.py` พร้อมชุดทดสอบของตัวเอง 70 ข้อ
+
+เมื่อตรวจโค้ดจริงแล้วได้ข้อสรุปที่ถูกต้องสองเรื่อง:
+
+**เรื่องที่หนึ่ง — การแก้ไขนี้เข้ากันได้กับ sync agent** ยืนยันด้วยการรัน `validate_blob_path()` ของ sync agent จริงกับ path ที่การแก้ไขนี้สร้าง:
+
+```
+บริษัทปกติ        -> ...\02_BILLS_RECEIPTS\NIKKISO\2026-10\uuid.jpg
+บริษัทใหม่        -> ...\02_BILLS_RECEIPTS\SUNRISE_MEDICAL\2026-10\uuid.jpg
+ชื่อแฟ้มภาษาไทย   -> ...\02_BILLS_RECEIPTS\ซันไรส์_เมดิคัล\2026-10\uuid.jpg
+รอตรวจสอบ         -> ...\02_BILLS_RECEIPTS\_PENDING_REVIEW\2026-10\uuid.jpg
+บิลแบบเดิม        -> ...\02_BILLS_RECEIPTS\2026-10\uuid.jpg
+ผลแล็บรายผู้ป่วย  -> ...\04_LAB_RESULTS\2026-Q4\2026-10\57042_สมชาย\uuid.pdf
+traversal         ปฏิเสธ
+ชื่อสงวน Windows  ปฏิเสธ
+```
+
+เหตุที่เข้ากันได้:
+
+- `validate_blob_path()` mirror blob name ทั้งเส้นใต้ `BASE_DIR` (`local_path = (base_dir / blob_name).resolve()`) **ไม่มีการอ่าน path จากตำแหน่งคงที่เลย** การเพิ่มชั้นแฟ้มบริษัทจึงไม่ทำให้มันสับสน
+- ไม่จำกัดชุดอักขระ → ชื่อแฟ้มภาษาไทยใช้ได้
+- prefix บนสุดยังเป็น `02_BILLS_RECEIPTS` ซึ่งอยู่ใน `EXPECTED_PREFIXES` เดิม
+- `discover_prefixes()` sync **เฉพาะ** prefix ใน allowlist → `_vendors/` (ทะเบียนบริษัท) ไม่ถูก sync ลงเครื่องคลินิก เหมือน `_state/` และ `_alerts/` ที่มีอยู่เดิม
+- ตัว sync agent มีการกัน traversal และชื่อสงวนของ Windows เป็นชั้นที่สอง ซึ่งให้ผลตรงกับฝั่ง cloud
+
+ชุดทดสอบของ sync agent เอง: `python3 -m unittest test_gcs_sync` → **70 ข้อผ่าน**
+
+เพิ่ม `TestWindowsSyncCompatibility` 6 ข้อใน repo เพื่อตรึงสัญญานี้ไว้ ไม่ให้การแก้โครงสร้างแฟ้มในอนาคตทำให้เอกสารตกค้างไม่ลงเครื่องคลินิก
+
+**เรื่องที่สอง — ข้อ 10 ไม่ใช่ BLOCKED แต่เป็น NOT IMPLEMENTED** การ sync เป็นทางเดียว GCS → Windows ฝั่ง cloud ไม่มีทางรู้ว่าเครื่องคลินิกดาวน์โหลดไฟล์ไปแล้วหรือยัง sync agent เก็บสถานะไว้ที่ `sync_state.json` บนเครื่องคลินิกเท่านั้น และไม่ส่งสถานะกลับ
+
+**"Windows Sync ช้า → รายงานสถานะรออยู่" จึงเป็นความสามารถที่ยังไม่มีในทั้งสองฝั่ง** ไม่ใช่เรื่องที่ทดสอบไม่ได้เพราะเข้าไม่ถึง ถ้าคุณหมอต้องการ ทำได้โดยให้ sync agent เขียนสถานะกลับขึ้น GCS แล้วให้ฝั่ง cloud อ่าน — เป็นงานแยกที่ต้องแก้ทั้งสองฝั่ง
 
 ### 4.4 ข้อที่ยังยืนยันไม่ได้
 
 | สิ่งที่ต้องยืนยัน | ติดที่ |
 |---|---|
 | object อยู่บน GCS ตาม path ที่คาด | ไม่มี GCS credential |
-| Windows Sync วางไฟล์ในโฟลเดอร์ที่คาด | sync agent ไม่อยู่ใน repo นี้ |
-| checksum ตรงกันระหว่าง cloud กับ Windows | เหตุผลเดียวกันทั้งสองข้อข้างบน |
+| checksum ตรงกันระหว่าง cloud กับ Windows | ต้องรัน sync จริงบนเครื่องคลินิก |
 | ใบ NIKKISO ที่วางผิดแฟ้มอยู่จริง อยู่ที่ไหน | ต้องอ่าน index/bucket จริง |
 
 ---
@@ -334,6 +366,7 @@ to_move=1  already_correct=1  needs_vendor_review=1
 
 ## 8. ที่ยังทำไม่ได้ / ควรทำต่อ
 
+0. **รายงานสถานะ sync กลับฝั่ง cloud** (ข้อ 10) — ต้องแก้ทั้ง sync agent และฝั่ง cloud ดูข้อ 4.5
 1. **ย้ายไฟล์เดิมที่วางผิดแฟ้ม** — มีแผน dry-run แล้ว รอคุณหมออนุมัติจึงทำส่วนย้ายจริง
 2. **ยืนยันกับ production** — ต้องรัน `/admin/api/v2/vendors/relocation-plan` กับข้อมูลจริง เพื่อรู้ว่ามีบิลที่วางผิดแฟ้มกี่ใบ
 3. **ลงทะเบียนบริษัทที่เหลือ** — ตอนนี้มี 9 รายจากตารางเดิม ถ้ามีคู่ค้ารายอื่นที่ส่งบิลเข้ามา ลงทะเบียนเพิ่มได้เองผ่าน API
@@ -348,7 +381,7 @@ to_move=1  already_correct=1  needs_vendor_review=1
 | ไฟล์ | การเปลี่ยน |
 |---|---|
 | `vendor_registry.py` | **ใหม่** — ทะเบียนบริษัท, การจับคู่, ความปลอดภัยของชื่อแฟ้ม |
-| `test_vendor_routing.py` | **ใหม่** — acceptance tests 60 ข้อ |
+| `test_vendor_routing.py` | **ใหม่** — acceptance tests 66 ข้อ (รวมความเข้ากันได้กับ Windows sync) |
 | `quarterly_compare.py` | `to_bangkok`, `bangkok_month`, `build_legacy_path(date=...)`, `_safe_folder_component` เข้มขึ้น |
 | `server.py` | ลบ `BILL_COMPANY_REGISTRY` ที่ hardcode, เพิ่ม `resolve_bill_vendor`, `parse_line_timestamp`, `_doc_submitted_date`, ร้อย timestamp ทั้งสาย, แก้เส้นทางจัดประเภทใหม่, endpoint ผู้ดูแล 6 ตัว |
 | `docs/DYNAMIC_VENDOR_ROUTING_REPORT.md` | **ใหม่** — รายงานฉบับนี้ |
@@ -363,7 +396,8 @@ to_move=1  already_correct=1  needs_vendor_review=1
 |---|---|
 | เป้าหมายหลัก (เพิ่มบริษัทไม่ต้องแก้โค้ด) | ✅ PASS — ยืนยันทั้งสายแล้ว |
 | ข้อกำหนดข้อ 7 — 13 จาก 14 ข้อ | ✅ PASS |
-| ข้อกำหนดข้อ 7 — ข้อ 10 (Windows Sync) | 🚫 BLOCKED — ไม่อยู่ใน repo นี้ |
+| ข้อกำหนดข้อ 7 — ข้อ 10 (Windows Sync delay) | ⚠️ NOT IMPLEMENTED — ไม่มีช่องทางรายงานสถานะกลับ |
+| ความเข้ากันได้กับ Windows Cloud Sync | ✅ PASS — ยืนยันกับโค้ด sync agent จริง |
 | ชุดทดสอบเดิม | ✅ 1,298/1,298 ไม่มี regression |
 | การยืนยันกับ production | 🚫 **BLOCKED — ยังไม่ได้ทดสอบแม้แต่ข้อเดียว** |
 | ย้ายไฟล์เดิม | ⏸ มีแผน dry-run รออนุมัติ |
