@@ -26,13 +26,42 @@ logger = logging.getLogger(__name__)
 # GCS Path Builders — Quarterly / Monthly
 # ─────────────────────────────────────────────────────────────
 
+try:
+    from zoneinfo import ZoneInfo
+    BANGKOK_TZ = ZoneInfo("Asia/Bangkok")
+except Exception:  # pragma: no cover - ถ้าไม่มีฐานข้อมูลเขตเวลาในระบบ
+    from datetime import timedelta as _timedelta
+    BANGKOK_TZ = timezone(_timedelta(hours=7), "Asia/Bangkok")
+
+
+def to_bangkok(date: datetime | None = None) -> datetime:
+    """แปลงเวลาเป็นเขตเวลาไทย — ใช้ตัดสินว่าเอกสารอยู่เดือน/ไตรมาสใด
+
+    ทำไมต้องมี: คลินิกอยู่ประเทศไทย (UTC+7) แต่เดิมระบบคิดเดือนจาก UTC
+    เอกสารที่ส่งเข้ามาช่วง 00:00–07:00 ตามเวลาไทย จึงถูกนับเป็นวันก่อนหน้า
+    ตามเวลา UTC และถ้าคาบเกี่ยวสิ้นเดือนก็จะลงแฟ้ม "เดือนก่อน"
+    เช่น ส่ง 1 พ.ย. 01:30 น. (ไทย) = 31 ต.ค. 18:30 UTC → เคยลง 2026-10
+
+    datetime ที่ไม่มีเขตเวลา (naive) ถือเป็น UTC ตามที่ระบบใช้มาเดิม
+    """
+    dt = date or datetime.now(timezone.utc)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(BANGKOK_TZ)
+
+
+def bangkok_month(date: datetime | None = None) -> str:
+    """เดือนตามปฏิทินไทย เช่น '2026-10'"""
+    return to_bangkok(date).strftime("%Y-%m")
+
+
 def build_quarterly_path(folder: str, filename: str, date: datetime | None = None) -> str:
     """สร้าง GCS path สำหรับเอกสารแบ่งไตรมาส.
 
     เช่น: 04_LAB_RESULTS/2026-Q4/uuid.pdf
     เก็บ YYYY-MM ไว้เป็น subfolder ย่อยเพื่อ backward compatibility
     """
-    dt = date or datetime.now(timezone.utc)
+    dt = to_bangkok(date)
     quarter = get_quarter(dt)
     monthly = dt.strftime("%Y-%m")
     return f"{folder}/{quarter}/{monthly}/{filename}"
@@ -49,22 +78,34 @@ def build_monthly_patient_path(
     ถ้าไม่มี patient_folder จะใช้ quarterly path (backward compatible)
     เปลี่ยนจาก monthly เป็น quarterly ตามที่ผู้ใช้ต้องการ
     """
-    dt = date or datetime.now(timezone.utc)
+    dt = to_bangkok(date)
     quarter = get_quarter(dt)
     if patient_folder:
         return f"{folder}/{quarter}/{patient_folder}/{filename}"
     return f"{folder}/{quarter}/{filename}"
 
 
-def build_legacy_path(folder: str, filename: str, subfolder: str = "") -> str:
-    """สร้าง GCS path แบบเดิม (backward compatible).
+def build_legacy_path(
+    folder: str, filename: str, subfolder: str = "",
+    date: datetime | None = None,
+) -> str:
+    """สร้าง GCS path แบบ folder/[subfolder/]YYYY-MM/filename
 
-    เช่น: 01_LINE_INBOX/2026-10/uuid.pdf
+    เช่น: 02_BILLS_RECEIPTS/NIKKISO/2026-10/uuid.pdf
+
+    date: เวลาที่ผู้ส่งส่งเอกสารเข้ามา (ควรเป็น timestamp จาก LINE)
+          ถ้าไม่ส่งมาจะใช้เวลาปัจจุบัน เดือนคิดตามปฏิทินไทยทุกกรณี
+          (ดู to_bangkok)
+
+    เหตุที่ต้องรับ date: เดิมฟังก์ชันนี้ใช้ datetime.now() ตายตัว ทำให้
+    การประมวลผลซ้ำ (retry, รวมหลายหน้า, จัดประเภทใหม่) ได้เดือนตามเวลา
+    ที่ประมวลผล ไม่ใช่เดือนที่ผู้ส่งส่งเข้ามา
     """
-    monthly = datetime.now(timezone.utc).strftime("%Y-%m")
+    monthly = bangkok_month(date)
     if subfolder:
-        safe_sub = subfolder.replace("/", "_").replace("\\", "_").replace("..", "_")
-        return f"{folder}/{safe_sub}/{monthly}/{filename}"
+        safe_sub = _safe_folder_component(subfolder)
+        if safe_sub:
+            return f"{folder}/{safe_sub}/{monthly}/{filename}"
     return f"{folder}/{monthly}/{filename}"
 
 
@@ -72,12 +113,40 @@ def build_legacy_path(folder: str, filename: str, subfolder: str = "") -> str:
 CLINICAL_CATEGORIES = ("lab", "rx", "dialysis")
 
 
+# อักขระที่ Windows ห้ามใช้ในชื่อไฟล์/โฟลเดอร์ — เอกสารต้องซิงก์ลง Windows
+# จึงต้องตัดออก ไม่งั้นไฟล์จะสร้างบนเครื่องปลายทางไม่ได้
+_WINDOWS_ILLEGAL = '<>:"|?*'
+
+# ชื่อที่ Windows สงวนไว้ — ใช้เป็นชื่อโฟลเดอร์ไม่ได้
+_WINDOWS_RESERVED_NAMES = frozenset(
+    ["CON", "PRN", "AUX", "NUL"]
+    + [f"COM{i}" for i in range(1, 10)]
+    + [f"LPT{i}" for i in range(1, 10)]
+)
+
+
 def _safe_folder_component(name: str) -> str:
-    """ทำความสะอาดชื่อ folder — ป้องกัน path traversal."""
+    """ทำความสะอาดชื่อ folder — กัน path traversal และชื่อที่ Windows ใช้ไม่ได้
+
+    รับชื่อที่มีภาษาไทยได้ (ใช้กับแฟ้มรายผู้ป่วย เช่น '57042_สมชาย')
+    คืนค่าว่างถ้าทำความสะอาดแล้วไม่เหลืออะไรที่ใช้เป็นชื่อแฟ้มได้
+    """
     if not name:
         return ""
     cleaned = name.replace("..", "_").replace("/", "_").replace("\\", "_")
-    return cleaned.strip().strip(".")
+    # อักขระควบคุมและอักขระที่ Windows ห้าม
+    cleaned = "".join(
+        "_" if (ch in _WINDOWS_ILLEGAL or ord(ch) < 32) else ch
+        for ch in cleaned
+    )
+    # Windows ตัดจุดและช่องว่างท้ายชื่อทิ้งเอง — ตัดให้ตรงกันไว้ก่อน
+    cleaned = cleaned.strip().strip(".").strip()
+    if not cleaned:
+        return ""
+    # ชื่อสงวนของ Windows (เทียบแบบไม่สนตัวพิมพ์ และไม่สนนามสกุล)
+    if cleaned.split(".")[0].upper() in _WINDOWS_RESERVED_NAMES:
+        return f"_{cleaned}"
+    return cleaned
 
 
 def build_document_path(
@@ -100,7 +169,8 @@ def build_document_path(
     เอกสารฟอกเลือด (dialysis) ใช้โครงสร้างเดียวกับ lab/rx — แยกไตรมาส
     แล้วแยกเดือน แล้วแยกรายผู้ป่วย
     """
-    dt = date or datetime.now(timezone.utc)
+    # เดือน/ไตรมาสคิดตามปฏิทินไทยเสมอ — ดูเหตุผลใน to_bangkok()
+    dt = to_bangkok(date)
 
     if category in CLINICAL_CATEGORIES:
         quarter = get_quarter(dt)
@@ -110,7 +180,7 @@ def build_document_path(
             return f"{folder}/{quarter}/{monthly}/{safe_patient}/{filename}"
         return f"{folder}/{quarter}/{monthly}/{filename}"
 
-    return build_legacy_path(folder, filename, subfolder)
+    return build_legacy_path(folder, filename, subfolder, date=dt)
 
 
 # ─────────────────────────────────────────────────────────────

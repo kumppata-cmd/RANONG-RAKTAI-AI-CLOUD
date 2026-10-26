@@ -54,11 +54,24 @@ from patient_master_registry import (
     parse_patient_text_input,
     extract_hn_from_document,
 )
+from vendor_registry import (
+    VendorRegistry,
+    VendorMatch,
+    REVIEW_VENDOR_FOLDER,
+    UNKNOWN_VENDOR_FOLDER,
+    extract_candidate_names,
+    is_valid_canonical_name,
+    to_canonical_name,
+)
 from quarterly_compare import (
     build_quarterly_path,
     build_monthly_patient_path,
     build_legacy_path,
     build_document_path,
+    _safe_folder_component,
+    bangkok_month,
+    to_bangkok,
+    BANGKOK_TZ,
     CLINICAL_CATEGORIES,
     compare_lab_reports,
     compare_latest_labs,
@@ -825,12 +838,25 @@ class StorageGCS:
                 )
                 patient_hn_folder = ""
 
+        # เดือน/ไตรมาสต้องมาจากเวลาที่ "ผู้ส่งส่งเข้ามา" (timestamp ของ LINE)
+        # ไม่ใช่เวลาที่ประมวลผล ไม่งั้นเอกสารที่ retry หรือรวมหลายหน้าจะ
+        # ไปอยู่เดือนที่ประมวลผลสำเร็จ ไม่ใช่เดือนที่ส่ง
+        submitted_at = None
+        _submitted_raw = (metadata or {}).get("submitted_at", "")
+        if _submitted_raw:
+            try:
+                submitted_at = datetime.fromisoformat(_submitted_raw)
+            except (ValueError, TypeError):
+                logger.warning("submitted_at อ่านไม่ได้ — ใช้เวลาปัจจุบันแทน")
+                submitted_at = None
+
         blob_path = build_document_path(
             folder,
             filename,
             category,
             patient_folder=patient_hn_folder,
             subfolder=subfolder or "",
+            date=submitted_at,
         )
 
         content_type = self._get_content_type(filename)
@@ -1168,6 +1194,14 @@ master_registry = MasterPatientRegistry()
 if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
     master_registry.set_storage(storage._bucket)
     logger.info("MasterPatientRegistry initialized with GCS bucket")
+
+# ─── Vendor Registry: ทะเบียนบริษัทคู่ค้า (แฟ้มบิล) ───────
+# ย้ายรายชื่อบริษัทออกจาก source code มาอยู่บน GCS เพื่อให้ผู้ดูแล
+# เพิ่มบริษัทใหม่ได้เองโดยไม่ต้องแก้โค้ดและ deploy ใหม่
+vendor_registry = VendorRegistry()
+if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
+    vendor_registry.set_storage(storage._bucket)
+    logger.info("VendorRegistry initialized with GCS bucket")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -2293,6 +2327,290 @@ def api_master_registry_update():
         new_hospital_hn=new_hospital_hn,
     )
     return jsonify({"success": success, "message": msg}), 200 if success else 400
+
+
+# ═══════════════════════════════════════════════════════════
+# Vendor Registry API — เพิ่มบริษัทคู่ค้าใหม่โดยไม่ต้องแก้โค้ด
+#
+# นี่คือเป้าหมายหลักของฟีเจอร์: บริษัทใหม่ลงทะเบียนผ่าน API นี้
+# แล้วเอกสารของบริษัทนั้นเข้าแฟ้มเองทันที ไม่ต้อง deploy ใหม่
+#
+# การยืนยันตัวตน: รับ secret ทาง header เท่านั้น ไม่รับทาง query string
+# เพราะ query string ถูกบันทึกใน access log ของ proxy และ Render
+# ═══════════════════════════════════════════════════════════
+
+def _vendor_api_auth() -> "tuple | None":
+    """ตรวจสิทธิ์ผู้ดูแล — คืน error response ถ้าไม่ผ่าน, None ถ้าผ่าน"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "")
+    if not auth or not hmac.compare_digest(auth, admin_secret):
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
+
+@app.route("/admin/api/v2/vendors/list", methods=["GET"])
+def api_vendors_list():
+    """รายชื่อบริษัทคู่ค้าทั้งหมดในทะเบียน"""
+    err = _vendor_api_auth()
+    if err:
+        return err
+    include_inactive = request.args.get("include_inactive") == "1"
+    try:
+        vendors = vendor_registry.list_all(include_inactive=include_inactive)
+    except Exception as e:
+        logger.error("vendors/list ล้มเหลว: %s", type(e).__name__)
+        return jsonify({"error": "อ่านทะเบียนไม่สำเร็จ"}), 503
+    return jsonify({
+        "count": len(vendors),
+        "vendors": [
+            {
+                **v.to_dict(),
+                "keywords": vendor_registry.keywords_for(v.canonical_name),
+            }
+            for v in vendors
+        ],
+    })
+
+
+@app.route("/admin/api/v2/vendors/suggest", methods=["POST"])
+def api_vendors_suggest():
+    """วิเคราะห์ข้อความเอกสาร แล้วเสนอว่าควรลงทะเบียนเป็นบริษัทใด
+
+    ใช้ก่อนลงทะเบียน เพื่อให้ผู้ดูแลเห็นว่าระบบอ่านชื่อบริษัทได้ว่าอย่างไร
+    และมีบริษัทในทะเบียนที่อาจเป็นรายเดียวกันอยู่แล้วหรือไม่
+    """
+    err = _vendor_api_auth()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    text = (data.get("text") or "").strip()
+    if not text:
+        return jsonify({"error": "ต้องระบุ text"}), 400
+
+    match = resolve_bill_vendor(text)
+    names = extract_candidate_names(text)
+    proposed = to_canonical_name(names[0]) if names else ""
+    conflicts = []
+    if proposed:
+        try:
+            conflicts = vendor_registry.find_conflicts(proposed, names)
+        except Exception as e:
+            logger.error("find_conflicts ล้มเหลว: %s", type(e).__name__)
+    return jsonify({
+        "match": match.to_dict(),
+        "candidate_names": names,
+        "proposed_canonical_name": proposed,
+        "proposed_is_valid": bool(
+            proposed and is_valid_canonical_name(proposed)
+        ),
+        "possible_duplicates": conflicts,
+    })
+
+
+@app.route("/admin/api/v2/vendors/register", methods=["POST"])
+def api_vendors_register():
+    """ลงทะเบียนบริษัทคู่ค้าใหม่
+
+    body: canonical_name (ชื่อแฟ้ม A-Z0-9_), display_name, aliases[],
+          tax_id (13 หลัก), keywords[], verified, notes, allow_similar
+    """
+    err = _vendor_api_auth()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    canonical = (data.get("canonical_name") or "").strip()
+    if not canonical:
+        return jsonify({"error": "ต้องระบุ canonical_name"}), 400
+    aliases = data.get("aliases") or []
+    if not isinstance(aliases, list):
+        return jsonify({"error": "aliases ต้องเป็น list"}), 400
+    keywords = data.get("keywords") or []
+    if not isinstance(keywords, list):
+        return jsonify({"error": "keywords ต้องเป็น list"}), 400
+
+    try:
+        ok, msg, record = vendor_registry.register(
+            canonical_name=canonical,
+            display_name=(data.get("display_name") or "").strip(),
+            aliases=aliases,
+            tax_id=(data.get("tax_id") or "").strip(),
+            keywords=keywords,
+            # ยืนยันทันทีได้ เพราะผู้เรียกคือผู้ดูแลที่ถือ secret อยู่แล้ว
+            verified=bool(data.get("verified", True)),
+            created_by="admin_api",
+            notes=(data.get("notes") or "").strip(),
+            allow_similar=bool(data.get("allow_similar", False)),
+        )
+    except Exception as e:
+        logger.error("vendors/register ล้มเหลว: %s", type(e).__name__)
+        return jsonify({"error": "บันทึกทะเบียนไม่สำเร็จ"}), 503
+    return jsonify({
+        "success": ok,
+        "message": msg,
+        "vendor": record.to_dict() if record else None,
+    }), 200 if ok else 400
+
+
+@app.route("/admin/api/v2/vendors/update", methods=["POST"])
+def api_vendors_update():
+    """แก้ไขบริษัท — เพิ่ม/ลบ alias, แก้เลขผู้เสียภาษี, ยืนยัน, ปิดใช้งาน"""
+    err = _vendor_api_auth()
+    if err:
+        return err
+    data = request.get_json(silent=True) or {}
+    canonical = (data.get("canonical_name") or "").strip()
+    if not canonical:
+        return jsonify({"error": "ต้องระบุ canonical_name"}), 400
+
+    kwargs: dict = {"updated_by": "admin_api"}
+    for key in ("display_name", "notes"):
+        if key in data:
+            kwargs[key] = (data.get(key) or "").strip()
+    for key in ("add_aliases", "remove_aliases", "keywords"):
+        if key in data:
+            if not isinstance(data[key], list):
+                return jsonify({"error": f"{key} ต้องเป็น list"}), 400
+            kwargs[key] = data[key]
+    if "tax_id" in data:
+        kwargs["tax_id"] = (data.get("tax_id") or "").strip()
+    for key in ("verified", "active"):
+        if key in data:
+            kwargs[key] = bool(data[key])
+
+    try:
+        ok, msg, record = vendor_registry.update(canonical, **kwargs)
+    except Exception as e:
+        logger.error("vendors/update ล้มเหลว: %s", type(e).__name__)
+        return jsonify({"error": "บันทึกทะเบียนไม่สำเร็จ"}), 503
+    return jsonify({
+        "success": ok,
+        "message": msg,
+        "vendor": record.to_dict() if record else None,
+    }), 200 if ok else 400
+
+
+@app.route("/admin/api/v2/vendors/review-queue", methods=["GET"])
+def api_vendors_review_queue():
+    """บิลที่ระบุบริษัทไม่ได้ — รอผู้ดูแลตรวจ
+
+    แสดงชื่อบริษัทที่ระบบอ่านได้จากเอกสาร เพื่อให้ผู้ดูแลลงทะเบียน
+    บริษัทใหม่แล้วย้ายเอกสารเข้าแฟ้มด้วยคำสั่ง "ย้ายเอกสาร"
+    """
+    err = _vendor_api_auth()
+    if err:
+        return err
+    limit = min(max(int(request.args.get("limit", "100") or 100), 1), 500)
+    pending: list[dict] = []
+    try:
+        doc_index._ensure_fresh()
+        for d in reversed(doc_index._docs):
+            if d.get("category") != "bills":
+                continue
+            folder = d.get("bill_company", "")
+            if folder not in (REVIEW_VENDOR_FOLDER, UNKNOWN_VENDOR_FOLDER):
+                continue
+            pending.append({
+                "document_id": d.get("document_id", "")[:8],
+                "upload_date": d.get("upload_date", ""),
+                "folder": folder,
+                "extracted_name": d.get("vendor_extracted_name", ""),
+                "method": d.get("vendor_method", ""),
+            })
+            if len(pending) >= limit:
+                break
+    except Exception as e:
+        logger.error("vendors/review-queue ล้มเหลว: %s", type(e).__name__)
+        return jsonify({"error": "อ่าน index ไม่สำเร็จ"}), 503
+    return jsonify({"count": len(pending), "documents": pending})
+
+
+@app.route("/admin/api/v2/vendors/relocation-plan", methods=["GET"])
+def api_vendors_relocation_plan():
+    """แผนย้ายบิลเดิมที่อยู่ผิดแฟ้ม — อ่านอย่างเดียว ไม่ย้ายอะไร
+
+    เอกสารที่จัดเก็บก่อนมีทะเบียนบริษัทจะอยู่ที่
+    02_BILLS_RECEIPTS/YYYY-MM/ หรือแฟ้มที่คำนวณจากเดือน UTC
+    endpoint นี้คำนวณว่าแต่ละใบ "ควร" อยู่ที่ใด แล้วคืนเป็นแผน
+
+    ไม่คัดลอก ไม่ย้าย ไม่ลบ และไม่แก้ index — การย้ายจริงต้องได้รับ
+    อนุมัติจากผู้ใช้ก่อน ตามข้อกำหนด
+    """
+    err = _vendor_api_auth()
+    if err:
+        return err
+    limit = min(max(int(request.args.get("limit", "200") or 200), 1), 1000)
+
+    plan: list[dict] = []
+    unchanged = 0
+    needs_review = 0
+    try:
+        doc_index._ensure_fresh()
+        existing_paths = {
+            d.get("gcs_object_path", "").replace(
+                f"gs://{STORAGE_BUCKET}/", ""
+            )
+            for d in doc_index._docs
+        }
+        for d in doc_index._docs:
+            if d.get("category") != "bills":
+                continue
+            raw = d.get("gcs_object_path", "")
+            current = raw.replace(f"gs://{STORAGE_BUCKET}/", "")
+            if not current:
+                continue
+
+            match = resolve_bill_vendor(d.get("extracted_text", ""))
+            if match.needs_review:
+                needs_review += 1
+                continue
+
+            filename = current.rsplit("/", 1)[-1]
+            proposed = build_document_path(
+                FOLDERS["bills"], filename, "bills",
+                subfolder=match.folder,
+                date=_doc_submitted_date(d),
+            )
+            if proposed == current:
+                unchanged += 1
+                continue
+            plan.append({
+                "document_id": d.get("document_id", "")[:8],
+                "upload_date": d.get("upload_date", ""),
+                "current_gcs_path": current,
+                "proposed_gcs_path": proposed,
+                # Windows sync ดึงจาก GCS จึงใช้โครงสร้างเดียวกัน
+                # ไม่ระบุ drive letter เพราะ sync root ตั้งที่เครื่องคลินิก
+                "proposed_relative_windows_path": proposed.replace("/", "\\"),
+                "content_sha256": d.get("content_sha256", "") or "ไม่มีในindex",
+                "vendor": match.folder,
+                "vendor_method": match.method,
+                "vendor_confidence": match.confidence,
+                "collision_risk": proposed in existing_paths,
+            })
+            if len(plan) >= limit:
+                break
+    except Exception as e:
+        logger.error("relocation-plan ล้มเหลว: %s", type(e).__name__)
+        return jsonify({"error": "อ่าน index ไม่สำเร็จ"}), 503
+
+    return jsonify({
+        "dry_run": True,
+        "applied": False,
+        "note": (
+            "แผนนี้ยังไม่ถูกดำเนินการ การย้ายไฟล์จริงต้องได้รับอนุมัติ "
+            "และจะใช้วิธีคัดลอกแล้วอัปเดต index โดยไม่ลบไฟล์ต้นฉบับ"
+        ),
+        "to_move": len(plan),
+        "already_correct": unchanged,
+        "needs_vendor_review": needs_review,
+        "rollback": (
+            "ไฟล์ต้นฉบับไม่ถูกลบ การย้อนกลับทำได้โดยชี้ "
+            "gcs_object_path ใน index กลับไปที่ current_gcs_path"
+        ),
+        "plan": plan,
+    })
 
 
 @app.route("/admin/registry")
@@ -5559,13 +5877,19 @@ def build_object_metadata(
     ext: str,
     size_bytes: int,
     sha256_hex: str,
+    submitted_at_ms: int = 0,
 ) -> dict:
     """สร้าง metadata สำหรับ GCS object.
 
     ต้องไม่มีข้อมูลส่วนบุคคล — ไม่เก็บชื่อไฟล์ต้นฉบับ, LINE User ID,
     ชื่อผู้ป่วย หรือเนื้อหาเอกสาร
+
+    submitted_at_ms: timestamp จาก LINE event (มิลลิวินาที) — เวลาที่
+        "ผู้ส่งส่งเอกสารเข้ามา" ใช้ตัดสินว่าเอกสารอยู่เดือนใด
+        ต่างจาก received_at ซึ่งเป็นเวลาที่เซิร์ฟเวอร์ประมวลผล และจะ
+        เคลื่อนไปถ้ามีการ retry หรือรวมเอกสารหลายหน้า
     """
-    return {
+    meta = {
         "doc_id": doc_id,
         "category": category,
         "ext": ext,
@@ -5575,6 +5899,71 @@ def build_object_metadata(
         "source": "line_oa",
         "classifier": "internal",
     }
+    submitted = parse_line_timestamp(submitted_at_ms)
+    if submitted:
+        meta["submitted_at"] = submitted.isoformat(timespec="seconds")
+    return meta
+
+
+def _doc_submitted_date(doc: dict) -> "datetime | None":
+    """วันที่ที่ใช้ตัดสินเดือน/ไตรมาสของเอกสารหนึ่งใบใน index
+
+    ลำดับ: submitted_at (เวลาเต็มจาก LINE) → upload_date (วันที่ล้วน)
+
+    upload_date เก็บเป็น "YYYY-MM-DD" ไม่มีเวลา จึงตรึงไว้ที่ "เที่ยงวัน
+    ตามเวลาไทย" ไม่ใช่เที่ยงคืน UTC
+
+    เหตุผล: ถ้าตรึงที่เที่ยงคืน UTC แล้วแปลงเป็นเวลาไทย จะได้ 07:00 ของ
+    วันเดียวกัน ซึ่งยังเดือนเดิม แต่ถ้าวันนั้นเป็นวันแรกของเดือนและเคย
+    ถูกคำนวณด้วยตรรกะ UTC เดิม การคำนวณใหม่อาจได้คนละเดือนและทำให้
+    ระบบคิดว่าต้องย้ายไฟล์เก่า เที่ยงวันตามเวลาไทยอยู่ห่างจากขอบเขต
+    วันทั้งสองฝั่ง 12 ชั่วโมง จึงให้เดือนเดิมเสมอ
+    """
+    if not isinstance(doc, dict):
+        return None
+    raw = doc.get("submitted_at", "")
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw)
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+        except (ValueError, TypeError):
+            pass
+    raw_date = doc.get("upload_date", "")
+    if raw_date:
+        try:
+            naive = datetime.strptime(raw_date, "%Y-%m-%d")
+            return naive.replace(hour=12, tzinfo=BANGKOK_TZ)
+        except (ValueError, TypeError):
+            return None
+    return None
+
+
+def parse_line_timestamp(timestamp_ms) -> "datetime | None":
+    """แปลง timestamp จาก LINE event (มิลลิวินาที) เป็น datetime แบบ UTC
+
+    คืน None ถ้าค่าใช้ไม่ได้ — ให้ผู้เรียก fallback ไปเวลาปัจจุบัน
+    ไม่ยอมรับเวลาที่เพี้ยนไปไกล (ก่อนปี 2020 หรืออนาคตเกิน 1 วัน)
+    เพราะ timestamp ที่ผิดจะทำให้เอกสารไปอยู่เดือนที่ไม่มีอยู่จริง
+    """
+    try:
+        ms = int(timestamp_ms)
+    except (TypeError, ValueError):
+        return None
+    if ms <= 0:
+        return None
+    try:
+        dt = datetime.fromtimestamp(ms / 1000.0, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        return None
+    now = datetime.now(timezone.utc)
+    if dt.year < 2020 or dt > now + timedelta(days=1):
+        logger.warning(
+            "LINE timestamp อยู่นอกช่วงที่รับได้ — ใช้เวลาปัจจุบันแทน"
+        )
+        return None
+    return dt
 
 
 def save_to_inbox(data: bytes, filename: str) -> str:
@@ -5763,88 +6152,90 @@ def classify_with_claude(filepath: str) -> dict:
         return classify_with_keywords(filepath)
 
 
-# ── Bill Company Registry ──
-# แยกบิลตามบริษัท — เพิ่มบริษัทใหม่ได้ง่ายโดยเพิ่ม entry ใน dict
-# key = ชื่อ folder (uppercase), value = list ของ keywords ที่ OCR จะพบในบิล
-# ถ้าไม่ตรงบริษัทใด → จัดเป็น "OTHER"
-BILL_COMPANY_REGISTRY: dict[str, list[str]] = {
-    "NIKKISO": [
-        "nikkiso", "นิคคิโซ", "nikkiso medical",
-        "nikkiso co", "nikkiso thailand",
-        "นิคคิโซ เมดิคัล", "nikkiso medical (thailand)",
-        "0105537100222",  # tax ID
-        "hemodialysis package", "วัสดุสิ้นเปลืองสำหรับฟอกเลือด",
-    ],
-    "MEDITOP": [
-        "meditop", "เมดิท็อป", "meditop co",
-        "meditop thailand", "บจก.เมดิท็อป", "บริษัท เมดิท็อป",
-        "0105528039974",  # tax ID
-        "blood line tubing", "mdt-bl-vt",
-        "two filter vt", "fm-act",
-    ],
-    "FRESENIUS": [
-        "fresenius", "เฟรเซนีอุส", "fresenius kabi",
-        "fresenius medical care", "fmc",
-    ],
-    "SP_LOGISTIC": [
-        "s.p.logistic", "sp logistic", "เอส.พี.โลจิสติก",
-        "s.p. logistic", "sp logistics",
-    ],
-    "THAI_WATER_GENERATION": [
-        "thai water generation", "ไทย วอเตอร์ เจเนอเรชั่น",
-        "thai water", "twg",
-        "ไทย วอเตอร์ เจนเนอเรชั่น",
-        "0315557000647",  # tax ID
-        "thaiwatergen.co.th", "thaiwatergen",
-        "supernova", "ผลิตน้ำบริสุทธิ์", "ระบบ ro",
-        "flo filter",
-    ],
-    "BJC": [
-        "bjc", "เบอร์ลี่ ยุคเกอร์", "berli jucker",
-        "บจก.เบอร์ลี่", "บริษัท เบอร์ลี่",
-        "0107536009226",  # tax ID
-        "berli jucker public", "agani needle",
-        "kdl 3ml syringe",
-    ],
-    "BLH": [
-        "blh", "บี.เอล.เอช", "b.l.h. trading",
-        "b.l.h.", "blh trading",
-        "0105496000431",  # tax ID
-        "service@blh.co.th",
-    ],
-    "CENTRAL_POLY": [
-        "central poly", "เซ็นทรัลโพลีเทรดดิ้ง", "central polytrading",
-        "centralpolytrading", "เซ็นทรัลโพลี",
-        "0835560000178",  # tax ID
-        "pharmasinlaboratories", "central poly trading",
-    ],
-    "PINYO_PHARMACY": [
-        "pinyo pharmacy", "ภิญโญฟาร์มาซี", "pinyo",
-        "ภิญโญ ฟาร์มาซี", "ห้างหุ้นส่วนจำกัด ภิญโญ",
-        "0103510000",  # tax ID prefix (partially visible)
-        "pinyo pharmacy ltd",
-    ],
-    # ── เพิ่มบริษัทใหม่ที่นี่ ──
-}
+# ── Bill Company Registry (มุมมองเพื่อความเข้ากันได้) ──
+# รายชื่อบริษัท "ไม่ได้" อยู่ในไฟล์นี้แล้ว — ย้ายไปอยู่บน GCS ผ่าน
+# VendorRegistry เพื่อให้ผู้ดูแลเพิ่มบริษัทใหม่ได้เองโดยไม่ต้องแก้โค้ด
+# (ดู vendor_registry.py และ endpoint /admin/vendors)
+#
+# ฟังก์ชันนี้สร้าง dict รูปแบบเดิม {ชื่อแฟ้ม: [keywords]} จากทะเบียนจริง
+# ไว้ให้โค้ดเดิมที่ยังอ้างถึงใช้งานต่อได้ ไม่ใช่แหล่งข้อมูลหลักอีกต่อไป
+
+
+def get_bill_company_registry() -> dict:
+    """คืนรายชื่อบริษัทในรูปแบบเดิม — อ่านจากทะเบียนบน GCS"""
+    out: dict[str, list[str]] = {}
+    try:
+        for v in vendor_registry.list_all():
+            keys = list(v.aliases)
+            if v.tax_id:
+                keys.append(v.tax_id)
+            keys.extend(vendor_registry.keywords_for(v.canonical_name))
+            out[v.canonical_name] = keys
+    except Exception as e:
+        logger.error(
+            "get_bill_company_registry ล้มเหลว: %s", type(e).__name__
+        )
+    return out
+
+
+def get_vendor_name_keywords() -> list[str]:
+    """ชื่อบริษัททุกรายในทะเบียน — ใช้เป็น keyword ช่วยจัดประเภทเป็น bills
+
+    ทำให้บริษัทที่ผู้ดูแลเพิ่งลงทะเบียนมีผลทันทีกับการจัดประเภท
+    ไม่ต้องรอแก้ keyword ในโค้ด
+    """
+    out: list[str] = []
+    try:
+        for v in vendor_registry.list_all():
+            out.extend(a for a in v.aliases if len(a) >= 3)
+    except Exception as e:
+        logger.error(
+            "get_vendor_name_keywords ล้มเหลว: %s", type(e).__name__
+        )
+    return out
+
+
+def resolve_bill_vendor(text: str) -> VendorMatch:
+    """ระบุบริษัทผู้ขายจากข้อความ OCR — เส้นทางเดียวที่ใช้ทุกที่
+
+    ทุกจุดที่ต้องรู้ว่าบิลใบนี้เป็นของบริษัทใด (จัดประเภทอัตโนมัติ,
+    จัดประเภทด้วยมือ, จัดประเภทใหม่) ต้องเรียกฟังก์ชันนี้ เพื่อให้
+    ผลลัพธ์ตรงกันทุกเส้นทาง
+
+    คืน VendorMatch ซึ่งบอกทั้งแฟ้มปลายทางและว่าต้องให้คนตรวจหรือไม่
+    """
+    try:
+        match = vendor_registry.match_document(text or "")
+    except Exception as e:
+        # ทะเบียนล่มต้องไม่ทำให้เอกสารหาย — ส่งเข้าแฟ้มตรวจสอบแทน
+        logger.error("VendorRegistry: match ล้มเหลว: %s", type(e).__name__)
+        return VendorMatch(
+            method="none", reason=f"ทะเบียนบริษัทใช้งานไม่ได้ ({type(e).__name__})"
+        )
+    # log เฉพาะผลสรุป — ห้ามบันทึกเนื้อหาเอกสาร
+    logger.info(
+        "  vendor: %s (method=%s conf=%.2f auto=%s)",
+        match.folder, match.method, match.confidence, match.auto_route,
+    )
+    return match
 
 
 def detect_bill_company(text: str) -> str:
     """ตรวจจับชื่อบริษัทจากข้อความ OCR ของบิล.
 
+    คงชื่อเดิมไว้เพื่อความเข้ากันได้ของผู้เรียกที่ต้องการแค่ชื่อแฟ้ม
+    ผู้เรียกที่ต้องรู้ว่า "ต้องให้คนตรวจหรือไม่" ให้ใช้ resolve_bill_vendor
+
     Returns:
-        ชื่อบริษัท (uppercase) หรือ "OTHER" ถ้าไม่พบ
+        ชื่อแฟ้มบริษัท หรือแฟ้มตรวจสอบ (_PENDING_REVIEW / _UNIDENTIFIED)
+        ถ้าระบุบริษัทไม่ได้อย่างมั่นใจ
+
+    หมายเหตุพฤติกรรมที่เปลี่ยน: เดิมคืน "OTHER" เมื่อไม่พบบริษัท และ
+    คืนชื่อบริษัททันทีเมื่อเจอ keyword เพียงคำเดียว (ซึ่งอาจเป็นชื่อ
+    สินค้าหรือชื่อผู้ซื้อ) ตอนนี้เอกสารที่ยังมั่นใจไม่พอจะเข้าแฟ้ม
+    ตรวจสอบ เพื่อไม่ให้ถูกจัดเข้าแฟ้มบริษัทที่ผิด
     """
-    text_lower = text.lower()
-    best_company = "OTHER"
-    best_hits = 0
-    for company, keywords in BILL_COMPANY_REGISTRY.items():
-        hits = sum(1 for kw in keywords if kw.lower() in text_lower)
-        if hits > best_hits:
-            best_company = company
-            best_hits = hits
-    if best_hits > 0:
-        logger.info(f"  bill company detected: {best_company} ({best_hits} hits)")
-    return best_company
+    return resolve_bill_vendor(text).folder
 
 
 def classify_with_keywords(filepath: str, override_text: str | None = None) -> dict:
@@ -5915,14 +6306,9 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "เลขประจำตัวผู้เสียภาษี", "tax id", "สาขา",
              "purchase order", "po no", "p.o.", "delivery order",
              "ใบเสนอราคา", "quotation", "credit note",
-             # บริษัทที่เป็น supplier ของคลินิก
-             "nikkiso", "meditop", "fresenius", "bjc",
-             "berli jucker", "b.l.h.", "blh",
-             "central poly", "pinyo pharmacy", "thai water",
-             "s.p.logistic", "sp logistic",
-             "นิคคิโซ", "เมดิท็อป", "เฟรเซนีอุส",
-             "เบอร์ลี่ ยุคเกอร์", "บี.เอล.เอช",
-             "เซ็นทรัลโพลี", "ภิญโญฟาร์มาซี",
+             # ชื่อบริษัทคู่ค้า — ดึงจากทะเบียนบน GCS ไม่ได้ hardcode
+             # บริษัทที่ผู้ดูแลเพิ่งลงทะเบียนจึงมีผลทันที
+             *get_vendor_name_keywords(),
              ],
             2,
         ),
@@ -6019,45 +6405,51 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
     ]
     bank_hits = [kw for kw in _bank_strong if kw.lower() in content_lower]
     if len(bank_hits) >= 2:
-        company = detect_bill_company(content)
-        logger.info(f"  pre-check: bank slip detected ({len(bank_hits)} strong hits) → bills/{company}")
+        _slip_match = resolve_bill_vendor(content)
+        logger.info(
+            "  pre-check: bank slip detected (%d strong hits) → bills/%s",
+            len(bank_hits), _slip_match.folder,
+        )
         return {
             "category": "bills",
-            "bill_company": company,
+            "bill_company": _slip_match.folder,
+            "vendor_match": _slip_match.to_dict(),
             "reason": f"bank slip pre-check ({len(bank_hits)} strong hits)",
             "confidence": min(len(bank_hits) / 3.0, 1.0),
         }
 
     # ── Pre-check: บริษัท supplier ที่รู้จัก ──
-    # ถ้าตรวจพบชื่อบริษัทจาก BILL_COMPANY_REGISTRY ≥2 hits
-    # + มี keyword เกี่ยวกับเงิน/ราคา อย่างน้อย 1 → บังคับ bills
-    _company_check = detect_bill_company(content)
-    if _company_check != "OTHER":
-        _company_hits = sum(
-            1 for kw in BILL_COMPANY_REGISTRY.get(_company_check, [])
-            if kw.lower() in content_lower
+    # ถ้าระบุบริษัทในทะเบียนได้อย่างมั่นใจ (auto_route) และมี keyword
+    # เกี่ยวกับเงิน/ราคาอย่างน้อย 1 → บังคับ bills
+    #
+    # เดิมใช้การนับ keyword จาก BILL_COMPANY_REGISTRY ≥2 ซึ่งนับชื่อสินค้า
+    # รวมกับชื่อบริษัท ทำให้บิลที่เอ่ยถึงสินค้าของบริษัทอื่นถูกจัดผิดแฟ้มได้
+    # ตอนนี้ใช้ผลจากทะเบียนบริษัทซึ่งต้องตรงด้วยเลขผู้เสียภาษีหรือชื่อบริษัท
+    _vendor_match = resolve_bill_vendor(content)
+    _money_kws = [
+        "บาท", "ราคา", "จำนวนเงิน", "ยอดรวม", "รวมทั้งสิ้น",
+        "ภาษี", "vat", "tax", "ใบกำกับ", "invoice", "ใบเสร็จ",
+        "ใบแจ้งหนี้", "ชำระเงิน", "ส่วนลด", "receipt",
+        "ใบกำกับภาษี", "ใบวางบิล", "ใบส่งของ",
+    ]
+    _money_hits = sum(1 for kw in _money_kws if kw.lower() in content_lower)
+    if _vendor_match.auto_route and _money_hits >= 1:
+        logger.info(
+            "  pre-check: known supplier %s (%s, %d money hits) → bills",
+            _vendor_match.folder, _vendor_match.method, _money_hits,
         )
-        _money_kws = [
-            "บาท", "ราคา", "จำนวนเงิน", "ยอดรวม", "รวมทั้งสิ้น",
-            "ภาษี", "vat", "tax", "ใบกำกับ", "invoice", "ใบเสร็จ",
-            "ใบแจ้งหนี้", "ชำระเงิน", "ส่วนลด", "receipt",
-            "ใบกำกับภาษี", "ใบวางบิล", "ใบส่งของ",
-        ]
-        _money_hits = sum(1 for kw in _money_kws if kw.lower() in content_lower)
-        if _company_hits >= 2 and _money_hits >= 1:
-            logger.info(
-                f"  pre-check: known supplier {_company_check} "
-                f"({_company_hits} company hits, {_money_hits} money hits) → bills"
-            )
-            return {
-                "category": "bills",
-                "bill_company": _company_check,
-                "reason": (
-                    f"known supplier pre-check: {_company_check} "
-                    f"({_company_hits} company hits, {_money_hits} money hits)"
-                ),
-                "confidence": min((_company_hits + _money_hits) / 5.0, 1.0),
-            }
+        return {
+            "category": "bills",
+            "bill_company": _vendor_match.folder,
+            "vendor_match": _vendor_match.to_dict(),
+            "reason": (
+                f"known supplier pre-check: {_vendor_match.folder} "
+                f"({_vendor_match.method}, {_money_hits} money hits)"
+            ),
+            "confidence": min(
+                _vendor_match.confidence + _money_hits / 20.0, 1.0
+            ),
+        }
 
     # ── Pre-check: ใบฟอกเลือด (Hemodialysis) ──
     # ถ้าพบ strong HD keywords ≥2 → บังคับ dialysis
@@ -6186,8 +6578,13 @@ def copy_to_category(
     """
     # Local copy (ephemeral — เป็น temp ระหว่างรอ upload)
     base_folder = FOLDERS.get(category, FOLDERS["review"])
-    if subfolder:
-        dest_folder = os.path.join(BASE_DIR, base_folder, subfolder)
+    # ชื่อ subfolder ต้องผ่านการตรวจก่อนต่อเป็น path บนดิสก์
+    # ปกติมาจากทะเบียนบริษัทซึ่งตรวจแล้ว แต่กันไว้อีกชั้นเพราะจุดนี้
+    # เป็นการเขียนไฟล์จริง ถ้ามีผู้เรียกใหม่ส่งค่าที่ไม่ได้ตรวจเข้ามา
+    # path จะหลุดออกนอก BASE_DIR ได้
+    safe_subfolder = _safe_folder_component(subfolder or "")
+    if safe_subfolder:
+        dest_folder = os.path.join(BASE_DIR, base_folder, safe_subfolder)
     else:
         dest_folder = os.path.join(BASE_DIR, base_folder)
     os.makedirs(dest_folder, exist_ok=True)
@@ -6200,7 +6597,9 @@ def copy_to_category(
         )
     shutil.copy2(src_path, dest_path)
     # ไม่ log path เต็ม
-    log_dest = f"{base_folder}/{subfolder}" if subfolder else base_folder
+    log_dest = (
+        f"{base_folder}/{safe_subfolder}" if safe_subfolder else base_folder
+    )
     logger.info(f"คัดลอก → {log_dest}")
 
     # Cloud storage (ถ้าตั้งค่าไว้ และ backend ไม่ใช่ local)
@@ -6235,6 +6634,7 @@ def process_file_async(
     line_user_id: str = "",
     merged_ocr_text: str | None = None,
     merged_page_count: int = 0,
+    submitted_at_ms: int = 0,
 ):
     """ประมวลผลไฟล์ในเธรดแยก.
 
@@ -6268,7 +6668,38 @@ def process_file_async(
                     result = classify_with_keywords(filepath)
 
             category = result.get("category", "review")
-            bill_company = result.get("bill_company")  # subfolder for bills
+            # ชื่อแฟ้มบริษัทต้องมาจากทะเบียนเท่านั้น
+            #
+            # ห้ามนำค่าที่ผู้จำแนกส่งกลับมาใช้เป็นชื่อแฟ้มโดยตรง เพราะถ้า
+            # เปิดการจำแนกด้วย AI ค่านั้นคือข้อความอิสระจากโมเดล การนำไป
+            # ต่อเป็น path จึงเป็นการเชื่อข้อความที่ไม่ได้ตรวจ ที่นี่จึง
+            # รับเฉพาะชื่อที่ผ่านการตรวจรูปแบบและมีอยู่ในทะเบียนจริง
+            bill_company = ""
+            _vendor_info: dict = {}
+            if category == "bills":
+                _claimed = (result.get("bill_company") or "").strip().upper()
+                _vm = result.get("vendor_match") or {}
+                if _vm.get("folder") and _vm.get("auto_route") is not None:
+                    # มาจาก resolve_bill_vendor ใน pre-check แล้ว — ตรวจแล้ว
+                    bill_company = _vm["folder"]
+                    _vendor_info = _vm
+                elif (
+                    _claimed
+                    and is_valid_canonical_name(_claimed)
+                    and vendor_registry.get(_claimed) is not None
+                ):
+                    bill_company = _claimed
+                    _vendor_info = {
+                        "folder": _claimed, "method": "classifier_validated",
+                        "needs_review": False, "extracted_name": "",
+                    }
+                else:
+                    if _claimed:
+                        logger.warning(
+                            "ชื่อบริษัทจากผู้จำแนกไม่อยู่ในทะเบียน — "
+                            "ไม่ใช้เป็นชื่อแฟ้ม"
+                        )
+                    bill_company = ""  # เติมภายหลังเมื่อได้ข้อความ OCR
             ext_now = os.path.splitext(filepath)[1].lower()
             try:
                 size_now = os.path.getsize(filepath)
@@ -6281,6 +6712,7 @@ def process_file_async(
                 ext=ext_now,
                 size_bytes=size_now,
                 sha256_hex=sha256_hex or "",
+                submitted_at_ms=submitted_at_ms,
             )
             # เพิ่ม owner_hash สำหรับ quarterly/monthly path construction
             if owner_hash:
@@ -6401,6 +6833,13 @@ def process_file_async(
                         type(ctx_err).__name__,
                     )
 
+            # บิลที่ยังไม่รู้บริษัท — ระบุจากข้อความ OCR ที่ได้มาแล้ว
+            # เป็นจุดเดียวที่ตัดสินแฟ้มบริษัทของเส้นทางอัตโนมัติ
+            if category == "bills" and not bill_company:
+                _vm_obj = resolve_bill_vendor(extracted_text)
+                bill_company = _vm_obj.folder
+                _vendor_info = _vm_obj.to_dict()
+
             dest = copy_to_category(
                 filepath, category, metadata=metadata,
                 subfolder=bill_company,
@@ -6421,12 +6860,23 @@ def process_file_async(
                     ".png": "image/png",
                     ".txt": "text/plain",
                 }
+                # วันที่แสดงผล — ใช้ปฏิทินไทย เพื่อให้ตรงกับแฟ้มที่เอกสาร
+                # ไปอยู่ ไม่ให้วันที่ใน index ต่างจากชื่อแฟ้มบน storage
+                _submitted_dt = metadata.get("submitted_at", "")
+                try:
+                    _display_dt = (
+                        datetime.fromisoformat(_submitted_dt)
+                        if _submitted_dt else datetime.now(timezone.utc)
+                    )
+                except (ValueError, TypeError):
+                    _display_dt = datetime.now(timezone.utc)
+
                 doc_meta = {
                     "document_id": _doc_id,
                     "original_filename": f"document{ext_now}",
                     "gcs_object_path": gcs_object_path,
                     "category": category,
-                    "upload_date": datetime.now().strftime("%Y-%m-%d"),
+                    "upload_date": to_bangkok(_display_dt).strftime("%Y-%m-%d"),
                     "mime_type": mime_map.get(ext_now, "application/octet-stream"),
                     "file_size": size_now,
                     "ocr_status": ocr_status,
@@ -6435,6 +6885,21 @@ def process_file_async(
                     # ผู้ใช้เห็นเฉพาะเอกสารที่ตัวเองส่ง
                     "owner_hash": owner_hash or "",
                 }
+                # เวลาส่งแบบเต็ม — ให้การจัดประเภทใหม่ภายหลังคำนวณเดือน
+                # ได้ตรงกับตอนส่ง ไม่ใช่เดือนที่จัดประเภทใหม่
+                if _submitted_dt:
+                    doc_meta["submitted_at"] = _submitted_dt
+                # บิล: เก็บผลการระบุบริษัทไว้ให้คิวตรวจสอบและหน้า dashboard
+                if category == "bills" and bill_company:
+                    doc_meta["bill_company"] = bill_company
+                    if _vendor_info:
+                        doc_meta["vendor_method"] = _vendor_info.get("method", "")
+                        doc_meta["vendor_needs_review"] = bool(
+                            _vendor_info.get("needs_review")
+                        )
+                        doc_meta["vendor_extracted_name"] = _vendor_info.get(
+                            "extracted_name", ""
+                        )
                 try:
                     doc_index.add(doc_meta)
                     index_saved = True
@@ -7287,29 +7752,49 @@ def _reclassify_document(
     dest_folder = FOLDERS.get(new_category, FOLDERS["review"])
     filename = object_path.rsplit("/", 1)[-1] if "/" in object_path else object_path
 
+    # ดึงข้อความและวันที่ของเอกสารจาก index — ใช้ทั้งหา HN และหาบริษัท
+    doc_text = ""
+    doc_submitted = None
+    try:
+        for _d in doc_index._docs:
+            if _d.get("document_id") == doc_id:
+                doc_text = _d.get("extracted_text", "")
+                doc_submitted = _doc_submitted_date(_d)
+                break
+    except Exception as _idx_err:
+        logger.warning(
+            "Reclassify: อ่าน index ไม่ได้: %s", type(_idx_err).__name__
+        )
+
     # หา patient folder จาก HN ใน OCR text ของเอกสาร — ใบยา/ใบฟอกเลือด
     # ต้องเข้าแฟ้มรายผู้ป่วยเหมือนผลแล็บ
     patient_folder = ""
-    if new_category in CLINICAL_CATEGORIES and master_registry:
+    if new_category in CLINICAL_CATEGORIES and master_registry and doc_text:
         try:
-            doc_text = ""
-            for _d in doc_index._docs:
-                if _d.get("document_id") == doc_id:
-                    doc_text = _d.get("extracted_text", "")
+            for hn_candidate in extract_hn_from_document(doc_text):
+                _folder = master_registry.get_folder_for_hn(hn_candidate)
+                if _folder:
+                    patient_folder = _folder
                     break
-            if doc_text:
-                for hn_candidate in extract_hn_from_document(doc_text):
-                    _folder = master_registry.get_folder_for_hn(hn_candidate)
-                    if _folder:
-                        patient_folder = _folder
-                        break
         except Exception as _hn_err:
             logger.warning(
                 "Reclassify: HN lookup failed: %s", type(_hn_err).__name__
             )
 
+    # บิลต้องเข้าแฟ้มบริษัทเหมือนเส้นทางอัตโนมัติ
+    #
+    # เดิมเส้นทางนี้ไม่ส่ง subfolder เลย บิลที่ผู้ดูแลจัดประเภทด้วยมือจึง
+    # ลงที่ 02_BILLS_RECEIPTS/YYYY-MM/ ตรงๆ ไม่มีแฟ้มบริษัท ต่างจาก
+    # เส้นทางอัตโนมัติ — เป็นเหตุให้โครงสร้างแฟ้มไม่ตรงกันสองแบบ
+    vendor_subfolder = ""
+    if new_category == "bills":
+        vendor_subfolder = resolve_bill_vendor(doc_text).folder
+
     new_path = build_document_path(
-        dest_folder, filename, new_category, patient_folder=patient_folder,
+        dest_folder, filename, new_category,
+        patient_folder=patient_folder,
+        subfolder=vendor_subfolder,
+        date=doc_submitted,
     )
 
     try:
@@ -7428,14 +7913,7 @@ def _move_document_to_patient(
         return {"error": "เอกสารนี้ไม่มีไฟล์ใน cloud storage"}
 
     # ใช้วันที่ของเอกสาร เพื่อให้ยังอยู่ไตรมาส/เดือนเดิม ไม่ย้ายข้ามช่วงเวลา
-    doc_dt = None
-    try:
-        if doc.get("upload_date"):
-            doc_dt = datetime.strptime(
-                doc["upload_date"], "%Y-%m-%d"
-            ).replace(tzinfo=timezone.utc)
-    except (ValueError, TypeError):
-        doc_dt = None
+    doc_dt = _doc_submitted_date(doc)
 
     filename = blob_path.rsplit("/", 1)[-1]
     new_blob_path = build_document_path(
@@ -7541,6 +8019,8 @@ def _multipage_flush(user_hash: str):
         page_entries = meta["pages"]
         line_user_id = meta.get("line_user_id", "")
         page_count = len(page_entries)
+        # เวลาส่งหน้าแรก — เดือนของเอกสารที่รวมเสร็จต้องอ้างเวลานี้
+        submitted_at_ms = meta.get("submitted_at_ms", 0)
 
         # อ่านข้อมูลภาพจาก /tmp files
         pages_data = []
@@ -7589,6 +8069,7 @@ def _multipage_flush(user_hash: str):
         process_file_async(
             filepath, None, doc_id=doc_id, sha256_hex=sha256_hex,
             owner_hash=user_hash, line_user_id=line_user_id,
+            submitted_at_ms=submitted_at_ms,
         )
         return
 
@@ -7651,6 +8132,7 @@ def _multipage_flush(user_hash: str):
         line_user_id=line_user_id,
         merged_ocr_text=merged_text,
         merged_page_count=actual_count,
+        submitted_at_ms=submitted_at_ms,
     )
 
 
@@ -7842,6 +8324,7 @@ def _handle_incoming_document(
     user_hash: str,
     reply_token: str | None,
     line_user_id: str = "",
+    submitted_at_ms: int = 0,
 ):
     """ขั้นตอนร่วมของการรับเอกสารจาก LINE (ทั้งภาพและไฟล์).
 
@@ -7962,6 +8445,9 @@ def _handle_incoming_document(
                     }],
                     "line_user_id": line_user_id,
                     "last_image_ts": time.time(),
+                    # เวลาที่ผู้ส่งส่ง "หน้าแรก" เข้ามา — ใช้ตัดสินเดือน
+                    # ของเอกสารที่รวมเสร็จ ไม่ใช่เวลาที่รวมสำเร็จ
+                    "submitted_at_ms": submitted_at_ms,
                 }
                 _mp_write_meta(user_hash, new_meta)
 
@@ -7991,6 +8477,7 @@ def _handle_incoming_document(
     process_file_async(
         filepath, reply_token, doc_id=doc_id, sha256_hex=sha256_hex,
         owner_hash=user_hash, line_user_id=line_user_id,
+        submitted_at_ms=submitted_at_ms,
     )
 
 
@@ -8052,7 +8539,10 @@ def _push_flex_message(user_id: str, message: dict) -> bool:
 # ใช้ push_message แทน reply_message เพราะ reply_token หมดอายุ
 # ─────────────────────────────────────────────────────────────
 
-def _async_process_image(msg_id: str, user_hash: str, line_user_id: str):
+def _async_process_image(
+    msg_id: str, user_hash: str, line_user_id: str,
+    submitted_at_ms: int = 0,
+):
     """Background thread: ดาวน์โหลดภาพจาก LINE แล้วส่งเข้า multi-page buffer."""
     try:
         ext = get_content_type_ext(msg_id)
@@ -8075,13 +8565,19 @@ def _async_process_image(msg_id: str, user_hash: str, line_user_id: str):
             return
 
         # reply_token=None เพราะหมดอายุแล้ว — _handle_incoming_document จะใช้ push_message
-        _handle_incoming_document(data, ext, user_hash, None, line_user_id)
+        _handle_incoming_document(
+            data, ext, user_hash, None, line_user_id,
+            submitted_at_ms=submitted_at_ms,
+        )
     except Exception as e:
         logger.error(f"[ASYNC-IMG] unexpected error: {type(e).__name__}: {e}")
         push_message(line_user_id, "เกิดข้อผิดพลาดในการประมวลผลภาพ กรุณาลองส่งใหม่")
 
 
-def _async_process_file(msg_id: str, file_ext: str, user_hash: str, line_user_id: str):
+def _async_process_file(
+    msg_id: str, file_ext: str, user_hash: str, line_user_id: str,
+    submitted_at_ms: int = 0,
+):
     """Background thread: ดาวน์โหลดไฟล์จาก LINE แล้วประมวลผล."""
     try:
         data = download_line_content(msg_id)
@@ -8090,7 +8586,10 @@ def _async_process_file(msg_id: str, file_ext: str, user_hash: str, line_user_id
             return
 
         # reply_token=None — _handle_incoming_document จะใช้ push_message
-        _handle_incoming_document(data, file_ext, user_hash, None, line_user_id)
+        _handle_incoming_document(
+            data, file_ext, user_hash, None, line_user_id,
+            submitted_at_ms=submitted_at_ms,
+        )
     except Exception as e:
         logger.error(f"[ASYNC-FILE] unexpected error: {type(e).__name__}: {e}")
         push_message(line_user_id, "เกิดข้อผิดพลาดในการประมวลผลไฟล์ กรุณาลองส่งใหม่")
@@ -8196,6 +8695,11 @@ def webhook():
         # LINE อาจส่ง event เดียวกันซ้ำจาก retry หรือปัญหาเครือข่าย
         # event ที่ส่งซ้ำมี webhookEventId เดิม ต่างแค่ isRedelivery
         # ต้องตรวจก่อน rate limit เพื่อไม่ให้ retry กิน quota ของผู้ป่วย
+        # เวลาที่ผู้ส่งส่งข้อความเข้ามา (มิลลิวินาที จาก LINE)
+        # ใช้ตัดสินว่าเอกสารอยู่เดือนใด — ต่างจากเวลาที่เซิร์ฟเวอร์
+        # ประมวลผล ซึ่งเคลื่อนได้จาก retry และการรวมเอกสารหลายหน้า
+        event_ts_ms = event.get("timestamp", 0)
+
         event_id = event.get("webhookEventId", "")
         is_redelivery = bool(
             event.get("deliveryContext", {}).get("isRedelivery", False)
@@ -8239,7 +8743,7 @@ def webhook():
                 reply_message(reply_token, "📷 ได้รับภาพแล้ว กำลังประมวลผล...")
                 threading.Thread(
                     target=_async_process_image,
-                    args=(msg_id, user_hash, _line_user_id),
+                    args=(msg_id, user_hash, _line_user_id, event_ts_ms),
                     daemon=True,
                 ).start()
                 continue
@@ -8268,7 +8772,8 @@ def webhook():
                 reply_message(reply_token, "📄 ได้รับไฟล์แล้ว กำลังประมวลผล...")
                 threading.Thread(
                     target=_async_process_file,
-                    args=(msg_id, file_ext, user_hash, _line_user_id),
+                    args=(msg_id, file_ext, user_hash, _line_user_id,
+                          event_ts_ms),
                     daemon=True,
                 ).start()
                 continue
@@ -9407,16 +9912,9 @@ def admin_retroactive_route():
         filename = blob_path.rsplit("/", 1)[-1]
         dest_folder = FOLDERS.get(cat, FOLDERS["review"])
 
-        # ใช้วันที่อัปโหลดของเอกสาร เพื่อให้เข้าไตรมาส/เดือนที่ถูกต้อง
-        doc_dt = None
-        _upload_date = doc.get("upload_date", "")
-        if _upload_date:
-            try:
-                doc_dt = datetime.strptime(_upload_date, "%Y-%m-%d").replace(
-                    tzinfo=timezone.utc
-                )
-            except (ValueError, TypeError):
-                doc_dt = None
+        # ใช้วันที่ของเอกสารเอง เพื่อให้เข้าไตรมาส/เดือนที่ถูกต้อง
+        # และไม่ให้เอกสารเก่าถูกคิดว่าต้องย้ายเพียงเพราะเปลี่ยนเขตเวลา
+        doc_dt = _doc_submitted_date(doc)
 
         new_blob_path = build_document_path(
             dest_folder, filename, cat,
