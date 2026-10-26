@@ -398,6 +398,27 @@ class TestResolvePatientFolder(unittest.TestCase):
         self.assertEqual(resolve_patient_folder(self.FULL_HASH, None, None), "")
         self.assertEqual(resolve_patient_folder("", self.hn_reg, self.master), "")
 
+    def test_staff_account_never_auto_files_to_one_patient(self):
+        """บัญชีเจ้าหน้าที่ส่งเอกสารแทนผู้ป่วยหลายคน — ต้องไม่จัดเข้าแฟ้ม
+        ของ HN ที่ผูกไว้ ไม่งั้นเอกสารทุกคนจะไปรวมแฟ้มเดียว
+        """
+        # บัญชีเดียวกันนี้ถ้าเป็นผู้ป่วย จะได้แฟ้ม
+        self.assertEqual(
+            resolve_patient_folder(
+                self.FULL_HASH, self.hn_reg, self.master,
+                is_staff_account=False,
+            ),
+            "57042_PatientName",
+        )
+        # แต่ถ้าเป็นบัญชีเจ้าหน้าที่ ต้องไม่ได้แฟ้มรายผู้ป่วย
+        self.assertEqual(
+            resolve_patient_folder(
+                self.FULL_HASH, self.hn_reg, self.master,
+                is_staff_account=True,
+            ),
+            "",
+        )
+
     def test_registry_error_is_contained(self):
         """ทะเบียนพังต้องไม่ทำให้การจัดเก็บเอกสารล้มเหลว"""
         class _Broken:

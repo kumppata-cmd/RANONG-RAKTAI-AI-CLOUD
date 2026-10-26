@@ -284,6 +284,7 @@ def resolve_patient_folder(
     owner_hash_full: str,
     hn_reg=None,
     master_reg=None,
+    is_staff_account: bool = False,
 ) -> str:
     """หาชื่อแฟ้มผู้ป่วยจากบัญชี LINE ของผู้ส่ง (ไม่พึ่ง OCR)
 
@@ -298,8 +299,15 @@ def resolve_patient_folder(
 
     คืน "" เมื่อหาไม่ได้ — เอกสารจะอยู่ระดับไตรมาส/เดือนเท่านั้น
     ไม่ใช้ owner_hash เป็นชื่อแฟ้ม เพราะอ่านไม่ออกและไม่สื่อความหมาย
+
+    is_staff_account: บัญชีเจ้าหน้าที่/ผู้ดูแล ซึ่งส่งเอกสารแทนผู้ป่วย
+        หลายคนจากบัญชีเดียว — ห้ามใช้การผูก HN ของบัญชีนี้มาจัดแฟ้ม
+        เพราะจะทำให้เอกสารของผู้ป่วยทุกคนไปรวมอยู่แฟ้มคนเดียว
+        บัญชีนี้ให้อาศัย HN ในเอกสาร (OCR) เท่านั้น
     """
     if not owner_hash_full or not hn_reg:
+        return ""
+    if is_staff_account:
         return ""
 
     try:

@@ -791,8 +791,16 @@ class StorageGCS:
             and owner_hash_full
         ):
             try:
+                # บัญชีเจ้าหน้าที่ส่งเอกสารแทนผู้ป่วยหลายคน — ห้ามใช้การผูก HN
+                # ของบัญชีนั้นจัดแฟ้ม ไม่งั้นเอกสารทุกคนจะไปรวมแฟ้มเดียว
+                _is_staff = False
+                try:
+                    _is_staff = is_authorized_user(owner_hash_full)
+                except Exception:
+                    _is_staff = False
                 patient_hn_folder = resolve_patient_folder(
                     owner_hash_full, hn_registry, master_registry,
+                    is_staff_account=_is_staff,
                 )
             except Exception as _link_err:
                 logger.warning(
@@ -4388,6 +4396,16 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 "has_clinic_hn": bool(clinic_hn),
                 "has_hospital_hn": bool(hospital_hn),
             })
+            # บัญชีเจ้าหน้าที่ส่งเอกสารแทนผู้ป่วยหลายคน — แจ้งให้ชัดว่า
+            # ระบบจะไม่จัดเอกสารที่ส่งจากบัญชีนี้เข้าแฟ้ม HN นี้
+            if success and is_authorized_user(user_hash):
+                msg = (
+                    f"{msg}\n\n"
+                    "⚠️ บัญชีนี้เป็นบัญชีผู้ดูแล\n"
+                    "เอกสารที่ส่งจากบัญชีนี้จะไม่ถูกจัดเข้าแฟ้ม HN นี้ "
+                    "โดยอัตโนมัติ (ป้องกันเอกสารของผู้ป่วยหลายคน"
+                    "ไปรวมแฟ้มเดียว) ระบบจะใช้ HN ที่อ่านได้จากเอกสารแทน"
+                )
             return msg
         except Exception as e:
             logger.warning(f"HN register error: {type(e).__name__}")
