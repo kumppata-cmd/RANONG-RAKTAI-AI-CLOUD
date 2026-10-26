@@ -11,7 +11,11 @@ gunicorn==23.0.0
 requests==2.32.3
 
 # PDF Processing
-pypdf==5.1.0
+# pypdf 6.7.1: 5.1.0 มี CVE 10 รายการ — ทั้งหมดอยู่ในเส้นทางอ่าน PDF
+# ของผู้ป่วยโดยตรง (PdfReader ใน server.py และ lab_extractor.py)
+# CVE-2026-27024/27025/27026, 24688, 22690, 22691,
+# CVE-2025-66019, 62707, 62708, 55197
+pypdf==6.7.1
 PyMuPDF==1.25.1
 
 # OCR
