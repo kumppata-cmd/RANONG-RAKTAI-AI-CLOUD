@@ -579,3 +579,48 @@ class TestLineShapeDiagnostic(unittest.TestCase):
     def test_all_counters_are_integers(self):
         for v in self.shape("Creatinine 5.2").values():
             self.assertIsInstance(v, int)
+
+
+class TestMaskedLinePatterns(unittest.TestCase):
+    """รูปแบบบรรทัดแบบปิดบัง — ต้องบอกโครงสร้างโดยไม่เผยเนื้อหา"""
+
+    def setUp(self):
+        self.mask = _server()._masked_line_patterns
+
+    def test_structure_is_preserved(self):
+        got = self.mask("Creatinine    9.9   mg/dL   (0.6-1.2)")
+        self.assertEqual(got, ["xxxxxxxxxx    9.9   xx/xx   (9.9-9.9)"])
+
+    def test_no_letters_or_digits_survive(self):
+        text = (
+            "ชื่อผู้ป่วย สมชาย ใจดี อายุ 65 ปี\n"
+            "HN 57042 โรงพยาบาลระนอง\n"
+            "Creatinine 5.2 mg/dL\n"
+        )
+        for line in self.mask(text):
+            for ch in line:
+                self.assertFalse(
+                    ch.isalpha() and ch != "x",
+                    f"ตัวอักษรหลุดออกมา: {ch!r} ใน {line!r}",
+                )
+                self.assertFalse(
+                    ch.isdigit() and ch != "9",
+                    f"ตัวเลขหลุดออกมา: {ch!r} ใน {line!r}",
+                )
+
+    def test_thai_vowels_and_tone_marks_are_masked(self):
+        """สระและวรรณยุกต์ไทยต้องถูกปิดบังด้วย ไม่ใช่เหลือไว้"""
+        line = self.mask("ครีเอตินิน 5.2")[0]
+        for mark in "ีเิ":
+            self.assertNotIn(mark, line)
+
+    def test_blank_lines_are_skipped(self):
+        self.assertEqual(self.mask("a 1\n\n\nb 2"), ["x 9", "x 9"])
+
+    def test_limit_is_respected(self):
+        text = "\n".join(f"Creatinine {i}.0 mg/dL" for i in range(40))
+        self.assertLessEqual(len(self.mask(text, limit=5)), 5)
+
+    def test_empty_text_gives_empty_list(self):
+        self.assertEqual(self.mask(""), [])
+        self.assertEqual(self.mask("   \n  \n"), [])
