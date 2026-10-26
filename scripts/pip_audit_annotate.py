@@ -40,6 +40,19 @@ def _ann_escape(text: str) -> str:
     )
 
 
+def _ver_key(version: str) -> tuple:
+    """เรียงเวอร์ชันแบบตัวเลข — "6.9.1" ต้องน้อยกว่า "6.10.0"
+
+    การเทียบเป็นสตริงจะได้ผลกลับกัน และทำให้เลือกเวอร์ชันเป้าหมายผิด
+    ส่วนที่ไม่ใช่ตัวเลข (rc, post) ถือเป็น 0 — พอสำหรับการเลือกตัวสูงสุด
+    """
+    parts = []
+    for chunk in str(version).split("."):
+        digits = "".join(c for c in chunk if c.isdigit())
+        parts.append(int(digits) if digits else 0)
+    return tuple(parts)
+
+
 def _fix_hint(name: str, fix_versions: list) -> str:
     if fix_versions:
         return f"แก้ได้: upgrade {name} -> {', '.join(fix_versions)}"
@@ -118,6 +131,32 @@ def main() -> int:
             )
             print(f"::warning file=requirements.txt,line=1,"
                   f"title=pip-audit {f['id']}::{_ann_escape(msg)}")
+
+        # เวอร์ชันเป้าหมายต่อแพ็กเกจ — ตัวเลขเดียวที่ต้องใช้ตอนแก้
+        #
+        # ทำไมต้องมี: advisory แต่ละรายการบอก "เวอร์ชันที่แก้รายการนั้น"
+        # ซึ่งมักไม่ใช่ตัวเดียวกัน การ upgrade ไปตามตัวแรกที่เห็นจึงยัง
+        # เหลือ CVE ค้างและต้อง upgrade ซ้ำหลายรอบ — เกิดขึ้นจริงกับ
+        # pypdf สี่รอบติดเมื่อ 26 ต.ค. 2026 (5.1.0 -> 6.7.1 -> 6.10.2
+        # -> 6.13.1 -> 6.15.0 แต่ละรอบยังเหลือประมาณ 10 รายการ)
+        targets = {}
+        for f in findings:
+            for v in f["fix_versions"]:
+                cur = targets.get(f["name"])
+                if cur is None or _ver_key(v) > _ver_key(cur):
+                    targets[f["name"]] = v
+
+        if targets:
+            summary_lines += ["", "### เวอร์ชันเป้าหมาย", ""]
+            for name, v in sorted(targets.items()):
+                summary_lines.append(f"- `{name}` → **{v}**")
+                print(
+                    f"::warning title=pip-audit target::"
+                    f"{_ann_escape(f'{name}: upgrade ไปที่ {v} '
+                                   f'(เวอร์ชันสูงสุดที่ advisory ทั้งหมด'
+                                   f'ของแพ็กเกจนี้ระบุ) — '
+                                   f'อย่า upgrade ตามตัวแรกที่เห็น')}"
+                )
 
         summary_lines += [
             "",
