@@ -2330,17 +2330,20 @@ def api_master_registry_update():
 
 
 # ═══════════════════════════════════════════════════════════
-# Vendor Registry API — เพิ่มบริษัทคู่ค้าใหม่โดยไม่ต้องแก้โค้ด
+# Admin API — ทะเบียนบริษัทคู่ค้า และการอ่านผลแล็บซ้ำ
 #
-# นี่คือเป้าหมายหลักของฟีเจอร์: บริษัทใหม่ลงทะเบียนผ่าน API นี้
+# Vendor Registry คือเป้าหมายหลักของฟีเจอร์: บริษัทใหม่ลงทะเบียนผ่าน API นี้
 # แล้วเอกสารของบริษัทนั้นเข้าแฟ้มเองทันที ไม่ต้อง deploy ใหม่
 #
 # การยืนยันตัวตน: รับ secret ทาง header เท่านั้น ไม่รับทาง query string
-# เพราะ query string ถูกบันทึกใน access log ของ proxy และ Render
+# เพราะ query string ถูกบันทึกใน access log ของ proxy และแพลตฟอร์ม
 # ═══════════════════════════════════════════════════════════
 
-def _vendor_api_auth() -> "tuple | None":
-    """ตรวจสิทธิ์ผู้ดูแล — คืน error response ถ้าไม่ผ่าน, None ถ้าผ่าน"""
+def _admin_api_auth() -> "tuple | None":
+    """ตรวจสิทธิ์ผู้ดูแล — คืน error response ถ้าไม่ผ่าน, None ถ้าผ่าน
+
+    รับ secret ทาง header เท่านั้น ไม่รับทาง query string เพราะ
+    query string ถูกบันทึกใน access log ของ proxy และแพลตฟอร์ม"""
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
@@ -2353,7 +2356,7 @@ def _vendor_api_auth() -> "tuple | None":
 @app.route("/admin/api/v2/vendors/list", methods=["GET"])
 def api_vendors_list():
     """รายชื่อบริษัทคู่ค้าทั้งหมดในทะเบียน"""
-    err = _vendor_api_auth()
+    err = _admin_api_auth()
     if err:
         return err
     include_inactive = request.args.get("include_inactive") == "1"
@@ -2381,7 +2384,7 @@ def api_vendors_suggest():
     ใช้ก่อนลงทะเบียน เพื่อให้ผู้ดูแลเห็นว่าระบบอ่านชื่อบริษัทได้ว่าอย่างไร
     และมีบริษัทในทะเบียนที่อาจเป็นรายเดียวกันอยู่แล้วหรือไม่
     """
-    err = _vendor_api_auth()
+    err = _admin_api_auth()
     if err:
         return err
     data = request.get_json(silent=True) or {}
@@ -2416,7 +2419,7 @@ def api_vendors_register():
     body: canonical_name (ชื่อแฟ้ม A-Z0-9_), display_name, aliases[],
           tax_id (13 หลัก), keywords[], verified, notes, allow_similar
     """
-    err = _vendor_api_auth()
+    err = _admin_api_auth()
     if err:
         return err
     data = request.get_json(silent=True) or {}
@@ -2456,7 +2459,7 @@ def api_vendors_register():
 @app.route("/admin/api/v2/vendors/update", methods=["POST"])
 def api_vendors_update():
     """แก้ไขบริษัท — เพิ่ม/ลบ alias, แก้เลขผู้เสียภาษี, ยืนยัน, ปิดใช้งาน"""
-    err = _vendor_api_auth()
+    err = _admin_api_auth()
     if err:
         return err
     data = request.get_json(silent=True) or {}
@@ -2498,7 +2501,7 @@ def api_vendors_review_queue():
     แสดงชื่อบริษัทที่ระบบอ่านได้จากเอกสาร เพื่อให้ผู้ดูแลลงทะเบียน
     บริษัทใหม่แล้วย้ายเอกสารเข้าแฟ้มด้วยคำสั่ง "ย้ายเอกสาร"
     """
-    err = _vendor_api_auth()
+    err = _admin_api_auth()
     if err:
         return err
     limit = min(max(int(request.args.get("limit", "100") or 100), 1), 500)
@@ -2537,7 +2540,7 @@ def api_vendors_relocation_plan():
     ไม่คัดลอก ไม่ย้าย ไม่ลบ และไม่แก้ index — การย้ายจริงต้องได้รับ
     อนุมัติจากผู้ใช้ก่อน ตามข้อกำหนด
     """
-    err = _vendor_api_auth()
+    err = _admin_api_auth()
     if err:
         return err
     limit = min(max(int(request.args.get("limit", "200") or 200), 1), 1000)
@@ -2611,6 +2614,280 @@ def api_vendors_relocation_plan():
         ),
         "plan": plan,
     })
+
+
+# ═══════════════════════════════════════════════════════════
+# Lab Re-extraction API
+# ═══════════════════════════════════════════════════════════
+
+# เครื่องหมายที่คงไว้ในรูปแบบบรรทัด — เป็นตัวบอกการแบ่งคอลัมน์
+_PATTERN_KEEP = frozenset(".,:;|=()[]{}/<>+-*%#")
+
+
+def _masked_line_patterns(text: str, limit: int = 12) -> list:
+    """คืน "รูปแบบ" ของบรรทัด โดยปิดบังเนื้อหาทั้งหมด
+
+    ตัวเลขทุกตัว -> 9   ตัวอักษรทุกตัว (ไทย/ละติน) -> x
+    เครื่องหมายวรรคตอนและช่องว่างคงไว้ เพราะเป็นตัวบอกโครงสร้างคอลัมน์
+
+    ใช้ระบุว่าเอกสารจัดวางแบบไหน เมื่อตัวนับรูปร่างบรรทัดยังไม่พอชี้ชัด
+    ผลลัพธ์อ่านไม่ได้ว่าเขียนอะไรไว้ จึงไม่มีชื่อผู้ป่วย ไม่มีชื่อรายการ
+    ตรวจ และไม่มีค่าผลตรวจหลุดออกมา
+
+    ตัวอย่าง: "Creatinine  5.2  mg/dL  (0.6-1.2)"
+         ->   "xxxxxxxxxx  9.9  xx/xx  (9.9-9.9)"
+    """
+    out = []
+    for raw in (text or "").split("\n"):
+        ln = raw.rstrip()
+        if not ln.strip():
+            continue
+        # whitelist: เก็บเฉพาะช่องว่างและเครื่องหมายที่บอกโครงสร้างคอลัมน์
+        # ที่เหลือแปลงหมด — ตัวเลขเป็น 9 อย่างอื่นเป็น x
+        # ใช้ whitelist เพราะ blocklist ทิ้งสระและวรรณยุกต์ไทยไว้
+        masked = "".join(
+            " " if ch in " \t"
+            else ("9" if ch.isdigit() else (ch if ch in _PATTERN_KEEP else "x"))
+            for ch in ln
+        )
+        out.append(masked[:110])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _line_shape(text: str) -> dict:
+    """นับ "รูปร่าง" ของบรรทัดในเอกสาร โดยไม่เปิดเผยเนื้อหา
+
+    ใช้ระบุว่าใบแล็บจัดวางแบบไหน เมื่ออ่านค่าไม่ออกและต้องรู้ว่า
+    ควรแก้ตัวแยกค่าอย่างไร โดยไม่ต้องเปิดอ่านเอกสารผู้ป่วย
+
+    แปลผล:
+      name_with_number สูง  → ชื่อกับค่าอยู่บรรทัดเดียวกัน (ตาราง)
+      name_only สูง         → ชื่อแยกบรรทัดจากค่า (คอลัมน์/แนวตั้ง)
+      number_only สูง       → มีค่าลอยอยู่โดยไม่มีชื่อกำกับ
+      max_name_run          → ชื่อเรียงติดกันยาวสุดกี่บรรทัด
+    """
+    try:
+        from lab_extractor import _normalize_analyte
+    except ImportError:
+        return {}
+    name_only = name_and_number = number_only = other = 0
+    run = max_run = 0
+    for raw in (text or "").split("\n"):
+        ln = raw.strip()
+        if not ln:
+            continue
+        has_num = bool(re.search(r"\d", ln))
+        # ชื่อรายการตรวจคือข้อความ "ก่อนตัวเลขตัวแรก"
+        # ตัดทั้งบรรทัดที่ตัวเลขไม่ได้ เพราะหน่วยที่อยู่หลังค่า
+        # (mg/dL) จะติดมากับชื่อและทำให้เทียบไม่ติด
+        name_part = re.split(r"\d", ln, maxsplit=1)[0].strip(" :=|\t-")
+        is_name = bool(_normalize_analyte(name_part or ln))
+        if is_name and has_num:
+            name_and_number += 1
+            run = 0
+        elif is_name:
+            name_only += 1
+            run += 1
+            max_run = max(max_run, run)
+        elif has_num and not name_part:
+            number_only += 1
+            run = 0
+        else:
+            other += 1
+            run = 0
+    return {
+        "lines_name_with_number": name_and_number,
+        "lines_name_only": name_only,
+        "lines_number_only": number_only,
+        "lines_other": other,
+        "max_consecutive_name_lines": max_run,
+    }
+
+
+def _count_analyte_mentions(text: str) -> int:
+    """นับว่าพบชื่อรายการตรวจที่ระบบรู้จักกี่ชนิดในข้อความ
+
+    ใช้วินิจฉัยว่าเอกสารที่อ่านค่าไม่ออก "เป็นใบแล็บแต่รูปแบบแปลก"
+    หรือ "ไม่ใช่ใบแล็บตั้งแต่แรก" — คืนเฉพาะจำนวน ไม่บอกว่าชนิดใด
+    """
+    try:
+        from lab_extractor import ANALYTE_ALIASES
+    except ImportError:
+        return -1
+    low = (text or "").lower()
+    seen = set()
+    for alias, canonical in ANALYTE_ALIASES.items():
+        # alias สั้นมาก (เช่น "k", "na") จับพลาดง่าย จึงนับเฉพาะที่ยาวพอ
+        if len(alias) >= 3 and alias.lower() in low:
+            seen.add(canonical)
+    return len(seen)
+
+
+@app.route("/admin/api/v2/labs/reextract", methods=["GET", "POST"])
+def api_labs_reextract():
+    """อ่านค่าผลแล็บจากเอกสารที่เก็บไว้แล้วซ้ำอีกครั้ง
+
+    ทำไมต้องมี: ตัวแยกค่าเดิมบังคับว่าต้องมี "หน่วย" ต่อท้ายค่าเสมอ
+    ใบแล็บที่ไม่เป็นรูปแบบนั้นจึงถูกเก็บไว้โดยไม่เคยถูกแปลงเป็นตัวเลข
+    เครื่องตรวจจับค่าวิกฤตจึงไม่มีทางเห็นเอกสารเหล่านั้นเลย
+    เมื่อแก้ตัวแยกค่าแล้ว ต้องย้อนกลับไปอ่านเอกสารเดิมใหม่
+
+    ค่าเริ่มต้นเป็น dry-run — ดูว่าจะได้อะไรบ้างโดยไม่เขียนอะไรทั้งสิ้น
+    ต้องส่ง ?apply=1 จึงจะเขียนจริง
+
+    ผลลัพธ์ไม่มีข้อมูลผู้ป่วย: คืนเฉพาะรหัสเอกสาร 8 ตัว วันที่ และ
+    จำนวนค่าที่อ่านได้/จำนวนค่าวิกฤต ไม่มีชื่อผู้ป่วยและไม่มีค่าผลตรวจ
+
+    ไม่ส่งการแจ้งเตือนย้อนหลังโดยเจตนา — เอกสารเก่าอาจมีหลายใบ
+    การ push ทีเดียวจำนวนมากทำให้แพทย์แยกไม่ออกว่าอันไหนเร่งด่วนจริง
+    ผลลัพธ์บอกว่าเอกสารใบไหนมีค่าวิกฤต ให้เปิดดูได้ตรงจุด
+    """
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    apply_changes = (
+        request.args.get("apply") == "1"
+        or (request.get_json(silent=True) or {}).get("apply") is True
+    )
+    include_review = request.args.get("include_review") == "1"
+    categories = {"lab", "review"} if include_review else {"lab"}
+
+    try:
+        from lab_extractor import extract_lab_results_from_text
+        from lab_models import ExtractionMethod
+    except ImportError:
+        return jsonify({"error": "lab_extractor ไม่พร้อมใช้งาน"}), 503
+
+    scanned = 0
+    already_had = 0
+    no_text = 0
+    still_empty = 0
+    extracted: list[dict] = []
+    unreadable: list[dict] = []
+    write_failed = 0
+
+    try:
+        doc_index._ensure_fresh()
+        for d in list(doc_index._docs):
+            if d.get("category") not in categories:
+                continue
+            scanned += 1
+            doc_id = d.get("document_id", "")
+            if not doc_id:
+                continue
+
+            lab_path = f"{LAB_RESULTS_PREFIX}{doc_id}.json"
+            try:
+                if storage.get(lab_path) is not None:
+                    already_had += 1
+                    continue
+            except Exception:
+                pass  # อ่านไม่ได้ → ถือว่ายังไม่มี แล้วใช้ create_only กันเขียนทับ
+
+            text = d.get("extracted_text", "")
+            if not text or not text.strip():
+                no_text += 1
+                continue
+
+            method = (
+                ExtractionMethod.REGEX_OCR.value
+                if str(d.get("ocr_status", "")).startswith("ocr")
+                else ExtractionMethod.REGEX_PDF_TEXT.value
+            )
+            try:
+                report = extract_lab_results_from_text(text, doc_id, method)
+            except Exception as ex_err:
+                logger.warning(
+                    "reextract: แยกค่าล้มเหลว doc=%s: %s",
+                    doc_id[:8], type(ex_err).__name__,
+                )
+                continue
+
+            if not report.results:
+                still_empty += 1
+                # เก็บสัญญาณที่ "ไม่ใช่ข้อมูลผู้ป่วย" ไว้วินิจฉัยว่าทำไมอ่านไม่ออก
+                #
+                # แยกสองกรณีที่ต้องจัดการคนละแบบ:
+                #   ไม่พบชื่อรายการตรวจเลย → น่าจะไม่ใช่ใบแล็บตั้งแต่แรก
+                #                             (จัดหมวดผิด เช่นใบตรวจ OPD)
+                #   พบชื่อรายการตรวจแต่อ่านค่าไม่ได้ → เป็นใบแล็บจริง
+                #                             แต่รูปแบบยังไม่รองรับ
+                #
+                # รายงานเฉพาะ "จำนวน" ไม่บอกว่าเป็นรายการตรวจอะไร
+                # และไม่บอกค่า — ชื่อรายการตรวจรวมกับวันที่พอจะชี้ตัวผู้ป่วยได้
+                unreadable.append({
+                    "document_id": doc_id[:8],
+                    "upload_date": d.get("upload_date", ""),
+                    "ocr_status": str(d.get("ocr_status", "")),
+                    "text_length": len(text),
+                    "analyte_names_found": _count_analyte_mentions(text),
+                    "numbers_found": len(re.findall(r"\d+(?:\.\d+)?", text)),
+                    # รูปร่างของบรรทัด — บอกว่าเอกสารจัดวางแบบไหน
+                    # โดยไม่เปิดเผยว่าเขียนอะไรไว้
+                    **_line_shape(text),
+                    "line_patterns": _masked_line_patterns(text),
+                })
+                continue
+
+            n_critical = sum(
+                1 for r in report.results
+                if any("critical" in f for f in r.flags)
+            )
+            # ไม่ใส่ชื่อ analyte หรือค่าผลตรวจ — เป็นข้อมูลผู้ป่วย
+            entry = {
+                "document_id": doc_id[:8],
+                "upload_date": d.get("upload_date", ""),
+                "category": d.get("category", ""),
+                "results": len(report.results),
+                "critical": n_critical,
+                "written": False,
+            }
+
+            if apply_changes:
+                try:
+                    storage.put(
+                        lab_path,
+                        report.to_json().encode("utf-8"),
+                        content_type="application/json",
+                        create_only=True,
+                    )
+                    entry["written"] = True
+                except Exception as put_err:
+                    write_failed += 1
+                    logger.error(
+                        "reextract: เขียนผลแล็บไม่สำเร็จ doc=%s: %s",
+                        doc_id[:8], type(put_err).__name__,
+                    )
+            extracted.append(entry)
+    except Exception as e:
+        logger.error("reextract ล้มเหลว: %s", type(e).__name__)
+        return jsonify({"error": "ประมวลผลไม่สำเร็จ"}), 503
+
+    total_critical = sum(e["critical"] for e in extracted)
+    return jsonify({
+        "dry_run": not apply_changes,
+        "applied": bool(apply_changes),
+        "categories": sorted(categories),
+        "scanned": scanned,
+        "already_extracted": already_had,
+        "no_text_available": no_text,
+        "newly_readable": len(extracted),
+        "still_unreadable": still_empty,
+        "write_failed": write_failed,
+        "documents_with_critical_values": total_critical,
+        "note": (
+            "dry-run: ยังไม่เขียนอะไร ส่ง ?apply=1 เพื่อบันทึกจริง"
+            if not apply_changes else
+            "บันทึกผลแล็บแล้ว ไม่ส่งการแจ้งเตือนย้อนหลัง"
+        ),
+        "documents": extracted,
+        "unreadable_documents": unreadable,
+    })
+
+
 
 
 @app.route("/admin/registry")

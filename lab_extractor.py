@@ -256,6 +256,11 @@ UNIT_PATTERNS = [
     r"ml/min(?:/1\.73m2)?",
     r"x?10\^[39]/[uµ][lL]",
     r"cells/[uµ][lL]",
+    # หน่วยนับเม็ดเลือดที่เขียนขึ้นต้นด้วยขีดทับ พบในใบ CBC ทั่วไป
+    # เช่น "WBC  5,600 /uL" และ "Platelet  250,000 /uL"
+    r"/[uµ][lL]",
+    r"/mm3",
+    r"/cu\.?mm",
     r"pg/[mM][lL]",
     r"ng/[mM][lL]",
     r"[pnuµ]mol/[lL]",
@@ -310,6 +315,9 @@ TABULAR_RE = re.compile(
     r":?[^\S\n]+"                        # optional colon + horizontal whitespace (no newline)
     r"(?P<value>\d+\.?\d*)"            # numeric value
     r"[^\S\n]+"
+    # flag ของห้องแล็บ (H/L/HH/LL/High/Low/*) อาจคั่นระหว่างค่ากับหน่วย
+    # ถ้าไม่ข้าม flag จะถูกจับเป็น "หน่วย" แล้วหน่วยจริงตกหล่น
+    r"(?:(?:HH|LL|High|Low|H|L|\*)[^\S\n]+)?"
     r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
     r"(?:[^\S\n]+"
     r"(?P<ref>[<>]?\d+\.?\d*(?:\s*-\s*\d+\.?\d*)?))?",  # optional reference
@@ -327,6 +335,9 @@ TABULAR_THAI_RE = re.compile(
     r":?[^\S\n]+"                           # optional colon + 1+ horizontal spaces (no newline)
     r"(?P<value>\d+\.?\d*)"                # numeric value
     r"[^\S\n]+"
+    # flag ของห้องแล็บ (H/L/HH/LL/High/Low/*) อาจคั่นระหว่างค่ากับหน่วย
+    # ถ้าไม่ข้าม flag จะถูกจับเป็น "หน่วย" แล้วหน่วยจริงตกหล่น
+    r"(?:(?:HH|LL|High|Low|H|L|\*)[^\S\n]+)?"
     r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
     r"(?:[^\S\n]+"
     r"(?P<ref>[<>]?\d+\.?\d*(?:\s*-\s*\d+\.?\d*)?))?",  # optional reference
@@ -379,10 +390,28 @@ def _normalize_analyte(name: str) -> Optional[str]:
 
 
 def _parse_value(text: str) -> Optional[float]:
-    """แปลง string เป็น float อย่างปลอดภัย."""
+    """แปลง string เป็น float อย่างปลอดภัย
+
+    จุลภาคมีสองความหมาย ต้องแยกให้ถูก มิฉะนั้นค่าจะผิดเป็นพันเท่า:
+
+      คั่นหลักพัน   "250,000"  -> 250000.0   (ตามด้วยเลข 3 หลักพอดี)
+      ทศนิยมยุโรป   "5,2"      -> 5.2        (ตามด้วยเลข 1-2 หลัก)
+
+    เดิมแปลงจุลภาคเป็นจุดเสมอ ทำให้ "250,000" กลายเป็น 250.0
+    เกล็ดเลือด 250,000 (ค่าปกติ) จึงถูกอ่านเป็น 250 ซึ่งต่ำวิกฤต
+    และ "5,600" (เม็ดเลือดขาวปกติ) กลายเป็น 5.6 ซึ่งต่ำวิกฤตเช่นกัน
+    ผลคือแจ้งเตือนเท็จกับผู้ป่วยทุกคนที่ตรวจ CBC
+    """
     text = text.strip()
+
+    # จุลภาคคั่นหลักพัน: มีเลข 1-3 หลักนำ แล้วตามด้วย ",nnn" อย่างน้อยหนึ่งชุด
+    if re.fullmatch(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?", text):
+        text = text.replace(",", "")
+    else:
+        # ที่เหลือถือเป็นทศนิยมแบบยุโรป
+        text = text.replace(",", ".")
+
     # Handle common OCR artifacts
-    text = text.replace(",", ".")  # European decimal
     text = text.replace("O", "0").replace("o", "0")  # OCR O→0
     text = text.replace("l", "1").replace("I", "1")  # OCR l→1 only for standalone
 
@@ -390,6 +419,35 @@ def _parse_value(text: str) -> Optional[float]:
         return float(text)
     except ValueError:
         return None
+
+
+# flag ที่ห้องแล็บใส่ไว้ข้างค่า — ไม่ใช่หน่วย
+_LAB_FLAG_TOKENS = frozenset({
+    "h", "l", "hh", "ll", "high", "low", "n", "normal", "abn", "a",
+})
+
+
+def _clean_unit_token(unit: str) -> str:
+    """กรองสิ่งที่ "ไม่ใช่หน่วย" ออก คืนค่าว่างถ้าไม่ใช่หน่วยจริง
+
+    ทำไมต้องมี: กลุ่ม unit ของ TABULAR_RE ยอมรับทั้งตัวอักษรและตัวเลข
+    จึงไปคว้าสิ่งที่อยู่ถัดจากค่ามาเป็นหน่วยได้ สองกรณีที่พบจริง:
+
+      "Creatinine  5.2      0.6-1.2"   → หน่วยกลายเป็น "0"  (เลขจากช่วงอ้างอิง)
+      "Creatinine  5.2  H   mg/dL"     → หน่วยกลายเป็น "H"  (flag ของห้องแล็บ)
+
+    หน่วยผิดมีผลจริง เพราะ validate_result() ใช้หน่วยตรวจความสมเหตุสมผล
+    และหน่วยถูกแสดงในข้อความแจ้งเตือนที่ส่งถึงแพทย์
+    """
+    u = (unit or "").strip()
+    if not u:
+        return ""
+    # ตัวเลขล้วน (รวมทศนิยม/ช่วง) ไม่ใช่หน่วย
+    if re.fullmatch(r"[<>]?\d+(?:[.,]\d+)?(?:\s*-\s*\d+(?:[.,]\d+)?)?", u):
+        return ""
+    if u.lower() in _LAB_FLAG_TOKENS:
+        return ""
+    return u
 
 
 def _normalize_unit(unit: str) -> str:
@@ -407,6 +465,157 @@ def _normalize_unit(unit: str) -> str:
         "ng/ml": "ng/mL",
     }
     return replacements.get(unit.lower(), unit)
+
+
+# ชื่อ-ค่า-หน่วย-ช่วงอ้างอิง บนบรรทัดเดียว โดย "ไม่บังคับ" ว่าต้องมีหน่วย
+#
+# ต่างจาก TABULAR_RE ตรงที่หน่วยเป็นตัวเลือก และยอมรับตัวคั่นหลายแบบ
+# ชื่อห้ามมีตัวเลข เพื่อไม่ให้ไปคาบเกี่ยวกับค่าหรือช่วงอ้างอิง
+_GENERIC_LINE_RE = re.compile(
+    r"^[\s|]*"                                  # ขอบซ้าย อาจมี | ของตาราง
+    r"(?P<name>[ก-๙A-Za-z][ก-๙A-Za-z\s()/-]{1,39}?)"   # ชื่อ ไม่มีตัวเลข/จุด
+    # ตัวคั่น: ช่องว่าง, : = |, หรือ "จุดไข่ปลา" ที่ใบแล็บใช้ลากจากชื่อไปค่า
+    # เช่น "Hemoglobin .............. 10.5 g/dL"
+    r"\s*(?:\.{2,}|[:=|])?\s*"
+    r"(?P<value>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:[.,]\d+)?)"  # ค่า (มีจุลภาคได้)
+    r"(?P<rest>.*)$"                            # ที่เหลือ: หน่วย/ช่วงอ้างอิง/flag
+)
+
+# ช่วงอ้างอิงที่พบท้ายบรรทัด เช่น (0.6-1.2) หรือ 0.6 - 1.2 หรือ <200
+_REF_RE = re.compile(
+    r"\(?\s*(?P<ref>[<>]?\s*\d+(?:\.\d+)?\s*(?:-\s*\d+(?:\.\d+)?)?)\s*\)?\s*$"
+)
+
+
+def _parse_generic_line(line: str):
+    """อ่าน 'ชื่อ ค่า [หน่วย] [ช่วงอ้างอิง]' จากหนึ่งบรรทัด
+
+    คืน (ชื่อมาตรฐาน, ค่า, หน่วย, ช่วงอ้างอิง) หรือ None ถ้าบรรทัดนี้ไม่ใช่ผลตรวจ
+
+    หน่วยเป็นตัวเลือก — ใบแล็บจำนวนมากวางหน่วยไว้ที่หัวคอลัมน์
+    หรือไม่ระบุเลย ซึ่งเดิมทำให้ทั้งบรรทัดถูกข้าม
+
+    ความปลอดภัย: คืนค่าเฉพาะเมื่อชื่ออยู่ในรายการ analyte ที่รู้จัก
+    """
+    if not line or not line.strip():
+        return None
+    # ตัวคั่นตาราง | และ tab ให้เป็นช่องว่าง เพื่อให้รูปแบบเดียวกันหมด
+    cleaned = line.replace("\t", " ").replace("|", " ")
+    m = _GENERIC_LINE_RE.match(cleaned)
+    if not m:
+        return None
+
+    canonical = _normalize_analyte(m.group("name"))
+    if not canonical:
+        return None
+
+    value_f = _parse_value(m.group("value"))
+    if value_f is None:
+        return None
+
+    rest = (m.group("rest") or "").strip()
+    # ตัด flag H/L/High/Low ที่ห้องแล็บใส่ไว้ท้ายค่า
+    rest = re.sub(r"^\s*(?:H|L|HH|LL|High|Low|\*)\b\s*", "", rest, flags=re.I)
+
+    unit = ""
+    unit_match = UNIT_RE.match(rest.strip())
+    if unit_match:
+        unit = _normalize_unit(_clean_unit_token(unit_match.group(0)))
+        rest = rest.strip()[unit_match.end():]
+
+    ref_range = ""
+    ref_match = _REF_RE.search(rest.strip()) if rest.strip() else None
+    if ref_match:
+        ref_range = re.sub(r"\s+", "", ref_match.group("ref"))
+
+    return canonical, value_f, unit, ref_range
+
+
+# หน่วยที่นับ "ต่อไมโครลิตร" ตรงๆ — ต้องหารพันเพื่อให้ตรงกับเกณฑ์
+_PER_UL_UNITS = frozenset({
+    "/ul", "/µl", "cells/ul", "cells/µl", "/mm3", "/cumm", "/cu.mm",
+})
+
+
+def _to_count_primary_unit(analyte: str, value: float, unit: str):
+    """แปลงค่านับเม็ดเลือดจาก /uL เป็นหน่วยพัน (x10^3/uL)
+
+    คืน (ค่าใหม่, หน่วยใหม่) หรือ None ถ้าไม่ต้องแปลง
+
+    แปลงเฉพาะรายการที่เกณฑ์ระบุ primary_unit เป็น x10^3/uL เท่านั้น
+    และเฉพาะเมื่อหน่วยที่อ่านได้เป็นแบบต่อไมโครลิตรตรงๆ — ไม่เดาจาก
+    ขนาดของตัวเลข เพราะการเดาจากขนาดจะพังเมื่อค่าผิดปกติมากจริงๆ
+    """
+    if not unit:
+        return None
+    try:
+        from lab_rules import ANALYTE_SPECS
+    except ImportError:
+        return None
+    spec = ANALYTE_SPECS.get(analyte)
+    if spec is None or getattr(spec, "primary_unit", "") != "x10^3/uL":
+        return None
+    if unit.strip().lower().replace(" ", "") not in _PER_UL_UNITS:
+        return None
+    return value / 1000.0, spec.primary_unit
+
+
+def _find_column_major_runs(text: str):
+    """หาช่วงที่เป็น 'ชื่อรายการตรวจเรียงกัน แล้วค่าเรียงกัน'
+
+    คืน [(รายชื่อมาตรฐาน, [(ค่า, หน่วย), ...]), ...]
+    ผู้เรียกเป็นผู้ตัดสินว่าจะจับคู่หรือไม่เมื่อจำนวนไม่เท่ากัน
+
+    ต้องมีอย่างน้อย 3 ชื่อติดกันจึงนับว่าเป็นรูปแบบคอลัมน์ —
+    น้อยกว่านั้นมักเป็นเอกสารทั่วไปที่บังเอิญมีชื่อรายการตรวจติดกัน
+    """
+    MIN_RUN = 3
+    lines = [ln.strip() for ln in text.split("\n")]
+    runs = []
+    i = 0
+    while i < len(lines):
+        if not lines[i]:
+            i += 1
+            continue
+        # เก็บชื่อที่เรียงติดกัน (ข้ามบรรทัดว่างได้)
+        names, j = [], i
+        while j < len(lines):
+            if not lines[j]:
+                j += 1
+                continue
+            canonical = _normalize_analyte(lines[j])
+            if not canonical:
+                break
+            names.append(canonical)
+            j += 1
+        if len(names) < MIN_RUN:
+            i = j + 1 if j == i else j
+            continue
+
+        # เก็บค่าที่เรียงติดกันถัดจากชุดชื่อ
+        values = []
+        while j < len(lines):
+            if not lines[j]:
+                j += 1
+                continue
+            m = re.match(
+                r"^(?P<v>\d+(?:[.,]\d+)?)\s*(?P<u>[A-Za-z%/^µ]\S*)?$",
+                lines[j],
+            )
+            if not m:
+                break
+            v = _parse_value(m.group("v"))
+            if v is None:
+                break
+            values.append(
+                (v, _normalize_unit(_clean_unit_token(m.group("u") or "")))
+            )
+            j += 1
+
+        if values:
+            runs.append((names, values))
+        i = j if j > i else i + 1
+    return runs
 
 
 def extract_lab_results_from_text(
@@ -445,6 +654,39 @@ def extract_lab_results_from_text(
             continue
 
         canonical = _normalize_analyte(line)
+
+        # ─ กันการจับคู่ผิดเมื่อชื่อรายการตรวจเรียงติดกันเป็นชุด ─
+        #
+        # pypdf อ่าน PDF แบบคอลัมน์มักพ่น "ชื่อทั้งหมด" ก่อน แล้วค่อยพ่น
+        # "ค่าทั้งหมด" การมองไปข้างหน้า 4 บรรทัดจึงจับชื่อตัวสุดท้ายของชุด
+        # คู่กับค่าตัวแรกของอีกชุด ซึ่งเป็นคนละรายการกัน
+        #
+        # ตัวอย่างจริงที่วัดได้: ชื่อ 11 รายการเรียงกัน ตามด้วยค่า 11 ตัว
+        # ผลคือได้ "eGFR = 5.2" ทั้งที่ 5.2 เป็นค่าของ Creatinine
+        # eGFR 5.2 อ่านว่าไตวายระยะสุดท้าย — แจ้งเตือนเท็จที่อันตราย
+        # และยังบังชื่ออื่นไม่ให้ถูกจับคู่ถูกต้องด้วย
+        #
+        # ถ้าบรรทัดก่อนหน้า "หรือ" บรรทัดถัดไปเป็นชื่อรายการตรวจอีก
+        # แปลว่าอยู่ในชุดชื่อที่เรียงติดกัน ให้ strategy คอลัมน์จัดการแทน
+        #
+        # ต้องดูทั้งสองทาง: ชื่อ "ตัวสุดท้าย" ของชุดมีค่าตามหลังพอดี
+        # (เพราะชุดค่าเริ่มตรงนั้น) การดูแต่บรรทัดถัดไปจึงไม่พอ
+        # นี่คือกรณี eGFR ที่ถูกจับคู่กับค่าของ Creatinine
+        def _is_name_at(rng):
+            for _k in rng:
+                _nxt = lines[_k].strip()
+                if not _nxt:
+                    continue
+                return bool(_normalize_analyte(_nxt))
+            return False
+
+        if canonical and (
+            _is_name_at(range(i + 1, min(i + 3, len(lines))))
+            or _is_name_at(range(i - 1, max(i - 3, -1), -1))
+        ):
+            i += 1
+            continue
+
         if canonical and canonical not in seen_analytes:
             # Found an analyte name — look ahead for value, unit, reference
             value_f = None
@@ -464,6 +706,21 @@ def extract_lab_results_from_text(
                     if parsed is not None:
                         value_f = parsed
                         continue
+                    # PDF/OCR บางฉบับวาง "ค่า" กับ "หน่วย" ไว้บรรทัดเดียวกัน
+                    # ใต้ชื่อรายการ เช่น  "Creatinine\n5.2 mg/dL"
+                    # เดิมบรรทัดนี้ parse เป็นตัวเลขไม่ได้จึงถูกข้ามทั้งคู่
+                    combo = re.match(
+                        r"^(?P<v>\d+(?:[.,]\d+)?)\s+(?P<u>\S+)", next_line
+                    )
+                    if combo:
+                        parsed = _parse_value(combo.group("v"))
+                        if parsed is not None:
+                            value_f = parsed
+                            if not unit:
+                                unit = _normalize_unit(
+                                    _clean_unit_token(combo.group("u"))
+                                )
+                            continue
 
                 # Try to parse as unit
                 if value_f is not None and not unit:
@@ -524,7 +781,7 @@ def extract_lab_results_from_text(
                 if value_f is None:
                     continue
 
-                unit = _normalize_unit(match.group("unit") or "")
+                unit = _normalize_unit(_clean_unit_token(match.group("unit") or ""))
                 ref_range = match.group("ref") or get_reference_range(canonical)
 
                 flags = validate_result(canonical, value_f, unit)
@@ -561,7 +818,7 @@ def extract_lab_results_from_text(
                 if value_f is None:
                     continue
 
-                unit = _normalize_unit(match.group("unit") or "")
+                unit = _normalize_unit(_clean_unit_token(match.group("unit") or ""))
                 ref_range = match.group("ref") or get_reference_range(canonical)
 
                 flags = validate_result(canonical, value_f, unit)
@@ -583,6 +840,126 @@ def extract_lab_results_from_text(
                 )
                 results.append(result)
                 seen_analytes.add(canonical)
+
+    # ── Strategy 3.5: รูปแบบคอลัมน์ (ชื่อทั้งชุด แล้วค่าทั้งชุด) ──
+    #
+    # pypdf อ่าน PDF ที่จัดเป็นคอลัมน์มักพ่นชื่อรายการตรวจทั้งหมดก่อน
+    # แล้วค่อยพ่นค่าทั้งหมดตามลำดับเดียวกัน:
+    #
+    #     Creatinine        5.2
+    #     BUN          →    45
+    #     Potassium         6.1
+    #
+    # กลายเป็น "Creatinine\nBUN\nPotassium\n5.2\n45\n6.1"
+    #
+    # จับคู่ตามลำดับได้ "ก็ต่อเมื่อจำนวนชื่อเท่ากับจำนวนค่าพอดี"
+    # ถ้าไม่เท่ากันแปลว่าอ่านมาไม่ครบหรือมีอย่างอื่นปน การจับคู่จะเลื่อน
+    # ทั้งแถวและได้ค่าผิดทุกตัว — ในงานนี้ "ไม่ได้ค่า" ปลอดภัยกว่า
+    # "ได้ค่าผิด" เพราะค่าผิดนำไปสู่การแจ้งเตือนเท็จหรือบังค่าวิกฤตจริง
+    for name_run, value_run in _find_column_major_runs(text):
+        if len(name_run) != len(value_run):
+            warnings.append(
+                f"พบรูปแบบคอลัมน์ที่จำนวนชื่อ ({len(name_run)}) "
+                f"ไม่เท่าจำนวนค่า ({len(value_run)}) — ไม่จับคู่ให้"
+            )
+            continue
+        for canonical, (value_f, unit) in zip(name_run, value_run):
+            if canonical in seen_analytes:
+                continue
+            flags = validate_result(canonical, value_f, unit)
+            confidence = 0.70  # ต่ำกว่าแบบบรรทัดเดียว เพราะอาศัยลำดับ
+            if not unit:
+                confidence -= 0.05
+            if "unit_mismatch" in flags:
+                confidence -= 0.20
+            if "physiologic_impossible" in flags:
+                confidence = 0.3
+            results.append(LabResult(
+                analyte=canonical,
+                value=value_f,
+                unit=unit,
+                reference_range=get_reference_range(canonical),
+                confidence=round(confidence, 2),
+                extraction_method=extraction_method,
+                flags=flags,
+                raw_text="(column-major)",
+            ))
+            seen_analytes.add(canonical)
+
+    # ── Strategy 4: ตัวอ่านแบบทั่วไป (ทำงานเสมอ) ──
+    #
+    # ทำไมต้องมี: สาม strategy ข้างบน "บังคับว่าต้องมีหน่วย" ต่อท้ายค่า
+    # แต่ใบแล็บจริงจำนวนมากไม่เป็นแบบนั้น — วัดจากรูปแบบที่พบจริง 10 แบบ
+    # มี 5 แบบที่อ่านไม่ออกเลย:
+    #   - ไม่มีหน่วยเลย                      "Creatinine   5.2"
+    #   - ช่วงอ้างอิงในวงเล็บ                "Creatinine  5.2  (0.6-1.2)"
+    #   - ชื่อกับค่าอยู่คนละบรรทัด            "Creatinine\n5.2 mg/dL"
+    #   - ใช้ = คั่น                         "Creatinine = 5.2 mg/dL"
+    #   - ตารางคั่นด้วย | (พบบ่อยมากใน OCR)  "Creatinine | 5.2 | mg/dL"
+    #
+    # ทำไมทำงานเสมอ ไม่ใช่เฉพาะตอนที่ strategy อื่นอ่านไม่ได้:
+    #   การกั้นด้วย len(results) < 3 ทำให้พออ่านได้ 3 ค่าก็หยุดมองหาต่อ
+    #   แต่ใบแล็บจริงมี 10-20 ค่า เอกสารที่ "อ่านสำเร็จ" จึงอาจได้ไม่ครบ
+    #   seen_analytes กันค่าซ้ำอยู่แล้ว การให้ทำงานเสมอจึงเพิ่มได้อย่างเดียว
+    #
+    # ความปลอดภัย: ชื่อที่อ่านได้ต้องอยู่ใน ANALYTE_ALIASES เท่านั้น
+    # (ผ่าน _normalize_analyte) ข้อความอื่นในเอกสารจึงไม่กลายเป็นผลตรวจ
+    for line in text.split("\n"):
+        parsed = _parse_generic_line(line)
+        if parsed is None:
+            continue
+        canonical, value_f, unit, ref_range = parsed
+        if canonical in seen_analytes:
+            continue
+
+        if not ref_range:
+            ref_range = get_reference_range(canonical)
+        flags = validate_result(canonical, value_f, unit)
+        # ความเชื่อมั่นต่ำกว่า strategy อื่น เพราะรูปแบบกำกวมกว่า
+        # ถ้าไม่มีหน่วยให้ตรวจ ยิ่งต้องให้คนดูซ้ำ
+        confidence = 0.75
+        if not unit:
+            confidence -= 0.10
+        if "unit_mismatch" in flags:
+            confidence -= 0.20
+        if "physiologic_impossible" in flags:
+            confidence = 0.3
+
+        results.append(LabResult(
+            analyte=canonical,
+            value=value_f,
+            unit=unit,
+            reference_range=ref_range,
+            confidence=round(confidence, 2),
+            extraction_method=extraction_method,
+            flags=flags,
+            raw_text=line.strip()[:120],
+        ))
+        seen_analytes.add(canonical)
+
+    # ── ปรับหน่วยนับเม็ดเลือดให้ตรงกับที่เกณฑ์ใช้ ──
+    #
+    # ใบ CBC รายงานเป็นจำนวนเต็มต่อไมโครลิตร ("250,000 /uL") แต่เกณฑ์
+    # ในระบบใช้หน่วยพัน (x10^3/uL) ค่าดิบจึงเกิน physiologic_max เสมอ
+    # แล้วถูกตั้งธงว่า "เป็นไปไม่ได้" และความเชื่อมั่นตกเหลือ 0.3
+    #
+    # ผลที่อันตราย: เกล็ดเลือด 30,000 ซึ่งต่ำวิกฤตจริง ถูกอ่านเป็น 30000
+    # แล้วถูกตีว่าเป็นค่าอ่านผิด จึงไม่ถูกแจ้งเตือน — ค่าวิกฤตจริงหายไป
+    #
+    # แปลงที่นี่จุดเดียวหลังทุก strategy แล้วคำนวณธงใหม่ เพื่อไม่ต้อง
+    # แก้ซ้ำทุกจุดที่สร้างผลลัพธ์
+    for r in results:
+        converted = _to_count_primary_unit(r.analyte, r.value, r.unit)
+        if converted is None:
+            continue
+        r.value, r.unit = converted
+        r.flags = validate_result(r.analyte, r.value, r.unit)
+        r.confidence = 0.80
+        if "unit_mismatch" in r.flags:
+            r.confidence -= 0.20
+        if "physiologic_impossible" in r.flags:
+            r.confidence = 0.3
+        r.confidence = round(r.confidence, 2)
 
     # Generate warnings
     if not results:
