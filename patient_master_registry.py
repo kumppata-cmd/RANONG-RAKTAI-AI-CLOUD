@@ -16,7 +16,9 @@
 
 import json
 import logging
+import os
 import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -114,6 +116,12 @@ class MasterPatientRegistry:
     GCS_FILE = "_patient_master/registry.json"
     GCS_VERSIONED_PREFIX = "_patient_master/registry_v"
 
+    # อายุแคชของ "เส้นทางอ่าน" (วินาที) — ดู _refresh_if_stale()
+    # ตั้ง 0 เพื่อกลับไปโหลดใหม่ทุกครั้งเหมือนพฤติกรรมเดิม
+    CACHE_TTL_SECONDS = float(
+        os.getenv("REGISTRY_CACHE_TTL", "5").strip() or "5"
+    )
+
     def __init__(self, storage=None):
         self._storage = storage  # GCS bucket object
         self._patients: list[MasterPatient] = []
@@ -122,6 +130,9 @@ class MasterPatientRegistry:
         # HN แบบตัด 0 นำหน้า -> list index (fallback matching)
         self._normalized_hn_index: dict[str, int] = {}
         self._loaded = False
+        # เวลาที่โหลดสำเร็จล่าสุด (monotonic) — ใช้คู่กับ TTL ด้านล่าง
+        self._loaded_at = 0.0
+        self._cache_ttl = self.CACHE_TTL_SECONDS
 
     def set_storage(self, storage) -> None:
         """ตั้งค่า GCS bucket สำหรับเก็บ registry"""
@@ -163,6 +174,7 @@ class MasterPatientRegistry:
                     len(self._patients), latest.name,
                 )
                 self._loaded = True
+                self._loaded_at = time.monotonic()
                 return
 
             # fallback: legacy path
@@ -181,8 +193,41 @@ class MasterPatientRegistry:
             else:
                 logger.info("MasterPatientRegistry: no registry file — starting empty")
             self._loaded = True
+            self._loaded_at = time.monotonic()
         except Exception as e:
             logger.error("MasterPatientRegistry: load failed: %s", e)
+
+    def _refresh_if_stale(self) -> None:
+        """โหลดใหม่เฉพาะเมื่อแคชเก่าเกิน TTL — ใช้กับ "เส้นทางอ่าน" เท่านั้น
+
+        ทำไมถึงต้องมี:
+          เดิมทุกเมธอดอ่าน (match_hn, count, list_all, search) สั่ง
+          _loaded = False ทุกครั้ง ทำให้เรียก GCS ใหม่ทั้ง list + download
+          ทุกการเรียก การประมวลผลเอกสารหนึ่งใบเรียกเมธอดเหล่านี้หลายครั้ง
+          (นับได้จริง 10 GCS round-trips ต่อเอกสาร 1 ใบ) ทั้งที่ข้อมูล
+          ชุดเดียวกันทั้งหมด และทั้งหมดอยู่ในเส้นทางประมวลผล webhook
+          จึงหน่วงทุกเอกสารที่คลินิกส่ง
+
+        ทำไมยังปลอดภัยกับ multi-worker:
+          - TTL สั้น (ค่าเริ่มต้น 5 วินาที) ความไม่สดจึงถูกจำกัดเวลาไว้
+          - "เส้นทางเขียน" (register/update/delete) ยังบังคับ reload
+            เต็มรูปแบบเหมือนเดิม เพื่อความถูกต้องของ read-modify-write
+          - หลังเขียนเสร็จ worker ที่เขียนจะเห็นข้อมูลของตัวเองทันที
+          - worker อื่นเห็นภายใน TTL ผลของความช้าช่วงสั้นนี้คือเอกสาร
+            อาจไม่ได้แฟ้มรายผู้ป่วยชั่วคราว ซึ่งแก้ย้อนหลังได้ด้วย
+            retroactive routing — ไม่ใช่การสูญหายหรือเข้าแฟ้มผิดคน
+        """
+        if not self._loaded:
+            self._load()
+            return
+        if (time.monotonic() - self._loaded_at) >= self._cache_ttl:
+            self._loaded = False
+            self._load()
+
+    def invalidate_cache(self) -> None:
+        """บังคับให้โหลดใหม่ในครั้งถัดไป (ใช้หลังเขียน หรือเมื่อต้องการสด)"""
+        self._loaded = False
+        self._loaded_at = 0.0
 
     def _save(self) -> tuple:
         """บันทึก registry ลง GCS — ใช้ versioned path (ไม่ต้อง delete permission)
@@ -218,6 +263,12 @@ class MasterPatientRegistry:
 
             # ลบ version เก่า (best-effort — อาจล้มเหลวถ้าไม่มี delete permission)
             self._cleanup_old_versions(keep=3)
+
+            # ข้อมูลใน memory ตรงกับที่เพิ่งเขียนลง GCS แล้ว จึงถือว่า
+            # แคชสดใหม่ ณ จุดนี้ — worker ที่เขียนเห็นผลของตัวเองทันที
+            # โดยไม่ต้องดาวน์โหลดกลับมาอ่านซ้ำ
+            self._loaded = True
+            self._loaded_at = time.monotonic()
 
             return True, ""
         except Exception as e:
@@ -410,9 +461,8 @@ class MasterPatientRegistry:
              เช่น ทะเบียนเก็บ "00007567" แต่ใบยา/ใบฟอกเลือดพิมพ์ "7567"
              (fallback ใช้เฉพาะเมื่อค้นแบบตรงตัวไม่พบ)
         """
-        # Force reload จาก GCS — ป้องกัน stale data ใน multi-worker
-        self._loaded = False
-        self._load()
+        # [perf] โหลดใหม่เฉพาะเมื่อแคชเก่าเกิน TTL — ดู _refresh_if_stale()
+        self._refresh_if_stale()
         hn = hn.strip().upper()
         if not hn:
             return None
@@ -441,9 +491,8 @@ class MasterPatientRegistry:
 
     def search(self, query: str) -> list[MasterPatient]:
         """ค้นหาผู้ป่วย (HN หรือชื่อ)"""
-        # Force reload จาก GCS — ป้องกัน stale data ใน multi-worker
-        self._loaded = False
-        self._load()
+        # [perf] โหลดใหม่เฉพาะเมื่อแคชเก่าเกิน TTL — ดู _refresh_if_stale()
+        self._refresh_if_stale()
         q = query.strip().upper()
         results = []
         for p in self._patients:
@@ -455,16 +504,14 @@ class MasterPatientRegistry:
 
     def list_all(self) -> list[MasterPatient]:
         """แสดงรายชื่อทั้งหมด"""
-        # Force reload จาก GCS — ป้องกัน stale data ใน multi-worker
-        self._loaded = False
-        self._load()
+        # [perf] โหลดใหม่เฉพาะเมื่อแคชเก่าเกิน TTL — ดู _refresh_if_stale()
+        self._refresh_if_stale()
         return sorted(self._patients, key=lambda p: p.clinic_hn or p.hospital_hn)
 
     def count(self) -> int:
         """จำนวนผู้ป่วยทั้งหมด"""
-        # Force reload จาก GCS — ป้องกัน stale data ใน multi-worker
-        self._loaded = False
-        self._load()
+        # [perf] โหลดใหม่เฉพาะเมื่อแคชเก่าเกิน TTL — ดู _refresh_if_stale()
+        self._refresh_if_stale()
         return len(self._patients)
 
     def update_patient(
