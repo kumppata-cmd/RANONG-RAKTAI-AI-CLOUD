@@ -572,12 +572,61 @@ const API_BASE = '__API_BASE__';
 let idToken = null;
 let labData = null;
 
+// สถานะ liff.init() — ต้องรู้ว่า SDK พร้อมแล้วหรือยังก่อนเรียก API
+let liffReady = false;
+
+// แสดงปัญหาให้ผู้ป่วยเห็นจริง
+//
+// ข้อความเดิมเขียนลง #loadingLabs เท่านั้น ซึ่งอยู่ใน #mainApp ที่ถูก
+// ซ่อนอยู่หลังหน้ายินยอม PDPA ถ้าเกิดปัญหาก่อนกดยอมรับ ผู้ป่วยจึง
+// ไม่เห็นอะไรเลย — เห็นแต่หน้ายินยอมที่กดแล้วไม่มีอะไรเกิดขึ้น
+function showProblem(msg) {
+    const box = document.getElementById('loadingLabs');
+    if (box) {
+        box.style.display = '';
+        box.innerHTML = '<div>' + msg + '</div>';
+    }
+    const ov = document.getElementById('consentOverlay');
+    const card = document.querySelector('.consent-card');
+    if (ov && card && getComputedStyle(ov).display !== 'none') {
+        card.innerHTML = '<h2>🔒</h2>' +
+            '<p style="text-align:center;color:#94a3b8;">' + msg + '</p>';
+    }
+}
+
+// รับประกันว่ามี ID token ก่อนเรียก API
+//
+// ทำไมต้องมี: acceptConsent() เดิมเรียก initApp() ทันทีโดยไม่ตรวจว่า
+// idToken ถูกตั้งค่าแล้วหรือยัง ถ้าผู้ป่วยเปิดลิงก์จาก browser (ไม่ได้
+// เปิดจากแอป LINE) initLiff() จะไปถึง liff.login() แล้ว return ทิ้ง
+// idToken เป็น null ไว้ พอกดยอมรับ ระบบจะ POST {id_token: null}
+// server ตอบ 400 และผู้ป่วยเห็นข้อความ "ไม่สามารถโหลดข้อมูลได้ HTTP 400"
+// ซึ่งไม่บอกว่าต้องทำอะไรต่อ (ยืนยันแล้วจาก production 26 ต.ค. 2026)
+async function ensureIdToken() {
+    if (!liffReady) return null;
+    if (idToken) return idToken;
+    try { idToken = liff.getIDToken(); } catch (e) { idToken = null; }
+    if (idToken) return idToken;
+
+    if (!liff.isLoggedIn()) {
+        // กันวนซ้ำ: ถ้าเพิ่งพยายาม login ไปแล้วรอบนี้ ไม่ redirect อีก
+        let tried = false;
+        try { tried = sessionStorage.getItem('liff_login_tried') === '1'; } catch (e) {}
+        if (!tried) {
+            try { sessionStorage.setItem('liff_login_tried', '1'); } catch (e) {}
+            liff.login();
+            return null;
+        }
+    }
+    return null;
+}
+
 // ── PDPA Consent ──
-function acceptConsent() {
+async function acceptConsent() {
     document.getElementById('consentOverlay').style.display = 'none';
     document.getElementById('mainApp').style.display = 'block';
     try { localStorage.setItem('pdpa_consent', 'accepted'); } catch(e) {}
-    initApp();
+    await initApp();
 }
 function declineConsent() {
     if (typeof liff !== 'undefined' && liff.isInClient()) {
@@ -595,27 +644,28 @@ function declineConsent() {
 // ห้ามส่งตัวระบุตัวตนใด ๆ ที่ client กำหนดเองไปใช้กรองข้อมูลผู้ป่วย
 async function initLiff() {
     if (!LIFF_ID || LIFF_ID === '__LIFF_ID__') {
-        document.getElementById('loadingLabs').innerHTML =
-            '<div>❌ ระบบยังไม่ได้ตั้งค่า LIFF — กรุณาติดต่อเจ้าหน้าที่</div>';
+        showProblem('❌ ระบบยังไม่ได้ตั้งค่า LIFF — กรุณาติดต่อเจ้าหน้าที่');
         return;
     }
     try {
         await liff.init({ liffId: LIFF_ID });
-        if (!liff.isLoggedIn()) {
-            liff.login();
-            return;
-        }
-        idToken = liff.getIDToken();
-        if (!idToken) {
-            document.getElementById('loadingLabs').innerHTML =
-                '<div>❌ ไม่สามารถยืนยันตัวตนได้ กรุณาเข้าใหม่อีกครั้ง</div>';
+        liffReady = true;
+        const tok = await ensureIdToken();
+        if (!tok) {
+            // ensureIdToken อาจสั่ง redirect ไป login อยู่ — ถ้ายังไม่มี
+            // token และไม่ได้ redirect ให้บอกให้ชัดว่าต้องทำอะไร
+            if (!liff.isInClient()) {
+                showProblem('🔑 กรุณาเปิดหน้านี้จากแอป LINE' +
+                    '<br><small>หรือเข้าสู่ระบบ LINE ในเบราว์เซอร์นี้ก่อน</small>');
+            } else {
+                showProblem('❌ ไม่สามารถยืนยันตัวตนได้ กรุณาเข้าใหม่อีกครั้ง');
+            }
             return;
         }
         checkConsent();
     } catch (e) {
         console.error('LIFF init error:', e);
-        document.getElementById('loadingLabs').innerHTML =
-            '<div>❌ ไม่สามารถเชื่อมต่อ LINE ได้</div>';
+        showProblem('❌ ไม่สามารถเชื่อมต่อ LINE ได้');
     }
 }
 
@@ -631,17 +681,27 @@ function checkConsent() {
 
 // ── Load Data ──
 async function initApp() {
+    // ห้ามยิง API โดยไม่มี token — server จะตอบ 400 และผู้ป่วยเห็นแต่
+    // รหัส HTTP ซึ่งไม่บอกว่าต้องทำอะไรต่อ
+    const tok = await ensureIdToken();
+    if (!tok) {
+        showProblem('🔑 กรุณาเปิดหน้านี้จากแอป LINE' +
+            '<br><small>ระบบต้องยืนยันตัวตนกับ LINE ก่อนแสดงผลแล็บ</small>');
+        return;
+    }
     try {
         // [SEC-1] POST พร้อม ID token — ตัวระบุตัวตนไม่อยู่ใน URL อีกต่อไป
         // (query string ถูกบันทึกลง access log ของ proxy/แพลตฟอร์ม)
         const resp = await fetch(API_BASE + '/liff/api/my-labs', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({id_token: idToken}),
+            body: JSON.stringify({id_token: tok}),
         });
-        if (resp.status === 401) {
-            document.getElementById('loadingLabs').innerHTML =
-                '<div>❌ ยืนยันตัวตนไม่สำเร็จ กรุณาเปิดจาก LINE อีกครั้ง</div>';
+        // 400 = ไม่มี token, 401 = token ใช้ไม่ได้ — ผู้ป่วยต้องทำ
+        // สิ่งเดียวกันทั้งสองกรณี จึงบอกให้ชัดแบบเดียวกัน
+        if (resp.status === 401 || resp.status === 400) {
+            idToken = null;
+            showProblem('❌ ยืนยันตัวตนไม่สำเร็จ กรุณาเปิดจาก LINE อีกครั้ง');
             return;
         }
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -815,6 +875,38 @@ def get_liff_html(api_base: str = "") -> str:
     Safety: HTML เป็น read-only — ไม่มีปุ่มแก้ไขข้อมูล
     """
     html = LIFF_HTML
-    html = html.replace("__LIFF_ID__", LIFF_ID or "")
-    html = html.replace("__API_BASE__", api_base or "")
+    # แทนค่าเฉพาะบรรทัดประกาศตัวแปร ไม่ใช่ทุกจุดที่มี placeholder
+    #
+    # บั๊กเดิม (ยืนยันจาก production 26 ต.ค. 2026): ใช้
+    #     html.replace("__LIFF_ID__", LIFF_ID)
+    # ซึ่ง str.replace ของ Python แทนค่า "ทุกจุด" รวมถึงบรรทัดที่หน้าเว็บ
+    # ใช้ตรวจว่ายังไม่ได้ตั้งค่า หน้าเว็บที่ส่งออกไปจึงกลายเป็น
+    #     const LIFF_ID = '2012225688-Qu71sdil';
+    #     if (!LIFF_ID || LIFF_ID === '2012225688-Qu71sdil') {   // จริงเสมอ
+    #         ❌ ระบบยังไม่ได้ตั้งค่า LIFF
+    # ผลคือ liff.init() ไม่ถูกเรียกเลย หน้าผลแล็บใช้งานไม่ได้กับผู้ป่วย
+    # ทุกคน แม้ env จะถูกต้องครบ และข้อความที่แสดงยังชี้ไปผิดทางด้วย
+    #
+    # json.dumps ป้องกันค่าที่มี quote หรือ backslash หลุดออกนอก string
+    html = html.replace(
+        "const LIFF_ID = '__LIFF_ID__';",
+        "const LIFF_ID = " + json.dumps(LIFF_ID or "") + ";",
+    )
+    html = html.replace(
+        "const API_BASE = '__API_BASE__';",
+        "const API_BASE = " + json.dumps(api_base or "") + ";",
+    )
+
+    # ถ้าบรรทัดประกาศยังไม่ถูกแทน แปลว่า template ถูกแก้จนรูปแบบไม่ตรง
+    # ปล่อยผ่านไม่ได้ เพราะหน้าเว็บจะพังแบบเงียบ ๆ อีกครั้ง
+    #
+    # ตรวจที่ "บรรทัดประกาศ" เท่านั้น — ตัว __LIFF_ID__ ยังต้องเหลืออยู่
+    # ในบรรทัดที่ JS ใช้ตรวจว่ายังไม่ได้ตั้งค่า ซึ่งถูกต้องแล้ว
+    for decl in ("const LIFF_ID = '__LIFF_ID__';",
+                 "const API_BASE = '__API_BASE__';"):
+        if decl in html:
+            logger.error(
+                "LIFF: แทนค่าบรรทัด %r ไม่สำเร็จ — รูปแบบ template ไม่ตรง",
+                decl,
+            )
     return html
