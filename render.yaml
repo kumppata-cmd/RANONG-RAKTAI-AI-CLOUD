@@ -41,3 +41,20 @@ services:
       # ─ ทางเลือก (backward-compatible) ─
       # - key: STORAGE_BUCKET        # alias ของ GCS_BUCKET_NAME
       # - key: GCS_CREDENTIALS_BASE64  # Base64 ของ JSON Key (ถ้าไม่ใช้ ADC)
+
+      # LIFF Mini-App — หน้าให้ผู้ป่วยดูผลแล็บ (ตั้งค่าใน Render Dashboard)
+      #
+      # ทั้งสองค่านี้หาได้จาก LINE Developers Console
+      # ที่ LINE Login channel ซึ่งผูกกับ LIFF app:
+      #   LIFF_ID         — แท็บ LIFF → คอลัมน์ LIFF ID
+      #                     (รูปแบบ 1234567890-AbCdEfGh)
+      #   LIFF_CHANNEL_ID — แท็บ Basic settings → Channel ID
+      #                     (ตัวเลขล้วน เช่น 1234567890)
+      #
+      # LIFF_CHANNEL_ID ใช้ตรวจ aud ของ ID token ฝั่ง server (SEC-1)
+      # ถ้าไม่ตั้ง endpoint /liff/api/my-labs จะปฏิเสธทุกคำขอโดยเจตนา
+      # (fail-closed) ตรวจสถานะได้ที่ /health → liff_channel_id_set
+      - key: LIFF_ID
+        sync: false
+      - key: LIFF_CHANNEL_ID
+        sync: false
