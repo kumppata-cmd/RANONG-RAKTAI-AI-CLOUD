@@ -109,6 +109,10 @@ class CriticalAlert:
     notification_text: str = ""      # ข้อความที่ส่ง (ไม่มี PHI)
     events: list[dict] = field(default_factory=list)
     dedup_key: str = ""              # สำหรับ deduplication
+    # [CS-3] เวลารอการรับทราบจากแพทย์ (วินาที) — ส่งถึงแล้วแต่ไม่มีใคร
+    # ตอบรับภายในเวลานี้ ต้อง escalate ไม่ใช่ปล่อยเงียบ
+    ack_timeout_sec: int = 900       # 15 นาที
+    escalation_reason: str = ""
 
     def __post_init__(self):
         if not self.alert_id:
@@ -163,6 +167,30 @@ class CriticalAlert:
             and self.delivery_attempts >= self.max_delivery_attempts
         )
 
+    def seconds_awaiting_ack(self, now: float | None = None) -> float:
+        """เวลาที่ผ่านไปตั้งแต่ส่งถึง โดยยังไม่มีใครรับทราบ (วินาที)
+
+        คืน 0.0 ถ้าไม่ได้อยู่ในสถานะรอการรับทราบ หรืออ่านเวลาไม่ได้
+        """
+        if self.state != AlertState.SENT.value or not self.sent_at:
+            return 0.0
+        try:
+            sent_ts = datetime.fromisoformat(self.sent_at).timestamp()
+        except (ValueError, TypeError):
+            return 0.0
+        return max(0.0, (now if now is not None else time.time()) - sent_ts)
+
+    def should_escalate_unacknowledged(self, now: float | None = None) -> bool:
+        """[CS-3] ส่งถึงแล้วแต่ไม่มีแพทย์รับทราบภายในเวลาที่กำหนด
+
+        ก่อนหน้านี้ should_escalate() ผูกกับ DELIVERY_FAILED เท่านั้น
+        ทำให้ alert ที่ "ส่งถึงแต่ไม่มีใครดู" แยกไม่ออกจาก alert ที่
+        จัดการแล้ว — ซึ่งเป็นสถานการณ์ที่อันตรายที่สุดทางคลินิก
+        """
+        if self.ack_timeout_sec <= 0:
+            return False
+        return self.seconds_awaiting_ack(now) >= self.ack_timeout_sec
+
     def get_retry_delay(self) -> int:
         """Exponential backoff delay in seconds."""
         base = 30  # 30 seconds base
@@ -186,10 +214,22 @@ class AlertDeliveryService:
     """
 
     def __init__(self, storage, audit_logger,
-                 clinician_recipients: dict[str, list[str]] | None = None):
+                 clinician_recipients: dict[str, list[str]] | None = None,
+                 allow_simulated_delivery: bool = False):
+        """
+        allow_simulated_delivery: อนุญาตให้ "ถือว่าส่งสำเร็จ" เมื่อไม่มี
+            send_push_fn — ใช้ได้เฉพาะในการทดสอบเท่านั้น
+
+            ค่าเริ่มต้นเป็น False (fail-closed) โดยเจตนา: ถ้า production
+            ไม่มีช่องทางส่ง (เช่น LINE_CHANNEL_ACCESS_TOKEN ไม่ได้ตั้ง)
+            alert ต้องถูกบันทึกเป็น delivery_failed เพื่อให้เข้า retry
+            และ escalation ไม่ใช่บันทึกว่า SENT ทั้งที่ไม่ได้ส่งอะไรเลย
+            (ดู CLINICAL_SAFETY_GAP_ANALYSIS CS-4)
+        """
         self._storage = storage
         self._audit = audit_logger
         self._recipients = clinician_recipients or {}
+        self._allow_simulated_delivery = allow_simulated_delivery
         self._dedup_cache: dict[str, str] = {}  # dedup_key → alert_id
 
     def _alert_path(self, alert_id: str) -> str:
@@ -329,6 +369,8 @@ class AlertDeliveryService:
             return {"error": f"สถานะ {alert.state} ไม่สามารถส่งได้"}
 
         alert.delivery_attempts += 1
+        # ล้างเหตุผลของครั้งก่อน เพื่อให้ค่าที่บันทึกตรงกับความพยายามครั้งนี้
+        alert.last_delivery_error = ""
 
         # ส่ง LINE push
         recipients = self._recipients.get("physician", [])
@@ -357,9 +399,18 @@ class AlertDeliveryService:
                     logger.warning(
                         f"Alert push failed: {type(e).__name__}"
                     )
-        else:
-            # Testing mode — simulate delivery
+        elif self._allow_simulated_delivery:
+            # โหมดทดสอบเท่านั้น — ต้อง opt-in ที่ constructor
             delivery_success = True
+        else:
+            # [CS-4] ไม่มีช่องทางส่งจริง → ต้องถือว่าส่งไม่สำเร็จ
+            # ห้ามบันทึกว่า SENT เพราะไม่มีใครได้รับอะไรเลย
+            logger.error(
+                "Alert delivery: ไม่มี send_push_fn และไม่ได้อนุญาต "
+                "simulated delivery — ถือว่าส่งไม่สำเร็จ (fail-closed)"
+            )
+            delivery_success = False
+            alert.last_delivery_error = "no_sender_configured"
 
         if delivery_success:
             alert.state = AlertState.SENT.value
@@ -374,9 +425,12 @@ class AlertDeliveryService:
             })
         else:
             alert.state = AlertState.DELIVERY_FAILED.value
-            alert.last_delivery_error = "LINE push failed"
+            # ไม่เขียนทับเหตุผลที่เจาะจงกว่า (เช่น no_sender_configured)
+            if not alert.last_delivery_error:
+                alert.last_delivery_error = "LINE push failed"
             alert.add_event("delivery_failed", details={
                 "attempt": alert.delivery_attempts,
+                "reason": alert.last_delivery_error,
             })
 
             # Check escalation
@@ -398,6 +452,40 @@ class AlertDeliveryService:
             "delivery_attempts": alert.delivery_attempts,
             "success": delivery_success,
         }
+
+    def find_alert_id_by_prefix(self, prefix: str) -> str | None:
+        """หา alert_id เต็มจากคำนำหน้า 8 ตัวที่แสดงในข้อความแจ้งเตือน
+
+        [CS-2] ข้อความแจ้งเตือนบอกให้แพทย์ตอบ 'รับทราบ <8 ตัวแรก>'
+        จึงต้องแปลงกลับเป็น alert_id เต็มเพื่อเรียก acknowledge_alert
+
+        คืน None ถ้าไม่พบ หรือถ้าคำนำหน้าตรงกับหลายรายการ (กำกวม —
+        ปลอดภัยกว่าที่จะไม่เดา เพราะนี่คือการรับทราบผลวิกฤต)
+        """
+        prefix = (prefix or "").strip().lower()
+        if len(prefix) < 6:
+            return None
+        try:
+            files = self._storage.list_files(ALERTS_PREFIX)
+        except Exception as e:
+            logger.warning(f"find_alert_id_by_prefix failed: {type(e).__name__}")
+            return None
+
+        matches = []
+        for f in files:
+            name = f.rsplit("/", 1)[-1]
+            if name.endswith(".json"):
+                aid = name[:-5]
+                if aid.lower().startswith(prefix):
+                    matches.append(aid)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            logger.warning(
+                "find_alert_id_by_prefix: คำนำหน้ากำกวม พบ %d รายการ",
+                len(matches),
+            )
+        return None
 
     def acknowledge_alert(self, alert_id: str,
                            physician_hash: str) -> dict:
@@ -668,12 +756,31 @@ class AlertRetryManager:
                             )
                             results.append(result)
 
-                    # Check if needs escalation
+                    # Check if needs escalation (ส่งไม่สำเร็จจนครบจำนวนครั้ง)
                     elif alert.should_escalate():
-                        self._escalate(alert, send_push_fn)
+                        self._escalate(
+                            alert, send_push_fn,
+                            reason="max_delivery_attempts_reached",
+                        )
                         results.append({
                             "alert_id": alert.alert_id,
                             "state": "escalated",
+                            "reason": "max_delivery_attempts_reached",
+                        })
+
+                    # [CS-3] ส่งถึงแล้วแต่ไม่มีแพทย์รับทราบในเวลาที่กำหนด
+                    elif alert.should_escalate_unacknowledged(now):
+                        waited = int(alert.seconds_awaiting_ack(now))
+                        self._escalate(
+                            alert, send_push_fn,
+                            reason="acknowledgement_overdue",
+                            waited_sec=waited,
+                        )
+                        results.append({
+                            "alert_id": alert.alert_id,
+                            "state": "escalated",
+                            "reason": "acknowledgement_overdue",
+                            "waited_sec": waited,
                         })
                 except (json.JSONDecodeError, KeyError):
                     continue
@@ -683,37 +790,63 @@ class AlertRetryManager:
         return results
 
     def _escalate(self, alert: CriticalAlert,
-                  send_push_fn=None):
+                  send_push_fn=None,
+                  reason: str = "max_delivery_attempts_reached",
+                  waited_sec: int = 0):
         """Escalation — ส่ง admin notification.
 
         ไม่มี PHI ใน escalation message
+
+        reason:
+          max_delivery_attempts_reached — ส่งไม่สำเร็จจนครบจำนวนครั้ง
+          acknowledgement_overdue       — ส่งถึงแล้วแต่ไม่มีใครรับทราบ
         """
+        if reason == "acknowledgement_overdue":
+            headline = (
+                f"🆘 ESCALATION: แจ้งเตือน {alert.analyte} "
+                f"ส่งถึงแล้วแต่ยังไม่มีแพทย์รับทราบ"
+            )
+            detail = f"รอมาแล้ว {waited_sec // 60} นาที"
+        else:
+            headline = (
+                f"🆘 ESCALATION: แจ้งเตือน {alert.analyte} "
+                f"ส่งไม่สำเร็จ"
+            )
+            detail = f"ส่งแล้ว {alert.delivery_attempts} ครั้ง"
+
+        message = (
+            f"{headline}\n"
+            f"{detail}\n"
+            f"เอกสาร: {alert.doc_id[:8]}\n"
+            f"รับทราบ: พิมพ์ 'รับทราบ {alert.alert_id[:8]}'"
+        )
+
+        # ส่งให้ admin ก่อน ถ้าไม่มีจึงส่งซ้ำให้ physician
         admin_recipients = self._service._recipients.get("admin", [])
-        if not admin_recipients and send_push_fn:
-            # Fallback: ส่งให้ physician recipients อีกครั้ง
-            # พร้อมข้อความ escalation
-            for recipient in self._service._recipients.get("physician", []):
+        targets = admin_recipients or self._service._recipients.get(
+            "physician", []
+        )
+        if send_push_fn and targets:
+            for recipient in targets:
                 try:
-                    send_push_fn(
-                        recipient,
-                        f"🆘 ESCALATION: แจ้งเตือน {alert.analyte} "
-                        f"ยังไม่ได้รับการตอบรับ "
-                        f"(ส่งแล้ว {alert.delivery_attempts} ครั้ง)\n"
-                        f"เอกสาร: {alert.doc_id[:8]}"
-                    )
+                    send_push_fn(recipient, message)
                 except Exception:
                     pass
 
         alert.state = AlertState.ESCALATED.value
+        alert.escalation_reason = reason
+        alert.escalation_target = "admin" if admin_recipients else "physician"
         alert.add_event("escalated", details={
-            "reason": "max_delivery_attempts_reached",
+            "reason": reason,
             "total_attempts": alert.delivery_attempts,
+            "waited_sec": waited_sec,
         })
         self._service._save_alert(alert)
         self._service._audit.log("alert_escalated", alert.owner_hash, {
             "alert_id": alert.alert_id[:8],
             "analyte": alert.analyte,
             "attempts": alert.delivery_attempts,
+            "reason": reason,
         })
 
 
@@ -764,9 +897,12 @@ def format_active_alerts(alerts: list[dict]) -> str:
             AlertState.ACKNOWLEDGED.value: "✅",
         }.get(a["state"], "")
 
+        # ต้องแสดงรหัส alert (ไม่ใช่ doc_id) เพราะคำสั่งรับทราบใช้รหัสนี้
+        # ก่อนหน้านี้แสดงแต่ doc_id ทำให้แพทย์ไม่มีรหัสที่ใช้ตอบกลับได้
+        _ref = (a.get("alert_id") or "")[:8]
         lines.append(
-            f"{severity_icon} {a['analyte']} [{a['doc_id']}] "
-            f"{state_icon} {a['state']}"
+            f"{severity_icon} {a['analyte']} {state_icon} {a['state']}\n"
+            f"   รหัส: {_ref} · เอกสาร: {a['doc_id']}"
         )
 
     return "\n".join(lines)

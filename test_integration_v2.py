@@ -153,6 +153,9 @@ class TestAlertDeliveryIntegration(unittest.TestCase):
         self.service = AlertDeliveryService(
             self.storage, self.audit,
             clinician_recipients=self.recipients,
+            # ทดสอบเรียก attempt_delivery โดยไม่มี send_push_fn
+            # production fail-closed โดยค่าเริ่มต้น (CS-4)
+            allow_simulated_delivery=True,
         )
 
     def test_create_alert_and_attempt_delivery_success(self):
@@ -311,6 +314,9 @@ class TestAlertRetryManager(unittest.TestCase):
         self.service = AlertDeliveryService(
             self.storage, self.audit,
             clinician_recipients=self.recipients,
+            # ทดสอบเรียก attempt_delivery โดยไม่มี send_push_fn
+            # production fail-closed โดยค่าเริ่มต้น (CS-4)
+            allow_simulated_delivery=True,
         )
         self.retry_mgr = AlertRetryManager(self.service)
         # Set retry interval to 0 so tests don't get throttled
@@ -896,6 +902,9 @@ class TestCrossModuleIntegration(unittest.TestCase):
         self.alert_service = AlertDeliveryService(
             self.storage, self.audit,
             clinician_recipients={"physician": ["U_cross_001"]},
+            # ทดสอบเรียก attempt_delivery โดยไม่มี send_push_fn
+            # production fail-closed โดยค่าเริ่มต้น (CS-4)
+            allow_simulated_delivery=True,
         )
         self.approval_service = PhysicianApprovalService(
             self.storage, self.audit,

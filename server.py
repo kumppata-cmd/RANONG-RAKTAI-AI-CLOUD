@@ -1855,12 +1855,17 @@ try:
         AlertDeliveryService, AlertSeverity,
         create_line_push_fn, build_alert_recipients_from_env,
         AlertRetryManager, rebuild_dedup_cache,
+        format_active_alerts,
     )
     # Build recipients from env vars
     _alert_recipients = build_alert_recipients_from_env()
     alert_service = AlertDeliveryService(
         storage, audit_logger,
         clinician_recipients=_alert_recipients,
+        # [CS-4] production ต้อง fail-closed: ถ้าไม่มีช่องทางส่งจริง
+        # alert ต้องเป็น delivery_failed เพื่อเข้า retry/escalation
+        # ห้ามบันทึกว่า SENT ทั้งที่ไม่มีใครได้รับ
+        allow_simulated_delivery=not IS_PRODUCTION,
     )
     # Create real LINE push function if token available
     _line_token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
@@ -7066,6 +7071,34 @@ def _clear_patient_context(user_hash: str):
         pass
 
 
+def _parse_alert_ack(text: str):
+    """แยกคำสั่งรับทราบ/ปิด alert วิกฤต
+
+    [CS-2] ข้อความแจ้งเตือนที่ส่งให้แพทย์มีบรรทัด
+        ตอบ 'รับทราบ <8 ตัวแรกของ alert_id>' เพื่อยืนยัน
+    จึงต้องรองรับรูปแบบนั้นเป็นหลัก
+
+    รองรับ:
+      รับทราบ a1b2c3d4   / ack a1b2c3d4        → ("a1b2c3d4", "ack")
+      แก้ไขแล้ว a1b2c3d4 / resolve a1b2c3d4    → ("a1b2c3d4", "resolve")
+
+    คืน None ถ้าไม่ใช่คำสั่งนี้ — (tuple, str) ถ้าใช่
+    """
+    import re as _re_ack
+
+    m = _re_ack.match(
+        r"^\s*(รับทราบ|ack|acknowledge|แก้ไขแล้ว|resolve)\s+"
+        r"([0-9a-fA-F]{6,32})\s*$",
+        (text or "").strip(),
+        _re_ack.IGNORECASE,
+    )
+    if not m:
+        return None
+    verb = m.group(1).lower()
+    action = "resolve" if verb in ("แก้ไขแล้ว", "resolve") else "ack"
+    return (m.group(2), action)
+
+
 def _parse_patient_select(text: str) -> str | None:
     """แยก HN จากคำสั่งเลือกผู้ป่วย
 
@@ -8128,6 +8161,95 @@ def webhook():
                             "พิมพ์ 'ผู้ป่วย <HN>' เพื่อเลือก\n"
                             "ตัวอย่าง: ผู้ป่วย 57042",
                         )
+                # ── [CS-2] รับทราบ alert วิกฤต ──────────────────────
+                # ข้อความแจ้งเตือนบอกให้แพทย์ตอบ 'รับทราบ <id>' มาตลอด
+                # แต่ไม่เคยมี handler รองรับ → คำตอบของแพทย์ถูกทิ้งเงียบ
+                # และระบบไม่มีทางรู้เลยว่ามีคนเห็นผลวิกฤตแล้วหรือยัง
+                elif _parse_alert_ack(text) is not None:
+                    _ack_ref, _ack_action = _parse_alert_ack(text)
+                    if alert_service is None:
+                        reply_message(
+                            reply_token,
+                            "ขออภัย ระบบแจ้งเตือนไม่พร้อมใช้งานในขณะนี้",
+                        )
+                    elif (user_hash not in PHYSICIAN_USERS
+                          and user_hash not in ADMIN_USERS):
+                        # การรับทราบผลวิกฤตเป็นการกระทำทางคลินิก
+                        logger.warning(
+                            "Alert ack denied — ไม่ใช่แพทย์/ผู้ดูแล"
+                        )
+                        audit_logger.log("alert_ack_denied", user_hash, {
+                            "action": _ack_action,
+                        })
+                        reply_message(
+                            reply_token,
+                            "⚠️ เฉพาะแพทย์หรือผู้ดูแลระบบเท่านั้น"
+                            "ที่รับทราบการแจ้งเตือนได้",
+                        )
+                    else:
+                        _full_id = alert_service.find_alert_id_by_prefix(
+                            _ack_ref
+                        )
+                        if not _full_id:
+                            reply_message(
+                                reply_token,
+                                f"❌ ไม่พบการแจ้งเตือน {_ack_ref}\n\n"
+                                "ตรวจรหัสอีกครั้ง หรือพิมพ์ "
+                                "'แจ้งเตือนค้าง' เพื่อดูรายการ",
+                            )
+                        else:
+                            if _ack_action == "resolve":
+                                _res = alert_service.resolve_alert(
+                                    _full_id, user_hash
+                                )
+                            else:
+                                _res = alert_service.acknowledge_alert(
+                                    _full_id, user_hash
+                                )
+                            if _res.get("error"):
+                                reply_message(
+                                    reply_token, f"❌ {_res['error']}"
+                                )
+                            else:
+                                reply_message(
+                                    reply_token,
+                                    _res.get("message", "✅ บันทึกแล้ว"),
+                                )
+                # ── [CS-2] ดูรายการแจ้งเตือนที่ยังค้าง ──────────────
+                # แพทย์ต้องเห็นรายการก่อนจึงจะรับทราบได้ ลำพังคำสั่ง
+                # 'รับทราบ <id>' ใช้ไม่ได้ถ้าหา id ไม่ได้
+                elif text.strip() in (
+                    "แจ้งเตือนค้าง", "แจ้งเตือน", "active alerts", "alerts",
+                ):
+                    if alert_service is None:
+                        reply_message(
+                            reply_token,
+                            "ขออภัย ระบบแจ้งเตือนไม่พร้อมใช้งานในขณะนี้",
+                        )
+                    elif (user_hash not in PHYSICIAN_USERS
+                          and user_hash not in ADMIN_USERS):
+                        reply_message(
+                            reply_token,
+                            "⚠️ เฉพาะแพทย์หรือผู้ดูแลระบบเท่านั้น",
+                        )
+                    else:
+                        try:
+                            _active = alert_service.get_active_alerts()
+                            _txt = format_active_alerts(_active)
+                            if _active:
+                                _txt += (
+                                    "\n\nรับทราบ: พิมพ์ 'รับทราบ <รหัส>'"
+                                )
+                            reply_message(reply_token, _txt)
+                        except Exception as _al_err:
+                            logger.warning(
+                                "active alerts failed: %s",
+                                type(_al_err).__name__,
+                            )
+                            reply_message(
+                                reply_token,
+                                "ขออภัย ไม่สามารถดึงรายการแจ้งเตือนได้",
+                            )
                 # ── Master Patient Registry: ลงทะเบียนรายชื่อ ──
                 elif text.strip() in (
                     "ลงทะเบียนรายชื่อ", "ลงทะเบียน",
@@ -9938,6 +10060,104 @@ if _KEEPALIVE_ENABLED and not IS_TESTING:
     )
 else:
     logger.info("Keep-alive: ปิด (KEEPALIVE_ENABLED=false หรือ testing mode)")
+
+
+# ═══════════════════════════════════════════════════════════
+# [CS-1] Critical Alert Delivery Driver
+#
+# ปัญหาเดิม: AlertRetryManager.check_and_retry() มี call site เดียว
+# อยู่ใน /health/ready แต่ไม่มีอะไรในระบบที่ deploy อยู่เรียก path นั้น
+#   - Render health check เรียก /health      (render.yaml)
+#   - keep-alive thread เรียก /health/live
+#   - ไม่มี external cron (ตามคอมเมนต์เดิมในไฟล์นี้)
+# ผลคือ retry และ escalation ของ alert วิกฤต "ไม่เคยทำงานเลย"
+# alert ที่ส่งไม่สำเร็จค้างอยู่ใน delivery_failed ตลอดไป
+#
+# แก้: thread เฉพาะของตัวเอง รอบถี่กว่า keep-alive เพราะผลวิกฤต
+# รอ 10 นาทีต่อรอบนานเกินไป
+#
+# ความปลอดภัยข้าม worker: Gunicorn รัน 2 workers ในคอนเทนเนอร์เดียว
+# จึงแชร์ /tmp กัน ใช้ fcntl.flock แบบ non-blocking — worker ที่ไม่ได้
+# lock ข้ามรอบนั้นไป กันการส่งซ้ำซึ่งทางคลินิกจะทำให้เข้าใจผิดว่าเป็น
+# เหตุการณ์ใหม่ (directive §6 P0-A)
+# ═══════════════════════════════════════════════════════════
+
+_ALERT_DRIVER_INTERVAL = int(
+    os.environ.get("ALERT_DRIVER_INTERVAL", "120")
+)
+_ALERT_DRIVER_ENABLED = os.environ.get(
+    "ALERT_DRIVER_ENABLED", "true"
+).lower() == "true"
+_ALERT_DRIVER_LOCK = os.path.join(
+    tempfile.gettempdir(), "ranong_raktai", "alert_driver.lock"
+)
+
+
+def _run_alert_delivery_tick() -> list[dict]:
+    """รัน retry/escalation หนึ่งรอบ โดยถือ lock ข้าม worker
+
+    คืน list ผลลัพธ์ (ว่างได้) — ไม่ raise ออกไปหา caller
+    """
+    if alert_retry_manager is None:
+        return []
+    os.makedirs(os.path.dirname(_ALERT_DRIVER_LOCK), exist_ok=True)
+    lock_fd = None
+    try:
+        lock_fd = open(_ALERT_DRIVER_LOCK, "w")
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError):
+            # worker อื่นกำลังทำรอบนี้อยู่ — ข้ามไป ไม่ใช่ข้อผิดพลาด
+            return []
+        try:
+            results = alert_retry_manager.check_and_retry(line_push_fn)
+            if results:
+                logger.info(
+                    "Alert driver: ดำเนินการ %d รายการ", len(results)
+                )
+            return results or []
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except Exception:
+                pass
+    except Exception as e:
+        logger.warning(
+            "Alert driver tick failed: %s", type(e).__name__
+        )
+        return []
+    finally:
+        if lock_fd is not None:
+            try:
+                lock_fd.close()
+            except Exception:
+                pass
+
+
+def _alert_driver_worker():
+    """Background thread: ขับ retry/escalation ของ alert วิกฤต."""
+    import time as _time
+    while True:
+        _time.sleep(_ALERT_DRIVER_INTERVAL)
+        _run_alert_delivery_tick()
+
+
+if _ALERT_DRIVER_ENABLED and not IS_TESTING and alert_retry_manager is not None:
+    _alert_driver_thread = threading.Thread(
+        target=_alert_driver_worker,
+        daemon=True,
+        name="alert-delivery-driver",
+    )
+    _alert_driver_thread.start()
+    logger.info(
+        "Alert delivery driver: เปิดใช้งาน (ทุก %d วินาที)",
+        _ALERT_DRIVER_INTERVAL,
+    )
+else:
+    logger.warning(
+        "Alert delivery driver: ปิด — retry/escalation ของ alert วิกฤต "
+        "จะไม่ทำงานอัตโนมัติ"
+    )
 
 
 # ═══════════════════════════════════════════════════════════

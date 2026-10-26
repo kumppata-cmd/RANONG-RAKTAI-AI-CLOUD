@@ -254,6 +254,10 @@ class TestAlertDelivery(unittest.TestCase):
             storage=self.storage,
             audit_logger=self.audit,
             clinician_recipients={"physician": ["U_PHYS_001"]},
+            # ชุดทดสอบนี้เรียก attempt_delivery โดยไม่ส่ง send_push_fn
+            # จึงต้อง opt-in simulated delivery อย่างชัดเจน
+            # production ใช้ค่าเริ่มต้น False (fail-closed) — ดู CS-4
+            allow_simulated_delivery=True,
         )
 
     def test_create_critical_alert(self):
