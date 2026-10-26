@@ -737,10 +737,21 @@ class AlertRetryManager:
     เพื่อความ simple บน single-instance Render
     """
 
+    # สถานะที่ driver ไม่ต้องแตะอีกแล้ว — อ้างอิงจาก ALERT_TRANSITIONS
+    #   ACKNOWLEDGED -> {RESOLVED}   เปลี่ยนได้ด้วยคนเท่านั้น
+    #   RESOLVED     -> {}           สิ้นสุด ไม่มีทางออก
+    # ไม่รวม ESCALATED เพราะยังกลับไป QUEUED ได้ จึงต้องสแกนต่อ
+    _DRIVER_INERT_STATES = frozenset({
+        AlertState.ACKNOWLEDGED.value,
+        AlertState.RESOLVED.value,
+    })
+
     def __init__(self, alert_service: AlertDeliveryService):
         self._service = alert_service
         self._last_retry_check = 0.0
         self._retry_interval = 60  # ตรวจทุก 60 วินาที
+        # alert ที่จบแล้ว — ข้ามโดยไม่ต้องดาวน์โหลดซ้ำทุกรอบ
+        self._inert_alert_ids: set[str] = set()
 
     def check_and_retry(self, send_push_fn=None) -> list[dict]:
         """ตรวจสอบ alerts ที่ต้อง retry.
@@ -760,10 +771,25 @@ class AlertRetryManager:
             alert_files = self._service._storage.list_files(ALERTS_PREFIX)
             for f in alert_files:
                 try:
+                    # [perf] ข้าม alert ที่จบแล้วโดยไม่ดาวน์โหลดซ้ำ
+                    #
+                    # driver รันทุก 2 นาทีตลอดเวลา เดิมดาวน์โหลด alert
+                    # ทุกไฟล์ที่เคยสร้างมาทุกรอบ แม้รายการที่แพทย์รับทราบ
+                    # หรือปิดเคสไปแล้วซึ่งไม่ต้องทำอะไรอีก ภาระจึงโตขึ้น
+                    # เรื่อย ๆ ตามจำนวน alert สะสม ไม่ใช่ตามงานที่ค้างจริง
+                    _name = f.rsplit("/", 1)[-1]
+                    _aid = _name[:-5] if _name.endswith(".json") else _name
+                    if _aid in self._inert_alert_ids:
+                        continue
+
                     data = self._service._storage.get(f)
                     if data is None:
                         continue
                     alert = CriticalAlert.from_dict(json.loads(data))
+
+                    if alert.state in self._DRIVER_INERT_STATES:
+                        self._inert_alert_ids.add(alert.alert_id)
+                        continue
 
                     # Check if needs retry
                     if alert.should_retry():

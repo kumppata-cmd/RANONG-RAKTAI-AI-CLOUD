@@ -457,6 +457,79 @@ class TestCS1DriverRunsRetries(unittest.TestCase):
         )
         self.assertEqual(calls, [], "ยังไม่ควร retry ภายใน backoff")
 
+    def test_finished_alerts_are_not_refetched_every_tick(self):
+        """[perf] driver ต้องไม่ดาวน์โหลด alert ที่จบแล้วซ้ำทุกรอบ
+
+        driver รันทุก 2 นาทีตลอดเวลา ถ้าดาวน์โหลดทุกไฟล์ที่เคยสร้าง
+        ภาระจะโตตามจำนวน alert สะสม ไม่ใช่ตามงานที่ค้างจริง
+        """
+        storage, audit = MockStorage(), MockAudit()
+        svc = make_service(storage, audit, simulate=True)
+        for i in range(6):
+            a = new_alert(svc, doc_id=f"D{i}")
+            svc.attempt_delivery(a.alert_id)
+            if i < 4:                      # 4 ใบรับทราบแล้ว
+                svc.acknowledge_alert(a.alert_id, "phys_1")
+
+        counter = {"n": 0}
+        original_get = storage.get
+
+        def counting_get(path):
+            counter["n"] += 1
+            return original_get(path)
+
+        storage.get = counting_get
+
+        mgr = AlertRetryManager(svc)
+        mgr._retry_interval = 0
+
+        mgr.check_and_retry(lambda u, m: True)      # รอบแรก อ่านทั้งหมด
+        counter["n"] = 0
+        mgr.check_and_retry(lambda u, m: True)      # รอบสอง
+        self.assertLessEqual(
+            counter["n"], 2,
+            "รอบถัดไปควรอ่านเฉพาะ alert ที่ยังค้าง",
+        )
+
+    def test_unacknowledged_alert_is_never_skipped(self):
+        """[ความถูกต้อง] alert ที่ยังไม่มีใครรับทราบต้องไม่ถูกข้าม
+
+        ถ้าข้ามผิด จะไม่มีการ escalate = ผลวิกฤตเงียบหายไป
+        ซึ่งอันตรายกว่าการดาวน์โหลดซ้ำมาก
+        """
+        storage, audit = MockStorage(), MockAudit()
+        svc = make_service(storage, audit, simulate=True)
+        alert = new_alert(svc)
+        alert.state = AlertState.SENT.value
+        alert.sent_at = (
+            datetime.now() - timedelta(seconds=1200)
+        ).isoformat(timespec="seconds")
+        alert.ack_timeout_sec = 900
+        svc._save_alert(alert)
+
+        mgr = AlertRetryManager(svc)
+        mgr._retry_interval = 0
+        mgr.check_and_retry(lambda u, m: True)   # รอบแรก
+        mgr._retry_interval = 0
+        mgr.check_and_retry(lambda u, m: True)   # รอบสอง
+
+        stored = svc._load_alert(alert.alert_id)
+        self.assertEqual(stored.state, AlertState.ESCALATED.value)
+        self.assertNotIn(alert.alert_id, mgr._inert_alert_ids)
+
+    def test_escalated_alert_is_still_scanned(self):
+        """ESCALATED ยังกลับไป QUEUED ได้ จึงต้องไม่ถูกจำว่าจบแล้ว"""
+        storage, audit = MockStorage(), MockAudit()
+        svc = make_service(storage, audit, simulate=True)
+        alert = new_alert(svc)
+        alert.state = AlertState.ESCALATED.value
+        svc._save_alert(alert)
+
+        mgr = AlertRetryManager(svc)
+        mgr._retry_interval = 0
+        mgr.check_and_retry(lambda u, m: True)
+        self.assertNotIn(alert.alert_id, mgr._inert_alert_ids)
+
     def test_driver_tick_is_safe_with_no_alerts(self):
         svc = make_service(simulate=True)
         mgr = AlertRetryManager(svc)
