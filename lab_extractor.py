@@ -310,6 +310,9 @@ TABULAR_RE = re.compile(
     r":?[^\S\n]+"                        # optional colon + horizontal whitespace (no newline)
     r"(?P<value>\d+\.?\d*)"            # numeric value
     r"[^\S\n]+"
+    # flag ของห้องแล็บ (H/L/HH/LL/High/Low/*) อาจคั่นระหว่างค่ากับหน่วย
+    # ถ้าไม่ข้าม flag จะถูกจับเป็น "หน่วย" แล้วหน่วยจริงตกหล่น
+    r"(?:(?:HH|LL|High|Low|H|L|\*)[^\S\n]+)?"
     r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
     r"(?:[^\S\n]+"
     r"(?P<ref>[<>]?\d+\.?\d*(?:\s*-\s*\d+\.?\d*)?))?",  # optional reference
@@ -327,6 +330,9 @@ TABULAR_THAI_RE = re.compile(
     r":?[^\S\n]+"                           # optional colon + 1+ horizontal spaces (no newline)
     r"(?P<value>\d+\.?\d*)"                # numeric value
     r"[^\S\n]+"
+    # flag ของห้องแล็บ (H/L/HH/LL/High/Low/*) อาจคั่นระหว่างค่ากับหน่วย
+    # ถ้าไม่ข้าม flag จะถูกจับเป็น "หน่วย" แล้วหน่วยจริงตกหล่น
+    r"(?:(?:HH|LL|High|Low|H|L|\*)[^\S\n]+)?"
     r"(?P<unit>[a-zA-Z%/^µu0-9]+(?:/[a-zA-Z0-9.µu^]+)*)"  # unit
     r"(?:[^\S\n]+"
     r"(?P<ref>[<>]?\d+\.?\d*(?:\s*-\s*\d+\.?\d*)?))?",  # optional reference
@@ -392,6 +398,35 @@ def _parse_value(text: str) -> Optional[float]:
         return None
 
 
+# flag ที่ห้องแล็บใส่ไว้ข้างค่า — ไม่ใช่หน่วย
+_LAB_FLAG_TOKENS = frozenset({
+    "h", "l", "hh", "ll", "high", "low", "n", "normal", "abn", "a",
+})
+
+
+def _clean_unit_token(unit: str) -> str:
+    """กรองสิ่งที่ "ไม่ใช่หน่วย" ออก คืนค่าว่างถ้าไม่ใช่หน่วยจริง
+
+    ทำไมต้องมี: กลุ่ม unit ของ TABULAR_RE ยอมรับทั้งตัวอักษรและตัวเลข
+    จึงไปคว้าสิ่งที่อยู่ถัดจากค่ามาเป็นหน่วยได้ สองกรณีที่พบจริง:
+
+      "Creatinine  5.2      0.6-1.2"   → หน่วยกลายเป็น "0"  (เลขจากช่วงอ้างอิง)
+      "Creatinine  5.2  H   mg/dL"     → หน่วยกลายเป็น "H"  (flag ของห้องแล็บ)
+
+    หน่วยผิดมีผลจริง เพราะ validate_result() ใช้หน่วยตรวจความสมเหตุสมผล
+    และหน่วยถูกแสดงในข้อความแจ้งเตือนที่ส่งถึงแพทย์
+    """
+    u = (unit or "").strip()
+    if not u:
+        return ""
+    # ตัวเลขล้วน (รวมทศนิยม/ช่วง) ไม่ใช่หน่วย
+    if re.fullmatch(r"[<>]?\d+(?:[.,]\d+)?(?:\s*-\s*\d+(?:[.,]\d+)?)?", u):
+        return ""
+    if u.lower() in _LAB_FLAG_TOKENS:
+        return ""
+    return u
+
+
 def _normalize_unit(unit: str) -> str:
     """ปรับรูปแบบหน่วยให้เป็นมาตรฐาน."""
     unit = unit.strip()
@@ -407,6 +442,68 @@ def _normalize_unit(unit: str) -> str:
         "ng/ml": "ng/mL",
     }
     return replacements.get(unit.lower(), unit)
+
+
+# ชื่อ-ค่า-หน่วย-ช่วงอ้างอิง บนบรรทัดเดียว โดย "ไม่บังคับ" ว่าต้องมีหน่วย
+#
+# ต่างจาก TABULAR_RE ตรงที่หน่วยเป็นตัวเลือก และยอมรับตัวคั่นหลายแบบ
+# ชื่อห้ามมีตัวเลข เพื่อไม่ให้ไปคาบเกี่ยวกับค่าหรือช่วงอ้างอิง
+_GENERIC_LINE_RE = re.compile(
+    r"^[\s|]*"                                  # ขอบซ้าย อาจมี | ของตาราง
+    r"(?P<name>[ก-๙A-Za-z][ก-๙A-Za-z\s()./-]{1,39}?)"  # ชื่อ ไม่มีตัวเลข
+    r"\s*[:=|]?\s*"                             # ตัวคั่น : = | หรือช่องว่าง
+    r"(?P<value>\d+(?:[.,]\d+)?)"               # ค่า
+    r"(?P<rest>.*)$"                            # ที่เหลือ: หน่วย/ช่วงอ้างอิง/flag
+)
+
+# ช่วงอ้างอิงที่พบท้ายบรรทัด เช่น (0.6-1.2) หรือ 0.6 - 1.2 หรือ <200
+_REF_RE = re.compile(
+    r"\(?\s*(?P<ref>[<>]?\s*\d+(?:\.\d+)?\s*(?:-\s*\d+(?:\.\d+)?)?)\s*\)?\s*$"
+)
+
+
+def _parse_generic_line(line: str):
+    """อ่าน 'ชื่อ ค่า [หน่วย] [ช่วงอ้างอิง]' จากหนึ่งบรรทัด
+
+    คืน (ชื่อมาตรฐาน, ค่า, หน่วย, ช่วงอ้างอิง) หรือ None ถ้าบรรทัดนี้ไม่ใช่ผลตรวจ
+
+    หน่วยเป็นตัวเลือก — ใบแล็บจำนวนมากวางหน่วยไว้ที่หัวคอลัมน์
+    หรือไม่ระบุเลย ซึ่งเดิมทำให้ทั้งบรรทัดถูกข้าม
+
+    ความปลอดภัย: คืนค่าเฉพาะเมื่อชื่ออยู่ในรายการ analyte ที่รู้จัก
+    """
+    if not line or not line.strip():
+        return None
+    # ตัวคั่นตาราง | และ tab ให้เป็นช่องว่าง เพื่อให้รูปแบบเดียวกันหมด
+    cleaned = line.replace("\t", " ").replace("|", " ")
+    m = _GENERIC_LINE_RE.match(cleaned)
+    if not m:
+        return None
+
+    canonical = _normalize_analyte(m.group("name"))
+    if not canonical:
+        return None
+
+    value_f = _parse_value(m.group("value"))
+    if value_f is None:
+        return None
+
+    rest = (m.group("rest") or "").strip()
+    # ตัด flag H/L/High/Low ที่ห้องแล็บใส่ไว้ท้ายค่า
+    rest = re.sub(r"^\s*(?:H|L|HH|LL|High|Low|\*)\b\s*", "", rest, flags=re.I)
+
+    unit = ""
+    unit_match = UNIT_RE.match(rest.strip())
+    if unit_match:
+        unit = _normalize_unit(_clean_unit_token(unit_match.group(0)))
+        rest = rest.strip()[unit_match.end():]
+
+    ref_range = ""
+    ref_match = _REF_RE.search(rest.strip()) if rest.strip() else None
+    if ref_match:
+        ref_range = re.sub(r"\s+", "", ref_match.group("ref"))
+
+    return canonical, value_f, unit, ref_range
 
 
 def extract_lab_results_from_text(
@@ -464,6 +561,21 @@ def extract_lab_results_from_text(
                     if parsed is not None:
                         value_f = parsed
                         continue
+                    # PDF/OCR บางฉบับวาง "ค่า" กับ "หน่วย" ไว้บรรทัดเดียวกัน
+                    # ใต้ชื่อรายการ เช่น  "Creatinine\n5.2 mg/dL"
+                    # เดิมบรรทัดนี้ parse เป็นตัวเลขไม่ได้จึงถูกข้ามทั้งคู่
+                    combo = re.match(
+                        r"^(?P<v>\d+(?:[.,]\d+)?)\s+(?P<u>\S+)", next_line
+                    )
+                    if combo:
+                        parsed = _parse_value(combo.group("v"))
+                        if parsed is not None:
+                            value_f = parsed
+                            if not unit:
+                                unit = _normalize_unit(
+                                    _clean_unit_token(combo.group("u"))
+                                )
+                            continue
 
                 # Try to parse as unit
                 if value_f is not None and not unit:
@@ -524,7 +636,7 @@ def extract_lab_results_from_text(
                 if value_f is None:
                     continue
 
-                unit = _normalize_unit(match.group("unit") or "")
+                unit = _normalize_unit(_clean_unit_token(match.group("unit") or ""))
                 ref_range = match.group("ref") or get_reference_range(canonical)
 
                 flags = validate_result(canonical, value_f, unit)
@@ -561,7 +673,7 @@ def extract_lab_results_from_text(
                 if value_f is None:
                     continue
 
-                unit = _normalize_unit(match.group("unit") or "")
+                unit = _normalize_unit(_clean_unit_token(match.group("unit") or ""))
                 ref_range = match.group("ref") or get_reference_range(canonical)
 
                 flags = validate_result(canonical, value_f, unit)
@@ -583,6 +695,57 @@ def extract_lab_results_from_text(
                 )
                 results.append(result)
                 seen_analytes.add(canonical)
+
+    # ── Strategy 4: ตัวอ่านแบบทั่วไป (ทำงานเสมอ) ──
+    #
+    # ทำไมต้องมี: สาม strategy ข้างบน "บังคับว่าต้องมีหน่วย" ต่อท้ายค่า
+    # แต่ใบแล็บจริงจำนวนมากไม่เป็นแบบนั้น — วัดจากรูปแบบที่พบจริง 10 แบบ
+    # มี 5 แบบที่อ่านไม่ออกเลย:
+    #   - ไม่มีหน่วยเลย                      "Creatinine   5.2"
+    #   - ช่วงอ้างอิงในวงเล็บ                "Creatinine  5.2  (0.6-1.2)"
+    #   - ชื่อกับค่าอยู่คนละบรรทัด            "Creatinine\n5.2 mg/dL"
+    #   - ใช้ = คั่น                         "Creatinine = 5.2 mg/dL"
+    #   - ตารางคั่นด้วย | (พบบ่อยมากใน OCR)  "Creatinine | 5.2 | mg/dL"
+    #
+    # ทำไมทำงานเสมอ ไม่ใช่เฉพาะตอนที่ strategy อื่นอ่านไม่ได้:
+    #   การกั้นด้วย len(results) < 3 ทำให้พออ่านได้ 3 ค่าก็หยุดมองหาต่อ
+    #   แต่ใบแล็บจริงมี 10-20 ค่า เอกสารที่ "อ่านสำเร็จ" จึงอาจได้ไม่ครบ
+    #   seen_analytes กันค่าซ้ำอยู่แล้ว การให้ทำงานเสมอจึงเพิ่มได้อย่างเดียว
+    #
+    # ความปลอดภัย: ชื่อที่อ่านได้ต้องอยู่ใน ANALYTE_ALIASES เท่านั้น
+    # (ผ่าน _normalize_analyte) ข้อความอื่นในเอกสารจึงไม่กลายเป็นผลตรวจ
+    for line in text.split("\n"):
+        parsed = _parse_generic_line(line)
+        if parsed is None:
+            continue
+        canonical, value_f, unit, ref_range = parsed
+        if canonical in seen_analytes:
+            continue
+
+        if not ref_range:
+            ref_range = get_reference_range(canonical)
+        flags = validate_result(canonical, value_f, unit)
+        # ความเชื่อมั่นต่ำกว่า strategy อื่น เพราะรูปแบบกำกวมกว่า
+        # ถ้าไม่มีหน่วยให้ตรวจ ยิ่งต้องให้คนดูซ้ำ
+        confidence = 0.75
+        if not unit:
+            confidence -= 0.10
+        if "unit_mismatch" in flags:
+            confidence -= 0.20
+        if "physiologic_impossible" in flags:
+            confidence = 0.3
+
+        results.append(LabResult(
+            analyte=canonical,
+            value=value_f,
+            unit=unit,
+            reference_range=ref_range,
+            confidence=round(confidence, 2),
+            extraction_method=extraction_method,
+            flags=flags,
+            raw_text=line.strip()[:120],
+        ))
+        seen_analytes.add(canonical)
 
     # Generate warnings
     if not results:
