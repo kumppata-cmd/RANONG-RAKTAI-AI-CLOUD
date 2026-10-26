@@ -2314,6 +2314,42 @@ def _admin_api_auth() -> "tuple | None":
 
 
 
+# เครื่องหมายที่คงไว้ในรูปแบบบรรทัด — เป็นตัวบอกการแบ่งคอลัมน์
+_PATTERN_KEEP = frozenset(".,:;|=()[]{}/<>+-*%#")
+
+
+def _masked_line_patterns(text: str, limit: int = 12) -> list:
+    """คืน "รูปแบบ" ของบรรทัด โดยปิดบังเนื้อหาทั้งหมด
+
+    ตัวเลขทุกตัว -> 9   ตัวอักษรทุกตัว (ไทย/ละติน) -> x
+    เครื่องหมายวรรคตอนและช่องว่างคงไว้ เพราะเป็นตัวบอกโครงสร้างคอลัมน์
+
+    ใช้ระบุว่าเอกสารจัดวางแบบไหน เมื่อตัวนับรูปร่างบรรทัดยังไม่พอชี้ชัด
+    ผลลัพธ์อ่านไม่ได้ว่าเขียนอะไรไว้ จึงไม่มีชื่อผู้ป่วย ไม่มีชื่อรายการ
+    ตรวจ และไม่มีค่าผลตรวจหลุดออกมา
+
+    ตัวอย่าง: "Creatinine  5.2  mg/dL  (0.6-1.2)"
+         ->   "xxxxxxxxxx  9.9  xx/xx  (9.9-9.9)"
+    """
+    out = []
+    for raw in (text or "").split("\n"):
+        ln = raw.rstrip()
+        if not ln.strip():
+            continue
+        # whitelist: เก็บเฉพาะช่องว่างและเครื่องหมายที่บอกโครงสร้างคอลัมน์
+        # ที่เหลือแปลงหมด — ตัวเลขเป็น 9 อย่างอื่นเป็น x
+        # ใช้ whitelist เพราะ blocklist ทิ้งสระและวรรณยุกต์ไทยไว้
+        masked = "".join(
+            " " if ch in " \t"
+            else ("9" if ch.isdigit() else (ch if ch in _PATTERN_KEEP else "x"))
+            for ch in ln
+        )
+        out.append(masked[:110])
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _line_shape(text: str) -> dict:
     """นับ "รูปร่าง" ของบรรทัดในเอกสาร โดยไม่เปิดเผยเนื้อหา
 
@@ -2486,6 +2522,7 @@ def api_labs_reextract():
                     # รูปร่างของบรรทัด — บอกว่าเอกสารจัดวางแบบไหน
                     # โดยไม่เปิดเผยว่าเขียนอะไรไว้
                     **_line_shape(text),
+                    "line_patterns": _masked_line_patterns(text),
                 })
                 continue
 
