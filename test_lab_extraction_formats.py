@@ -624,3 +624,98 @@ class TestMaskedLinePatterns(unittest.TestCase):
     def test_empty_text_gives_empty_list(self):
         self.assertEqual(self.mask(""), [])
         self.assertEqual(self.mask("   \n  \n"), [])
+
+
+# ═══════════════════════════════════════════════════════════
+# รูปแบบที่พบจริงบน production: จุดไข่ปลา + จุลภาคคั่นหลักพัน
+#
+#   Hemoglobin .............. 10.5 g/dL    (ค่าปกติ: 12-16)
+#   Platelet ................ 250,000 /uL  (ค่าปกติ: 150,000-400,000)
+# ═══════════════════════════════════════════════════════════
+
+from lab_extractor import _parse_value  # noqa: E402
+
+
+class TestDotLeaderFormat(unittest.TestCase):
+
+    REAL = (
+        "  Hemoglobin .............. 10.5 g/dL    (ค่าปกติ: 12-16)\n"
+        "  Hematocrit .............. 32.0 %       (ค่าปกติ: 36-46)\n"
+        "  WBC ..................... 5,600 /uL    (ค่าปกติ: 4,000-10,000)\n"
+        "  Platelet ................ 250,000 /uL  (ค่าปกติ: 150,000-400,000)\n"
+        "  Creatinine .............. 5.2 mg/dL    (ค่าปกติ: 0.6-1.2)\n"
+    )
+
+    def test_dot_leaders_do_not_block_extraction(self):
+        got = _extract(self.REAL)
+        self.assertEqual(
+            set(got),
+            {"Hemoglobin", "Hematocrit", "WBC", "Platelet", "Creatinine"},
+        )
+
+    def test_values_are_correct(self):
+        got = _extract(self.REAL)
+        self.assertEqual(got["Hemoglobin"].value, 10.5)
+        self.assertEqual(got["Creatinine"].value, 5.2)
+
+
+class TestThousandsSeparator(unittest.TestCase):
+    """จุลภาคมีสองความหมาย ถ้าแยกผิดค่าจะผิดเป็นพันเท่า"""
+
+    def test_thousands_separator_is_not_a_decimal_point(self):
+        """เดิม "250,000" ถูกอ่านเป็น 250.0
+
+        เกล็ดเลือด 250,000 เป็นค่าปกติ แต่ 250 (ถ้าตีเป็นหน่วยพัน)
+        ยังปกติ — ส่วน "5,600" เม็ดเลือดขาวปกติ กลายเป็น 5.6
+        ผลคือแจ้งเตือนเท็จกับผู้ป่วยทุกคนที่ตรวจ CBC
+        """
+        self.assertEqual(_parse_value("250,000"), 250000.0)
+        self.assertEqual(_parse_value("5,600"), 5600.0)
+        self.assertEqual(_parse_value("1,234.5"), 1234.5)
+
+    def test_european_decimal_still_works(self):
+        self.assertEqual(_parse_value("5,2"), 5.2)
+        self.assertEqual(_parse_value("10,75"), 10.75)
+
+    def test_plain_numbers_unchanged(self):
+        self.assertEqual(_parse_value("45"), 45.0)
+        self.assertEqual(_parse_value("10.5"), 10.5)
+
+
+class TestBloodCountUnitConversion(unittest.TestCase):
+    """ใบ CBC รายงานต่อไมโครลิตร แต่เกณฑ์ใช้หน่วยพัน"""
+
+    def test_per_microlitre_is_converted_to_thousands(self):
+        got = _extract("  Platelet ................ 250,000 /uL")
+        self.assertEqual(got["Platelet"].value, 250.0)
+        self.assertEqual(got["Platelet"].unit, "x10^3/uL")
+
+    def test_normal_cbc_raises_no_flags(self):
+        got = _extract(
+            "  WBC ..................... 5,600 /uL\n"
+            "  Platelet ................ 250,000 /uL\n"
+        )
+        for r in got.values():
+            self.assertEqual(r.flags, [], f"{r.analyte} ไม่ควรมีธงใดๆ")
+
+    def test_critically_low_platelet_is_flagged_not_discarded(self):
+        """กรณีที่อันตรายที่สุด
+
+        เดิม 30,000 ถูกอ่านเป็น 30000 ซึ่งเกินช่วงที่เป็นไปได้
+        จึงถูกตั้งธงว่า "เป็นไปไม่ได้" แล้วความเชื่อมั่นตกเหลือ 0.3
+        ค่าวิกฤตจริงจึงถูกตีว่าเป็นค่าอ่านผิดและไม่ถูกแจ้งเตือน
+        """
+        got = _extract("  Platelet ................ 30,000 /uL")
+        r = got["Platelet"]
+        self.assertEqual(r.value, 30.0)
+        self.assertIn("critical_low", r.flags)
+        self.assertNotIn("physiologic_impossible", r.flags)
+
+    def test_values_already_in_thousands_are_untouched(self):
+        got = _extract("  Platelet   250 x10^3/uL")
+        self.assertEqual(got["Platelet"].value, 250.0)
+
+    def test_analytes_not_measured_per_microlitre_are_untouched(self):
+        got = _extract("  Creatinine .............. 5.2 mg/dL")
+        self.assertEqual(got["Creatinine"].value, 5.2)
+        self.assertEqual(got["Creatinine"].unit, "mg/dL")
