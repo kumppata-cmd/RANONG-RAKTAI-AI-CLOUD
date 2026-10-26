@@ -2995,10 +2995,42 @@ def build_file_flex_message(doc: dict, download_url: str) -> dict:
 
 
 def is_authorized_user(user_hash: str) -> bool:
-    """ตรวจสอบว่า user hash อยู่ใน Allowlist."""
+    """ตรวจสอบว่า user hash อยู่ใน Allowlist.
+
+    ⚠️ นี่คือสิทธิ์ "เข้าถึงระบบ" เท่านั้น ไม่ใช่สิทธิ์ทางคลินิก
+    ใน allowlist นี้มีได้ทั้งเจ้าหน้าที่และผู้ป่วย — ห้ามใช้ตัดสินว่า
+    ผู้ใช้เห็นผลวิเคราะห์ที่ยังไม่ผ่านแพทย์ได้หรือไม่ (ดู CS-5)
+    """
     if not AUTHORIZED_USERS:
         return False  # ถ้าไม่ตั้งค่า = ปิดระบบค้นหา
     return user_hash in AUTHORIZED_USERS
+
+
+def is_physician_user(user_hash: str) -> bool:
+    """แพทย์ที่ได้รับอนุมัติให้ตรวจสอบผลวิเคราะห์ทางคลินิก"""
+    return bool(user_hash) and user_hash in PHYSICIAN_USERS
+
+
+def is_admin_user(user_hash: str) -> bool:
+    """ผู้ดูแลระบบ"""
+    return bool(user_hash) and user_hash in ADMIN_USERS
+
+
+def can_view_unapproved_clinical(user_hash: str) -> bool:
+    """[CS-5] ใครเห็นผลวิเคราะห์ที่ยังไม่ผ่านการตรวจสอบของแพทย์ได้
+
+    เฉพาะแพทย์และผู้ดูแลระบบ เพราะ "ต้องเห็นเพื่อตรวจสอบ" ถ้าซ่อนจาก
+    แพทย์ด้วย กระบวนการอนุมัติก็ทำงานไม่ได้
+
+    ผู้ใช้อื่นใน AUTHORIZED_USERS (เจ้าหน้าที่/ผู้ป่วย) ต้องไม่เห็น
+    เนื้อหาข้อสรุปทางคลินิกจนกว่าแพทย์จะอนุมัติ
+
+    เดิมระบบส่งเนื้อหาเต็มให้ทุกคนใน AUTHORIZED_USERS โดยติดป้ายกำกับ
+    ไว้เฉย ๆ ซึ่งแปลว่าการกันไม่ให้ผู้ป่วยเห็นขึ้นกับการตั้งค่า env
+    ไม่ใช่การบังคับใช้ในโค้ด — การเพิ่มผู้ป่วยเข้า allowlist เพียงคนเดียว
+    ก็ทำให้เห็นผลวิเคราะห์ที่ยังไม่ผ่านแพทย์ทันที
+    """
+    return is_physician_user(user_hash) or is_admin_user(user_hash)
 
 
 def format_search_results(results: list[dict]) -> str:
@@ -3908,11 +3940,41 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 "stale": bool(stale_warning),
             })
 
-            # ── Verification status banner ──
+            # ── [CS-5] บังคับ approval gate ก่อนเปิดเผยข้อสรุปทางคลินิก ──
+            # ผลวิเคราะห์ที่ยังไม่ผ่านแพทย์ หรือที่ล้าสมัยเพราะผลแล็บถูก
+            # แก้ไขภายหลัง ต้อง "ไม่ถูกส่งเนื้อหา" ให้ผู้ที่ไม่ใช่แพทย์
+            # ไม่ใช่แค่ติดป้ายกำกับแล้วส่งเนื้อหาเต็มเหมือนเดิม
+            _needs_review = verification_status in (
+                "PENDING_VERIFICATION", "STALE_AFTER_CORRECTION",
+            )
+            if _needs_review and not can_view_unapproved_clinical(user_hash):
+                audit_logger.log(
+                    "clinical_analysis_withheld", user_hash, {
+                        "doc_id": full_doc_id[:8],
+                        "status": verification_status,
+                    },
+                )
+                if verification_status == "STALE_AFTER_CORRECTION":
+                    return (
+                        "⚠️ ผลวิเคราะห์ของเอกสารนี้ล้าสมัย\n"
+                        "ผลแล็บถูกแก้ไขหลังจากวิเคราะห์ จึงยังไม่แสดง\n\n"
+                        "ระบบจะแสดงให้เมื่อแพทย์ตรวจสอบผลที่แก้ไขแล้ว"
+                    )
+                return (
+                    "⏳ ผลวิเคราะห์ของเอกสารนี้ยังไม่ผ่านการตรวจสอบ"
+                    "โดยแพทย์\n\n"
+                    "เพื่อความปลอดภัย ระบบจะยังไม่แสดงข้อสรุป "
+                    "จนกว่าแพทย์จะตรวจสอบและยืนยัน\n\n"
+                    f"รหัสเอกสาร: {full_doc_id[:8]}"
+                )
+
+            # ── Verification status banner (สำหรับผู้มีสิทธิ์ตรวจสอบ) ──
             status_banner = ""
             if verification_status == "PENDING_VERIFICATION":
                 status_banner = (
-                    "⏳ ผลวิเคราะห์ยังไม่ผ่านการตรวจสอบโดยแพทย์\n\n"
+                    "⏳ ผลวิเคราะห์ยังไม่ผ่านการตรวจสอบโดยแพทย์\n"
+                    "(แสดงเพื่อการตรวจสอบ — ห้ามส่งต่อให้ผู้ป่วย"
+                    "ก่อนยืนยัน)\n\n"
                 )
             elif verification_status == "STALE_AFTER_CORRECTION":
                 status_banner = (
