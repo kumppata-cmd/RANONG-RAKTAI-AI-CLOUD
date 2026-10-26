@@ -27,7 +27,29 @@
 
 ## 2. FINDING SEC-1 (HIGH) — `/liff/api/my-labs` trusts client-supplied identity
 
-**Status: CONFIRMED by direct inspection of all three layers.**
+> ### ✅ **RESOLVED (TESTED)** — commit `b61c9f2`
+>
+> | Change | Detail |
+> |---|---|
+> | Server-side token verification | `verify_liff_id_token()` posts to LINE's `/oauth2/v2.1/verify`; the signature is checked by LINE, never decoded locally |
+> | `aud` re-checked locally | Without this, a token issued to **another** LIFF channel would grant access to this system's patient data |
+> | `owner_hash` no longer an input | Derived from the verified `sub` via `hash_user_id()` — the client can no longer declare who it is |
+> | Moved to POST | Identifiers leave the query string, so they stop landing in proxy/platform access logs |
+> | Error bodies generic | `unauthorized` / `internal error`; the reason goes to the server log plus a `liff_auth_failed` audit event |
+> | `dev_test_user` bypass removed | It was embedded in the page served to patients |
+> | Fail-closed everywhere | Missing `LIFF_CHANNEL_ID`, LINE unreachable, `aud` mismatch, missing `sub` → rejected |
+>
+> **Verified with the Flask test client:**
+> ```
+> GET  ?owner_hash=<guess>      → 405   (the original attack vector no longer exists)
+> POST {"owner_hash": <guess>}  → 400   (owner_hash is simply not accepted)
+> POST {"id_token": <forged>}   → 401   unauthorized, no internal detail leaked
+> ```
+> 19 tests in `test_liff_auth.py`; suite now **1,224 tests, 0 failures**.
+>
+> **Operational requirement:** `LIFF_CHANNEL_ID` (the LINE Login channel ID) must be set in Render. Until it is, the endpoint rejects every request — fail-closed by design. `/health` now reports `liff_channel_id_set` so this is visible. Note this is **not** a regression: the endpoint returned no data for real patients before the fix either (see the functional defect below).
+
+**Status: CONFIRMED by direct inspection of all three layers.** *(original finding preserved below for the record)*
 
 ### Evidence
 
@@ -124,8 +146,21 @@ Nothing in the codebase asserts that an `owner_hash` is a 32-hex-character salte
 
 ## 6. Ranked remediation order
 
-1. **SEC-1** — LIFF authorization (HIGH; fixes a broken auth model *and* a broken feature in one change)
+1. ~~**SEC-1** — LIFF authorization~~ → ✅ **RESOLVED** (`b61c9f2`)
 2. **§3.2** — persistent salt whenever document storage is enabled (MEDIUM; prevents silent data loss)
 3. **§3.1** — `owner_hash` format validator + test (MEDIUM; cheap defence in depth)
-4. **§4** — restore a real `pip-audit` gate (MEDIUM; currently zero vulnerability visibility)
+4. **§4 / TD-14** — pip-audit now *runs* and is visible, but still advisory because the specific CVE is unidentified (CI logs unreachable from the audit environment). See `TECHNICAL_DEBT_REGISTER.md` TD-14.
 5. **§3.4, §3.5** — fail-closed chart key; header-only admin secret (LOW)
+
+### Security status after batches 1–4
+
+| Finding | Status |
+|---|---|
+| SEC-1 LIFF authorization | ✅ RESOLVED (TESTED) |
+| §3.1 identifier-contract guard | OPEN (MEDIUM) |
+| §3.2 `testing-docs` salt rotation | OPEN (MEDIUM) |
+| §3.3 dedup not atomic across workers | OPEN (MEDIUM) — partially mitigated: the alert driver now takes a cross-worker `flock`, so duplicate *clinical notifications* from the retry path are prevented |
+| §3.4 chart-token key fallback | OPEN (LOW) |
+| §3.5 admin secret in query string | OPEN (LOW) |
+| Malware scanning of uploads | NOT IMPLEMENTED |
+| GCS bucket posture | **UNKNOWN** — still no credentials |
