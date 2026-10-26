@@ -103,7 +103,11 @@ class ClinicalAnalysis:
     """
     source_document_id: str
     specimen_date: str
+    # ⚠️ ckd_stage เก็บ "หมวดค่า eGFR" (G1–G5) ไม่ใช่การวินิจฉัย CKD
+    # ชื่อฟิลด์คงไว้เพื่อ backward compatibility — ข้อสรุปว่าเป็น CKD
+    # หรือไม่ (พร้อมเหตุผลและสิ่งที่ยังขาด) อยู่ใน ckd_assessment
     ckd_stage: str = CKDStage.UNKNOWN.value
+    ckd_assessment: dict = field(default_factory=dict)
     findings: list[ClinicalFinding] = field(default_factory=list)
     summary_text_th: str = ""   # สรุปภาษาไทย
     analyzed_at: str = ""
@@ -148,14 +152,24 @@ class ClinicalAnalysis:
 # CKD Staging — KDIGO 2012
 # ═══════════════════════════════════════════════════════════
 
-def classify_ckd_stage(egfr: float) -> CKDStage:
-    """จัดระดับ CKD จาก eGFR ตาม KDIGO 2012.
+def classify_egfr_category(egfr: float) -> CKDStage:
+    """จัดหมวด eGFR (G1–G5) ตาม KDIGO
+
+    ⚠️ สำคัญ: นี่คือ "หมวดของค่า eGFR" ไม่ใช่การวินิจฉัย CKD
+
+    ค่า eGFR ตั้งแต่ 60 ขึ้นไป (G1/G2) ไม่ได้แปลว่าเป็นโรคไตเรื้อรัง
+    ต้องมีหลักฐานความผิดปกติของไตร่วมด้วย เช่น albuminuria หรือ
+    ความผิดปกติของโครงสร้างไต นานอย่างน้อย 3 เดือน
+    ส่วน eGFR ต่ำกว่า 60 ก็ต้องประเมินความเรื้อรังเช่นกัน
+    ไม่ควรวินิจฉัย CKD จากผลตรวจครั้งเดียว
+
+    ใช้ assess_ckd() เมื่อต้องการข้อสรุปว่าเป็น CKD หรือไม่
 
     Args:
         egfr: eGFR ในหน่วย mL/min/1.73m²
 
     Returns:
-        CKDStage enum value
+        CKDStage enum value (หมวด eGFR)
     """
     if egfr >= 90:
         return CKDStage.G1
@@ -169,6 +183,314 @@ def classify_ckd_stage(egfr: float) -> CKDStage:
         return CKDStage.G4
     else:
         return CKDStage.G5
+
+
+def classify_ckd_stage(egfr: float) -> CKDStage:
+    """DEPRECATED — ใช้ classify_egfr_category() หรือ assess_ckd() แทน
+
+    ชื่อเดิมสื่อว่าเป็นการ "จัดระยะ CKD" จาก eGFR ค่าเดียว ซึ่งไม่ถูกต้อง
+    ตาม KDIGO (ดู CLINICAL_SAFETY_GAP_ANALYSIS CS-6)
+    คงไว้เพื่อ backward compatibility — พฤติกรรมเหมือน
+    classify_egfr_category() ทุกประการ
+    """
+    return classify_egfr_category(egfr)
+
+
+# ─────────────────────────────────────────────────────────────
+# Albuminuria (UACR) — KDIGO A1/A2/A3
+# ─────────────────────────────────────────────────────────────
+
+class AlbuminuriaCategory(str, Enum):
+    """หมวด albuminuria ตาม UACR (mg/g)."""
+    A1 = "A1"   # <30    — ปกติถึงเพิ่มเล็กน้อย
+    A2 = "A2"   # 30-299 — เพิ่มปานกลาง (microalbuminuria)
+    A3 = "A3"   # ≥300   — เพิ่มรุนแรง (macroalbuminuria)
+    UNKNOWN = "unknown"
+
+
+ALBUMINURIA_DESCRIPTIONS = {
+    AlbuminuriaCategory.A1: "ปกติถึงเพิ่มเล็กน้อย (UACR <30 mg/g)",
+    AlbuminuriaCategory.A2: "เพิ่มปานกลาง (UACR 30–299 mg/g)",
+    AlbuminuriaCategory.A3: "เพิ่มรุนแรง (UACR ≥300 mg/g)",
+    AlbuminuriaCategory.UNKNOWN: "ไม่มีผล UACR",
+}
+
+
+def classify_albuminuria(uacr_mg_g: float | None) -> AlbuminuriaCategory:
+    """จัดหมวด albuminuria จาก UACR (mg/g)."""
+    if uacr_mg_g is None:
+        return AlbuminuriaCategory.UNKNOWN
+    try:
+        v = float(uacr_mg_g)
+    except (TypeError, ValueError):
+        return AlbuminuriaCategory.UNKNOWN
+    if v < 0:
+        return AlbuminuriaCategory.UNKNOWN
+    if v < 30:
+        return AlbuminuriaCategory.A1
+    if v < 300:
+        return AlbuminuriaCategory.A2
+    return AlbuminuriaCategory.A3
+
+
+# ─────────────────────────────────────────────────────────────
+# KDIGO risk heat map — eGFR category × albuminuria
+# ─────────────────────────────────────────────────────────────
+
+class KDIGORisk(str, Enum):
+    """ระดับความเสี่ยงตามตาราง KDIGO."""
+    LOW = "low"              # ต่ำ
+    MODERATE = "moderate"    # ปานกลาง
+    HIGH = "high"            # สูง
+    VERY_HIGH = "very_high"  # สูงมาก
+    UNKNOWN = "unknown"
+
+
+KDIGO_RISK_LABELS_TH = {
+    KDIGORisk.LOW: "ต่ำ",
+    KDIGORisk.MODERATE: "ปานกลาง",
+    KDIGORisk.HIGH: "สูง",
+    KDIGORisk.VERY_HIGH: "สูงมาก",
+    KDIGORisk.UNKNOWN: "ประเมินไม่ได้",
+}
+
+# ตาราง KDIGO: (eGFR category, albuminuria category) → ระดับความเสี่ยง
+# หมายเหตุ G1/G2 + A1: ถ้าไม่มีหลักฐานความผิดปกติของไตอื่น ไม่จัดเป็น CKD
+_KDIGO_RISK_MATRIX = {
+    CKDStage.G1: {
+        AlbuminuriaCategory.A1: KDIGORisk.LOW,
+        AlbuminuriaCategory.A2: KDIGORisk.MODERATE,
+        AlbuminuriaCategory.A3: KDIGORisk.HIGH,
+    },
+    CKDStage.G2: {
+        AlbuminuriaCategory.A1: KDIGORisk.LOW,
+        AlbuminuriaCategory.A2: KDIGORisk.MODERATE,
+        AlbuminuriaCategory.A3: KDIGORisk.HIGH,
+    },
+    CKDStage.G3a: {
+        AlbuminuriaCategory.A1: KDIGORisk.MODERATE,
+        AlbuminuriaCategory.A2: KDIGORisk.HIGH,
+        AlbuminuriaCategory.A3: KDIGORisk.VERY_HIGH,
+    },
+    CKDStage.G3b: {
+        AlbuminuriaCategory.A1: KDIGORisk.HIGH,
+        AlbuminuriaCategory.A2: KDIGORisk.VERY_HIGH,
+        AlbuminuriaCategory.A3: KDIGORisk.VERY_HIGH,
+    },
+    CKDStage.G4: {
+        AlbuminuriaCategory.A1: KDIGORisk.VERY_HIGH,
+        AlbuminuriaCategory.A2: KDIGORisk.VERY_HIGH,
+        AlbuminuriaCategory.A3: KDIGORisk.VERY_HIGH,
+    },
+    CKDStage.G5: {
+        AlbuminuriaCategory.A1: KDIGORisk.VERY_HIGH,
+        AlbuminuriaCategory.A2: KDIGORisk.VERY_HIGH,
+        AlbuminuriaCategory.A3: KDIGORisk.VERY_HIGH,
+    },
+}
+
+
+def kdigo_risk(egfr_category: CKDStage,
+               albuminuria: AlbuminuriaCategory) -> KDIGORisk:
+    """ระดับความเสี่ยงตามตาราง KDIGO (eGFR × albuminuria)
+
+    คืน UNKNOWN เมื่อขาดข้อมูลด้านใดด้านหนึ่ง — ไม่เดา
+    """
+    row = _KDIGO_RISK_MATRIX.get(egfr_category)
+    if row is None:
+        return KDIGORisk.UNKNOWN
+    return row.get(albuminuria, KDIGORisk.UNKNOWN)
+
+
+# ─────────────────────────────────────────────────────────────
+# การประเมิน CKD แบบครบเกณฑ์ KDIGO
+# ─────────────────────────────────────────────────────────────
+
+# ต้องมีความผิดปกติต่อเนื่องอย่างน้อย 3 เดือนจึงเข้าเกณฑ์ "เรื้อรัง"
+CKD_CHRONICITY_DAYS = 90
+
+
+@dataclass
+class CKDAssessment:
+    """ผลประเมิน CKD ตามเกณฑ์ KDIGO
+
+    แยก "หมวดค่า eGFR" ออกจาก "การวินิจฉัย CKD" อย่างชัดเจน
+    เพราะสองอย่างนี้ไม่เหมือนกัน และการสับสนทำให้ผู้ที่ไตปกติ
+    ถูกติดป้ายว่าเป็น CKD (ดู CS-6)
+
+    is_ckd:
+        True  — เข้าเกณฑ์ CKD
+        False — ไม่เข้าเกณฑ์ (เช่น G1/G2 + A1 ไม่มีหลักฐานความผิดปกติ)
+        None  — ข้อมูลไม่พอสรุป (เช่น มีผลตรวจครั้งเดียว)
+    """
+    egfr: float | None = None
+    egfr_category: CKDStage = CKDStage.UNKNOWN
+    albuminuria_category: AlbuminuriaCategory = AlbuminuriaCategory.UNKNOWN
+    uacr: float | None = None
+    chronicity_met: bool = False
+    chronicity_days: int = 0
+    has_damage_marker: bool = False
+    is_ckd: bool | None = None
+    risk: KDIGORisk = KDIGORisk.UNKNOWN
+    missing: list[str] = field(default_factory=list)
+    reason_th: str = ""
+
+    @property
+    def stage_label_th(self) -> str:
+        """ป้ายที่ปลอดภัยสำหรับแสดงผล
+
+        ถ้ายังสรุปไม่ได้ว่าเป็น CKD ต้องไม่เรียกว่า "CKD Stage"
+        """
+        cat = self.egfr_category.value
+        if self.is_ckd is True:
+            if self.albuminuria_category != AlbuminuriaCategory.UNKNOWN:
+                return f"CKD {cat}{self.albuminuria_category.value}"
+            return f"CKD {cat}"
+        if self.is_ckd is False:
+            return f"eGFR category {cat} (ไม่เข้าเกณฑ์ CKD)"
+        return f"eGFR category {cat} (ยังสรุปไม่ได้)"
+
+    def to_dict(self) -> dict:
+        return {
+            "egfr": self.egfr,
+            "egfr_category": self.egfr_category.value,
+            "albuminuria_category": self.albuminuria_category.value,
+            "uacr": self.uacr,
+            "chronicity_met": self.chronicity_met,
+            "chronicity_days": self.chronicity_days,
+            "has_damage_marker": self.has_damage_marker,
+            "is_ckd": self.is_ckd,
+            "risk": self.risk.value,
+            "missing": list(self.missing),
+            "reason_th": self.reason_th,
+            "stage_label_th": self.stage_label_th,
+        }
+
+
+def assess_ckd(
+    egfr: float | None,
+    uacr: float | None = None,
+    prior_egfr_dates: list[tuple[float, datetime]] | None = None,
+    has_structural_abnormality: bool = False,
+    damage_marker_since: datetime | None = None,
+    now: datetime | None = None,
+) -> CKDAssessment:
+    """ประเมิน CKD ตามเกณฑ์ KDIGO — ไม่วินิจฉัยจากผลตรวจครั้งเดียว
+
+    Args:
+        egfr: eGFR ปัจจุบัน (mL/min/1.73m²)
+        uacr: UACR ปัจจุบัน (mg/g) — ใช้จัดหมวด albuminuria
+        prior_egfr_dates: ผล eGFR ก่อนหน้า [(ค่า, วันที่), ...]
+            ใช้พิสูจน์ความเรื้อรัง ≥3 เดือน
+        has_structural_abnormality: มีความผิดปกติของโครงสร้างไต
+        damage_marker_since: วันที่เริ่มพบหลักฐานความผิดปกติของไต
+        now: เวลาอ้างอิง (สำหรับทดสอบ)
+
+    Returns:
+        CKDAssessment — ระบุชัดว่าสรุปได้หรือไม่ และขาดอะไร
+    """
+    now = now or datetime.now()
+    a = CKDAssessment(egfr=egfr, uacr=uacr)
+
+    if egfr is None:
+        a.missing.append("eGFR")
+        a.reason_th = "ไม่มีค่า eGFR — ประเมินไม่ได้"
+        return a
+
+    a.egfr_category = classify_egfr_category(egfr)
+    a.albuminuria_category = classify_albuminuria(uacr)
+    a.risk = kdigo_risk(a.egfr_category, a.albuminuria_category)
+
+    # ── หลักฐานความผิดปกติของไต (damage marker) ──
+    a.has_damage_marker = bool(
+        has_structural_abnormality
+        or a.albuminuria_category in (
+            AlbuminuriaCategory.A2, AlbuminuriaCategory.A3
+        )
+    )
+
+    # ── ความเรื้อรัง: ต้องมีหลักฐานต่อเนื่อง ≥ 3 เดือน ──
+    span_days = 0
+    low_egfr_now = egfr < 60
+    for prior_value, prior_date in (prior_egfr_dates or []):
+        try:
+            days = (now - prior_date).days
+        except TypeError:
+            continue
+        if days < CKD_CHRONICITY_DAYS:
+            continue
+        # ความผิดปกติต้องคงอยู่ในอดีตด้วย ไม่ใช่แค่มีผลเก่า
+        if low_egfr_now and prior_value < 60:
+            span_days = max(span_days, days)
+        elif not low_egfr_now and a.has_damage_marker:
+            span_days = max(span_days, days)
+
+    if damage_marker_since is not None:
+        try:
+            marker_days = (now - damage_marker_since).days
+            if marker_days >= CKD_CHRONICITY_DAYS:
+                span_days = max(span_days, marker_days)
+        except TypeError:
+            pass
+
+    a.chronicity_days = span_days
+    a.chronicity_met = span_days >= CKD_CHRONICITY_DAYS
+
+    # ── สรุป ──
+    if a.egfr_category in (CKDStage.G1, CKDStage.G2):
+        # eGFR ≥60: ต้องมีหลักฐานความผิดปกติของไตจึงจะเป็น CKD
+        if not a.has_damage_marker:
+            if a.albuminuria_category == AlbuminuriaCategory.UNKNOWN:
+                a.is_ckd = None
+                a.missing.append("UACR")
+                a.reason_th = (
+                    f"eGFR {egfr:.0f} อยู่ในหมวด {a.egfr_category.value} "
+                    "ซึ่งยังไม่บอกว่าเป็นโรคไตเรื้อรัง "
+                    "ต้องมีผล UACR หรือหลักฐานความผิดปกติของไตประกอบ"
+                )
+            else:
+                a.is_ckd = False
+                a.reason_th = (
+                    f"eGFR {egfr:.0f} ({a.egfr_category.value}) ร่วมกับ "
+                    f"{a.albuminuria_category.value} และไม่พบหลักฐาน"
+                    "ความผิดปกติของไต — ไม่เข้าเกณฑ์ CKD"
+                )
+            return a
+
+        # มี damage marker → ต้องพิสูจน์ความเรื้อรังด้วย
+        if a.chronicity_met:
+            a.is_ckd = True
+            a.reason_th = (
+                f"{a.egfr_category.value}{a.albuminuria_category.value}: "
+                f"มีหลักฐานความผิดปกติของไตต่อเนื่อง "
+                f"{a.chronicity_days} วัน (≥90 วัน)"
+            )
+        else:
+            a.is_ckd = None
+            a.missing.append("ผลติดตาม ≥90 วัน")
+            a.reason_th = (
+                f"พบความผิดปกติ ({a.albuminuria_category.value}) "
+                f"แต่ยังไม่มีหลักฐานว่าเป็นต่อเนื่อง ≥90 วัน "
+                "ไม่ควรวินิจฉัย CKD จากผลตรวจครั้งเดียว"
+            )
+        return a
+
+    # eGFR <60 (G3a ขึ้นไป) — ยังต้องประเมินความเรื้อรังเช่นกัน
+    if a.chronicity_met:
+        a.is_ckd = True
+        a.reason_th = (
+            f"eGFR {egfr:.0f} ({a.egfr_category.value}) ต่ำกว่า 60 "
+            f"ต่อเนื่อง {a.chronicity_days} วัน (≥90 วัน)"
+        )
+    else:
+        a.is_ckd = None
+        a.missing.append("ผลติดตาม ≥90 วัน")
+        a.reason_th = (
+            f"eGFR {egfr:.0f} ต่ำกว่า 60 แต่ยังไม่มีผลยืนยันว่าต่ำ"
+            "ต่อเนื่อง ≥90 วัน — ต้องแยกภาวะไตบาดเจ็บเฉียบพลัน (AKI) "
+            "ก่อน ไม่ควรวินิจฉัย CKD จากผลตรวจครั้งเดียว"
+        )
+    return a
 
 
 CKD_STAGE_DESCRIPTIONS = {
@@ -192,17 +514,27 @@ CKD_STAGE_RECOMMENDATIONS = {
 
 
 def _assess_ckd(results: dict[str, LabResult]) -> list[ClinicalFinding]:
-    """ประเมิน CKD staging จากผล Lab."""
+    """ประเมินหมวด eGFR และ CKD จากผล Lab ชุดเดียว
+
+    [CS-6] ผล Lab ชุดเดียวพิสูจน์ความเรื้อรังไม่ได้ จึงรายงานเป็น
+    "หมวด eGFR" พร้อมระบุสิ่งที่ยังขาด ไม่ประกาศว่าเป็น CKD Stage
+    """
     findings = []
 
     egfr_result = results.get("eGFR")
     cr_result = results.get("Creatinine")
     bun_result = results.get("BUN")
+    uacr_result = results.get("UACR")
 
     if egfr_result:
-        stage = classify_ckd_stage(egfr_result.value)
+        stage = classify_egfr_category(egfr_result.value)
         desc = CKD_STAGE_DESCRIPTIONS.get(stage, "")
         rec = CKD_STAGE_RECOMMENDATIONS.get(stage, "")
+
+        assessment = assess_ckd(
+            egfr=egfr_result.value,
+            uacr=uacr_result.value if uacr_result else None,
+        )
 
         severity = Severity.NORMAL
         if stage in (CKDStage.G4, CKDStage.G5):
@@ -221,10 +553,25 @@ def _assess_ckd(results: dict[str, LabResult]) -> list[ClinicalFinding]:
         if bun_result:
             values["BUN"] = bun_result.value
             based_on.append("BUN")
+        if uacr_result:
+            values["UACR"] = uacr_result.value
+            based_on.append("UACR")
+
+        # ข้อความต้องไม่ประกาศการวินิจฉัยจากผลครั้งเดียว
+        finding_text = f"{assessment.stage_label_th}: {desc}"
+        if assessment.reason_th:
+            finding_text += f"\n{assessment.reason_th}"
+        if assessment.risk != KDIGORisk.UNKNOWN:
+            finding_text += (
+                f"\nความเสี่ยงตาม KDIGO: "
+                f"{KDIGO_RISK_LABELS_TH[assessment.risk]}"
+            )
+        if assessment.missing:
+            finding_text += f"\nยังขาด: {', '.join(assessment.missing)}"
 
         findings.append(ClinicalFinding(
             area=AssessmentArea.CKD_STAGING.value,
-            finding=f"CKD Stage {stage.value}: {desc}",
+            finding=finding_text,
             severity=severity.value,
             recommendation=rec,
             based_on=based_on,
@@ -1108,10 +1455,17 @@ def analyze_lab_report(lab_report: LabReport) -> ClinicalAnalysis:
         specimen_date=lab_report.specimen_date,
     )
 
-    # CKD staging
+    # หมวด eGFR (ไม่ใช่การวินิจฉัย CKD — ดู CS-6)
+    # ฟิลด์ ckd_stage เก็บ "หมวด eGFR" เพื่อคง backward compatibility
+    # กับผู้ใช้เดิม ส่วนข้อสรุปว่าเป็น CKD หรือไม่อยู่ใน ckd_assessment
     egfr = results.get("eGFR")
     if egfr:
-        analysis.ckd_stage = classify_ckd_stage(egfr.value).value
+        analysis.ckd_stage = classify_egfr_category(egfr.value).value
+        _uacr = results.get("UACR")
+        analysis.ckd_assessment = assess_ckd(
+            egfr=egfr.value,
+            uacr=_uacr.value if _uacr else None,
+        ).to_dict()
 
     # รัน assessments ทั้งหมด
     all_findings = []

@@ -229,13 +229,22 @@ class CKDProgressionReport:
 # ═══════════════════════════════════════════════════════════
 
 def get_ckd_stage(egfr: float) -> str:
-    """กำหนด CKD Stage จากค่า eGFR.
+    """คืน "หมวดค่า eGFR" (G1–G5) จากค่า eGFR ปัจจุบัน
+
+    ⚠️ ชื่อฟังก์ชันสื่อว่าเป็น "CKD Stage" แต่ค่าที่คืนคือหมวดของค่า
+    eGFR เท่านั้น ไม่ใช่การวินิจฉัย CKD — การวินิจฉัยต้องมีความเรื้อรัง
+    ≥3 เดือน และหลักฐานความผิดปกติของไต (ดู clinical_analyzer.assess_ckd
+    และ CLINICAL_SAFETY_GAP_ANALYSIS CS-6)
+
+    คงชื่อและพฤติกรรมไว้โดยเจตนา เพราะผู้ใช้หลักคือการปรับขนาดยาตาม
+    การทำงานของไต (nephrology_drug_db) ซึ่ง "ต้อง" ใช้ค่า eGFR ปัจจุบัน
+    ไม่ใช่สถานะความเรื้อรัง การเปลี่ยนตรงนี้จะทำให้ขนาดยาผิด
 
     Args:
         egfr: ค่า eGFR (mL/min/1.73m²)
 
     Returns:
-        CKDStage value string
+        CKDStage value string — หมวดค่า eGFR
     """
     if egfr >= 90:
         return CKDStage.G1.value
