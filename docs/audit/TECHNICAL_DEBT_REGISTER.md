@@ -1,6 +1,35 @@
 # TECHNICAL DEBT REGISTER — RANONG-RAKTAI-AI
 
-**Audit date:** 2026-10-26 · **Commit:** `b4a6619` (`main`)
+**Audit date:** 2026-10-26 · **Audited commit:** `b4a6619` (`main`)
+**Last updated:** 2026-10-26 — Batch 1 (P0-C CI/CD Recovery) **RESOLVED & VERIFIED**
+
+> ## Batch 1 status — TD-1, TD-2, TD-3, TD-4 → **RESOLVED (VERIFIED IN CI)**
+>
+> Commits: `3690503`, `1a75f30`
+>
+> | Item | Status | Verification evidence |
+> |---|---|---|
+> | TD-1 YAML invalid | ✅ RESOLVED | `yaml.safe_load` parses both workflows. Push `3690503` produced **no** 0s deploy-check failure — the "No jobs were run" symptom is gone |
+> | TD-2 swallowed test gates | ✅ **RESOLVED & PROVEN** | CI run `40270798487`: `Tests — unittest suite (root): success` + `Tests — pytest suite (tests/): success`. **Gate-bite proof:** PR #16 (branch `ci/verify-gate-bites`) added one deliberately failing test → run `40270949046` = **failure**, step `Tests — unittest suite (root): failure`, later steps `skipped`. Before the fix this was green. PR closed, not merged. |
+> | TD-3 env-dependent test failure | ✅ RESOLVED | Local root suite: 1148 tests, **0 failures, 0 errors**, 15 skipped |
+> | TD-4 pytest undeclared | ✅ RESOLVED | `requirements-dev.txt` (pinned). CI `Tests — pytest suite (tests/): success` — the 46 previously-unrunnable tests now pass |
+> | pip-audit hidden by `\|\| echo` | ⚠️ PARTIAL — now **visible**, not yet gating | See TD-14 below. Promotion to a hard gate was attempted and **reverted** |
+>
+> **Newly established fact:** the `tests/` pytest suite (46 tests) **passes**. This was `UNKNOWN` at audit time because pytest cannot be installed in the audit container (proxy denies PyPI with 403).
+>
+> ### TD-14 (NEW, P1) — pip-audit reports a finding; identity not yet known
+>
+> **Correction of an earlier claim in this document.** An interim revision of this register asserted that pip-audit "passes". That was **wrong**, and the error is instructive: the `success` observed in run `40270798487` was produced by `continue-on-error: true`, which reports a step as `success` even when the command exits non-zero. Promoting it to a hard gate (`1a75f30`) proved the opposite — run `40271014104` shows `pip-audit: failure`.
+>
+> **Second, more serious finding from that attempt:** when pip-audit failed as a hard gate, GitHub **skipped every later step in the same job** — including `ตรวจสอบ EXTERNAL_AI_CLASSIFICATION_ALLOWED = False` and `ตรวจสอบ no public GCS access`. An unrelated dependency CVE could therefore silence the two most important security controls in the pipeline. Fixed by reordering: the must-always-run greps now execute **before** pip-audit, which sits last with `continue-on-error`.
+>
+> **Current state:** pip-audit runs, its result is visible as an orange warning in the UI (not masked green as `|| echo` did), and it does not block deploys or mask other controls.
+>
+> **Why not a hard gate yet:** the specific CVE is unidentified. `pip-audit` cannot be installed in the audit container (proxy denies PyPI, 403) and CI logs cannot be fetched (`results-receiver.actions.githubusercontent.com` denied, 403). Blocking all deployments on an unassessed finding would obstruct urgent clinical safety fixes, which are higher priority.
+>
+> **Next action:** read the step's log in the GitHub UI to identify the advisory, then either upgrade the dependency or add `--ignore-vuln <ID>` with a documented review reason, and only then remove `continue-on-error`. **Do not delete the step to make CI green** (directive §2.7).
+>
+> **Residual:** remote branch `ci/verify-gate-bites` could not be deleted — the sandbox proxy denies both the REST delete and `git push --delete`. Harmless (PR closed, never merged, `main` unaffected); delete it manually when convenient.
 
 Disposition vocabulary per directive §4: **KEEP / REFACTOR / REPLACE / DEPRECATE / INVESTIGATE**.
 Deprecation must be evidence-based; nothing below is marked DEPRECATE without evidence.

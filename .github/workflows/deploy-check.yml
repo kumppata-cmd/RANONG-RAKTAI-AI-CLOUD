@@ -82,11 +82,17 @@ jobs:
             exit 1
           }
 
-      - name: "pip-audit"
-        # ใช้ block scalar (|) เพราะค่าแบบ inline ที่มี ": " ทำให้ YAML
-        # parse ไม่ผ่าน และ GitHub จะไม่รัน job ใด ๆ เลย (0s failure)
+      # ใช้ block scalar (|) เพราะค่าแบบ inline ที่มี ": " ทำให้ YAML
+      # parse ไม่ผ่าน และ GitHub จะไม่รัน job ใด ๆ เลย (0s failure)
+      #
+      # continue-on-error แทน "|| echo" เพื่อให้ผลปรากฏใน UI จริง
+      # ไม่ถูกกลบเป็นสีเขียว — เหตุผลเต็มดูใน ci.yml (step เดียวกัน)
+      # อยู่ท้ายสุดหลังการตรวจ EXTERNAL_AI เพื่อไม่ให้ CVE ที่ไม่เกี่ยวกัน
+      # ทำให้ control สำคัญถูก skip
+      - name: "pip-audit (advisory)"
+        continue-on-error: true
         run: |
-          pip-audit --strict --desc || echo "WARNING - vulnerabilities found (advisory)"
+          pip-audit --strict --desc
 
   # ---------------------------------------------------------------------------
   # Job 2: Docker Build — ตรวจว่า Dockerfile build ได้
