@@ -256,6 +256,11 @@ UNIT_PATTERNS = [
     r"ml/min(?:/1\.73m2)?",
     r"x?10\^[39]/[uµ][lL]",
     r"cells/[uµ][lL]",
+    # หน่วยนับเม็ดเลือดที่เขียนขึ้นต้นด้วยขีดทับ พบในใบ CBC ทั่วไป
+    # เช่น "WBC  5,600 /uL" และ "Platelet  250,000 /uL"
+    r"/[uµ][lL]",
+    r"/mm3",
+    r"/cu\.?mm",
     r"pg/[mM][lL]",
     r"ng/[mM][lL]",
     r"[pnuµ]mol/[lL]",
@@ -385,10 +390,28 @@ def _normalize_analyte(name: str) -> Optional[str]:
 
 
 def _parse_value(text: str) -> Optional[float]:
-    """แปลง string เป็น float อย่างปลอดภัย."""
+    """แปลง string เป็น float อย่างปลอดภัย
+
+    จุลภาคมีสองความหมาย ต้องแยกให้ถูก มิฉะนั้นค่าจะผิดเป็นพันเท่า:
+
+      คั่นหลักพัน   "250,000"  -> 250000.0   (ตามด้วยเลข 3 หลักพอดี)
+      ทศนิยมยุโรป   "5,2"      -> 5.2        (ตามด้วยเลข 1-2 หลัก)
+
+    เดิมแปลงจุลภาคเป็นจุดเสมอ ทำให้ "250,000" กลายเป็น 250.0
+    เกล็ดเลือด 250,000 (ค่าปกติ) จึงถูกอ่านเป็น 250 ซึ่งต่ำวิกฤต
+    และ "5,600" (เม็ดเลือดขาวปกติ) กลายเป็น 5.6 ซึ่งต่ำวิกฤตเช่นกัน
+    ผลคือแจ้งเตือนเท็จกับผู้ป่วยทุกคนที่ตรวจ CBC
+    """
     text = text.strip()
+
+    # จุลภาคคั่นหลักพัน: มีเลข 1-3 หลักนำ แล้วตามด้วย ",nnn" อย่างน้อยหนึ่งชุด
+    if re.fullmatch(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?", text):
+        text = text.replace(",", "")
+    else:
+        # ที่เหลือถือเป็นทศนิยมแบบยุโรป
+        text = text.replace(",", ".")
+
     # Handle common OCR artifacts
-    text = text.replace(",", ".")  # European decimal
     text = text.replace("O", "0").replace("o", "0")  # OCR O→0
     text = text.replace("l", "1").replace("I", "1")  # OCR l→1 only for standalone
 
@@ -450,9 +473,11 @@ def _normalize_unit(unit: str) -> str:
 # ชื่อห้ามมีตัวเลข เพื่อไม่ให้ไปคาบเกี่ยวกับค่าหรือช่วงอ้างอิง
 _GENERIC_LINE_RE = re.compile(
     r"^[\s|]*"                                  # ขอบซ้าย อาจมี | ของตาราง
-    r"(?P<name>[ก-๙A-Za-z][ก-๙A-Za-z\s()./-]{1,39}?)"  # ชื่อ ไม่มีตัวเลข
-    r"\s*[:=|]?\s*"                             # ตัวคั่น : = | หรือช่องว่าง
-    r"(?P<value>\d+(?:[.,]\d+)?)"               # ค่า
+    r"(?P<name>[ก-๙A-Za-z][ก-๙A-Za-z\s()/-]{1,39}?)"   # ชื่อ ไม่มีตัวเลข/จุด
+    # ตัวคั่น: ช่องว่าง, : = |, หรือ "จุดไข่ปลา" ที่ใบแล็บใช้ลากจากชื่อไปค่า
+    # เช่น "Hemoglobin .............. 10.5 g/dL"
+    r"\s*(?:\.{2,}|[:=|])?\s*"
+    r"(?P<value>\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:[.,]\d+)?)"  # ค่า (มีจุลภาคได้)
     r"(?P<rest>.*)$"                            # ที่เหลือ: หน่วย/ช่วงอ้างอิง/flag
 )
 
@@ -504,6 +529,35 @@ def _parse_generic_line(line: str):
         ref_range = re.sub(r"\s+", "", ref_match.group("ref"))
 
     return canonical, value_f, unit, ref_range
+
+
+# หน่วยที่นับ "ต่อไมโครลิตร" ตรงๆ — ต้องหารพันเพื่อให้ตรงกับเกณฑ์
+_PER_UL_UNITS = frozenset({
+    "/ul", "/µl", "cells/ul", "cells/µl", "/mm3", "/cumm", "/cu.mm",
+})
+
+
+def _to_count_primary_unit(analyte: str, value: float, unit: str):
+    """แปลงค่านับเม็ดเลือดจาก /uL เป็นหน่วยพัน (x10^3/uL)
+
+    คืน (ค่าใหม่, หน่วยใหม่) หรือ None ถ้าไม่ต้องแปลง
+
+    แปลงเฉพาะรายการที่เกณฑ์ระบุ primary_unit เป็น x10^3/uL เท่านั้น
+    และเฉพาะเมื่อหน่วยที่อ่านได้เป็นแบบต่อไมโครลิตรตรงๆ — ไม่เดาจาก
+    ขนาดของตัวเลข เพราะการเดาจากขนาดจะพังเมื่อค่าผิดปกติมากจริงๆ
+    """
+    if not unit:
+        return None
+    try:
+        from lab_rules import ANALYTE_SPECS
+    except ImportError:
+        return None
+    spec = ANALYTE_SPECS.get(analyte)
+    if spec is None or getattr(spec, "primary_unit", "") != "x10^3/uL":
+        return None
+    if unit.strip().lower().replace(" ", "") not in _PER_UL_UNITS:
+        return None
+    return value / 1000.0, spec.primary_unit
 
 
 def _find_column_major_runs(text: str):
@@ -882,6 +936,30 @@ def extract_lab_results_from_text(
             raw_text=line.strip()[:120],
         ))
         seen_analytes.add(canonical)
+
+    # ── ปรับหน่วยนับเม็ดเลือดให้ตรงกับที่เกณฑ์ใช้ ──
+    #
+    # ใบ CBC รายงานเป็นจำนวนเต็มต่อไมโครลิตร ("250,000 /uL") แต่เกณฑ์
+    # ในระบบใช้หน่วยพัน (x10^3/uL) ค่าดิบจึงเกิน physiologic_max เสมอ
+    # แล้วถูกตั้งธงว่า "เป็นไปไม่ได้" และความเชื่อมั่นตกเหลือ 0.3
+    #
+    # ผลที่อันตราย: เกล็ดเลือด 30,000 ซึ่งต่ำวิกฤตจริง ถูกอ่านเป็น 30000
+    # แล้วถูกตีว่าเป็นค่าอ่านผิด จึงไม่ถูกแจ้งเตือน — ค่าวิกฤตจริงหายไป
+    #
+    # แปลงที่นี่จุดเดียวหลังทุก strategy แล้วคำนวณธงใหม่ เพื่อไม่ต้อง
+    # แก้ซ้ำทุกจุดที่สร้างผลลัพธ์
+    for r in results:
+        converted = _to_count_primary_unit(r.analyte, r.value, r.unit)
+        if converted is None:
+            continue
+        r.value, r.unit = converted
+        r.flags = validate_result(r.analyte, r.value, r.unit)
+        r.confidence = 0.80
+        if "unit_mismatch" in r.flags:
+            r.confidence -= 0.20
+        if "physiologic_impossible" in r.flags:
+            r.confidence = 0.3
+        r.confidence = round(r.confidence, 2)
 
     # Generate warnings
     if not results:
