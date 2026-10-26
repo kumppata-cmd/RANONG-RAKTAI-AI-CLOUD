@@ -2295,6 +2295,164 @@ def api_master_registry_update():
     return jsonify({"success": success, "message": msg}), 200 if success else 400
 
 
+# ═══════════════════════════════════════════════════════════
+# Lab Re-extraction API
+# ═══════════════════════════════════════════════════════════
+
+def _admin_api_auth() -> "tuple | None":
+    """ตรวจสิทธิ์ผู้ดูแล — คืน error response ถ้าไม่ผ่าน, None ถ้าผ่าน
+
+    รับ secret ทาง header เท่านั้น ไม่รับทาง query string เพราะ
+    query string ถูกบันทึกใน access log ของ proxy และแพลตฟอร์ม"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "")
+    if not auth or not hmac.compare_digest(auth, admin_secret):
+        return jsonify({"error": "Unauthorized"}), 401
+    return None
+
+
+
+@app.route("/admin/api/v2/labs/reextract", methods=["GET", "POST"])
+def api_labs_reextract():
+    """อ่านค่าผลแล็บจากเอกสารที่เก็บไว้แล้วซ้ำอีกครั้ง
+
+    ทำไมต้องมี: ตัวแยกค่าเดิมบังคับว่าต้องมี "หน่วย" ต่อท้ายค่าเสมอ
+    ใบแล็บที่ไม่เป็นรูปแบบนั้นจึงถูกเก็บไว้โดยไม่เคยถูกแปลงเป็นตัวเลข
+    เครื่องตรวจจับค่าวิกฤตจึงไม่มีทางเห็นเอกสารเหล่านั้นเลย
+    เมื่อแก้ตัวแยกค่าแล้ว ต้องย้อนกลับไปอ่านเอกสารเดิมใหม่
+
+    ค่าเริ่มต้นเป็น dry-run — ดูว่าจะได้อะไรบ้างโดยไม่เขียนอะไรทั้งสิ้น
+    ต้องส่ง ?apply=1 จึงจะเขียนจริง
+
+    ผลลัพธ์ไม่มีข้อมูลผู้ป่วย: คืนเฉพาะรหัสเอกสาร 8 ตัว วันที่ และ
+    จำนวนค่าที่อ่านได้/จำนวนค่าวิกฤต ไม่มีชื่อผู้ป่วยและไม่มีค่าผลตรวจ
+
+    ไม่ส่งการแจ้งเตือนย้อนหลังโดยเจตนา — เอกสารเก่าอาจมีหลายใบ
+    การ push ทีเดียวจำนวนมากทำให้แพทย์แยกไม่ออกว่าอันไหนเร่งด่วนจริง
+    ผลลัพธ์บอกว่าเอกสารใบไหนมีค่าวิกฤต ให้เปิดดูได้ตรงจุด
+    """
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    apply_changes = (
+        request.args.get("apply") == "1"
+        or (request.get_json(silent=True) or {}).get("apply") is True
+    )
+    include_review = request.args.get("include_review") == "1"
+    categories = {"lab", "review"} if include_review else {"lab"}
+
+    try:
+        from lab_extractor import extract_lab_results_from_text
+        from lab_models import ExtractionMethod
+    except ImportError:
+        return jsonify({"error": "lab_extractor ไม่พร้อมใช้งาน"}), 503
+
+    scanned = 0
+    already_had = 0
+    no_text = 0
+    still_empty = 0
+    extracted: list[dict] = []
+    write_failed = 0
+
+    try:
+        doc_index._ensure_fresh()
+        for d in list(doc_index._docs):
+            if d.get("category") not in categories:
+                continue
+            scanned += 1
+            doc_id = d.get("document_id", "")
+            if not doc_id:
+                continue
+
+            lab_path = f"{LAB_RESULTS_PREFIX}{doc_id}.json"
+            try:
+                if storage.get(lab_path) is not None:
+                    already_had += 1
+                    continue
+            except Exception:
+                pass  # อ่านไม่ได้ → ถือว่ายังไม่มี แล้วใช้ create_only กันเขียนทับ
+
+            text = d.get("extracted_text", "")
+            if not text or not text.strip():
+                no_text += 1
+                continue
+
+            method = (
+                ExtractionMethod.REGEX_OCR.value
+                if str(d.get("ocr_status", "")).startswith("ocr")
+                else ExtractionMethod.REGEX_PDF_TEXT.value
+            )
+            try:
+                report = extract_lab_results_from_text(text, doc_id, method)
+            except Exception as ex_err:
+                logger.warning(
+                    "reextract: แยกค่าล้มเหลว doc=%s: %s",
+                    doc_id[:8], type(ex_err).__name__,
+                )
+                continue
+
+            if not report.results:
+                still_empty += 1
+                continue
+
+            n_critical = sum(
+                1 for r in report.results
+                if any("critical" in f for f in r.flags)
+            )
+            # ไม่ใส่ชื่อ analyte หรือค่าผลตรวจ — เป็นข้อมูลผู้ป่วย
+            entry = {
+                "document_id": doc_id[:8],
+                "upload_date": d.get("upload_date", ""),
+                "category": d.get("category", ""),
+                "results": len(report.results),
+                "critical": n_critical,
+                "written": False,
+            }
+
+            if apply_changes:
+                try:
+                    storage.put(
+                        lab_path,
+                        report.to_json().encode("utf-8"),
+                        content_type="application/json",
+                        create_only=True,
+                    )
+                    entry["written"] = True
+                except Exception as put_err:
+                    write_failed += 1
+                    logger.error(
+                        "reextract: เขียนผลแล็บไม่สำเร็จ doc=%s: %s",
+                        doc_id[:8], type(put_err).__name__,
+                    )
+            extracted.append(entry)
+    except Exception as e:
+        logger.error("reextract ล้มเหลว: %s", type(e).__name__)
+        return jsonify({"error": "ประมวลผลไม่สำเร็จ"}), 503
+
+    total_critical = sum(e["critical"] for e in extracted)
+    return jsonify({
+        "dry_run": not apply_changes,
+        "applied": bool(apply_changes),
+        "categories": sorted(categories),
+        "scanned": scanned,
+        "already_extracted": already_had,
+        "no_text_available": no_text,
+        "newly_readable": len(extracted),
+        "still_unreadable": still_empty,
+        "write_failed": write_failed,
+        "documents_with_critical_values": total_critical,
+        "note": (
+            "dry-run: ยังไม่เขียนอะไร ส่ง ?apply=1 เพื่อบันทึกจริง"
+            if not apply_changes else
+            "บันทึกผลแล็บแล้ว ไม่ส่งการแจ้งเตือนย้อนหลัง"
+        ),
+        "documents": extracted,
+    })
+
+
 @app.route("/admin/registry")
 def admin_registry_page():
     """หน้าเว็บทะเบียนผู้ป่วย — เปิดจาก browser ได้เลย (same-origin)"""
