@@ -506,6 +506,64 @@ def _parse_generic_line(line: str):
     return canonical, value_f, unit, ref_range
 
 
+def _find_column_major_runs(text: str):
+    """หาช่วงที่เป็น 'ชื่อรายการตรวจเรียงกัน แล้วค่าเรียงกัน'
+
+    คืน [(รายชื่อมาตรฐาน, [(ค่า, หน่วย), ...]), ...]
+    ผู้เรียกเป็นผู้ตัดสินว่าจะจับคู่หรือไม่เมื่อจำนวนไม่เท่ากัน
+
+    ต้องมีอย่างน้อย 3 ชื่อติดกันจึงนับว่าเป็นรูปแบบคอลัมน์ —
+    น้อยกว่านั้นมักเป็นเอกสารทั่วไปที่บังเอิญมีชื่อรายการตรวจติดกัน
+    """
+    MIN_RUN = 3
+    lines = [ln.strip() for ln in text.split("\n")]
+    runs = []
+    i = 0
+    while i < len(lines):
+        if not lines[i]:
+            i += 1
+            continue
+        # เก็บชื่อที่เรียงติดกัน (ข้ามบรรทัดว่างได้)
+        names, j = [], i
+        while j < len(lines):
+            if not lines[j]:
+                j += 1
+                continue
+            canonical = _normalize_analyte(lines[j])
+            if not canonical:
+                break
+            names.append(canonical)
+            j += 1
+        if len(names) < MIN_RUN:
+            i = j + 1 if j == i else j
+            continue
+
+        # เก็บค่าที่เรียงติดกันถัดจากชุดชื่อ
+        values = []
+        while j < len(lines):
+            if not lines[j]:
+                j += 1
+                continue
+            m = re.match(
+                r"^(?P<v>\d+(?:[.,]\d+)?)\s*(?P<u>[A-Za-z%/^µ]\S*)?$",
+                lines[j],
+            )
+            if not m:
+                break
+            v = _parse_value(m.group("v"))
+            if v is None:
+                break
+            values.append(
+                (v, _normalize_unit(_clean_unit_token(m.group("u") or "")))
+            )
+            j += 1
+
+        if values:
+            runs.append((names, values))
+        i = j if j > i else i + 1
+    return runs
+
+
 def extract_lab_results_from_text(
     text: str,
     source_document_id: str,
@@ -542,6 +600,39 @@ def extract_lab_results_from_text(
             continue
 
         canonical = _normalize_analyte(line)
+
+        # ─ กันการจับคู่ผิดเมื่อชื่อรายการตรวจเรียงติดกันเป็นชุด ─
+        #
+        # pypdf อ่าน PDF แบบคอลัมน์มักพ่น "ชื่อทั้งหมด" ก่อน แล้วค่อยพ่น
+        # "ค่าทั้งหมด" การมองไปข้างหน้า 4 บรรทัดจึงจับชื่อตัวสุดท้ายของชุด
+        # คู่กับค่าตัวแรกของอีกชุด ซึ่งเป็นคนละรายการกัน
+        #
+        # ตัวอย่างจริงที่วัดได้: ชื่อ 11 รายการเรียงกัน ตามด้วยค่า 11 ตัว
+        # ผลคือได้ "eGFR = 5.2" ทั้งที่ 5.2 เป็นค่าของ Creatinine
+        # eGFR 5.2 อ่านว่าไตวายระยะสุดท้าย — แจ้งเตือนเท็จที่อันตราย
+        # และยังบังชื่ออื่นไม่ให้ถูกจับคู่ถูกต้องด้วย
+        #
+        # ถ้าบรรทัดก่อนหน้า "หรือ" บรรทัดถัดไปเป็นชื่อรายการตรวจอีก
+        # แปลว่าอยู่ในชุดชื่อที่เรียงติดกัน ให้ strategy คอลัมน์จัดการแทน
+        #
+        # ต้องดูทั้งสองทาง: ชื่อ "ตัวสุดท้าย" ของชุดมีค่าตามหลังพอดี
+        # (เพราะชุดค่าเริ่มตรงนั้น) การดูแต่บรรทัดถัดไปจึงไม่พอ
+        # นี่คือกรณี eGFR ที่ถูกจับคู่กับค่าของ Creatinine
+        def _is_name_at(rng):
+            for _k in rng:
+                _nxt = lines[_k].strip()
+                if not _nxt:
+                    continue
+                return bool(_normalize_analyte(_nxt))
+            return False
+
+        if canonical and (
+            _is_name_at(range(i + 1, min(i + 3, len(lines))))
+            or _is_name_at(range(i - 1, max(i - 3, -1), -1))
+        ):
+            i += 1
+            continue
+
         if canonical and canonical not in seen_analytes:
             # Found an analyte name — look ahead for value, unit, reference
             value_f = None
@@ -695,6 +786,51 @@ def extract_lab_results_from_text(
                 )
                 results.append(result)
                 seen_analytes.add(canonical)
+
+    # ── Strategy 3.5: รูปแบบคอลัมน์ (ชื่อทั้งชุด แล้วค่าทั้งชุด) ──
+    #
+    # pypdf อ่าน PDF ที่จัดเป็นคอลัมน์มักพ่นชื่อรายการตรวจทั้งหมดก่อน
+    # แล้วค่อยพ่นค่าทั้งหมดตามลำดับเดียวกัน:
+    #
+    #     Creatinine        5.2
+    #     BUN          →    45
+    #     Potassium         6.1
+    #
+    # กลายเป็น "Creatinine\nBUN\nPotassium\n5.2\n45\n6.1"
+    #
+    # จับคู่ตามลำดับได้ "ก็ต่อเมื่อจำนวนชื่อเท่ากับจำนวนค่าพอดี"
+    # ถ้าไม่เท่ากันแปลว่าอ่านมาไม่ครบหรือมีอย่างอื่นปน การจับคู่จะเลื่อน
+    # ทั้งแถวและได้ค่าผิดทุกตัว — ในงานนี้ "ไม่ได้ค่า" ปลอดภัยกว่า
+    # "ได้ค่าผิด" เพราะค่าผิดนำไปสู่การแจ้งเตือนเท็จหรือบังค่าวิกฤตจริง
+    for name_run, value_run in _find_column_major_runs(text):
+        if len(name_run) != len(value_run):
+            warnings.append(
+                f"พบรูปแบบคอลัมน์ที่จำนวนชื่อ ({len(name_run)}) "
+                f"ไม่เท่าจำนวนค่า ({len(value_run)}) — ไม่จับคู่ให้"
+            )
+            continue
+        for canonical, (value_f, unit) in zip(name_run, value_run):
+            if canonical in seen_analytes:
+                continue
+            flags = validate_result(canonical, value_f, unit)
+            confidence = 0.70  # ต่ำกว่าแบบบรรทัดเดียว เพราะอาศัยลำดับ
+            if not unit:
+                confidence -= 0.05
+            if "unit_mismatch" in flags:
+                confidence -= 0.20
+            if "physiologic_impossible" in flags:
+                confidence = 0.3
+            results.append(LabResult(
+                analyte=canonical,
+                value=value_f,
+                unit=unit,
+                reference_range=get_reference_range(canonical),
+                confidence=round(confidence, 2),
+                extraction_method=extraction_method,
+                flags=flags,
+                raw_text="(column-major)",
+            ))
+            seen_analytes.add(canonical)
 
     # ── Strategy 4: ตัวอ่านแบบทั่วไป (ทำงานเสมอ) ──
     #

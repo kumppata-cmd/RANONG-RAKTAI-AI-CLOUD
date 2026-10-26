@@ -444,3 +444,99 @@ class TestUnreadableDiagnostics(ReextractFixture):
     def test_counts_match_the_listing(self):
         d = self._call()
         self.assertEqual(d["still_unreadable"], len(d["unreadable_documents"]))
+
+
+# ═══════════════════════════════════════════════════════════
+# รูปแบบคอลัมน์ — ชื่อทั้งชุดก่อน แล้วค่าทั้งชุด
+#
+# pypdf อ่าน PDF ที่จัดเป็นคอลัมน์แบบนี้ และพบจริงบน production:
+# เอกสาร 2 ใบที่พบชื่อรายการตรวจ 11 ชนิดแต่อ่านค่าไม่ได้เลย
+# ═══════════════════════════════════════════════════════════
+
+ELEVEN = ["Creatinine", "BUN", "Potassium", "Sodium", "Chloride",
+          "Calcium", "Phosphate", "Albumin", "Hemoglobin",
+          "Hematocrit", "eGFR"]
+ELEVEN_VALUES = [5.2, 45.0, 6.1, 138.0, 102.0, 8.9, 5.4, 3.2, 9.1, 28.0, 12.0]
+
+
+class TestColumnMajorLayout(unittest.TestCase):
+
+    def _column_text(self, names, values):
+        return "Laboratory Report\n" + "\n".join(names) + "\n" + "\n".join(
+            str(v) for v in values
+        ) + "\n"
+
+    def test_all_values_pair_with_the_right_analyte(self):
+        got = _extract(self._column_text(ELEVEN, ELEVEN_VALUES))
+        self.assertEqual(len(got), 11)
+        for name, expected in zip(ELEVEN, ELEVEN_VALUES):
+            with self.subTest(analyte=name):
+                self.assertEqual(got[name].value, expected)
+
+    def test_last_analyte_is_not_paired_with_the_first_value(self):
+        """กรณีที่พบจริงและอันตรายที่สุด
+
+        ตรรกะ lookahead เดิมจับชื่อตัวสุดท้ายของชุด (eGFR) คู่กับค่าตัวแรก
+        ของอีกชุด (5.2 ซึ่งเป็นของ Creatinine) ได้ "eGFR = 5.2"
+        ซึ่งอ่านว่าไตวายระยะสุดท้าย — แจ้งเตือนเท็จที่อันตราย
+        และยังบังไม่ให้ค่า eGFR จริงถูกอ่าน
+        """
+        got = _extract(self._column_text(ELEVEN, ELEVEN_VALUES))
+        self.assertEqual(got["eGFR"].value, 12.0)
+        self.assertNotEqual(got["eGFR"].value, 5.2)
+
+    def test_mismatched_counts_produce_nothing(self):
+        """จำนวนชื่อไม่เท่าจำนวนค่า → ไม่จับคู่เลย
+
+        ถ้าจับคู่ทั้งที่จำนวนไม่ตรง ค่าจะเลื่อนทั้งแถวและผิดทุกตัว
+        ในงานนี้ 'ไม่ได้ค่า' ปลอดภัยกว่า 'ได้ค่าผิด'
+        """
+        got = _extract(self._column_text(ELEVEN[:4], [5.2, 45.0, 6.1]))
+        self.assertEqual(got, {})
+
+    def test_mismatch_is_reported_as_a_warning(self):
+        rep = extract_lab_results_from_text(
+            self._column_text(ELEVEN[:4], [5.2, 45.0, 6.1]),
+            "d", "regex_pdf_text",
+        )
+        self.assertTrue(
+            any("คอลัมน์" in w for w in rep.warnings),
+            f"ต้องเตือนว่าจำนวนไม่ตรง ได้: {rep.warnings}",
+        )
+
+    def test_column_values_carry_lower_confidence(self):
+        """จับคู่ตามลำดับเชื่อถือได้น้อยกว่าชื่อกับค่าบนบรรทัดเดียวกัน"""
+        col = _extract(self._column_text(ELEVEN, ELEVEN_VALUES))
+        inline = _extract("Creatinine   5.2   mg/dL   0.6-1.2")
+        self.assertLess(
+            col["Creatinine"].confidence, inline["Creatinine"].confidence
+        )
+
+    def test_short_runs_are_not_treated_as_columns(self):
+        """ชื่อติดกันแค่ 2 รายการ ไม่นับเป็นรูปแบบคอลัมน์
+
+        กันเอกสารทั่วไปที่บังเอิญมีชื่อรายการตรวจติดกันสองบรรทัด
+        """
+        got = _extract("Creatinine\nBUN\n5.2\n45\n")
+        self.assertNotIn(
+            "(column-major)", [r.raw_text for r in got.values()],
+            "ชื่อติดกันแค่ 2 รายการไม่ควรถูกจับคู่แบบคอลัมน์",
+        )
+
+    def test_column_layout_with_units_on_value_lines(self):
+        text = (
+            "Creatinine\nBUN\nPotassium\n"
+            "5.2 mg/dL\n45 mg/dL\n6.1 mmol/L\n"
+        )
+        got = _extract(text)
+        self.assertEqual(got["Creatinine"].value, 5.2)
+        self.assertEqual(got["Potassium"].unit, "mmol/L")
+
+    def test_critical_value_in_column_layout_is_flagged(self):
+        got = _extract(self._column_text(
+            ["Creatinine", "BUN", "Potassium"], [1.0, 15.0, 7.4]
+        ))
+        self.assertTrue(
+            any("critical" in f for f in got["Potassium"].flags),
+            f"K 7.4 ต้องถูกตั้งธงวิกฤต ได้: {got['Potassium'].flags}",
+        )
