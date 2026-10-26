@@ -540,3 +540,42 @@ class TestColumnMajorLayout(unittest.TestCase):
             any("critical" in f for f in got["Potassium"].flags),
             f"K 7.4 ต้องถูกตั้งธงวิกฤต ได้: {got['Potassium'].flags}",
         )
+
+
+class TestLineShapeDiagnostic(unittest.TestCase):
+    """ตัวนับรูปร่างบรรทัด — ใช้ระบุรูปแบบการจัดวางโดยไม่เปิดเผยเนื้อหา"""
+
+    def setUp(self):
+        self.shape = _server()._line_shape
+
+    def test_inline_table_counts_name_with_number(self):
+        s = self.shape(
+            "Creatinine 5.2 mg/dL\nBUN 45 mg/dL\nPotassium 6.1 mmol/L"
+        )
+        self.assertEqual(s["lines_name_with_number"], 3)
+        self.assertEqual(s["lines_name_only"], 0)
+
+    def test_column_layout_counts_name_only_and_number_only(self):
+        s = self.shape("Creatinine\nBUN\nPotassium\n5.2\n45\n6.1")
+        self.assertEqual(s["lines_name_only"], 3)
+        self.assertEqual(s["lines_number_only"], 3)
+        self.assertEqual(s["max_consecutive_name_lines"], 3)
+
+    def test_non_lab_text_counts_as_other(self):
+        s = self.shape("ใบเสร็จรับเงิน\nขอบคุณที่ใช้บริการ")
+        self.assertEqual(s["lines_name_with_number"], 0)
+        self.assertEqual(s["lines_name_only"], 0)
+        self.assertGreater(s["lines_other"], 0)
+
+    def test_shape_contains_no_document_text(self):
+        import json as _json
+        blob = _json.dumps(
+            self.shape("Creatinine 5.2 mg/dL\nชื่อผู้ป่วย สมชาย"),
+            ensure_ascii=False,
+        )
+        for leak in ("Creatinine", "สมชาย", "5.2"):
+            self.assertNotIn(leak, blob)
+
+    def test_all_counters_are_integers(self):
+        for v in self.shape("Creatinine 5.2").values():
+            self.assertIsInstance(v, int)
