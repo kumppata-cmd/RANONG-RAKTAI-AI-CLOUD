@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 import time
 import logging
@@ -33,6 +34,10 @@ logger = logging.getLogger(__name__)
 
 # LINE Push Messaging API endpoint (ไม่ใช่ Secrets)
 LINE_PUSH_API_URL = "https://api.line.me/v2/bot/message/push"
+
+# รูปแบบปลายทางที่ LINE push ได้: user (U), group (C), room (R)
+# ตามด้วย hex 32 ตัว — ใช้แยกออกจาก SHA-256 hash (hex 64 ตัว ไม่มีตัวนำ)
+_LINE_ID_RE = re.compile(r"^[UCR][0-9a-fA-F]{32}$")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -714,20 +719,94 @@ def build_alert_recipients_from_env() -> dict[str, list[str]]:
 
     # ลำดับ: ALERT_RECIPIENTS → PHYSICIAN_USERS
     alert_ids = os.getenv("ALERT_RECIPIENTS", "").strip()
+    source = "ALERT_RECIPIENTS"
     if not alert_ids:
         alert_ids = os.getenv("PHYSICIAN_USERS", "").strip()
+        source = "PHYSICIAN_USERS"
 
-    if alert_ids:
-        ids = [uid.strip() for uid in alert_ids.split(",") if uid.strip()]
-        if ids:
-            recipients["physician"] = ids
-            logger.info(f"Alert recipients configured: {len(ids)} physician(s)")
-        else:
-            logger.warning("No valid alert recipients found in env")
-    else:
-        logger.warning("ALERT_RECIPIENTS and PHYSICIAN_USERS not configured")
+    if not alert_ids:
+        logger.error(
+            "ALERT_RECIPIENTS และ PHYSICIAN_USERS ไม่ได้ตั้งค่า — "
+            "การแจ้งเตือนค่าวิกฤตจะไม่ถึงใครเลย"
+        )
+        return recipients
+
+    raw = [uid.strip() for uid in alert_ids.split(",") if uid.strip()]
+
+    # กรองให้เหลือเฉพาะ LINE ID จริง
+    #
+    # ทำไมต้องกรอง: PHYSICIAN_USERS เก็บ "SHA-256 hash" ของ LINE userId
+    # (ดู server.py — ตั้งใจให้เป็น hash เพื่อไม่เก็บ ID ดิบไว้ตรวจสิทธิ์)
+    # แต่ LINE push API ต้องใช้ ID ดิบ การ fallback ไปใช้ PHYSICIAN_USERS
+    # จึงได้ค่าที่ push ไม่ได้เลย ทุก alert ถูกตีตรา delivery_failed
+    # แบบเงียบ ๆ และไม่มีใครรู้ว่าค่าวิกฤตไม่ถึงมือแพทย์
+    # (เกิดขึ้นจริงแล้ว — ตรวจพบ 26 ต.ค. 2026)
+    #
+    # รูปแบบ ID ของ LINE: U/C/R ตามด้วย hex 32 ตัว
+    # ส่วน SHA-256 hex ยาว 64 ตัวและไม่มีตัวนำ จึงแยกออกจากกันได้ชัด
+    valid = [uid for uid in raw if _LINE_ID_RE.match(uid)]
+    rejected = len(raw) - len(valid)
+
+    if valid:
+        recipients["physician"] = valid
+        logger.info("ผู้รับการแจ้งเตือน: %d คน (จาก %s)", len(valid), source)
+    if rejected:
+        # ไม่ log ตัว ID — บอกแค่จำนวนและสาเหตุ
+        looks_hashed = any(len(uid) == 64 for uid in raw)
+        logger.error(
+            "ผู้รับการแจ้งเตือน %d ค่าใช้ไม่ได้ (ไม่ใช่รูปแบบ LINE ID)%s",
+            rejected,
+            " — ค่าที่ให้มาดูเป็น hash: ALERT_RECIPIENTS ต้องใช้ LINE "
+            "user ID ดิบ ไม่ใช่ค่าเดียวกับ PHYSICIAN_USERS"
+            if looks_hashed else "",
+        )
+    if not valid:
+        logger.error(
+            "ไม่มีผู้รับการแจ้งเตือนที่ใช้ได้เลย — "
+            "การแจ้งเตือนค่าวิกฤตจะไม่ถึงใคร"
+        )
 
     return recipients
+
+
+def describe_alert_recipients() -> dict:
+    """สรุปความพร้อมของเส้นทางแจ้งเตือน สำหรับ /health
+
+    คืนเฉพาะ "จำนวน" และ "สาเหตุ" ไม่คืน LINE user ID ใด ๆ
+    เพราะ /health เปิดอ่านได้โดยไม่ต้องยืนยันตัวตน
+
+    มีไว้เพราะเดิมไม่มีทางรู้เลยว่าการแจ้งเตือนค่าวิกฤตส่งถึงใครได้
+    หรือไม่ นอกจากไปอ่าน log — ซึ่งไม่มีใครอ่านจนกระทั่งตรวจเจอว่า
+    alert ทุกใบ delivery_failed
+    """
+    alert_ids = os.getenv("ALERT_RECIPIENTS", "").strip()
+    source = "ALERT_RECIPIENTS"
+    if not alert_ids:
+        alert_ids = os.getenv("PHYSICIAN_USERS", "").strip()
+        source = "PHYSICIAN_USERS"
+
+    raw = [uid.strip() for uid in alert_ids.split(",") if uid.strip()]
+    valid = [uid for uid in raw if _LINE_ID_RE.match(uid)]
+
+    if not raw:
+        reason = "ไม่ได้ตั้งค่า ALERT_RECIPIENTS หรือ PHYSICIAN_USERS"
+    elif not valid:
+        reason = (
+            "ค่าที่ตั้งไว้ไม่ใช่รูปแบบ LINE user ID "
+            "(ALERT_RECIPIENTS ต้องใช้ ID ดิบ ไม่ใช่ hash)"
+        )
+    elif len(valid) < len(raw):
+        reason = f"ใช้ได้ {len(valid)} จาก {len(raw)} ค่า"
+    else:
+        reason = ""
+
+    return {
+        "can_deliver": bool(valid),
+        "recipients": len(valid),
+        "configured_values": len(raw),
+        "source": source if raw else "",
+        "problem": reason,
+    }
 
 
 class AlertRetryManager:

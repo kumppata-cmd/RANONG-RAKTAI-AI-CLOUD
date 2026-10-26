@@ -1939,6 +1939,7 @@ try:
     from alert_delivery import (
         AlertDeliveryService, AlertSeverity,
         create_line_push_fn, build_alert_recipients_from_env,
+        describe_alert_recipients,
         AlertRetryManager, rebuild_dedup_cache,
         format_active_alerts,
     )
@@ -1966,6 +1967,7 @@ try:
     logger.info("Phase 2A: Alert delivery service initialized with LINE push")
 except ImportError:
     alert_service = None
+    describe_alert_recipients = None
     logger.warning("Phase 2A: alert_delivery module not available")
 
 # ─── Phase 2A: Patient Identity ─────────────────────────
@@ -9899,6 +9901,20 @@ def health():
         "external_ai_allowed": EXTERNAL_AI_CLASSIFICATION_ALLOWED,
         "ai_classify_env_setting": ENABLE_AI_CLASSIFY,
         "storage_backend": STORAGE_BACKEND,
+        # ── ความพร้อมของเส้นทางแจ้งเตือนค่าวิกฤต ──────────────
+        # เดิมไม่มีทางรู้เลยว่าการแจ้งเตือนส่งถึงใครได้หรือไม่ นอกจาก
+        # ไปอ่าน log ซึ่งไม่มีใครอ่าน จนตรวจพบเมื่อ 26 ต.ค. 2026 ว่า
+        # ALERT_RECIPIENTS ไม่ได้ตั้งค่าเลย และ alert ค่าวิกฤตทุกใบ
+        # ถูกตีตรา delivery_failed แบบเงียบ ๆ
+        #
+        # คืนเฉพาะจำนวนและสาเหตุ ไม่มี LINE user ID — /health
+        # เปิดอ่านได้โดยไม่ต้องยืนยันตัวตน
+        "critical_alert_delivery": (
+            describe_alert_recipients()
+            if describe_alert_recipients is not None
+            else {"can_deliver": False, "problem": "โมดูลแจ้งเตือนไม่พร้อม"}
+        ),
+        "alert_push_configured": bool(line_push_fn),
         "ocr_ready": HAS_TESSERACT and HAS_PIL,
         "ocr_dpi": OCR_DPI,
         "pymupdf_ready": HAS_PYMUPDF,
