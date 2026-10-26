@@ -99,8 +99,34 @@ Verify a LIFF ID token server-side against LINE's endpoint, derive `owner_hash` 
 
 ## 3. Secondary Findings
 
+### 3.1 ✅ **RESOLVED (TESTED)** — `ca184db`
+
+`is_valid_owner_hash()` enforces the real contract (32 lowercase hex, matching `hash_user_id()` output) at the two boundaries that accept an `owner_hash` from outside:
+
+- **`/admin/assign-owner`** — validated **atomically across the whole batch** before a single assignment is made. This matters because the endpoint binds an owner permanently and refuses to re-bind (`already_owned`), so one malformed value would make a document unreachable forever with no path to repair through that endpoint.
+- **`/admin/api/v2/hn-registry/register`** — a wrong binding here puts one patient's documents in another patient's folder.
+
+Note the connection to SEC-1: had this guard existed from the start, the LIFF defect (client sending a raw `userId` where a salted hash was expected) would have surfaced as an immediate 400 on day one instead of going unnoticed until this audit.
+
+*(original finding below)*
+
 ### 3.1 (MEDIUM) Identifier-contract mismatch is unguarded
 Nothing in the codebase asserts that an `owner_hash` is a 32-hex-character salted digest. A one-line format guard at every boundary that accepts an `owner_hash` would have turned SEC-1's functional break into an immediate 400 error. Recommend a validator plus a test.
+
+### 3.2 ✅ **RESOLVED (TESTED)** — `ca184db`
+
+The salt requirement now keys on *whether documents are stored*, not on production alone: `_SALT_REQUIRED = IS_PRODUCTION or IS_TESTING_DOCS`. Plain `testing` still uses a random salt, deliberately — nothing is stored there, and forcing a salt would make the whole 1,269-test suite unrunnable.
+
+All four combinations were executed to confirm production is untouched:
+
+| Mode | `USER_ID_SALT` | `_USER_ID_SALT_MISSING` | Change |
+|---|---|---|---|
+| `production` | absent | `True` (fail-closed) | unchanged |
+| `production` | set | `False` | unchanged |
+| `testing-docs` | absent | `True` (fail-closed) | **new** |
+| `testing` | absent | `False` (random salt) | unchanged |
+
+*(original finding below)*
 
 ### 3.2 (MEDIUM) `testing-docs` mode orphans real documents
 `server.py:238-240`: when `IS_PRODUCTION` is False the salt is random per restart, yet this mode still stores real documents. After any restart no owner can match previously stored documents — fail-closed (no leak) but **silent, permanent data inaccessibility**. Recommend requiring an explicit persistent salt whenever document storage is enabled, in any mode.
@@ -157,8 +183,8 @@ Nothing in the codebase asserts that an `owner_hash` is a 32-hex-character salte
 | Finding | Status |
 |---|---|
 | SEC-1 LIFF authorization | ✅ RESOLVED (TESTED) |
-| §3.1 identifier-contract guard | OPEN (MEDIUM) |
-| §3.2 `testing-docs` salt rotation | OPEN (MEDIUM) |
+| §3.1 identifier-contract guard | ✅ RESOLVED (TESTED) — `ca184db` |
+| §3.2 `testing-docs` salt rotation | ✅ RESOLVED (TESTED) — `ca184db` |
 | §3.3 dedup not atomic across workers | OPEN (MEDIUM) — partially mitigated: the alert driver now takes a cross-worker `flock`, so duplicate *clinical notifications* from the retry path are prevented |
 | §3.4 chart-token key fallback | OPEN (LOW) |
 | §3.5 admin secret in query string | OPEN (LOW) |
