@@ -215,6 +215,11 @@ jobs:
       # เพราะ container ที่ audit ติดตั้ง pip-audit ไม่ได้ (proxy ปฏิเสธ
       # PyPI 403) และดึง CI log ไม่ได้ (results-receiver ถูกปฏิเสธ 403)
       #
+      # แก้แล้ว (2026-10-26): step นี้ส่งผลออกทาง GitHub annotations และ
+      # step summary ด้วย scripts/pip_audit_annotate.py — ทั้งสองอย่าง
+      # อ่านได้ทาง REST API ปกติ จึงไม่ต้องพึ่ง log ใน blob storage
+      #   GET /repos/{owner}/{repo}/check-runs/{check_run_id}/annotations
+      #
       # เหตุผลที่ไม่ปิดเป็น hard gate ตอนนี้:
       #   ยังไม่ได้ประเมินว่าเป็น CVE ที่กระทบระบบจริงหรือไม่ การบล็อก
       #   deploy ทั้งหมดด้วยสิ่งที่ยังไม่ประเมิน จะขัดขวางการ deploy แก้ไข
@@ -239,7 +244,20 @@ jobs:
         continue-on-error: true
         run: |
           echo "=== ตรวจสอบ vulnerabilities ใน dependencies ==="
-          pip-audit --strict --desc
+          set +e
+          pip-audit --strict --desc --format json --output /tmp/pip-audit.json
+          AUDIT_RC=$?
+          set -e
+          echo "pip-audit exit code: $AUDIT_RC"
+
+          # รายงานแบบอ่านง่ายใน UI (ไม่ให้ความล้มเหลวหยุด step)
+          pip-audit --strict --desc || true
+
+          # ส่งผลออกทาง annotation + step summary ซึ่งอ่านได้ทาง REST API
+          # ปกติ ไม่ต้องดาวน์โหลด log จาก blob storage ที่เข้าไม่ถึง
+          python scripts/pip_audit_annotate.py /tmp/pip-audit.json "$AUDIT_RC"
+
+          exit $AUDIT_RC
 
   # ---------------------------------------------------------------------------
   # Job 4: Dependency Check — ตรวจสอบ packages
