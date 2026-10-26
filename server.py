@@ -6247,6 +6247,39 @@ def process_file_async(
                         "HN extraction failed: %s", type(hn_err).__name__
                     )
 
+            # ── โหมดเลือกผู้ป่วย: เจ้าหน้าที่ระบุผู้ป่วยไว้ก่อนส่งเอกสาร ──
+            # เอกสารคลินิกส่งจากบัญชีหมอ/เจ้าหน้าที่ จึงใช้ HN จากเอกสาร
+            # (OCR) ไม่ได้เสมอ — ถ้าเจ้าหน้าที่เลือกผู้ป่วยไว้ ให้ใช้ค่านั้น
+            _ctx_conflict = ""
+            if category in CLINICAL_CATEGORIES and owner_hash:
+                try:
+                    _ctx = _get_patient_context(owner_hash)
+                    if _ctx:
+                        _ctx_folder = _ctx.get("patient_folder", "")
+                        _ocr_folder = metadata.get("patient_hn_folder", "")
+                        if _ctx_folder and _ocr_folder and _ctx_folder != _ocr_folder:
+                            # OCR กับที่เจ้าหน้าที่เลือกไม่ตรงกัน — ใช้ค่าที่
+                            # เจ้าหน้าที่เลือก (เป็นการระบุโดยเจตนา) แต่ต้อง
+                            # เตือนให้เห็นชัด เพื่อให้แก้ได้ทันทีถ้าผิด
+                            _ctx_conflict = _ocr_folder
+                            metadata["patient_hn_folder"] = _ctx_folder
+                            logger.warning(
+                                "Patient context conflicts with OCR HN "
+                                "(category=%s) — using staff selection",
+                                category,
+                            )
+                        elif _ctx_folder and not _ocr_folder:
+                            metadata["patient_hn_folder"] = _ctx_folder
+                            logger.info(
+                                "Patient context applied (category=%s)",
+                                category,
+                            )
+                except Exception as ctx_err:
+                    logger.warning(
+                        "Patient context lookup failed: %s",
+                        type(ctx_err).__name__,
+                    )
+
             dest = copy_to_category(
                 filepath, category, metadata=metadata,
                 subfolder=bill_company,
@@ -6658,11 +6691,24 @@ def process_file_async(
                 _reply_lines.append(
                     f"พิมพ์ 'วิเคราะห์แล็บ {_doc_id[:8]}' เพื่อดูผลวิเคราะห์"
                 )
-            # แสดง patient folder สำหรับ dialysis
-            if category == "dialysis" and metadata.get("patient_hn_folder"):
-                _reply_lines.append(
-                    f"👤 แฟ้มผู้ป่วย: {metadata['patient_hn_folder']}"
-                )
+            # แสดงแฟ้มผู้ป่วยทุกหมวดคลินิก — เจ้าหน้าที่ต้องเห็นว่าเอกสาร
+            # เข้าแฟ้มใคร เพื่อจับความผิดพลาดได้ทันทีที่ส่ง
+            if category in CLINICAL_CATEGORIES:
+                if metadata.get("patient_hn_folder"):
+                    _reply_lines.append(
+                        f"👤 แฟ้มผู้ป่วย: {metadata['patient_hn_folder']}"
+                    )
+                    if _ctx_conflict:
+                        _reply_lines.append(
+                            f"⚠️ HN ในเอกสารอ่านได้เป็น: {_ctx_conflict}\n"
+                            f"ระบบใช้ผู้ป่วยที่เลือกไว้ หากผิดให้พิมพ์ "
+                            f"'ผู้ป่วย <HN>' ให้ถูกแล้วส่งเอกสารใหม่"
+                        )
+                else:
+                    _reply_lines.append(
+                        "👤 ยังไม่ระบุผู้ป่วย — เก็บไว้ที่ระดับไตรมาส/เดือน\n"
+                        "พิมพ์ 'ผู้ป่วย <HN>' ก่อนส่ง เพื่อเข้าแฟ้มรายคน"
+                    )
             _result_text = "\n".join(_reply_lines)
 
             # ── Interactive Classification: ถามผู้ใช้เมื่อ OCR ล้มเหลว ──
@@ -6943,6 +6989,99 @@ def _clear_pending_classification(user_hash: str):
         )
     except Exception:
         pass
+
+
+# ── โหมดเลือกผู้ป่วย: หมอ/เจ้าหน้าที่ส่งเอกสารแทนผู้ป่วยหลายคน ──────
+# workflow จริงของคลินิก: เอกสารคลินิก (ใบแล็บ ใบยา ใบฟอกเลือด)
+# ส่งจากบัญชีหมอ/เจ้าหน้าที่ ไม่ใช่บัญชีผู้ป่วย จึงผูก 1 บัญชี = 1 คน
+# ไม่ได้ ต้องให้เจ้าหน้าที่ "เลือกผู้ป่วย" ก่อนส่งเอกสารแทน
+#
+# เจ้าหน้าที่พิมพ์ "ผู้ป่วย 57042" → เอกสารที่ส่งต่อจากนั้นเข้าแฟ้มคนนั้น
+# ใช้ GCS-based state เพื่อให้ทุก Gunicorn worker เห็นค่าเดียวกัน
+_PATIENT_CTX_GCS_PREFIX = "_state/patient_ctx/"
+# 30 นาที — พอสำหรับส่งเอกสารของผู้ป่วยหนึ่งคนเป็นชุด
+# แต่สั้นพอที่จะไม่ค้างข้ามคนไข้รายถัดไป
+_PATIENT_CTX_TIMEOUT = 1800
+
+
+def _set_patient_context(
+    user_hash: str, patient_folder: str, hn_display: str, patient_name: str,
+) -> bool:
+    """ตั้งผู้ป่วยปัจจุบันของเจ้าหน้าที่คนนี้"""
+    try:
+        if not storage.is_ready or not hasattr(storage, "_bucket"):
+            logger.warning("Storage not ready for patient context")
+            return False
+        blob = storage._bucket.blob(
+            f"{_PATIENT_CTX_GCS_PREFIX}{user_hash}.json"
+        )
+        blob.upload_from_string(
+            json.dumps({
+                "timestamp": time.time(),
+                "patient_folder": patient_folder,
+                "hn_display": hn_display,
+                "patient_name": patient_name,
+            }, ensure_ascii=False),
+            content_type="application/json",
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Failed to set patient context: {type(e).__name__}")
+        return False
+
+
+def _get_patient_context(user_hash: str) -> dict | None:
+    """ดึงผู้ป่วยปัจจุบัน — คืน None ถ้าไม่มีหรือหมดเวลา"""
+    try:
+        if not storage.is_ready or not hasattr(storage, "_bucket"):
+            return None
+        blob = storage._bucket.blob(
+            f"{_PATIENT_CTX_GCS_PREFIX}{user_hash}.json"
+        )
+        if not blob.exists():
+            return None
+        data = json.loads(blob.download_as_text())
+        if data.get("cleared") or not data.get("patient_folder"):
+            return None
+        if (time.time() - data.get("timestamp", 0)) >= _PATIENT_CTX_TIMEOUT:
+            return None
+        return data
+    except Exception:
+        return None
+
+
+def _clear_patient_context(user_hash: str):
+    """ล้างผู้ป่วยปัจจุบัน — เขียนทับด้วย marker (ไม่มีสิทธิ์ลบ blob)"""
+    try:
+        if not storage.is_ready or not hasattr(storage, "_bucket"):
+            return
+        blob = storage._bucket.blob(
+            f"{_PATIENT_CTX_GCS_PREFIX}{user_hash}.json"
+        )
+        blob.upload_from_string(
+            json.dumps({"cleared": True, "timestamp": 0}),
+            content_type="application/json",
+        )
+    except Exception:
+        pass
+
+
+def _parse_patient_select(text: str) -> str | None:
+    """แยก HN จากคำสั่งเลือกผู้ป่วย
+
+    รองรับ: "ผู้ป่วย 57042", "คนไข้ 57042", "เลือกผู้ป่วย 57042",
+            "patient 57042", "ผู้ป่วย57042"
+    คืน None ถ้าไม่ใช่คำสั่งนี้
+    """
+    import re as _re_sel
+
+    m = _re_sel.match(
+        r"^\s*(?:เลือก)?(?:ผู้ป่วย|คนไข้|patient)\s*[:=]?\s*"
+        r"([A-Za-z0-9\-/]{2,20})\s*$",
+        text.strip(),
+        _re_sel.IGNORECASE,
+    )
+    return m.group(1) if m else None
 
 
 def _reclassify_document(
@@ -7916,6 +8055,79 @@ def webhook():
                         reply_line_message(reply_token, search_response)
                     else:
                         reply_message(reply_token, search_response)
+                # ── โหมดเลือกผู้ป่วย: ระบุผู้ป่วยก่อนส่งเอกสาร ──
+                elif _parse_patient_select(text) is not None:
+                    _sel_hn = _parse_patient_select(text)
+                    _sel_patient = (
+                        master_registry.match_hn(_sel_hn)
+                        if master_registry else None
+                    )
+                    if not _sel_patient:
+                        reply_message(
+                            reply_token,
+                            f"❌ ไม่พบ HN {_sel_hn} ในทะเบียนผู้ป่วย\n\n"
+                            "ตรวจ HN อีกครั้ง หรือพิมพ์ 'ทะเบียนผู้ป่วย' "
+                            "เพื่อดูรายชื่อ",
+                        )
+                    else:
+                        _ok = _set_patient_context(
+                            user_hash,
+                            _sel_patient.folder_name,
+                            _sel_patient.hn_display,
+                            _sel_patient.patient_name,
+                        )
+                        if _ok:
+                            reply_message(
+                                reply_token,
+                                f"👤 ผู้ป่วยปัจจุบัน\n"
+                                f"{_sel_patient.hn_display} — "
+                                f"{_sel_patient.patient_name or 'ไม่มีชื่อ'}\n\n"
+                                "📂 เอกสารที่ส่งต่อจากนี้ (ใบแล็บ ใบยา "
+                                "ใบฟอกเลือด) จะเข้าแฟ้มของผู้ป่วยคนนี้\n\n"
+                                "⏱️ ค้างไว้ 30 นาที\n"
+                                "• เปลี่ยนคน: พิมพ์ 'ผู้ป่วย <HN>'\n"
+                                "• เลิกใช้: พิมพ์ 'ล้างผู้ป่วย'",
+                            )
+                        else:
+                            reply_message(
+                                reply_token,
+                                "❌ ไม่สามารถตั้งผู้ป่วยได้ในขณะนี้ "
+                                "กรุณาลองใหม่",
+                            )
+                elif text.strip() in (
+                    "ล้างผู้ป่วย", "ยกเลิกผู้ป่วย", "ปิดผู้ป่วย",
+                    "clear patient", "เสร็จแล้ว",
+                ):
+                    _clear_patient_context(user_hash)
+                    reply_message(
+                        reply_token,
+                        "✅ ล้างผู้ป่วยปัจจุบันแล้ว\n\n"
+                        "เอกสารที่ส่งต่อจากนี้จะเก็บที่ระดับไตรมาส/เดือน "
+                        "จนกว่าจะเลือกผู้ป่วยใหม่",
+                    )
+                elif text.strip() in (
+                    "ผู้ป่วยปัจจุบัน", "ดูผู้ป่วย", "current patient",
+                ):
+                    _cur = _get_patient_context(user_hash)
+                    if _cur:
+                        _mins = int(
+                            (_PATIENT_CTX_TIMEOUT
+                             - (time.time() - _cur.get("timestamp", 0))) / 60
+                        )
+                        reply_message(
+                            reply_token,
+                            f"👤 ผู้ป่วยปัจจุบัน\n"
+                            f"{_cur.get('hn_display', '')} — "
+                            f"{_cur.get('patient_name') or 'ไม่มีชื่อ'}\n\n"
+                            f"⏱️ เหลืออีกประมาณ {max(_mins, 0)} นาที",
+                        )
+                    else:
+                        reply_message(
+                            reply_token,
+                            "ยังไม่ได้เลือกผู้ป่วย\n\n"
+                            "พิมพ์ 'ผู้ป่วย <HN>' เพื่อเลือก\n"
+                            "ตัวอย่าง: ผู้ป่วย 57042",
+                        )
                 # ── Master Patient Registry: ลงทะเบียนรายชื่อ ──
                 elif text.strip() in (
                     "ลงทะเบียนรายชื่อ", "ลงทะเบียน",
