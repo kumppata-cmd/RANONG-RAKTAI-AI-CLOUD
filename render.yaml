@@ -73,12 +73,20 @@ services:
       #     ทั้งสามใช้ "ตรวจสิทธิ์" จึงเก็บเป็น hash ไม่เก็บ ID ดิบ
       #     ขอ hash ของตัวเองได้จาก LINE ด้วยคำสั่งลงทะเบียนของระบบ
       #
-      #   ALERT_RECIPIENTS  LINE userId ดิบ (U + hex 32 ตัว)
+      #   ALERT_RECIPIENTS  LINE userId ดิบ (U + hex 32 ตัว) — ไม่บังคับ
       #     ใช้ "ส่งข้อความ" ซึ่ง LINE push API ต้องใช้ ID ดิบ
       #     ใส่ hash ที่นี่จะ push ไม่ได้เลย — ระบบจะคัดออกและขึ้น
       #     ERROR ใน log พร้อมบอกสาเหตุ
       #     รองรับหลายคนด้วยการคั่นด้วยจุลภาค และรับ group id (C...)
       #     ได้ด้วย ถ้าคลินิกใช้กลุ่มพยาบาล
+      #
+      #     วิธีที่แนะนำกว่าสำหรับการเพิ่มคน: ไม่ต้องแตะ ENV เลย
+      #       1. ผู้ดูแลขอรหัสจาก POST /admin/enroll
+      #       2. เจ้าตัวพิมพ์ "ยืนยัน <รหัส>" ใน LINE แล้วจะได้ hash
+      #       3. ผู้ดูแลส่ง hash นั้นไปที่
+      #          POST /admin/api/v2/alerts/recipients {hash, role}
+      #     ระบบเก็บ LINE ID ไว้เองตอนขั้นที่ 2 จึงไม่มีใครต้องเห็นหรือ
+      #     ส่ง LINE ID ให้กัน และการเพิ่ม/ลบมีผลทันทีไม่ต้อง redeploy
       #
       # ตรวจผลได้ที่ /health → critical_alert_delivery
       #   can_deliver / recipients / problem  (ไม่แสดง ID ของใคร)

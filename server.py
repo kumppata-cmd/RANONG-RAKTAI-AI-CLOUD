@@ -1939,12 +1939,20 @@ try:
     from alert_delivery import (
         AlertDeliveryService, AlertSeverity,
         create_line_push_fn, build_alert_recipients_from_env,
-        describe_alert_recipients,
+        describe_alert_recipients, resolve_alert_recipients,
         AlertRetryManager, rebuild_dedup_cache,
         format_active_alerts,
     )
-    # Build recipients from env vars
-    _alert_recipients = build_alert_recipients_from_env()
+    # ผู้รับมาจากสองที่: ENV และทะเบียนบน GCS (เพิ่มด้วย hash)
+    # ถ้าอ่านทะเบียนไม่ได้ ยังต้องได้ผู้รับจาก ENV ไม่ปล่อยให้ว่าง
+    try:
+        _alert_recipients = resolve_alert_recipients(storage)
+    except Exception as _ar_err:
+        logger.error(
+            "อ่านทะเบียนผู้รับไม่สำเร็จ ใช้เฉพาะ ENV: %s",
+            type(_ar_err).__name__,
+        )
+        _alert_recipients = build_alert_recipients_from_env()
     alert_service = AlertDeliveryService(
         storage, audit_logger,
         clinician_recipients=_alert_recipients,
@@ -2757,6 +2765,90 @@ def _count_analyte_mentions(text: str) -> int:
         if len(alias) >= 3 and alias.lower() in low:
             seen.add(canonical)
     return len(seen)
+
+
+@app.route("/admin/api/v2/alerts/recipients", methods=["GET", "POST"])
+def api_alert_recipients():
+    """จัดการผู้รับการแจ้งเตือนค่าวิกฤต — อ้างอิงด้วย hash เท่านั้น
+
+    ทำไมต้องมี: ALERT_RECIPIENTS ใน Render ต้องใช้ LINE user ID ดิบ
+    แต่คำสั่งลงทะเบียนของระบบตั้งใจไว้ว่า "ไม่แสดง LINE userId จริง"
+    (มาตรการลดการเปิดเผยตัวระบุตัวตนตาม PDPA) สองอย่างนี้ขัดกันตรง ๆ
+    และเป็นเหตุที่การแจ้งเตือนค่าวิกฤตไปถึงแพทย์คนเดียว
+    เพิ่มพยาบาลไม่ได้เลย
+
+    วิธีทำงาน: เจ้าตัวพิมพ์ "ยืนยัน <รหัส>" ใน LINE → ระบบเก็บคู่
+    hash -> LINE ID ไว้เอง → ผู้ดูแลเพิ่มผู้รับด้วย hash ที่เจ้าตัว
+    ได้รับ → ระบบไปหา ID ดิบเองตอนส่ง
+
+    ไม่มี endpoint ใดคืน LINE user ID และการเพิ่ม/ลบมีผลทันที
+    ไม่ต้อง redeploy
+
+    GET                      รายการผู้รับ (hash 12 ตัวแรก + บทบาท)
+    POST {hash, role}        เพิ่ม/แก้บทบาท  role: physician|nurse|admin
+    POST {hash, remove:true} ปิดการใช้งาน (ไม่ลบประวัติ)
+    """
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    if alert_service is None:
+        return jsonify({"error": "ระบบแจ้งเตือนไม่พร้อมใช้งาน"}), 503
+
+    try:
+        from alert_delivery import (
+            add_recipient, remove_recipient, list_recipients,
+            resolve_alert_recipients, describe_alert_recipients,
+        )
+    except ImportError:
+        return jsonify({"error": "alert_delivery ไม่พร้อมใช้งาน"}), 503
+
+    def _state():
+        return {
+            "recipients": list_recipients(storage),
+            "delivery": describe_alert_recipients(storage),
+        }
+
+    if request.method == "GET":
+        return jsonify(_state())
+
+    body = request.get_json(silent=True) or {}
+    user_hash = str(body.get("hash", "")).strip()
+    actor = (request.headers.get("X-Admin-Actor", "") or "admin")[:16]
+
+    if body.get("remove") is True:
+        res = remove_recipient(storage, user_hash, actor)
+    else:
+        res = add_recipient(
+            storage, user_hash,
+            str(body.get("role", "nurse")).strip().lower(),
+            actor, str(body.get("note", "")).strip(),
+        )
+
+    if res.get("error"):
+        return jsonify(res), 400
+
+    # มีผลทันที — ไม่ต้องรอ redeploy
+    try:
+        alert_service.set_recipients(resolve_alert_recipients(storage))
+    except Exception as e:
+        logger.error(
+            "โหลดผู้รับใหม่หลังแก้ทะเบียนไม่สำเร็จ: %s", type(e).__name__
+        )
+        return jsonify({
+            **res,
+            "warning": (
+                "บันทึกทะเบียนแล้ว แต่โหลดเข้าระบบส่งไม่สำเร็จ — "
+                "การเปลี่ยนแปลงจะมีผลหลัง redeploy"
+            ),
+        }), 200
+
+    audit_logger.log("alert_recipient_changed", actor, {
+        "action": res.get("status", ""),
+        "hash_prefix": user_hash[:12],
+        "role": res.get("role", ""),
+    })
+    return jsonify({**res, **_state()})
 
 
 @app.route("/admin/api/v2/labs/reextract", methods=["GET", "POST"])
@@ -3802,8 +3894,14 @@ def _invalidate_clinical_on_correction(
         )
 
 
-def handle_search_command(text: str, user_hash: str) -> str | None:
-    """ประมวลผลคำสั่งค้นหาเอกสาร — คืนข้อความตอบกลับ หรือ None ถ้าไม่ใช่คำสั่ง."""
+def handle_search_command(
+    text: str, user_hash: str, line_user_id: str = "",
+) -> str | None:
+    """ประมวลผลคำสั่งค้นหาเอกสาร — คืนข้อความตอบกลับ หรือ None ถ้าไม่ใช่คำสั่ง.
+
+    line_user_id: LINE user ID ดิบ ใช้เฉพาะตอนลงทะเบียนสำเร็จ เพื่อเก็บ
+        คู่ hash -> ID ไว้ส่งการแจ้งเตือน ไม่ถูกแสดง ไม่ใส่ log
+    """
     text_stripped = text.strip()
 
     # ── ยืนยันตัวตน (One-Time Enrollment Token) ──────────────
@@ -3832,6 +3930,29 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
 
         # ─ Token ถูกต้อง → ลงทะเบียนสำเร็จ ─
         audit_logger.log("enroll_success", user_hash, {})
+
+        # เก็บคู่ hash -> LINE user ID ไว้ใช้ส่งการแจ้งเตือนค่าวิกฤต
+        #
+        # ทำไมต้องเก็บ: ALERT_RECIPIENTS ต้องใช้ LINE user ID ดิบ แต่
+        # คำสั่งนี้ตั้งใจไว้ว่า "ไม่แสดง LINE userId จริง" สองอย่างนี้
+        # ขัดกัน และเป็นเหตุที่เพิ่มพยาบาลเป็นผู้รับไม่ได้เลย
+        # การเก็บไว้ในระบบทำให้ผู้ดูแลเพิ่มผู้รับด้วย hash ได้ โดยที่
+        # ไม่มีใครเห็น ID ดิบ และ ID ไม่ต้องเดินทางผ่านแชท
+        #
+        # ค่านี้ไม่ถูกแสดงที่ใด ไม่ใส่ log และไม่มี API ใดคืนออกไป
+        _can_be_recipient = False
+        if line_user_id and alert_service is not None:
+            try:
+                from alert_delivery import store_enrolled_line_id
+                _can_be_recipient = store_enrolled_line_id(
+                    storage, user_hash, line_user_id,
+                )
+            except Exception as _e:
+                logger.warning(
+                    "เก็บ LINE ID ของผู้ลงทะเบียนไม่สำเร็จ: %s",
+                    type(_e).__name__,
+                )
+
         salt_warning = ""
         if IS_PRODUCTION and not os.getenv("USER_ID_SALT", "").strip():
             salt_warning = (
@@ -3839,13 +3960,22 @@ def handle_search_command(text: str, user_hash: str) -> str | None:
                 "ค่า hash นี้ใช้ default salt\n"
                 "แนะนำ: ตั้ง USER_ID_SALT แล้วลงทะเบียนใหม่"
             )
+        alert_note = ""
+        if _can_be_recipient:
+            alert_note = (
+                "\n\n📣 ถ้าต้องการให้ได้รับแจ้งเตือนผลวิกฤต\n"
+                "ส่งค่า Hash ข้างบนให้ผู้ดูแลระบบ\n"
+                "ระบบเก็บ LINE ID ของคุณไว้เองแล้ว "
+                "ไม่ต้องส่ง LINE ID ให้ใคร"
+            )
         return (
             f"✅ ลงทะเบียนสำเร็จ\n\n"
             f"ค่า Hash สำหรับ AUTHORIZED_USERS:\n"
             f"{user_hash}\n\n"
             f"วิธีใช้: เพิ่มค่านี้ใน Render Dashboard\n"
             f"AUTHORIZED_USERS={user_hash}\n"
-            f"(หลายคนคั่นด้วยเครื่องหมายจุลภาค){salt_warning}"
+            f"(หลายคนคั่นด้วยเครื่องหมายจุลภาค)"
+            f"{alert_note}{salt_warning}"
         )
 
     # ── Parse command ด้วย line_bot_enhancer ──
@@ -9370,7 +9500,9 @@ def webhook():
                     continue
 
                 # ── Document Search V1: ตรวจคำสั่งค้นหาก่อน ──
-                search_response = handle_search_command(text, user_hash)
+                search_response = handle_search_command(
+                    text, user_hash, _line_user_id,
+                )
                 if search_response:
                     if isinstance(search_response, dict) and search_response.get("type") == "flex":
                         # Flex Message (เช่น ขอไฟล์ → ปุ่มเปิด PDF)
@@ -9910,7 +10042,7 @@ def health():
         # คืนเฉพาะจำนวนและสาเหตุ ไม่มี LINE user ID — /health
         # เปิดอ่านได้โดยไม่ต้องยืนยันตัวตน
         "critical_alert_delivery": (
-            describe_alert_recipients()
+            describe_alert_recipients(storage)
             if describe_alert_recipients is not None
             else {"can_deliver": False, "problem": "โมดูลแจ้งเตือนไม่พร้อม"}
         ),
