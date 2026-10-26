@@ -23,6 +23,7 @@ Deploy บน Render Managed Cloud ด้วย Gunicorn
 
 import fcntl
 import os
+import re
 import secrets
 import sys
 import hmac
@@ -225,18 +226,34 @@ DEDUP_CONTENT_TTL_SECONDS = int(os.getenv("DEDUP_CONTENT_TTL", "600"))  # 10 น
 _user_id_salt_env = os.getenv("USER_ID_SALT", "").strip()
 _USER_ID_SALT_MISSING = False  # Flag สำหรับ fail-closed ถ้า salt ไม่ได้ตั้ง
 _early_logger = logging.getLogger(__name__)  # Early logger ก่อน basicConfig
-if IS_PRODUCTION and not _user_id_salt_env:
-    # Production ต้องมี salt คงที่ — ห้ามใช้ค่า default
+# โหมดใดก็ตามที่ "จัดเก็บเอกสารจริง" ต้องมี salt คงที่
+#
+# [SECURITY_GAP_ANALYSIS §3.2] เดิมเงื่อนไขนี้เช็คเฉพาะ production แต่
+# โหมด testing-docs ก็ดาวน์โหลดและจัดเก็บเอกสารจริงลง GCS เหมือนกัน
+# เมื่อใช้ salt สุ่มที่เปลี่ยนทุก restart owner_hash ของเอกสารที่เก็บไว้
+# ก่อนหน้าจะไม่มีทางตรงกับของผู้ใช้คนเดิมอีกเลย
+# → เอกสารกลายเป็นเข้าถึงไม่ได้ถาวร แบบเงียบ ๆ ไม่มีใครรู้
+# (fail-closed จึงไม่รั่ว แต่เป็นการสูญเสียการเข้าถึงข้อมูลผู้ป่วย)
+_SALT_REQUIRED = IS_PRODUCTION or IS_TESTING_DOCS
+
+if _SALT_REQUIRED and not _user_id_salt_env:
+    # ต้องมี salt คงที่ — ห้ามใช้ค่า default
     # ไม่ crash แต่ fail-closed: ปฏิเสธทุก request ที่ต้องใช้ hash
     _USER_ID_SALT_MISSING = True
     USER_ID_SALT = "MISSING-SALT-DO-NOT-USE"
+    _mode_note = (
+        "Production" if IS_PRODUCTION
+        else "โหมด testing-docs (จัดเก็บเอกสารจริง)"
+    )
     _early_logger.critical(
-        "CRITICAL: USER_ID_SALT ต้องตั้งค่าใน Production ENV — "
+        f"CRITICAL: USER_ID_SALT ต้องตั้งค่าใน {_mode_note} ENV — "
         "ระบบจะปฏิเสธทุก request จนกว่าจะตั้งค่า — "
+        "ถ้าใช้ salt สุ่ม เอกสารที่เก็บไว้จะเข้าถึงไม่ได้หลัง restart — "
         "ใช้ค่าสุ่มที่ไม่ซ้ำ เช่น: python3 -c \"import secrets; print(secrets.token_hex(32))\""
     )
 elif not _user_id_salt_env:
-    # Non-production: ใช้ random salt (เปลี่ยนทุก restart — ปลอดภัยสำหรับ testing)
+    # โหมดทดสอบที่ไม่จัดเก็บเอกสาร: ใช้ random salt ได้
+    # (เปลี่ยนทุก restart — ไม่มีเอกสารให้สูญหาย)
     USER_ID_SALT = uuid.uuid4().hex
 else:
     USER_ID_SALT = _user_id_salt_env
@@ -2054,6 +2071,14 @@ def api_hn_register():
 
     if not owner_hash:
         return jsonify({"error": "ต้องระบุ owner_hash"}), 400
+    # [§3.1] ผูกบัญชีผิดคน = เอกสารของผู้ป่วยคนหนึ่งไปอยู่แฟ้มอีกคน
+    # จึงต้องตรวจรูปแบบก่อน ไม่รับ LINE userId ดิบ
+    if not is_valid_owner_hash(owner_hash):
+        return jsonify({
+            "error": "owner_hash ผิดรูปแบบ",
+            "detail": "ต้องเป็น hex ตัวพิมพ์เล็ก 32 ตัว "
+                      "(ผลลัพธ์ของ hash_user_id) — ไม่ใช่ LINE userId ดิบ",
+        }), 400
     if not clinic_hn and not hospital_hn:
         return jsonify({"error": "ต้องระบุ clinic_hn หรือ hospital_hn อย่างน้อย 1 รายการ"}), 400
 
@@ -4640,6 +4665,28 @@ def hash_user_id(user_id: str) -> str:
     return hashlib.sha256(
         ((user_id or "unknown") + USER_ID_SALT).encode("utf-8")
     ).hexdigest()[:32]
+
+
+# owner_hash ที่ถูกต้องคือผลลัพธ์ของ hash_user_id() เสมอ
+# = SHA-256 ตัด 32 ตัวแรก → hex ตัวพิมพ์เล็ก 32 ตัว
+_OWNER_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def is_valid_owner_hash(value: str) -> bool:
+    """ตรวจรูปแบบ owner_hash ก่อนนำไปใช้ที่ขอบระบบ
+
+    [SECURITY_GAP_ANALYSIS §3.1] ไม่มีจุดใดในระบบยืนยันว่า owner_hash
+    ที่รับเข้ามามีรูปแบบถูกต้อง ทำให้ค่าที่ผิดรูป (เช่น LINE userId ดิบ
+    หรือพิมพ์ตกหล่น) ถูกนำไปใช้เงียบ ๆ
+
+    ความเสียหายที่เกิดได้จริง:
+      - /admin/assign-owner ผูก owner ให้เอกสารแบบถาวร และ "ไม่ยอม
+        ผูกซ้ำ" ถ้าใส่ค่าผิดรูปเพียงครั้งเดียว เอกสารนั้นจะเข้าถึงไม่ได้
+        ตลอดไปโดยแก้ไม่ได้ผ่าน endpoint เดิม
+      - ข้อบกพร่องของ LIFF (SEC-1) ที่ client ส่ง userId ดิบ จะถูกจับได้
+        ทันทีตั้งแต่วันแรกถ้ามีตัวตรวจนี้ แทนที่จะเงียบจนมา audit เจอ
+    """
+    return bool(value) and bool(_OWNER_HASH_RE.match(value))
 
 
 class InMemoryBackend:
@@ -8860,6 +8907,27 @@ def admin_assign_owner():
     assigned = 0
     not_found = 0
     already_owned = 0
+
+    # [§3.1] ตรวจรูปแบบ owner_hash ทั้งชุดก่อนเริ่มผูกแม้แต่รายการเดียว
+    # การผูกเป็นแบบถาวรและไม่ยอมผูกซ้ำ ถ้าปล่อยค่าผิดรูปผ่านไป เอกสาร
+    # นั้นจะเข้าถึงไม่ได้ตลอดไปและแก้ผ่าน endpoint นี้ไม่ได้อีก
+    _invalid = [
+        item.get("doc_id", "")[:8]
+        for item in assignments
+        if item.get("owner_hash")
+        and not is_valid_owner_hash(item.get("owner_hash", ""))
+    ]
+    if _invalid:
+        logger.warning(
+            "assign-owner: ปฏิเสธ %d รายการที่ owner_hash ผิดรูปแบบ",
+            len(_invalid),
+        )
+        return jsonify({
+            "error": "invalid owner_hash format",
+            "detail": "owner_hash ต้องเป็น hex ตัวพิมพ์เล็ก 32 ตัว "
+                      "(ผลลัพธ์ของ hash_user_id) — ไม่ใช่ LINE userId ดิบ",
+            "invalid_doc_ids": _invalid,
+        }), 400
 
     for item in assignments:
         doc_id = item.get("doc_id", "")
