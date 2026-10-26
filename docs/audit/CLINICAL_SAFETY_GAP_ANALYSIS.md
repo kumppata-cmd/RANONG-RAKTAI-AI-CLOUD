@@ -18,6 +18,27 @@
 > ### Additional defect found and fixed during the repair
 > `format_active_alerts()` displayed only `doc_id`, never the **alert code** that the acknowledgment command requires — so even after adding the command, a clinician reading the pending-alerts list would have had no code to reply with. This is the *same* class of defect as CS-2 itself (an instruction referencing something the user cannot act on) and is now covered by a test.
 >
+> ## CS-6 status → **RESOLVED (TESTED)** — commit `150dd4b`
+>
+> Criteria supplied by Dr Kamphon (KDIGO). Implemented in `clinical_analyzer.py`, 26 new tests in `test_kdigo_ckd_staging.py`, suite now **1,205 tests, 0 failures**.
+>
+> | Added | Purpose |
+> |---|---|
+> | `classify_egfr_category()` | eGFR category G1–G5 — explicitly *not* a diagnosis (boundaries were already correct) |
+> | `classify_albuminuria()` | A1 `<30` / A2 `30–299` / A3 `≥300` mg/g; missing UACR → `UNKNOWN`, never assumed normal |
+> | `kdigo_risk()` | Full eGFR × albuminuria risk matrix; missing either axis → `UNKNOWN`, never guessed |
+> | `assess_ckd()` | The actual conclusion: `is_ckd` is `True` / `False` / **`None` (insufficient data)**, with `missing[]` and a Thai reason |
+>
+> **Behaviour change visible to clinicians:**
+> - before: `CKD Stage G1: ไตทำงานปกติหรือเกือบปกติ` — a person with normal kidneys labelled CKD
+> - after: `eGFR category G1 (ไม่เข้าเกณฑ์ CKD)` + reason + KDIGO risk
+> - single low eGFR: now reports `ยังขาด: ผลติดตาม ≥90 วัน` and explicitly warns to exclude **AKI**, instead of asserting a chronic diagnosis
+>
+> **Deliberately unchanged (and why):**
+> - **Severity** is still derived from the eGFR *value*, so G4/G5 remain `CRITICAL` and the alert pathway is unaffected. Urgency comes from the number; diagnosis comes from the criteria — these are different questions and are now separated.
+> - `ckd_progression.get_ckd_stage()` keeps its behaviour because its main consumer is **renal drug dosing**, which must use current eGFR, not chronicity status. Changing it would produce wrong doses. Only its docstring was corrected.
+> - `classify_ckd_stage()` remains as a backward-compatible alias; the `ckd_stage` field still carries the eGFR category, with the full conclusion added alongside in `ckd_assessment`.
+>
 > ### Still open in P0-A
 > - **Multi-recipient redundancy** (was noted P2): `attempt_delivery` still `break`s after the first successful recipient. Unchanged in this batch.
 > - **Production verification: BLOCKED.** Everything above is verified by test, not against the live service. The highest-value outstanding check remains reading the live `_alerts/` prefix to see whether real critical alerts were already lost while the pipeline was broken — this needs GCS credentials.
