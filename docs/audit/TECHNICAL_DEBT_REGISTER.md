@@ -23,7 +23,9 @@
 >
 > **Second, more serious finding from that attempt:** when pip-audit failed as a hard gate, GitHub **skipped every later step in the same job** — including `ตรวจสอบ EXTERNAL_AI_CLASSIFICATION_ALLOWED = False` and `ตรวจสอบ no public GCS access`. An unrelated dependency CVE could therefore silence the two most important security controls in the pipeline. Fixed by reordering: the must-always-run greps now execute **before** pip-audit, which sits last with `continue-on-error`.
 >
-> **Current state:** pip-audit runs, its result is visible as an orange warning in the UI (not masked green as `|| echo` did), and it does not block deploys or mask other controls.
+> **Current state:** pip-audit runs for real and its full output is in the step log; it does not block deploys and no longer masks other controls.
+>
+> ⚠️ **Known limitation — do not misread this step's status.** `continue-on-error: true` causes the Actions **API to report `conclusion: success`** for this step even when `pip-audit` exits non-zero. This is confirmed by comparing run `40270798487` (with `continue-on-error` → reported `success`) against run `40271014104` (same code, as a hard gate → `failure`). So `|| echo` and `continue-on-error` are **equally opaque to the API**; the only advantage of `continue-on-error` is that the command's real output remains in the step log. **The only reliable way to see the actual result is to open this step's log in the GitHub UI.** This exact masking caused one incorrect conclusion earlier in this batch, which is why it is documented here prominently.
 >
 > **Why not a hard gate yet:** the specific CVE is unidentified. `pip-audit` cannot be installed in the audit container (proxy denies PyPI, 403) and CI logs cannot be fetched (`results-receiver.actions.githubusercontent.com` denied, 403). Blocking all deployments on an unassessed finding would obstruct urgent clinical safety fixes, which are higher priority.
 >
