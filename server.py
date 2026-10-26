@@ -2314,6 +2314,25 @@ def _admin_api_auth() -> "tuple | None":
 
 
 
+def _count_analyte_mentions(text: str) -> int:
+    """นับว่าพบชื่อรายการตรวจที่ระบบรู้จักกี่ชนิดในข้อความ
+
+    ใช้วินิจฉัยว่าเอกสารที่อ่านค่าไม่ออก "เป็นใบแล็บแต่รูปแบบแปลก"
+    หรือ "ไม่ใช่ใบแล็บตั้งแต่แรก" — คืนเฉพาะจำนวน ไม่บอกว่าชนิดใด
+    """
+    try:
+        from lab_extractor import ANALYTE_ALIASES
+    except ImportError:
+        return -1
+    low = (text or "").lower()
+    seen = set()
+    for alias, canonical in ANALYTE_ALIASES.items():
+        # alias สั้นมาก (เช่น "k", "na") จับพลาดง่าย จึงนับเฉพาะที่ยาวพอ
+        if len(alias) >= 3 and alias.lower() in low:
+            seen.add(canonical)
+    return len(seen)
+
+
 @app.route("/admin/api/v2/labs/reextract", methods=["GET", "POST"])
 def api_labs_reextract():
     """อ่านค่าผลแล็บจากเอกสารที่เก็บไว้แล้วซ้ำอีกครั้ง
@@ -2355,6 +2374,7 @@ def api_labs_reextract():
     no_text = 0
     still_empty = 0
     extracted: list[dict] = []
+    unreadable: list[dict] = []
     write_failed = 0
 
     try:
@@ -2396,6 +2416,24 @@ def api_labs_reextract():
 
             if not report.results:
                 still_empty += 1
+                # เก็บสัญญาณที่ "ไม่ใช่ข้อมูลผู้ป่วย" ไว้วินิจฉัยว่าทำไมอ่านไม่ออก
+                #
+                # แยกสองกรณีที่ต้องจัดการคนละแบบ:
+                #   ไม่พบชื่อรายการตรวจเลย → น่าจะไม่ใช่ใบแล็บตั้งแต่แรก
+                #                             (จัดหมวดผิด เช่นใบตรวจ OPD)
+                #   พบชื่อรายการตรวจแต่อ่านค่าไม่ได้ → เป็นใบแล็บจริง
+                #                             แต่รูปแบบยังไม่รองรับ
+                #
+                # รายงานเฉพาะ "จำนวน" ไม่บอกว่าเป็นรายการตรวจอะไร
+                # และไม่บอกค่า — ชื่อรายการตรวจรวมกับวันที่พอจะชี้ตัวผู้ป่วยได้
+                unreadable.append({
+                    "document_id": doc_id[:8],
+                    "upload_date": d.get("upload_date", ""),
+                    "ocr_status": str(d.get("ocr_status", "")),
+                    "text_length": len(text),
+                    "analyte_names_found": _count_analyte_mentions(text),
+                    "numbers_found": len(re.findall(r"\d+(?:\.\d+)?", text)),
+                })
                 continue
 
             n_critical = sum(
@@ -2450,6 +2488,7 @@ def api_labs_reextract():
             "บันทึกผลแล็บแล้ว ไม่ส่งการแจ้งเตือนย้อนหลัง"
         ),
         "documents": extracted,
+        "unreadable_documents": unreadable,
     })
 
 

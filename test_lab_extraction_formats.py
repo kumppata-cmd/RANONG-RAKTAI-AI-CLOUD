@@ -397,3 +397,50 @@ class TestReextractApply(ReextractFixture):
         d = self._call("?apply=1")
         self.assertGreater(d["write_failed"], 0)
         self.assertTrue(all(not doc["written"] for doc in d["documents"]))
+
+
+class TestUnreadableDiagnostics(ReextractFixture):
+    """สัญญาณวินิจฉัยเอกสารที่อ่านค่าไม่ออก — ต้องไม่มีข้อมูลผู้ป่วย"""
+
+    def test_unreadable_documents_are_listed(self):
+        d = self._call()
+        ids = {u["document_id"] for u in d["unreadable_documents"]}
+        self.assertIn("dddd4444", ids)   # "ใบเสร็จรับเงิน 1500 บาท"
+
+    def test_non_lab_document_shows_no_analyte_names(self):
+        """ไม่พบชื่อรายการตรวจเลย = น่าจะไม่ใช่ใบแล็บตั้งแต่แรก"""
+        d = self._call()
+        entry = next(
+            u for u in d["unreadable_documents"]
+            if u["document_id"] == "dddd4444"
+        )
+        self.assertEqual(entry["analyte_names_found"], 0)
+        self.assertGreater(entry["text_length"], 0)
+        self.assertGreater(entry["numbers_found"], 0)
+
+    def test_lab_like_document_shows_analyte_names(self):
+        """พบชื่อรายการตรวจแต่อ่านค่าไม่ได้ = ใบแล็บรูปแบบที่ยังไม่รองรับ"""
+        self.s.doc_index._docs.append({
+            "document_id": "ffff6666" + "0" * 8, "category": "lab",
+            "upload_date": "2026-10-25", "ocr_status": "ocr",
+            # มีชื่อรายการตรวจ แต่ค่าถูกตัดขาดจนอ่านไม่ได้
+            "extracted_text": "Creatinine ......\nPotassium ......",
+        })
+        d = self._call()
+        entry = next(
+            u for u in d["unreadable_documents"]
+            if u["document_id"] == "ffff6666"
+        )
+        self.assertGreaterEqual(entry["analyte_names_found"], 2)
+
+    def test_diagnostics_contain_no_patient_data(self):
+        import json as _json
+        blob = _json.dumps(
+            self._call()["unreadable_documents"], ensure_ascii=False
+        ).lower()
+        for leak in ("ใบเสร็จ", "บาท", "creatinine", "potassium", "1500"):
+            self.assertNotIn(leak, blob, f"พบข้อมูลที่ไม่ควรมี: {leak}")
+
+    def test_counts_match_the_listing(self):
+        d = self._call()
+        self.assertEqual(d["still_unreadable"], len(d["unreadable_documents"]))
