@@ -2314,6 +2314,56 @@ def _admin_api_auth() -> "tuple | None":
 
 
 
+def _line_shape(text: str) -> dict:
+    """นับ "รูปร่าง" ของบรรทัดในเอกสาร โดยไม่เปิดเผยเนื้อหา
+
+    ใช้ระบุว่าใบแล็บจัดวางแบบไหน เมื่ออ่านค่าไม่ออกและต้องรู้ว่า
+    ควรแก้ตัวแยกค่าอย่างไร โดยไม่ต้องเปิดอ่านเอกสารผู้ป่วย
+
+    แปลผล:
+      name_with_number สูง  → ชื่อกับค่าอยู่บรรทัดเดียวกัน (ตาราง)
+      name_only สูง         → ชื่อแยกบรรทัดจากค่า (คอลัมน์/แนวตั้ง)
+      number_only สูง       → มีค่าลอยอยู่โดยไม่มีชื่อกำกับ
+      max_name_run          → ชื่อเรียงติดกันยาวสุดกี่บรรทัด
+    """
+    try:
+        from lab_extractor import _normalize_analyte
+    except ImportError:
+        return {}
+    name_only = name_and_number = number_only = other = 0
+    run = max_run = 0
+    for raw in (text or "").split("\n"):
+        ln = raw.strip()
+        if not ln:
+            continue
+        has_num = bool(re.search(r"\d", ln))
+        # ชื่อรายการตรวจคือข้อความ "ก่อนตัวเลขตัวแรก"
+        # ตัดทั้งบรรทัดที่ตัวเลขไม่ได้ เพราะหน่วยที่อยู่หลังค่า
+        # (mg/dL) จะติดมากับชื่อและทำให้เทียบไม่ติด
+        name_part = re.split(r"\d", ln, maxsplit=1)[0].strip(" :=|\t-")
+        is_name = bool(_normalize_analyte(name_part or ln))
+        if is_name and has_num:
+            name_and_number += 1
+            run = 0
+        elif is_name:
+            name_only += 1
+            run += 1
+            max_run = max(max_run, run)
+        elif has_num and not name_part:
+            number_only += 1
+            run = 0
+        else:
+            other += 1
+            run = 0
+    return {
+        "lines_name_with_number": name_and_number,
+        "lines_name_only": name_only,
+        "lines_number_only": number_only,
+        "lines_other": other,
+        "max_consecutive_name_lines": max_run,
+    }
+
+
 def _count_analyte_mentions(text: str) -> int:
     """นับว่าพบชื่อรายการตรวจที่ระบบรู้จักกี่ชนิดในข้อความ
 
@@ -2433,6 +2483,9 @@ def api_labs_reextract():
                     "text_length": len(text),
                     "analyte_names_found": _count_analyte_mentions(text),
                     "numbers_found": len(re.findall(r"\d+(?:\.\d+)?", text)),
+                    # รูปร่างของบรรทัด — บอกว่าเอกสารจัดวางแบบไหน
+                    # โดยไม่เปิดเผยว่าเขียนอะไรไว้
+                    **_line_shape(text),
                 })
                 continue
 
