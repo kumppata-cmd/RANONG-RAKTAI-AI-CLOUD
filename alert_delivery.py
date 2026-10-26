@@ -36,8 +36,15 @@ logger = logging.getLogger(__name__)
 LINE_PUSH_API_URL = "https://api.line.me/v2/bot/message/push"
 
 # รูปแบบปลายทางที่ LINE push ได้: user (U), group (C), room (R)
-# ตามด้วย hex 32 ตัว — ใช้แยกออกจาก SHA-256 hash (hex 64 ตัว ไม่มีตัวนำ)
+# ตามด้วย hex 32 ตัว
 _LINE_ID_RE = re.compile(r"^[UCR][0-9a-fA-F]{32}$")
+
+# รูปแบบ owner hash ของระบบนี้ — hash_user_id() คืน SHA-256 ตัด 32 ตัวแรก
+# (ไม่ใช่ 64 ตัวเต็ม) ตรงกับ _OWNER_HASH_RE ใน server.py
+#
+# สองรูปแบบข้างบนแยกกันได้ด้วยตัวนำ: LINE ID ขึ้นต้น U/C/R เสมอ
+# ส่วน hash เป็น hex ล้วน ความยาวเท่ากัน (32) จึงใช้ความยาวแยกไม่ได้
+_OWNER_HASH_RE = re.compile(r"^[0-9a-f]{32}$")
 
 
 # ═══════════════════════════════════════════════════════════
@@ -240,6 +247,19 @@ class AlertDeliveryService:
         self._recipients = clinician_recipients or {}
         self._allow_simulated_delivery = allow_simulated_delivery
         self._dedup_cache: dict[str, str] = {}  # dedup_key → alert_id
+
+    def set_recipients(self, recipients: dict) -> None:
+        """เปลี่ยนรายชื่อผู้รับโดยไม่ต้อง restart
+
+        จำเป็นเพราะ service ถูกสร้างครั้งเดียวตอน import ถ้าไม่มีตัวนี้
+        การเพิ่มพยาบาลจะไม่มีผลจนกว่าจะ redeploy — ซึ่งคนเพิ่มจะไม่รู้
+        และคิดว่าเพิ่มสำเร็จแล้ว
+        """
+        self._recipients = recipients or {}
+
+    def recipient_count(self, role: str = "physician") -> int:
+        """จำนวนผู้รับปัจจุบัน — ไม่คืนตัว ID"""
+        return len(self._recipients.get(role, []))
 
     def _alert_path(self, alert_id: str) -> str:
         return f"{ALERTS_PREFIX}{alert_id}.json"
@@ -752,7 +772,10 @@ def build_alert_recipients_from_env() -> dict[str, list[str]]:
         logger.info("ผู้รับการแจ้งเตือน: %d คน (จาก %s)", len(valid), source)
     if rejected:
         # ไม่ log ตัว ID — บอกแค่จำนวนและสาเหตุ
-        looks_hashed = any(len(uid) == 64 for uid in raw)
+        #
+        # แยก hash ด้วย "ตัวนำ" ไม่ใช่ความยาว เพราะ hash_user_id คืน
+        # hex 32 ตัว เท่ากับความยาวส่วน hex ของ LINE ID พอดี
+        looks_hashed = any(_OWNER_HASH_RE.match(uid.lower()) for uid in raw)
         logger.error(
             "ผู้รับการแจ้งเตือน %d ค่าใช้ไม่ได้ (ไม่ใช่รูปแบบ LINE ID)%s",
             rejected,
@@ -769,7 +792,230 @@ def build_alert_recipients_from_env() -> dict[str, list[str]]:
     return recipients
 
 
-def describe_alert_recipients() -> dict:
+# ═══════════════════════════════════════════════════════════
+# ทะเบียนผู้รับการแจ้งเตือน — เพิ่มคนได้โดยไม่เปิดเผย LINE user ID
+#
+# ปัญหาที่ต้องแก้: ALERT_RECIPIENTS ต้องใช้ LINE user ID ดิบ แต่คำสั่ง
+# ลงทะเบียนของระบบตั้งใจไว้ว่า "ไม่แสดง LINE userId จริง" (มาตรการลด
+# การเปิดเผยตัวระบุตัวตนตาม PDPA) สองอย่างนี้ขัดกันตรง ๆ และเป็นเหตุ
+# ที่การแจ้งเตือนค่าวิกฤตไปถึงแพทย์คนเดียว เพิ่มพยาบาลไม่ได้เลย
+#
+# ทางออกที่เลือก — ไม่ลดมาตรการเดิมลง:
+#   ตอนลงทะเบียน  ระบบเก็บ hash -> LINE user ID ไว้เองที่ _enrolled_ids/
+#                  ไม่แสดงให้ใครเห็น ไม่ใส่ log ไม่คืนทาง API ใด
+#   เพิ่มผู้รับ    ผู้ดูแลส่ง "hash" ซึ่งเจ้าตัวได้รับอยู่แล้วตอน
+#                  ลงทะเบียน ระบบไปหา ID ดิบเองตอนส่ง
+#   ผลลัพธ์        ไม่มีใครเห็น ID ดิบของใคร และ ID ไม่ต้องเดินทาง
+#                  ผ่านแชทเลย
+# ═══════════════════════════════════════════════════════════
+
+ENROLLED_IDS_PREFIX = "_enrolled_ids/"
+RECIPIENT_REGISTRY_PATH = "_alert_recipients/registry.json"
+
+# บทบาทที่รับได้ — ทุกบทบาทส่งเข้าช่อง "physician" ของ service
+# เพราะเป็นช่องเดียวที่ใช้ส่ง alert วิกฤต บทบาทเก็บไว้เพื่อให้ผู้ดูแล
+# รู้ว่าใครเป็นใครเวลาดูรายการ
+ALERT_ROLES = ("physician", "nurse", "admin")
+
+
+def store_enrolled_line_id(storage, user_hash: str, line_user_id: str) -> bool:
+    """เก็บ hash -> LINE user ID ไว้ใช้ส่งการแจ้งเตือน
+
+    ค่านี้ไม่ถูกแสดงที่ใดเลย ไม่ใส่ log และไม่มี API ใดคืนออกไป
+    ใช้เฉพาะตอน resolve ผู้รับก่อน push
+    """
+    if not _LINE_ID_RE.match(line_user_id or ""):
+        return False
+    if not _OWNER_HASH_RE.match((user_hash or "").lower()):
+        return False
+    user_hash = user_hash.lower()
+    try:
+        storage.put(
+            f"{ENROLLED_IDS_PREFIX}{user_hash}.json",
+            json.dumps({
+                "line_user_id": line_user_id,
+                "enrolled_at": datetime.now().isoformat(),
+            }, ensure_ascii=False).encode("utf-8"),
+            content_type="application/json",
+        )
+        return True
+    except Exception as e:
+        # ไม่ log ตัว ID — แค่ชนิดข้อผิดพลาด
+        logger.warning(
+            "เก็บ LINE ID ของผู้ลงทะเบียนไม่สำเร็จ: %s", type(e).__name__
+        )
+        return False
+
+
+def _lookup_enrolled_line_id(storage, user_hash: str) -> str:
+    """หา LINE user ID จาก hash — คืน "" ถ้าไม่พบ
+
+    ปรับเป็นตัวพิมพ์เล็กก่อนค้น ให้ตรงกับที่ store เขียนไว้ ไม่งั้น hash
+    เดียวกันที่พิมพ์ต่างกันจะกลายเป็นคนละคน
+    """
+    user_hash = (user_hash or "").strip().lower()
+    if not _OWNER_HASH_RE.match(user_hash):
+        return ""
+    try:
+        raw = storage.get(f"{ENROLLED_IDS_PREFIX}{user_hash}.json")
+        if not raw:
+            return ""
+        uid = (json.loads(raw.decode("utf-8")) or {}).get("line_user_id", "")
+        return uid if _LINE_ID_RE.match(uid or "") else ""
+    except Exception as e:
+        logger.warning("อ่าน LINE ID ไม่สำเร็จ: %s", type(e).__name__)
+        return ""
+
+
+def load_recipient_registry(storage) -> dict:
+    """อ่านทะเบียนผู้รับ — คืนโครงว่างถ้ายังไม่มีไฟล์"""
+    try:
+        raw = storage.get(RECIPIENT_REGISTRY_PATH)
+        if raw:
+            data = json.loads(raw.decode("utf-8")) or {}
+            if isinstance(data.get("recipients"), list):
+                return data
+    except Exception as e:
+        logger.warning("อ่านทะเบียนผู้รับไม่สำเร็จ: %s", type(e).__name__)
+    return {"recipients": []}
+
+
+def save_recipient_registry(storage, data: dict) -> bool:
+    try:
+        storage.put(
+            RECIPIENT_REGISTRY_PATH,
+            json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8"),
+            content_type="application/json",
+        )
+        return True
+    except Exception as e:
+        logger.error("เขียนทะเบียนผู้รับไม่สำเร็จ: %s", type(e).__name__)
+        return False
+
+
+def add_recipient(
+    storage, user_hash: str, role: str, added_by: str, note: str = "",
+) -> dict:
+    """เพิ่มผู้รับด้วย hash — ระบบไปหา LINE ID ดิบเอง
+
+    คืน dict ที่ไม่มี LINE user ID อยู่ในนั้นเลย
+    """
+    user_hash = (user_hash or "").strip().lower()
+    if not _OWNER_HASH_RE.match(user_hash):
+        return {"error": (
+            "hash ไม่ถูกต้อง — ต้องเป็น hex ตัวพิมพ์เล็ก 32 ตัว "
+            "(ค่าที่ได้จากคำสั่ง 'ยืนยัน' ใน LINE)"
+        )}
+    if role not in ALERT_ROLES:
+        return {"error": f"บทบาทต้องเป็นหนึ่งใน {', '.join(ALERT_ROLES)}"}
+
+    # ต้องลงทะเบียนมาก่อน ไม่งั้นเพิ่มแล้วส่งไม่ได้และไม่มีใครรู้
+    if not _lookup_enrolled_line_id(storage, user_hash):
+        return {"error": (
+            "ยังไม่พบการลงทะเบียนของ hash นี้ — "
+            "ให้เจ้าตัวพิมพ์ 'ยืนยัน <รหัส>' ใน LINE ก่อน "
+            "แล้วค่อยเพิ่มเป็นผู้รับ"
+        )}
+
+    data = load_recipient_registry(storage)
+    for r in data["recipients"]:
+        if r.get("user_hash") == user_hash:
+            r["role"] = role
+            r["active"] = True
+            r["updated_at"] = datetime.now().isoformat()
+            r["updated_by"] = (added_by or "")[:8]
+            if note:
+                r["note"] = note[:120]
+            if not save_recipient_registry(storage, data):
+                return {"error": "บันทึกทะเบียนไม่สำเร็จ"}
+            return {"status": "updated", "role": role}
+
+    data["recipients"].append({
+        "user_hash": user_hash,
+        "role": role,
+        "active": True,
+        "added_at": datetime.now().isoformat(),
+        "added_by": (added_by or "")[:8],
+        "note": note[:120] if note else "",
+    })
+    if not save_recipient_registry(storage, data):
+        return {"error": "บันทึกทะเบียนไม่สำเร็จ"}
+    return {"status": "added", "role": role}
+
+
+def remove_recipient(storage, user_hash: str, removed_by: str) -> dict:
+    """ปิดการใช้งานผู้รับ — ไม่ลบประวัติ"""
+    user_hash = (user_hash or "").strip().lower()
+    data = load_recipient_registry(storage)
+    for r in data["recipients"]:
+        if r.get("user_hash") == user_hash:
+            if not r.get("active", True):
+                return {"status": "already_inactive"}
+            r["active"] = False
+            r["updated_at"] = datetime.now().isoformat()
+            r["updated_by"] = (removed_by or "")[:8]
+            if not save_recipient_registry(storage, data):
+                return {"error": "บันทึกทะเบียนไม่สำเร็จ"}
+            return {"status": "removed"}
+    return {"error": "ไม่พบ hash นี้ในทะเบียนผู้รับ"}
+
+
+def list_recipients(storage) -> list:
+    """รายการผู้รับ — ไม่มี LINE user ID และบอก hash เพียง 12 ตัวแรก
+
+    hash เต็มคือสิ่งที่ใช้เพิ่ม/ลบ เจ้าตัวมีอยู่แล้ว การคืนเต็มทาง API
+    จึงไม่จำเป็น และ 12 ตัวพอให้ผู้ดูแลแยกแยะได้
+    """
+    out = []
+    for r in load_recipient_registry(storage).get("recipients", []):
+        out.append({
+            "user_hash_prefix": (r.get("user_hash") or "")[:12],
+            "role": r.get("role", ""),
+            "active": bool(r.get("active", True)),
+            "added_at": r.get("added_at", ""),
+            "note": r.get("note", ""),
+        })
+    return out
+
+
+def resolve_alert_recipients(storage) -> dict:
+    """รวมผู้รับจาก ENV และจากทะเบียน แล้วคืน LINE user ID ดิบสำหรับ push
+
+    ENV มาก่อนเพื่อไม่ให้การเพิ่มทะเบียนทำให้ผู้รับเดิมหลุดหาย
+    ไม่ log ตัว ID
+    """
+    recipients = build_alert_recipients_from_env()
+    ids = list(recipients.get("physician", []))
+    seen = set(ids)
+
+    resolved = 0
+    unresolved = 0
+    for r in load_recipient_registry(storage).get("recipients", []):
+        if not r.get("active", True):
+            continue
+        uid = _lookup_enrolled_line_id(storage, r.get("user_hash", ""))
+        if uid:
+            if uid not in seen:
+                ids.append(uid)
+                seen.add(uid)
+            resolved += 1
+        else:
+            unresolved += 1
+
+    if unresolved:
+        logger.error(
+            "ผู้รับการแจ้งเตือน %d รายในทะเบียนหา LINE ID ไม่ได้ — "
+            "เจ้าตัวอาจยังไม่ได้ลงทะเบียน", unresolved,
+        )
+    if resolved:
+        logger.info("ผู้รับจากทะเบียน: %d ราย", resolved)
+
+    if ids:
+        recipients["physician"] = ids
+    return recipients
+
+
+def describe_alert_recipients(storage=None) -> dict:
     """สรุปความพร้อมของเส้นทางแจ้งเตือน สำหรับ /health
 
     คืนเฉพาะ "จำนวน" และ "สาเหตุ" ไม่คืน LINE user ID ใด ๆ
@@ -788,21 +1034,59 @@ def describe_alert_recipients() -> dict:
     raw = [uid.strip() for uid in alert_ids.split(",") if uid.strip()]
     valid = [uid for uid in raw if _LINE_ID_RE.match(uid)]
 
-    if not raw:
-        reason = "ไม่ได้ตั้งค่า ALERT_RECIPIENTS หรือ PHYSICIAN_USERS"
-    elif not valid:
+    # ผู้รับจากทะเบียน (เพิ่มด้วย hash — ไม่ต้องแก้ ENV และไม่ต้อง restart)
+    from_registry = 0
+    registry_unresolved = 0
+    if storage is not None:
+        try:
+            for r in load_recipient_registry(storage).get("recipients", []):
+                if not r.get("active", True):
+                    continue
+                if _lookup_enrolled_line_id(storage, r.get("user_hash", "")):
+                    from_registry += 1
+                else:
+                    registry_unresolved += 1
+        except Exception as e:
+            logger.warning(
+                "อ่านทะเบียนผู้รับสำหรับ /health ไม่สำเร็จ: %s",
+                type(e).__name__,
+            )
+
+    total = len(valid) + from_registry
+
+    if not raw and not from_registry and not registry_unresolved:
         reason = (
-            "ค่าที่ตั้งไว้ไม่ใช่รูปแบบ LINE user ID "
-            "(ALERT_RECIPIENTS ต้องใช้ ID ดิบ ไม่ใช่ hash)"
+            "ยังไม่มีผู้รับเลย — ตั้ง ALERT_RECIPIENTS ใน Render "
+            "หรือเพิ่มด้วย /admin/api/v2/alerts/recipients"
         )
-    elif len(valid) < len(raw):
-        reason = f"ใช้ได้ {len(valid)} จาก {len(raw)} ค่า"
+    elif not total:
+        if raw and not valid:
+            reason = (
+                "ค่าที่ตั้งไว้ไม่ใช่รูปแบบ LINE user ID "
+                "(ALERT_RECIPIENTS ต้องใช้ ID ดิบ ไม่ใช่ hash)"
+            )
+        else:
+            reason = (
+                f"ผู้รับในทะเบียน {registry_unresolved} ราย "
+                "ยังไม่ได้ลงทะเบียนใน LINE จึงส่งไม่ได้"
+            )
     else:
-        reason = ""
+        bits = []
+        if raw and len(valid) < len(raw):
+            bits.append(f"ค่าใน ENV ใช้ได้ {len(valid)} จาก {len(raw)}")
+        if registry_unresolved:
+            bits.append(
+                f"ในทะเบียน {registry_unresolved} ราย"
+                "ยังไม่ได้ลงทะเบียนใน LINE"
+            )
+        reason = " · ".join(bits)
 
     return {
-        "can_deliver": bool(valid),
-        "recipients": len(valid),
+        "can_deliver": total > 0,
+        "recipients": total,
+        "from_env": len(valid),
+        "from_registry": from_registry,
+        "registry_unresolved": registry_unresolved,
         "configured_values": len(raw),
         "source": source if raw else "",
         "problem": reason,
