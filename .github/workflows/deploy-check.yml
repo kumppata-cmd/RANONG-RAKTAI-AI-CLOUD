@@ -42,8 +42,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest flake8 pip-audit
+          pip install -r requirements.txt -r requirements-dev.txt
 
       - name: "Syntax check"
         run: |
@@ -55,14 +54,26 @@ jobs:
         run: |
           flake8 . --select=E9,F63,F7,F82 --exclude=.git,__pycache__,*.backup*
 
-      - name: "Run tests"
+      # Gate จริง — ก่อนหน้านี้ปิดท้ายด้วย || true ทำให้ test ล้มแล้ว
+      # ยังผ่าน และรันแค่ tests/ ไม่เคยรันชุดหลักใน root เลย
+      - name: "Tests — unittest suite (root)"
         env:
           LINE_CHANNEL_ACCESS_TOKEN: "ci-test-dummy-token"
           LINE_CHANNEL_SECRET: "ci-test-dummy-secret"
           ADMIN_SECRET: "ci-test-admin-secret"
           GCS_BUCKET_NAME: "ci-test-bucket"
         run: |
-          python -m pytest tests/ -v --tb=short || true
+          # ระบุ module ตรง ๆ — discover จะไล่เข้า tests/ ซึ่งเป็นชุด pytest
+          python -m unittest $(ls test_*.py | sed 's/\.py$//' | tr '\n' ' ')
+
+      - name: "Tests — pytest suite (tests/)"
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: "ci-test-dummy-token"
+          LINE_CHANNEL_SECRET: "ci-test-dummy-secret"
+          ADMIN_SECRET: "ci-test-admin-secret"
+          GCS_BUCKET_NAME: "ci-test-bucket"
+        run: |
+          python -m pytest tests/ -v --tb=short
 
       - name: "Security — EXTERNAL_AI_CLASSIFICATION_ALLOWED = False"
         run: |
@@ -72,7 +83,10 @@ jobs:
           }
 
       - name: "pip-audit"
-        run: pip-audit --strict --desc || echo "WARNING: vulnerabilities found"
+        # ใช้ block scalar (|) เพราะค่าแบบ inline ที่มี ": " ทำให้ YAML
+        # parse ไม่ผ่าน และ GitHub จะไม่รัน job ใด ๆ เลย (0s failure)
+        run: |
+          pip-audit --strict --desc || echo "WARNING - vulnerabilities found (advisory)"
 
   # ---------------------------------------------------------------------------
   # Job 2: Docker Build — ตรวจว่า Dockerfile build ได้

@@ -82,19 +82,35 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest
+          pip install -r requirements.txt -r requirements-dev.txt
 
-      - name: "Run tests"
+      # ── Gate 1: ชุดทดสอบหลัก 1,100+ เคสใน root ──────────────────
+      # เดิม CI ไม่เคยรันชุดนี้เลย (รันแค่ pytest tests/) และยังปิดท้าย
+      # ด้วย || true ทำให้ test ล้มไม่ทำให้ CI แดง — CI เขียวจึงไม่ใช่
+      # หลักฐานว่า test ผ่าน (ดู TECHNICAL_DEBT_REGISTER TD-2)
+      - name: "Tests — unittest suite (root)"
         env:
-          # ตั้งค่า env ขั้นต่ำเพื่อให้ import ได้ (ไม่ใช่ค่าจริง)
+          # ค่า dummy ขั้นต่ำเพื่อให้ import ได้ ไม่ใช่ค่าจริง
           LINE_CHANNEL_ACCESS_TOKEN: "ci-test-dummy-token"
           LINE_CHANNEL_SECRET: "ci-test-dummy-secret"
           ADMIN_SECRET: "ci-test-admin-secret"
           GCS_BUCKET_NAME: "ci-test-bucket"
         run: |
-          echo "=== รัน pytest ==="
-          python -m pytest tests/ -v --tb=short || true
+          echo "=== unittest: root test_*.py (1,148 เคส) ==="
+          # ระบุ module ตรง ๆ ไม่ใช้ discover เพราะ discover จะไล่เข้าไปใน
+          # tests/ (เป็น package) แล้วรัน test แบบ pytest ด้วย runner ผิดตัว
+          python -m unittest $(ls test_*.py | sed 's/\.py$//' | tr '\n' ' ') -v
+
+      # ── Gate 2: ชุดทดสอบ pytest ใน tests/ ──────────────────────
+      - name: "Tests — pytest suite (tests/)"
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: "ci-test-dummy-token"
+          LINE_CHANNEL_SECRET: "ci-test-dummy-secret"
+          ADMIN_SECRET: "ci-test-admin-secret"
+          GCS_BUCKET_NAME: "ci-test-bucket"
+        run: |
+          echo "=== pytest tests/ ==="
+          python -m pytest tests/ -v --tb=short
 
       - name: "Compile all modules"
         run: |
@@ -138,10 +154,17 @@ jobs:
           pip install -r requirements.txt
           pip install pip-audit
 
+      # pip-audit: ใช้ continue-on-error แทน "|| echo" โดยเจตนา
+      #   || echo  → step เขียว ผลถูกกลบหายไปเลย (เท่ากับไม่ได้ตรวจ)
+      #   continue-on-error → step แสดงเป็นเตือนสีส้มใน UI เห็นผลจริง
+      #     แต่ยังไม่บล็อก deploy เพราะสถานะ CVE ปัจจุบันยังไม่ได้ประเมิน
+      # TODO(security): เมื่อประเมิน CVE ที่ค้างแล้ว ให้เปลี่ยนเป็น gate จริง
+      #   (ลบ continue-on-error) พร้อม ignore list ที่ review แล้ว
       - name: "pip-audit — ตรวจ dependency vulnerabilities"
+        continue-on-error: true
         run: |
           echo "=== ตรวจสอบ vulnerabilities ใน dependencies ==="
-          pip-audit --strict --desc || echo "WARNING: พบ vulnerabilities — กรุณาตรวจสอบ"
+          pip-audit --strict --desc
 
       - name: "ตรวจสอบ hardcoded secrets"
         run: |

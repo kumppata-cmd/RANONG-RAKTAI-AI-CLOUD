@@ -1,0 +1,18 @@
+# RANONG RAKTAI AI — Development / CI dependencies
+#
+# แยกจาก requirements.txt เพื่อไม่ให้ production image ติดตั้ง test tooling
+# ติดตั้ง: pip install -r requirements.txt -r requirements-dev.txt
+#
+# เหตุผลที่ต้องมีไฟล์นี้ (TECHNICAL_DEBT_REGISTER TD-4):
+#   ชุดทดสอบใน tests/ ใช้ pytest แต่ pytest ไม่ได้ถูกประกาศเป็น dependency
+#   ที่ใด ทำให้รันในเครื่องไม่ได้เลย (ModuleNotFoundError) และ CI ติดตั้ง
+#   แบบ ad-hoc โดยไม่ pin เวอร์ชัน
+
+# Test runner สำหรับชุดทดสอบใน tests/
+pytest==8.3.4
+
+# Linting (ใช้ใน CI job: lint)
+flake8==7.1.1
+
+# Dependency vulnerability scanning (ใช้ใน CI job: security)
+pip-audit==2.7.3

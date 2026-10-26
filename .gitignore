@@ -51,3 +51,9 @@ desktop.ini
 # ── ngrok (ไม่ใช้บน Cloud) ──────────────────────
 ngrok*
 server.py.backup.*
+
+# ── ผลลัพธ์ที่ test เขียนเองทุกครั้งที่รัน ───────
+# ไฟล์นี้ถูก test_phase14_3_crit001_fix.py เขียนใหม่ทุกครั้ง ทำให้เกิด
+# diff ค้างใน working tree ตลอด ซึ่งจะกวนการเปิด CI gate จริง
+# (ประวัติเดิมยังอยู่ใน git history — เลิก track เท่านั้น ไม่ได้ลบไฟล์)
+tests/phase14_3_results.json
