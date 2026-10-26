@@ -154,14 +154,14 @@ jobs:
           pip install -r requirements.txt
           pip install pip-audit
 
-      # pip-audit: ใช้ continue-on-error แทน "|| echo" โดยเจตนา
-      #   || echo  → step เขียว ผลถูกกลบหายไปเลย (เท่ากับไม่ได้ตรวจ)
-      #   continue-on-error → step แสดงเป็นเตือนสีส้มใน UI เห็นผลจริง
-      #     แต่ยังไม่บล็อก deploy เพราะสถานะ CVE ปัจจุบันยังไม่ได้ประเมิน
-      # TODO(security): เมื่อประเมิน CVE ที่ค้างแล้ว ให้เปลี่ยนเป็น gate จริง
-      #   (ลบ continue-on-error) พร้อม ignore list ที่ review แล้ว
+      # pip-audit เป็น gate จริง (ไม่มี || echo, ไม่มี continue-on-error)
+      # ยืนยันแล้วว่าผ่านบน dependency ชุดปัจจุบัน (run 40270798487)
+      # จึงปิดเป็น gate ได้โดยไม่ทำให้ CI แดงค้าง
+      #
+      # ถ้ามี CVE ใหม่ประกาศและจำเป็นต้อง deploy แก้ไขเร่งด่วนก่อน:
+      #   เพิ่ม --ignore-vuln <ID> พร้อมคอมเมนต์อธิบายเหตุผลและวันที่
+      #   review — ห้ามลบ gate ทั้งอันเพื่อให้ deploy ผ่าน
       - name: "pip-audit — ตรวจ dependency vulnerabilities"
-        continue-on-error: true
         run: |
           echo "=== ตรวจสอบ vulnerabilities ใน dependencies ==="
           pip-audit --strict --desc
