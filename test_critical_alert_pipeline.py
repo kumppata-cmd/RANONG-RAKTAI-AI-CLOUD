@@ -463,6 +463,75 @@ class TestCS1DriverRunsRetries(unittest.TestCase):
         mgr._retry_interval = 0
         self.assertEqual(mgr.check_and_retry(lambda u, m: True), [])
 
+    def test_delivers_to_all_recipients_not_just_first(self):
+        """ผลวิกฤตต้องถึงแพทย์ทุกคนที่ตั้งไว้ ไม่หยุดที่คนแรกที่สำเร็จ
+
+        เดิม break ทันทีเมื่อสำเร็จคนแรก → ถึงแพทย์คนเดียวโดยไม่มีสำรอง
+        ถ้าคนนั้นไม่ว่างหรือปิดเสียงก็ไม่มีใครรู้ ทั้งที่ตั้งผู้รับไว้
+        หลายคนเพื่อการนี้โดยเฉพาะ
+        """
+        svc = make_service(simulate=False,
+                           recipients={"physician": ["U1", "U2", "U3"]})
+        alert = new_alert(svc)
+        reached = []
+        svc.attempt_delivery(
+            alert.alert_id,
+            send_push_fn=lambda uid, msg: reached.append(uid) or True,
+        )
+        self.assertEqual(reached, ["U1", "U2", "U3"])
+
+        stored = svc._load_alert(alert.alert_id)
+        self.assertEqual(stored.delivered_to_count, 3)
+        self.assertEqual(stored.recipient_count, 3)
+
+    def test_first_recipient_failure_does_not_block_others(self):
+        """ผู้รับคนแรกล้มเหลว คนที่เหลือยังต้องได้รับ"""
+        svc = make_service(simulate=False,
+                           recipients={"physician": ["U1", "U2", "U3"]})
+        alert = new_alert(svc)
+        tried = []
+
+        def flaky(uid, msg):
+            tried.append(uid)
+            return uid != "U1"
+
+        svc.attempt_delivery(alert.alert_id, send_push_fn=flaky)
+        self.assertEqual(tried, ["U1", "U2", "U3"])
+
+        stored = svc._load_alert(alert.alert_id)
+        self.assertEqual(stored.state, AlertState.SENT.value)
+        self.assertEqual(stored.delivered_to_count, 2)
+
+    def test_exception_from_one_recipient_does_not_stop_delivery(self):
+        """ผู้รับคนหนึ่ง throw ต้องไม่ทำให้คนอื่นไม่ได้รับ"""
+        svc = make_service(simulate=False,
+                           recipients={"physician": ["U1", "U2"]})
+        alert = new_alert(svc)
+        reached = []
+
+        def explode(uid, msg):
+            if uid == "U1":
+                raise RuntimeError("LINE down for this user")
+            reached.append(uid)
+            return True
+
+        svc.attempt_delivery(alert.alert_id, send_push_fn=explode)
+        self.assertEqual(reached, ["U2"])
+        self.assertEqual(
+            svc._load_alert(alert.alert_id).state, AlertState.SENT.value
+        )
+
+    def test_all_recipients_failing_is_delivery_failed(self):
+        """ไม่ถึงใครเลย = ส่งไม่สำเร็จ ต้องเข้า retry"""
+        svc = make_service(simulate=False,
+                           recipients={"physician": ["U1", "U2"]})
+        alert = new_alert(svc)
+        svc.attempt_delivery(alert.alert_id,
+                             send_push_fn=lambda uid, msg: False)
+        stored = svc._load_alert(alert.alert_id)
+        self.assertEqual(stored.state, AlertState.DELIVERY_FAILED.value)
+        self.assertEqual(stored.delivered_to_count, 0)
+
     def test_missing_recipients_fails_closed(self):
         """ไม่มี physician recipient → ต้องไม่ถือว่าส่งสำเร็จ"""
         svc = make_service(simulate=True, recipients={})

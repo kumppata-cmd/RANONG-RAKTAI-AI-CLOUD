@@ -179,10 +179,16 @@ class TestAlertDeliveryIntegration(unittest.TestCase):
                                                 send_push_fn=mock_push)
         self.assertTrue(result["success"])
         self.assertEqual(result["state"], AlertState.SENT.value)
-        self.assertEqual(len(push_calls), 1)
-        self.assertEqual(push_calls[0][0], "U_demo_doc_001")
+        # ส่งถึงแพทย์ "ทุกคน" ที่ตั้งไว้ ไม่ใช่หยุดที่คนแรกที่สำเร็จ
+        # (เดิม assert == 1 ซึ่งเป็นการยืนยันพฤติกรรมที่ไม่มีสำรอง —
+        #  ผลวิกฤตถึงแพทย์คนเดียว ถ้าคนนั้นไม่ว่างก็ไม่มีใครรู้)
+        self.assertEqual(len(push_calls), len(self.recipients["physician"]))
+        self.assertEqual(
+            [c[0] for c in push_calls], self.recipients["physician"]
+        )
         # Notification should NOT contain PHI
-        self.assertNotIn("owner_hash_demo", push_calls[0][1])
+        for _uid, _msg in push_calls:
+            self.assertNotIn("owner_hash_demo", _msg)
 
     def test_create_alert_deduplication(self):
         """Duplicate alert for same doc+analyte+level is deduplicated."""

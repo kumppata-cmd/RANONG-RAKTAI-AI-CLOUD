@@ -113,6 +113,10 @@ class CriticalAlert:
     # ตอบรับภายในเวลานี้ ต้อง escalate ไม่ใช่ปล่อยเงียบ
     ack_timeout_sec: int = 900       # 15 นาที
     escalation_reason: str = ""
+    # จำนวนผู้รับที่ส่งถึงจริง / ผู้รับที่ตั้งไว้ทั้งหมด
+    # ใช้ตรวจว่าการแจ้งเตือนมีสำรองจริงหรือถึงแค่คนเดียว
+    delivered_to_count: int = 0
+    recipient_count: int = 0
 
     def __post_init__(self):
         if not self.alert_id:
@@ -386,19 +390,35 @@ class AlertDeliveryService:
             return {"error": "ไม่มี physician recipient"}
 
         delivery_success = False
+        delivered_count = 0
+        failed_count = 0
         if send_push_fn:
+            # ส่งให้ผู้รับ "ทุกคน" ที่ตั้งไว้ ไม่หยุดที่คนแรกที่สำเร็จ
+            #
+            # เดิม break ทันทีเมื่อส่งสำเร็จคนแรก → ผลวิกฤตถึงแพทย์
+            # คนเดียวโดยไม่มีสำรอง ถ้าแพทย์คนนั้นไม่ว่าง ปิดเสียง หรือ
+            # ไม่ได้เปิด LINE ก็ไม่มีใครรู้เลย ทั้งที่ตั้งผู้รับไว้หลายคน
+            # เพื่อการนี้โดยเฉพาะ
             for recipient_id in recipients:
                 try:
-                    success = send_push_fn(
-                        recipient_id, alert.notification_text
-                    )
-                    if success:
-                        delivery_success = True
-                        break
+                    if send_push_fn(recipient_id, alert.notification_text):
+                        delivered_count += 1
+                    else:
+                        failed_count += 1
                 except Exception as e:
+                    failed_count += 1
                     logger.warning(
                         f"Alert push failed: {type(e).__name__}"
                     )
+            # ถึงอย่างน้อยหนึ่งคน = ส่งสำเร็จ (ไม่ให้ retry ทั้งชุดซ้ำ
+            # ซึ่งจะทำให้คนที่ได้รับแล้วโดนแจ้งซ้ำ และอาจเข้าใจผิดว่า
+            # เป็นเหตุการณ์ใหม่)
+            delivery_success = delivered_count > 0
+            if delivered_count and failed_count:
+                logger.warning(
+                    "Alert partial delivery: %d สำเร็จ %d ล้มเหลว",
+                    delivered_count, failed_count,
+                )
         elif self._allow_simulated_delivery:
             # โหมดทดสอบเท่านั้น — ต้อง opt-in ที่ constructor
             delivery_success = True
@@ -415,13 +435,21 @@ class AlertDeliveryService:
         if delivery_success:
             alert.state = AlertState.SENT.value
             alert.sent_at = datetime.now().isoformat(timespec="seconds")
+            alert.delivered_to_count = delivered_count
+            alert.recipient_count = len(recipients)
             alert.add_event("sent", details={
                 "attempt": alert.delivery_attempts,
+                # บันทึกว่าถึงกี่คนจากกี่คน เพื่อให้เห็นการส่งถึงบางส่วน
+                "delivered": delivered_count,
+                "failed": failed_count,
+                "recipients": len(recipients),
             })
             self._audit.log("alert_sent", alert.owner_hash, {
                 "alert_id": alert.alert_id[:8],
                 "analyte": alert.analyte,
                 "attempt": alert.delivery_attempts,
+                "delivered": delivered_count,
+                "recipients": len(recipients),
             })
         else:
             alert.state = AlertState.DELIVERY_FAILED.value
