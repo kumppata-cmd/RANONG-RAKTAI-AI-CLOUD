@@ -7994,6 +7994,202 @@ def _parse_move_document(text: str):
     return (m.group(1), m.group(2))
 
 
+_CATEGORY_WORDS = {
+    "lab": "lab", "แล็บ": "lab", "ผลแล็บ": "lab", "ผลตรวจ": "lab",
+    "rx": "rx", "ยา": "rx", "ใบยา": "rx", "ใบสั่งยา": "rx",
+    "dialysis": "dialysis", "ฟอกเลือด": "dialysis", "ใบฟอกเลือด": "dialysis",
+    "bills": "bills", "bill": "bills", "บิล": "bills", "ใบเสร็จ": "bills",
+    "review": "review", "ตรวจสอบ": "review", "รอตรวจ": "review",
+}
+
+
+def _parse_change_category(text: str):
+    """แยกคำสั่งเปลี่ยนประเภทเอกสารที่จัดหมวดไว้ผิด
+
+    รองรับ:
+      เปลี่ยนประเภท a1b2c3d4 ใบยา
+      เปลี่ยนประเภท a1b2c3d4 rx 57042
+      recategorize a1b2c3d4 dialysis
+
+    คืน (doc_id_prefix, category, hn_or_empty) หรือ None ถ้าไม่ใช่คำสั่งนี้
+    """
+    import re as _re_cc
+
+    m = _re_cc.match(
+        r"^\s*(?:เปลี่ยนประเภท|เปลี่ยนหมวด|recategorize|recat)\s+"
+        r"([0-9a-fA-F]{6,32})\s+"
+        r"([^\s]{2,20})"
+        r"(?:\s+([A-Za-z0-9\-/]{2,20}))?\s*$",
+        (text or "").strip(),
+        _re_cc.IGNORECASE,
+    )
+    if not m:
+        return None
+    cat = _CATEGORY_WORDS.get(m.group(2).strip().lower())
+    if not cat:
+        return None
+    return (m.group(1), cat, (m.group(3) or "").strip())
+
+
+def _change_document_category(
+    doc_id_prefix: str, new_category: str, hn: str, actor_hash: str,
+) -> dict:
+    """เปลี่ยนประเภทเอกสารที่ถูกจัดหมวดไว้ผิด
+
+    เหตุผลที่ต้องมี:
+      ตัวจำแนกอัตโนมัติจัดหมวดผิดได้ และของเดิมแก้ได้เฉพาะ "ตอนเพิ่ง
+      ส่งเข้ามา" ผ่านการตอบเลข 1-4 ตามที่ระบบถาม (pending
+      classification) พอเลยช่วงนั้นไปแล้วก็ไม่มีวิธีแก้อีกเลย
+      ตรวจ production 26 ต.ค. 2026 พบเอกสาร 2 ใบถูกจัดเป็น lab
+      ทั้งที่ไม่มีชื่อรายการตรวจแม้แต่ชนิดเดียว — แก้ไม่ได้ด้วยคำสั่งใด
+
+    หลักที่ยึด:
+      ไม่ลบไฟล์ต้นฉบับ — ใช้ GCS server-side copy แล้วชี้ index ไป path
+        ใหม่ (ระบบไม่มีสิทธิ์ลบอยู่แล้ว และห้ามลบตามข้อกำหนด)
+      ไม่เดาประเภทจากชื่อไฟล์หรือรูปร่างเอกสาร — คนระบุประเภทเท่านั้น
+      บันทึก audit ทุกครั้ง พร้อมประเภทเดิมและประเภทใหม่
+    """
+    if not storage.is_ready:
+        return {"error": "ระบบจัดเก็บยังไม่พร้อม"}
+    if new_category not in FOLDERS:
+        return {"error": f"ไม่รู้จักประเภท '{new_category}'"}
+
+    doc, err = _find_doc_by_prefix(doc_id_prefix)
+    if doc is None:
+        return {"error": err}
+
+    doc_id = doc.get("document_id", "")
+    old_category = doc.get("category", "")
+    if old_category == new_category:
+        return {
+            "status": "unchanged",
+            "message": f"เอกสารนี้เป็นประเภท '{new_category}' อยู่แล้ว",
+        }
+
+    gcs_path = doc.get("gcs_object_path", "")
+    blob_path = (
+        gcs_path.split("/", 3)[3]
+        if gcs_path.startswith("gs://") and gcs_path.count("/") >= 3
+        else gcs_path
+    )
+    if not blob_path:
+        return {"error": "เอกสารนี้ไม่มีไฟล์ใน cloud storage"}
+
+    doc_text = doc.get("extracted_text", "")
+    doc_dt = _doc_submitted_date(doc)
+
+    # ── แฟ้มรายผู้ป่วย (เฉพาะเอกสารทางคลินิก) ──
+    patient_folder = ""
+    patient_label = ""
+    if new_category in CLINICAL_CATEGORIES and master_registry is not None:
+        if hn:
+            patient = master_registry.match_hn(hn)
+            if patient is None:
+                return {"error": f"ไม่พบ HN {hn} ในทะเบียนผู้ป่วย"}
+            patient_folder = patient.folder_name
+            patient_label = (
+                f"{patient.hn_display} — "
+                f"{patient.patient_name or 'ไม่มีชื่อ'}"
+            )
+        elif doc_text:
+            # ไม่ระบุ HN มา — ลองหาจาก HN ในเอกสาร เหมือนเส้นทางอัตโนมัติ
+            try:
+                for hn_candidate in extract_hn_from_document(doc_text):
+                    _p = master_registry.match_hn(hn_candidate)
+                    if _p is not None:
+                        patient_folder = _p.folder_name
+                        patient_label = (
+                            f"{_p.hn_display} — "
+                            f"{_p.patient_name or 'ไม่มีชื่อ'}"
+                        )
+                        break
+            except Exception as _hn_err:
+                logger.warning(
+                    "change-category: HN lookup ล้มเหลว: %s",
+                    type(_hn_err).__name__,
+                )
+        if not patient_folder:
+            return {"error": (
+                f"ประเภท '{new_category}' ต้องเข้าแฟ้มรายผู้ป่วย "
+                "แต่หา HN ในเอกสารไม่ได้\n"
+                f"กรุณาระบุ HN ต่อท้าย เช่น\n"
+                f"  เปลี่ยนประเภท {doc_id[:8]} {new_category} 57042"
+            )}
+
+    # ── แฟ้มบริษัท (เฉพาะบิล) ──
+    vendor_subfolder = ""
+    if new_category == "bills":
+        vendor_subfolder = resolve_bill_vendor(doc_text).folder
+
+    filename = blob_path.rsplit("/", 1)[-1]
+    new_blob_path = build_document_path(
+        FOLDERS.get(new_category, FOLDERS["review"]),
+        filename, new_category,
+        patient_folder=patient_folder,
+        subfolder=vendor_subfolder,
+        date=doc_dt,
+    )
+
+    # ผลแล็บที่อ่านไว้แล้วจะค้างอยู่ถ้าย้ายออกจากหมวด lab — เตือนให้รู้
+    # ไม่ลบให้เอง เพราะห้ามลบข้อมูล และการลบต้องเป็นการตัดสินใจของคน
+    stale_lab = False
+    if old_category == "lab" and new_category != "lab":
+        try:
+            stale_lab = storage.get(
+                f"{LAB_RESULTS_PREFIX}{doc_id}.json"
+            ) is not None
+        except Exception:
+            stale_lab = False
+
+    try:
+        src = storage._bucket.blob(blob_path)
+        if not src.exists():
+            return {"error": "ไม่พบไฟล์ต้นฉบับใน cloud storage"}
+        dest = storage._bucket.blob(new_blob_path)
+        if not dest.exists():
+            storage._bucket.copy_blob(src, storage._bucket, new_blob_path)
+
+        doc_index.update_category(doc_id, new_category, new_blob_path)
+
+        audit_logger.log("document_category_changed", actor_hash, {
+            "doc_id": doc_id[:8],
+            "from_category": old_category,
+            "to_category": new_category,
+            "to_patient_folder": patient_folder,
+            "stale_lab_results": stale_lab,
+        })
+        logger.info(
+            "เปลี่ยนประเภทเอกสาร %s: %s → %s",
+            doc_id[:8], old_category, new_category,
+        )
+
+        cat_names = {
+            "bills": "ใบเสร็จ/บิล", "rx": "ใบสั่งยา",
+            "lab": "ผลตรวจแล็บ", "dialysis": "เอกสารฟอกเลือด",
+            "review": "รอตรวจสอบ",
+        }
+        lines = [
+            "✅ เปลี่ยนประเภทเอกสารเรียบร้อย",
+            f"📄 รหัส: {doc_id[:8]}",
+            f"📁 {cat_names.get(old_category, old_category)}"
+            f" → {cat_names.get(new_category, new_category)}",
+        ]
+        if patient_label:
+            lines.append(f"👤 แฟ้ม: {patient_label}")
+        lines.append(f"📂 ที่เก็บ: {new_blob_path.rsplit('/', 1)[0]}")
+        lines.append("")
+        lines.append("หมายเหตุ: ไฟล์เดิมยังอยู่ ระบบชี้ไปที่แฟ้มใหม่แล้ว")
+        if stale_lab:
+            lines.append(
+                "⚠️ เอกสารนี้มีผลแล็บที่ระบบอ่านไว้แล้ว "
+                "ค่าเหล่านั้นยังอยู่ในระบบ กรุณาตรวจทานอีกครั้ง"
+            )
+        return {"status": "changed", "message": "\n".join(lines)}
+    except Exception as e:
+        logger.error("เปลี่ยนประเภทเอกสารไม่สำเร็จ: %s", type(e).__name__)
+        return {"error": f"เปลี่ยนประเภทไม่สำเร็จ ({type(e).__name__})"}
+
+
 def _parse_alert_ack(text: str):
     """แยกคำสั่งรับทราบ/ปิด alert วิกฤต
 
@@ -9334,6 +9530,36 @@ def webhook():
                             reply_message(
                                 reply_token,
                                 _mv_res.get("message", "✅ ดำเนินการแล้ว"),
+                            )
+                # ── เปลี่ยนประเภทเอกสารที่จัดหมวดไว้ผิด ─────────────
+                # ของเดิมแก้ได้เฉพาะตอนเพิ่งส่งเข้ามา (ตอบเลข 1-4)
+                # พอเลยช่วงนั้นไปแล้วไม่มีวิธีแก้เลย — ตรวจ production
+                # 26 ต.ค. 2026 พบเอกสาร 2 ใบถูกจัดเป็น lab ทั้งที่ไม่มี
+                # ชื่อรายการตรวจแม้แต่ชนิดเดียว และแก้ไม่ได้ด้วยคำสั่งใด
+                elif _parse_change_category(text) is not None:
+                    _cc_doc, _cc_cat, _cc_hn = _parse_change_category(text)
+                    if (user_hash not in PHYSICIAN_USERS
+                            and user_hash not in ADMIN_USERS):
+                        audit_logger.log(
+                            "document_category_change_denied", user_hash, {},
+                        )
+                        reply_message(
+                            reply_token,
+                            "⚠️ เฉพาะแพทย์หรือผู้ดูแลระบบเท่านั้น"
+                            "ที่เปลี่ยนประเภทเอกสารได้",
+                        )
+                    else:
+                        _cc_res = _change_document_category(
+                            _cc_doc, _cc_cat, _cc_hn, user_hash,
+                        )
+                        if _cc_res.get("error"):
+                            reply_message(
+                                reply_token, f"❌ {_cc_res['error']}"
+                            )
+                        else:
+                            reply_message(
+                                reply_token,
+                                _cc_res.get("message", "✅ ดำเนินการแล้ว"),
                             )
                 # ── [CS-2] ดูรายการแจ้งเตือนที่ยังค้าง ──────────────
                 # แพทย์ต้องเห็นรายการก่อนจึงจะรับทราบได้ ลำพังคำสั่ง
