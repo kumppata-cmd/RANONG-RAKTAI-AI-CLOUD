@@ -7224,12 +7224,14 @@ def process_file_async(
                             "checking %d HN candidates",
                             _reg_count, len(found_hns),
                         )
+                        _matched_registry = False
                         for hn_candidate in found_hns:
                             patient_folder = master_registry.get_folder_for_hn(
                                 hn_candidate
                             )
                             if patient_folder:
                                 metadata["patient_hn_folder"] = patient_folder
+                                _matched_registry = True
                                 logger.info(
                                     "Auto HN route: matched HN → patient folder "
                                     "(category=%s)", category
@@ -7240,6 +7242,28 @@ def process_file_async(
                                     "Auto HN route: no match for HN candidate "
                                     "(category=%s)", category
                                 )
+                        # ── Fallback: ใช้ HN จาก OCR เป็นชื่อ folder โดยตรง ──
+                        # เมื่อ OCR ดึง HN ได้แต่ไม่พบในทะเบียนผู้ป่วยกลาง
+                        # ใช้ HN เป็นชื่อ folder (เช่น HN003101075) แทนที่จะ
+                        # ทิ้งเอกสารไว้ไม่มี folder — เมื่อลงทะเบียนผู้ป่วย
+                        # ภายหลัง สามารถ retroactive-route จัดใหม่ได้
+                        if not _matched_registry and found_hns:
+                            _fallback_hn = found_hns[0]
+                            metadata["patient_hn_folder"] = f"HN{_fallback_hn}"
+                            logger.info(
+                                "Auto HN route: no registry match — using "
+                                "HN as folder name: HN%s (category=%s)",
+                                _fallback_hn, category,
+                            )
+                    elif found_hns and not master_registry:
+                        # Registry ไม่พร้อม — ใช้ HN จาก OCR เป็น folder
+                        _fallback_hn = found_hns[0]
+                        metadata["patient_hn_folder"] = f"HN{_fallback_hn}"
+                        logger.info(
+                            "Auto HN route: registry unavailable — using "
+                            "HN as folder name: HN%s (category=%s)",
+                            _fallback_hn, category,
+                        )
                     elif not found_hns:
                         logger.info(
                             "Auto HN route: no HN found in OCR text "
