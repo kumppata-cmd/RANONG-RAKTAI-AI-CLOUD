@@ -6783,6 +6783,12 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "sodium bicarbonate", "venofer", "epo",
              "erythropoietin", "darbepoetin",
              "hold", "ครั้ง/สัปดาห์",
+             # ── Medication Order Form ──
+             "dose", "frequency", "route", "regimen",
+             "order form", "oral", "p.c.", "h.s.",
+             "order for one day", "order for continuation",
+             "manidipine", "epiao", "bicarbo", "iron venofe",
+             "calcium carbon", "medication",
              ],
             2,
         ),
@@ -6901,6 +6907,60 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             ),
         }
 
+    # ── Pre-check: ใบสั่งยา / ใบตรวจรักษาผู้ป่วย / Medication Order ──
+    # *** ต้องอยู่ก่อน HD pre-check ***
+    # ถ้าพบชื่อยา ≥3 ตัว + keyword ทางการแพทย์ → บังคับ rx
+    # ป้องกัน "บาท" ท้ายใบยาจากการดึงเอกสารเข้า bills
+    # ป้องกัน Medication Order Form ที่มี dialysate/heparin ถูกจัดเป็น dialysis
+    _rx_drug_names = [
+        "losartan", "enalapril", "amlodipine", "atorvastatin",
+        "omeprazole", "aspirin", "carvedilol", "metformin",
+        "calcium carbonate", "folic acid", "ferrous", "calcitriol",
+        "sodium bicarbonate", "venofer", "furosemide", "simvastatin",
+        "clopidogrel", "warfarin", "insulin", "metoprolol",
+        "nifedipine", "diltiazem", "verapamil", "hydralazine",
+        "spironolactone", "hydrochlorothiazide", "doxazosin",
+        "allopurinol", "colchicine", "prednisolone", "dexamethasone",
+        "pantoprazole", "ranitidine", "domperidone", "ondansetron",
+        "paracetamol", "tramadol", "gabapentin", "pregabalin",
+        "amitriptyline", "fluoxetine", "diazepam", "alprazolam",
+        "phenytoin", "levetiracetam", "ciprofloxacin", "amoxicillin",
+        "cephalexin", "clindamycin", "metronidazole", "doxycycline",
+        "azithromycin", "levofloxacin", "co-trimoxazole",
+        "sevelamer", "lanthanum", "cinacalcet", "epo",
+        "erythropoietin", "darbepoetin", "epoetin",
+        # ── ยาที่พบบ่อยในคลินิกไต เพิ่มเติม ──
+        "manidipine", "epiao", "bicarbo", "iron venofe",
+        "calcium carbon",
+    ]
+    _rx_medical_kws = [
+        "mg", "mcg", "tab", "cap", "เม็ด", "หลังอาหาร",
+        "ก่อนอาหาร", "ก่อนนอน", "วันละ", "ครั้งละ",
+        "hold", "diagnosis", "diag text", "visit note",
+        "ใบตรวจรักษา", "mh/pe", "cc:",
+        # ── Medication Order Form columns & abbreviations ──
+        "dose", "frequency", "route", "regimen",
+        "oral", "p.c.", "h.s.", "order form",
+        "order for one day", "order for continuation",
+        "1x1", "1x2", "1 x 1", "1 x 2", "3x1", "2x1",
+        "medication",
+    ]
+    _drug_hits = [d for d in _rx_drug_names if d.lower() in content_lower]
+    _rx_med_hits = [k for k in _rx_medical_kws if k.lower() in content_lower]
+    if len(_drug_hits) >= 3 and len(_rx_med_hits) >= 1:
+        logger.info(
+            f"  pre-check: prescription detected "
+            f"({len(_drug_hits)} drugs, {len(_rx_med_hits)} medical kws) → rx"
+        )
+        return {
+            "category": "rx",
+            "reason": (
+                f"prescription pre-check "
+                f"({len(_drug_hits)} drugs, {len(_rx_med_hits)} medical kws)"
+            ),
+            "confidence": min((len(_drug_hits) + len(_rx_med_hits)) / 8.0, 1.0),
+        }
+
     # ── Pre-check: ใบฟอกเลือด (Hemodialysis) ──
     # ถ้าพบ strong HD keywords ≥2 → บังคับ dialysis
     # ป้องกันใบ HD ที่มี Hb/Hct/EPO จากการถูกจำแนกเป็น lab/rx
@@ -6926,49 +6986,6 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "category": "dialysis",
             "reason": f"hemodialysis pre-check ({len(_hd_hits)} strong HD hits)",
             "confidence": min(len(_hd_hits) / 4.0, 1.0),
-        }
-
-    # ── Pre-check: ใบสั่งยา / ใบตรวจรักษาผู้ป่วย ──
-    # ถ้าพบชื่อยา ≥3 ตัว + keyword ทางการแพทย์ → บังคับ rx
-    # ป้องกัน "บาท" ท้ายใบยาจากการดึงเอกสารเข้า bills
-    _rx_drug_names = [
-        "losartan", "enalapril", "amlodipine", "atorvastatin",
-        "omeprazole", "aspirin", "carvedilol", "metformin",
-        "calcium carbonate", "folic acid", "ferrous", "calcitriol",
-        "sodium bicarbonate", "venofer", "furosemide", "simvastatin",
-        "clopidogrel", "warfarin", "insulin", "metoprolol",
-        "nifedipine", "diltiazem", "verapamil", "hydralazine",
-        "spironolactone", "hydrochlorothiazide", "doxazosin",
-        "allopurinol", "colchicine", "prednisolone", "dexamethasone",
-        "pantoprazole", "ranitidine", "domperidone", "ondansetron",
-        "paracetamol", "tramadol", "gabapentin", "pregabalin",
-        "amitriptyline", "fluoxetine", "diazepam", "alprazolam",
-        "phenytoin", "levetiracetam", "ciprofloxacin", "amoxicillin",
-        "cephalexin", "clindamycin", "metronidazole", "doxycycline",
-        "azithromycin", "levofloxacin", "co-trimoxazole",
-        "sevelamer", "lanthanum", "cinacalcet", "epo",
-        "erythropoietin", "darbepoetin", "epoetin",
-    ]
-    _rx_medical_kws = [
-        "mg", "mcg", "tab", "cap", "เม็ด", "หลังอาหาร",
-        "ก่อนอาหาร", "ก่อนนอน", "วันละ", "ครั้งละ",
-        "hold", "diagnosis", "diag text", "visit note",
-        "ใบตรวจรักษา", "mh/pe", "cc:",
-    ]
-    _drug_hits = [d for d in _rx_drug_names if d.lower() in content_lower]
-    _rx_med_hits = [k for k in _rx_medical_kws if k.lower() in content_lower]
-    if len(_drug_hits) >= 3 and len(_rx_med_hits) >= 2:
-        logger.info(
-            f"  pre-check: prescription detected "
-            f"({len(_drug_hits)} drugs, {len(_rx_med_hits)} medical kws) → rx"
-        )
-        return {
-            "category": "rx",
-            "reason": (
-                f"prescription pre-check "
-                f"({len(_drug_hits)} drugs, {len(_rx_med_hits)} medical kws)"
-            ),
-            "confidence": min((len(_drug_hits) + len(_rx_med_hits)) / 8.0, 1.0),
         }
 
     best, best_score = "review", 0
