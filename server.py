@@ -6819,6 +6819,11 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
 
     override_text: ถ้ามี ใช้ข้อความนี้แทน OCR จากไฟล์
     (ใช้สำหรับ multi-page merge ที่ OCR รวมไว้แล้ว)
+
+    Returns dict ที่มี:
+      - category, reason, ...
+      - _ocr_text: ข้อความ OCR ที่ใช้จำแนก (ให้ caller นำไปใช้ต่อ
+        เช่น HN extraction โดยไม่ต้อง OCR ซ้ำ)
     """
     ext = os.path.splitext(filepath)[1].lower()
 
@@ -6831,6 +6836,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             return {
                 "category": "review",
                 "reason": "OCR อ่านข้อความจากภาพไม่ได้ — ต้องใช้ AI ตรวจสอบ",
+                "_ocr_text": "",
             }
         logger.info(f"OCR ภาพสำเร็จ — ได้ข้อความ {len(content.strip())} ตัวอักษร")
 
@@ -6843,6 +6849,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
                 return {
                     "category": "review",
                     "reason": "PDF สแกน — OCR อ่านไม่ได้ ต้องใช้ AI ตรวจสอบ",
+                    "_ocr_text": "",
                 }
 
     elif ext in (".txt", ".csv"):
@@ -6850,9 +6857,9 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             with open(filepath, "r", encoding="utf-8", errors="replace") as f:
                 content = f.read()
         except Exception:
-            return {"category": "review", "reason": "อ่านไฟล์ไม่ได้"}
+            return {"category": "review", "reason": "อ่านไฟล์ไม่ได้", "_ocr_text": ""}
     else:
-        return {"category": "review", "reason": f"ไม่รองรับนามสกุล {ext}"}
+        return {"category": "review", "reason": f"ไม่รองรับนามสกุล {ext}", "_ocr_text": ""}
 
     content_lower = content.lower()
 
@@ -7006,6 +7013,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "vendor_match": _slip_match.to_dict(),
             "reason": f"bank slip pre-check ({len(bank_hits)} strong hits)",
             "confidence": min(len(bank_hits) / 3.0, 1.0),
+            "_ocr_text": content,
         }
 
     # ── Pre-check: บริษัท supplier ที่รู้จัก ──
@@ -7039,6 +7047,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "confidence": min(
                 _vendor_match.confidence + _money_hits / 20.0, 1.0
             ),
+            "_ocr_text": content,
         }
 
     # ── Pre-check: ใบรายงานผลตรวจทางห้องปฏิบัติการ (Lab Report) ──
@@ -7078,6 +7087,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "confidence": min(
                 (len(_lab_form_hits) + len(_lab_result_hits)) / 6.0, 1.0
             ),
+            "_ocr_text": content,
         }
 
     # ── Pre-check: ใบสั่งยา / ใบตรวจรักษาผู้ป่วย / Medication Order ──
@@ -7135,6 +7145,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
                 f"({len(_drug_hits)} drugs, {len(_rx_med_hits)} medical kws)"
             ),
             "confidence": min((len(_drug_hits) + len(_rx_med_hits)) / 8.0, 1.0),
+            "_ocr_text": content,
         }
 
     # ── Pre-check: ใบฟอกเลือด (Hemodialysis) ──
@@ -7162,6 +7173,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "category": "dialysis",
             "reason": f"hemodialysis pre-check ({len(_hd_hits)} strong HD hits)",
             "confidence": min(len(_hd_hits) / 4.0, 1.0),
+            "_ocr_text": content,
         }
 
     # ── keyword matching helper ──
@@ -7241,6 +7253,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
     if best == "bills":
         result["bill_company"] = detect_bill_company(content)
 
+    result["_ocr_text"] = content
     return result
 
 
@@ -7402,6 +7415,10 @@ def process_file_async(
             extracted_text = ""
             ocr_status = "none"
 
+            # ── ใช้ OCR text จาก classify_with_keywords ก่อน ──
+            # เพื่อไม่ต้อง OCR ซ้ำ (Tesseract non-deterministic → ผลอาจต่างกัน)
+            _classify_ocr = result.get("_ocr_text", "")
+
             # ถ้ามี merged_ocr_text จาก multi-page buffer → ใช้ข้อความรวมเลย
             if merged_ocr_text:
                 extracted_text = merged_ocr_text
@@ -7409,6 +7426,14 @@ def process_file_async(
                 logger.info(
                     f"ใช้ merged OCR text: {merged_page_count} หน้า, "
                     f"{len(extracted_text)} chars"
+                )
+            elif _classify_ocr:
+                # ใช้ข้อความ OCR ที่ classify_with_keywords อ่านไว้แล้ว
+                extracted_text = _classify_ocr
+                ocr_status = "ocr_reused"
+                logger.info(
+                    "ใช้ OCR text จาก classify_with_keywords: %d chars",
+                    len(extracted_text),
                 )
             else:
                 try:
@@ -7533,6 +7558,52 @@ def process_file_async(
                                     "Enhanced folder with OCR name: %s",
                                     metadata["patient_hn_folder"],
                                 )
+                    # ── Auto-register: ลงทะเบียนผู้ป่วยอัตโนมัติจาก OCR ──
+                    # เมื่อ OCR ดึง HN + ชื่อได้ แต่ไม่อยู่ใน registry
+                    # → ลงทะเบียนเพื่อให้เอกสารถัดไปจัดเข้าแฟ้มได้ทันที
+                    if (
+                        _ocr_patient_name
+                        and _cur_folder
+                        and _cur_folder.startswith("HN")
+                        and master_registry
+                    ):
+                        try:
+                            # ดึง HN จาก folder name (HN00102196 → 00102196)
+                            _auto_hn = _cur_folder.split("_")[0]
+                            if _auto_hn.startswith("HN"):
+                                _auto_hn = _auto_hn[2:]
+                            _reg_ok, _reg_msg = master_registry.register(
+                                hospital_hn=_auto_hn,
+                                patient_name=_ocr_patient_name,
+                                registered_by="auto_ocr",
+                                notes=f"auto-registered from {category} document",
+                            )
+                            if _reg_ok:
+                                logger.info(
+                                    "Auto-registered patient: HN%s "
+                                    "(category=%s)",
+                                    _auto_hn, category,
+                                )
+                                # อัพเดต folder ใช้ชื่อจาก registry
+                                _new_folder = master_registry.get_folder_for_hn(
+                                    _auto_hn
+                                )
+                                if _new_folder:
+                                    metadata["patient_hn_folder"] = _new_folder
+                                    logger.info(
+                                        "Updated folder from registry: %s",
+                                        _new_folder,
+                                    )
+                            else:
+                                logger.info(
+                                    "Auto-register skipped: %s", _reg_msg
+                                )
+                        except Exception as reg_err:
+                            logger.warning(
+                                "Auto-register failed: %s",
+                                type(reg_err).__name__,
+                            )
+
                 except Exception as name_err:
                     logger.warning(
                         "Patient name extraction failed: %s",

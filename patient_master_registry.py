@@ -921,6 +921,8 @@ _HN_PATTERNS = [
     re.compile(r'(?:H\s+N)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
     # OCR อาจอ่านเป็น "H.N" หรือ "H .N." (มี dot/space ปน)
     re.compile(r'H\s*\.\s*N\s*\.?\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
+    # OCR อาจอ่าน "HN" เป็น "HIN" หรือ "HM" (OCR misread N)
+    re.compile(r'(?:HIN|HM)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
     # "เลขที่ 12345" or "เลขที่ผู้ป่วย 12345"
     re.compile(r'เลข(?:ที่)?(?:\s*ผู้ป่วย)?\s*[:=]?\s*(\d{2,10})'),
     # "รหัสผู้ป่วย 12345" or "รหัส HN 12345"
@@ -931,6 +933,8 @@ _HN_PATTERNS = [
     re.compile(r'(?<![a-zA-Zก-๙])(?:AN|A\.N\.)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
     # "VN: 12345" (Visit Number) — ใช้ lookbehind เช่นกัน
     re.compile(r'(?<![a-zA-Zก-๙])(?:VN|V\.N\.)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
+    # OCR อาจอ่าน separator เป็น "I" หรือ "|" — เช่น "HN I 00290382"
+    re.compile(r'(?:H\.?N\.?)\s*[I|l]\s*(\d{2,10})', re.IGNORECASE),
 ]
 
 
