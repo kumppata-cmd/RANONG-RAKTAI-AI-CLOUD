@@ -7825,6 +7825,62 @@ def process_file_async(
             elif line_user_id:
                 # Multi-page merge: reply_token หมดอายุ → ใช้ push_message
                 push_message(line_user_id, _result_text)
+
+            # ── แจ้งเตือนแอดมิน/ผู้รับแจ้งเตือน เมื่อได้รับเอกสารจากภายนอก ──
+            # ผู้ส่ง (บริษัท/บุคคลภายนอก) ได้รับ reply แล้ว
+            # ตอนนี้ส่ง push notification ไปหาแอดมินด้วย
+            # ข้ามถ้าผู้ส่งเป็นแอดมิน/เจ้าหน้าที่เอง (เพื่อไม่ให้ซ้ำ)
+            try:
+                _sender_is_staff = False
+                if owner_hash:
+                    _sender_is_staff = is_authorized_user(owner_hash)
+
+                if not _sender_is_staff and category != "review":
+                    # สร้างข้อความแจ้งเตือนสำหรับแอดมิน
+                    _admin_notify_lines = [
+                        "📬 ได้รับเอกสารใหม่จากภายนอก",
+                        f"📁 ประเภท: {cat_name}",
+                        f"📂 จัดเก็บใน: {_storage_display}",
+                    ]
+                    if bill_company and category == "bills":
+                        _admin_notify_lines.append(
+                            f"🏢 บริษัท: {bill_company}"
+                        )
+                    if merged_page_count > 1:
+                        _admin_notify_lines.insert(
+                            1, f"📄 รวม {merged_page_count} หน้า"
+                        )
+                    _admin_notify_text = "\n".join(_admin_notify_lines)
+
+                    # ดึงรายชื่อผู้รับจาก _alert_recipients (module-level)
+                    _notif_ids = list(
+                        _alert_recipients.get("physician", [])
+                    )
+
+                    # กรองไม่ให้ส่งซ้ำไปหาผู้ส่งเอง
+                    if line_user_id and line_user_id in _notif_ids:
+                        _notif_ids.remove(line_user_id)
+
+                    _notif_sent = 0
+                    for _rid in _notif_ids:
+                        if push_message(_rid, _admin_notify_text):
+                            _notif_sent += 1
+                    if _notif_sent:
+                        logger.info(
+                            "แจ้งเตือนเอกสารใหม่ส่งถึงผู้รับ %d ราย "
+                            "(doc_id=%s)", _notif_sent, _doc_id,
+                        )
+                    elif _notif_ids:
+                        logger.warning(
+                            "แจ้งเตือนเอกสารใหม่ส่งไม่ถึงผู้รับเลย "
+                            "(doc_id=%s)", _doc_id,
+                        )
+            except Exception as _notif_err:
+                # การแจ้งเตือนแอดมินล้มเหลวไม่ควรทำให้การรับเอกสารพัง
+                logger.error(
+                    "แจ้งเตือนแอดมินล้มเหลว: %s (doc_id=%s)",
+                    type(_notif_err).__name__, _doc_id,
+                )
         except RuntimeError as e:
             # Production mode — GCS ล้มเหลว ต้องแจ้งผู้ใช้
             # บันทึกเฉพาะชนิด exception — ห้าม log message
