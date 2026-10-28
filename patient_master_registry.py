@@ -927,10 +927,10 @@ _HN_PATTERNS = [
     re.compile(r'รหัส\s*(?:ผู้ป่วย|HN|hn)?\s*[:=]?\s*(\d{2,10})'),
     # "Patient ID: 12345" or "PID: 12345"
     re.compile(r'(?:Patient\s*ID|PID|Pat\.?\s*ID)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
-    # "AN: 12345" (Admission Number)
-    re.compile(r'(?:AN|A\.N\.)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
-    # "VN: 12345" (Visit Number)
-    re.compile(r'(?:VN|V\.N\.)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
+    # "AN: 12345" (Admission Number) — ใช้ lookbehind กัน match กลางคำ เช่น Losart"an"
+    re.compile(r'(?<![a-zA-Zก-๙])(?:AN|A\.N\.)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
+    # "VN: 12345" (Visit Number) — ใช้ lookbehind เช่นกัน
+    re.compile(r'(?<![a-zA-Zก-๙])(?:VN|V\.N\.)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
 ]
 
 
@@ -1022,3 +1022,238 @@ def _sanitize_folder_name(name: str) -> str:
     safe = re.sub(r'[^฀-๿a-zA-Z0-9\s\-]', '', name)
     safe = re.sub(r'\s+', '_', safe.strip())
     return safe[:50]
+
+
+# ─────────────────────────────────────────────────────────────
+# Patient Name Extraction from OCR Text
+# ─────────────────────────────────────────────────────────────
+
+# รูปแบบชื่อคนไข้ที่อาจพบในเอกสารทางการแพทย์
+_NAME_PATTERNS = [
+    # "ชื่อ-สกุล: สมชาย ใจดี" หรือ "ชื่อ-นามสกุล สมชาย ใจดี"
+    re.compile(
+        r'ชื่อ\s*[-–]?\s*(?:นาม)?สกุล\s*[:=]?\s*'
+        r'((?:นาย|นาง(?:สาว)?|เด็กชาย|เด็กหญิง|ด\.ช\.|ด\.ญ\.|Mr\.?|Mrs\.?|Ms\.?|Miss)?\s*'
+        r'[ก-๙a-zA-ZÀ-ɏ][ก-๙a-zA-ZÀ-ɏ ]{2,40})',
+        re.IGNORECASE,
+    ),
+    # "ชื่อผู้ป่วย: สมชาย ใจดี" หรือ "ชื่อผู้ป่วย สมชาย"
+    re.compile(
+        r'ชื่อ\s*(?:ผู้ป่วย|คนไข้)\s*[:=]?\s*'
+        r'((?:นาย|นาง(?:สาว)?|เด็กชาย|เด็กหญิง|ด\.ช\.|ด\.ญ\.|Mr\.?|Mrs\.?|Ms\.?|Miss)?\s*'
+        r'[ก-๙a-zA-ZÀ-ɏ][ก-๙a-zA-ZÀ-ɏ ]{2,40})',
+        re.IGNORECASE,
+    ),
+    # "ชื่อ: สมชาย ใจดี" (standalone ชื่อ)
+    re.compile(
+        r'(?:^|\n)\s*ชื่อ\s*[:=]\s*'
+        r'((?:นาย|นาง(?:สาว)?|เด็กชาย|เด็กหญิง|ด\.ช\.|ด\.ญ\.|Mr\.?|Mrs\.?|Ms\.?|Miss)?\s*'
+        r'[ก-๙a-zA-ZÀ-ɏ][ก-๙a-zA-ZÀ-ɏ ]{2,40})',
+        re.IGNORECASE,
+    ),
+    # "Patient: Somchai Jaidee" หรือ "Patient Name: ..."
+    re.compile(
+        r'(?:Patient|Patient\s*Name)\s*[:=]\s*'
+        r'((?:Mr\.?|Mrs\.?|Ms\.?|Miss)?\s*[A-Za-zก-๙À-ɏ][A-Za-zก-๙À-ɏ ]{2,40})',
+        re.IGNORECASE,
+    ),
+    # "นาย/นาง/นางสาว + ชื่อ + สกุล" ที่ขึ้นต้นบรรทัดหรือหลัง prefix
+    re.compile(
+        r'(?:^|\n)\s*((?:นาย|นาง(?:สาว)?)\s+[ก-๙]{2,}(?:\s+[ก-๙]{2,}){1,2})',
+    ),
+]
+
+# คำที่ไม่ใช่ชื่อคนจริง — กรองออก
+_NAME_STOP_WORDS = {
+    "แพทย์ผู้สั่ง", "แพทย์", "เภสัชกร", "พยาบาล", "ผู้สั่ง",
+    "หน่วยไตเทียม", "ระนอง", "คลินิก", "โรงพยาบาล",
+    "medication", "record", "unit", "oral", "hospital",
+}
+
+
+def extract_patient_name_from_document(text: str) -> str:
+    """ดึงชื่อผู้ป่วยจาก OCR text ของเอกสารทางการแพทย์
+
+    Returns: ชื่อผู้ป่วย (cleaned) หรือ "" ถ้าไม่พบ
+    """
+    if not text or len(text.strip()) < 5:
+        return ""
+
+    for pattern in _NAME_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            raw_name = match.group(1).strip()
+            cleaned = _clean_patient_name(raw_name)
+            if cleaned and len(cleaned) >= 3:
+                # ตรวจว่าไม่ใช่ stop word
+                name_lower = cleaned.lower()
+                if not any(sw in name_lower for sw in _NAME_STOP_WORDS):
+                    return cleaned
+
+    return ""
+
+
+def _clean_patient_name(raw: str) -> str:
+    """ทำความสะอาดชื่อ — ตัดคำนำหน้า, whitespace, ตัวเลข, HN/VN ฯลฯ"""
+    if not raw:
+        return ""
+    # ตัดบรรทัดใหม่ — เอาแค่บรรทัดแรก
+    if '\n' in raw:
+        raw = raw.split('\n')[0].strip()
+    # ตัด HN, VN, AN, PID labels ที่ติดมาท้ายชื่อ
+    cleaned = re.sub(
+        r'\s*(?:H\.?N\.?|HN|VN|AN|PID|Patient\s*ID)\s*[:=]?\s*\d*\s*$',
+        '', raw, flags=re.IGNORECASE,
+    )
+    # ตัด "H N" (OCR อ่านผิด) ที่ติดมาท้ายชื่อ
+    cleaned = re.sub(r'\s+H\s+N\s*$', '', cleaned)
+    # ตัด title prefix ก่อน clean (เก็บชื่อจริง)
+    title_stripped = re.sub(
+        r'^(?:นาย|นาง(?:สาว)?|เด็กชาย|เด็กหญิง|ด\.ช\.|ด\.ญ\.|Mr\.?\s*|Mrs\.?\s*|Ms\.?\s*|Miss\s+)',
+        '', cleaned, flags=re.IGNORECASE,
+    ).strip()
+    # ตัดตัวเลขและอักขระพิเศษท้ายชื่อ
+    title_stripped = re.sub(r'[\d\.\,\;\:\!\?\@\#\$\%\^\&\*\(\)]+.*$', '', title_stripped).strip()
+    # ถ้ายังมีตัวเลขเกาะท้าย ตัดออก
+    title_stripped = re.sub(r'\s*\d+\s*$', '', title_stripped).strip()
+    # เอา prefix กลับมาถ้ามี
+    if title_stripped and len(title_stripped) >= 2:
+        # ใช้ title_stripped เป็นชื่อจริง (ไม่มี prefix)
+        cleaned = title_stripped
+    else:
+        # fallback: ใช้ cleaned เดิม ตัดอักขระพิเศษท้าย
+        cleaned = re.sub(r'\s*[\d\.\,\;\:]+\s*$', '', cleaned)
+    # ตัด whitespace ซ้ำ
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    # จำกัดความยาว
+    if len(cleaned) > 50:
+        cleaned = cleaned[:50].strip()
+    return cleaned
+
+
+# ─────────────────────────────────────────────────────────────
+# Document Date Extraction from OCR Text
+# ─────────────────────────────────────────────────────────────
+
+# เดือนไทย → เลขเดือน
+_THAI_MONTHS = {
+    "มกราคม": 1, "ม.ค.": 1, "ม.ค": 1, "มค": 1,
+    "กุมภาพันธ์": 2, "ก.พ.": 2, "ก.พ": 2, "กพ": 2,
+    "มีนาคม": 3, "มี.ค.": 3, "มี.ค": 3, "มีค": 3,
+    "เมษายน": 4, "เม.ย.": 4, "เม.ย": 4, "เมย": 4,
+    "พฤษภาคม": 5, "พ.ค.": 5, "พ.ค": 5, "พค": 5,
+    "มิถุนายน": 6, "มิ.ย.": 6, "มิ.ย": 6, "มิย": 6,
+    "กรกฎาคม": 7, "ก.ค.": 7, "ก.ค": 7, "กค": 7,
+    "สิงหาคม": 8, "ส.ค.": 8, "ส.ค": 8, "สค": 8,
+    "กันยายน": 9, "ก.ย.": 9, "ก.ย": 9, "กย": 9,
+    "ตุลาคม": 10, "ต.ค.": 10, "ต.ค": 10, "ตค": 10,
+    "พฤศจิกายน": 11, "พ.ย.": 11, "พ.ย": 11, "พย": 11,
+    "ธันวาคม": 12, "ธ.ค.": 12, "ธ.ค": 12, "ธค": 12,
+}
+
+# สร้าง regex alternatives สำหรับชื่อเดือนไทย — เรียงยาว→สั้น เพื่อให้ match ชื่อเต็มก่อน
+_THAI_MONTH_ALT = "|".join(
+    sorted(_THAI_MONTHS.keys(), key=len, reverse=True)
+)
+
+# ── Date patterns — จากเอกสารจริงของคลินิก ──
+_DATE_PATTERNS = [
+    # "วันที่สั่ง 2 ต.ค. 2569" หรือ "วันที่สั่ง: 2 ต.ค. 69"
+    # "วันที่ 15 ตุลาคม 2569"
+    re.compile(
+        r'วัน(?:ที่|ที่สั่ง|ที่ตรวจ|ที่ทำ|ที่รับ|ที่บันทึก)\s*[:=]?\s*'
+        r'(\d{1,2})\s*[-/\.]?\s*(' + _THAI_MONTH_ALT + r')\s*'
+        r'(\d{2,4})',
+    ),
+    # "วันที่สั่ง 2/10/2569" หรือ "วันที่ 02/10/69"
+    re.compile(
+        r'วัน(?:ที่|ที่สั่ง|ที่ตรวจ|ที่ทำ|ที่รับ|ที่บันทึก)\s*[:=]?\s*'
+        r'(\d{1,2})\s*[/\-\.]\s*(\d{1,2})\s*[/\-\.]\s*(\d{2,4})',
+    ),
+    # "Date: 2/10/2569" หรือ "Date 02-10-2026"
+    re.compile(
+        r'[Dd]ate\s*[:=]?\s*(\d{1,2})\s*[/\-\.]\s*(\d{1,2})\s*[/\-\.]\s*(\d{2,4})',
+    ),
+    # "วันที่ 2 ต.ค. 69" (ท้ายบรรทัด — ไม่มี prefix เฉพาะ)
+    re.compile(
+        r'(?:^|\n)\s*(\d{1,2})\s*[-/\.]?\s*(' + _THAI_MONTH_ALT + r')\s*'
+        r'(\d{2,4})\s*(?:$|\n)',
+    ),
+]
+
+
+def extract_document_date(text: str) -> Optional[datetime]:
+    """ดึงวันที่จากเอกสาร OCR text — ใช้วันที่สั่ง/วันที่ตรวจ/วันที่ทำ
+
+    รองรับทั้ง:
+    - ปี พ.ศ. (2566-2600 → แปลงเป็น ค.ศ.)
+    - ปี ค.ศ. (2020-2030)
+    - ปี 2 หลัก (67-70 → 2567-2570 → 2024-2027 CE)
+    - เดือนไทย (ม.ค., มกราคม ฯลฯ)
+    - เดือนตัวเลข (01-12)
+
+    Returns: datetime (UTC) หรือ None ถ้าไม่พบ/parse ไม่ได้
+    """
+    if not text or len(text.strip()) < 5:
+        return None
+
+    for pattern in _DATE_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            groups = match.groups()
+            parsed = _parse_date_groups(groups)
+            if parsed:
+                return parsed
+
+    return None
+
+
+def _parse_date_groups(groups: tuple) -> Optional[datetime]:
+    """Parse date components จาก regex groups
+
+    groups อาจเป็น:
+    - (day, thai_month_name, year) — "2 ต.ค. 2569"
+    - (day, month_number, year) — "2/10/2569"
+    """
+    if len(groups) < 3:
+        return None
+
+    try:
+        day_str, month_part, year_str = groups[0], groups[1], groups[2]
+
+        # ── Day ──
+        day = int(day_str)
+        if day < 1 or day > 31:
+            return None
+
+        # ── Month ──
+        month: int
+        if month_part in _THAI_MONTHS:
+            month = _THAI_MONTHS[month_part]
+        else:
+            try:
+                month = int(month_part)
+            except ValueError:
+                return None
+        if month < 1 or month > 12:
+            return None
+
+        # ── Year ──
+        year = int(year_str)
+        if year < 100:
+            # ปี 2 หลัก → ถ้า 40-99 → สมมติ พ.ศ. 25xx
+            # ถ้า 20-39 → สมมติ ค.ศ. 20xx
+            if year >= 40:
+                year = 2500 + year  # เช่น 69 → 2569 BE
+            else:
+                year = 2000 + year  # เช่น 26 → 2026 CE
+        # ── แปลง พ.ศ. → ค.ศ. ──
+        if year >= 2500:
+            year = year - 543
+        # ── ตรวจว่าปีสมเหตุสมผล ──
+        if year < 2020 or year > 2030:
+            return None
+
+        return datetime(year, month, day, tzinfo=timezone.utc)
+    except (ValueError, TypeError, OverflowError):
+        return None

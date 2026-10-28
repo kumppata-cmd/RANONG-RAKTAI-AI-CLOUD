@@ -53,6 +53,9 @@ from patient_master_registry import (
     parse_patient_list_ocr,
     parse_patient_text_input,
     extract_hn_from_document,
+    extract_patient_name_from_document,
+    extract_document_date,
+    _sanitize_folder_name as _sanitize_patient_folder_name,
 )
 from vendor_registry import (
     VendorRegistry,
@@ -7457,6 +7460,64 @@ def process_file_async(
                         "HN extraction failed: %s", type(hn_err).__name__
                     )
 
+            # ── Patient Name Extraction from OCR ──
+            # ดึงชื่อคนไข้จากเอกสาร — ใช้เสริมเมื่อ HN ไม่อยู่ใน registry
+            _ocr_patient_name = ""
+            if extracted_text and category in CLINICAL_CATEGORIES:
+                try:
+                    _ocr_patient_name = extract_patient_name_from_document(
+                        extracted_text
+                    )
+                    if _ocr_patient_name:
+                        metadata["ocr_patient_name"] = _ocr_patient_name
+                        logger.info(
+                            "OCR patient name extracted: (category=%s)",
+                            category,
+                        )
+                        # ถ้า HN จาก OCR ได้ แต่ไม่อยู่ใน registry
+                        # (folder ขึ้นต้นด้วย "HN") — เสริมชื่อเข้าไป
+                        _cur_folder = metadata.get("patient_hn_folder", "")
+                        if _cur_folder and _cur_folder.startswith("HN"):
+                            _safe_name = _sanitize_patient_folder_name(
+                                _ocr_patient_name
+                            )
+                            if _safe_name:
+                                metadata["patient_hn_folder"] = (
+                                    f"{_cur_folder}_{_safe_name}"
+                                )
+                                logger.info(
+                                    "Enhanced folder with OCR name: %s",
+                                    metadata["patient_hn_folder"],
+                                )
+                except Exception as name_err:
+                    logger.warning(
+                        "Patient name extraction failed: %s",
+                        type(name_err).__name__,
+                    )
+
+            # ── Document Date Extraction from OCR ──
+            # ดึงวันที่สั่ง/วันที่ตรวจจากเอกสาร — ใช้แทน LINE timestamp
+            # สำหรับจัดเก็บตาม YYYY-QN/YYYY-MM ที่ถูกต้อง
+            _doc_date = None
+            if extracted_text and category in CLINICAL_CATEGORIES:
+                try:
+                    _doc_date = extract_document_date(extracted_text)
+                    if _doc_date:
+                        metadata["document_date"] = _doc_date.isoformat()
+                        # ใช้วันที่จากเอกสารแทน submitted_at
+                        # เพื่อให้ folder เดือน/ไตรมาสตรงกับวันที่ในเอกสาร
+                        metadata["submitted_at"] = _doc_date.isoformat()
+                        logger.info(
+                            "Document date extracted and applied: %s "
+                            "(category=%s)",
+                            _doc_date.strftime("%Y-%m-%d"), category,
+                        )
+                except Exception as date_err:
+                    logger.warning(
+                        "Document date extraction failed: %s",
+                        type(date_err).__name__,
+                    )
+
             # ── โหมดเลือกผู้ป่วย: เจ้าหน้าที่ระบุผู้ป่วยไว้ก่อนส่งเอกสาร ──
             # เอกสารคลินิกส่งจากบัญชีหมอ/เจ้าหน้าที่ จึงใช้ HN จากเอกสาร
             # (OCR) ไม่ได้เสมอ — ถ้าเจ้าหน้าที่เลือกผู้ป่วยไว้ ให้ใช้ค่านั้น
@@ -7952,6 +8013,22 @@ def process_file_async(
                         "👤 ยังไม่ระบุผู้ป่วย — เก็บไว้ที่ระดับไตรมาส/เดือน\n"
                         "พิมพ์ 'ผู้ป่วย <HN>' ก่อนส่ง เพื่อเข้าแฟ้มรายคน"
                     )
+                # แสดงชื่อคนไข้ที่อ่านได้จากเอกสาร (ถ้ามี)
+                if metadata.get("ocr_patient_name"):
+                    _reply_lines.append(
+                        f"📝 ชื่อในเอกสาร: {metadata['ocr_patient_name']}"
+                    )
+                # แสดงวันที่จากเอกสาร (ถ้า extract ได้)
+                if metadata.get("document_date"):
+                    try:
+                        _ddiso = metadata["document_date"]
+                        _dd = datetime.fromisoformat(_ddiso)
+                        _thai_yr = _dd.year + 543
+                        _reply_lines.append(
+                            f"📅 วันที่ในเอกสาร: {_dd.day}/{_dd.month}/{_thai_yr}"
+                        )
+                    except Exception:
+                        pass
             _result_text = "\n".join(_reply_lines)
 
             # ── Interactive Classification: ถามผู้ใช้เมื่อ OCR ล้มเหลว ──
