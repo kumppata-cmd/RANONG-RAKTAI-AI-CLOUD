@@ -6174,6 +6174,49 @@ def push_message(user_id: str, text: str) -> bool:
         return False
 
 
+def push_messages(user_id: str, messages: list[dict]) -> bool:
+    """ส่ง push messages หลายรายการไปยัง LINE user (รองรับ text, flex, image).
+
+    ไม่ log user_id หรือเนื้อหาข้อความ
+    Returns True if sent successfully, False otherwise.
+    """
+    if IS_TESTING and not IS_TESTING_DOCS:
+        return False
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        logger.error("[PUSH] ไม่มี LINE_CHANNEL_ACCESS_TOKEN")
+        return False
+    if not user_id or not messages:
+        return False
+    url = "https://api.line.me/v2/bot/message/push"
+    request_body = json.dumps(
+        {"to": user_id, "messages": messages[:5]},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        resp = http_requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            data=request_body,
+            timeout=10,
+        )
+        resp.raise_for_status()
+        logger.info(
+            "Push messages สำเร็จ (%d msgs, status=%d)",
+            len(messages), resp.status_code,
+        )
+        return True
+    except Exception as e:
+        status = getattr(getattr(e, "response", None), "status_code", "-")
+        logger.error(
+            "[PUSH] Push messages ไม่สำเร็จ: %s (status=%s)",
+            type(e).__name__, status,
+        )
+        return False
+
+
 def reply_message(reply_token: str, text: str):
     """ส่งข้อความตอบกลับไปยัง LINE."""
     if IS_TESTING and not IS_TESTING_DOCS:
@@ -7826,19 +7869,24 @@ def process_file_async(
                 # Multi-page merge: reply_token หมดอายุ → ใช้ push_message
                 push_message(line_user_id, _result_text)
 
-            # ── แจ้งเตือนแอดมิน/ผู้รับแจ้งเตือน เมื่อได้รับเอกสารจากภายนอก ──
-            # ผู้ส่ง (บริษัท/บุคคลภายนอก) ได้รับ reply แล้ว
-            # ตอนนี้ส่ง push notification ไปหาแอดมินด้วย
-            # ข้ามถ้าผู้ส่งเป็นแอดมิน/เจ้าหน้าที่เอง (เพื่อไม่ให้ซ้ำ)
+            # ── แจ้งเตือนแอดมิน/ผู้รับแจ้งเตือน เมื่อได้รับเอกสาร ──
+            # ส่ง push notification + ปุ่มเปิดเอกสาร ไปหาแอดมิน
+            # ทำงานกับทุกประเภท: bills, rx, lab, dialysis
+            # แจ้งเตือนทุกเอกสารที่เข้ามา — กรองเฉพาะผู้ส่งเอง
+            # (ผู้ส่งได้รับ reply แล้ว ไม่ต้อง push ซ้ำ)
             try:
-                _sender_is_staff = False
-                if owner_hash:
-                    _sender_is_staff = is_authorized_user(owner_hash)
-
-                if not _sender_is_staff and category != "review":
+                if category != "review":
+                    # ตรวจว่าผู้ส่งเป็นเจ้าหน้าที่หรือไม่ → ปรับข้อความ
+                    _sender_is_staff = bool(
+                        owner_hash and is_authorized_user(owner_hash)
+                    )
+                    _source_label = (
+                        "จากเจ้าหน้าที่" if _sender_is_staff
+                        else "จากภายนอก"
+                    )
                     # สร้างข้อความแจ้งเตือนสำหรับแอดมิน
                     _admin_notify_lines = [
-                        "📬 ได้รับเอกสารใหม่จากภายนอก",
+                        f"📬 ได้รับเอกสารใหม่{_source_label}",
                         f"📁 ประเภท: {cat_name}",
                         f"📂 จัดเก็บใน: {_storage_display}",
                     ]
@@ -7852,6 +7900,102 @@ def process_file_async(
                         )
                     _admin_notify_text = "\n".join(_admin_notify_lines)
 
+                    # สร้าง Flex Message พร้อมปุ่มเปิดเอกสาร
+                    _admin_messages = [
+                        {"type": "text", "text": _admin_notify_text},
+                    ]
+
+                    # สร้าง download URL จาก GCS path
+                    _doc_download_url = None
+                    if dest and dest.startswith("gs://"):
+                        # ดึง object path จาก gs://bucket/path
+                        _gcs_parts = dest.split("/", 3)
+                        if len(_gcs_parts) >= 4:
+                            _gcs_obj_path = _gcs_parts[3]
+                            _doc_download_url = get_download_url(
+                                _gcs_obj_path
+                            )
+
+                    if _doc_download_url:
+                        # สร้าง Flex Message พร้อมปุ่มเปิดเอกสาร
+                        _expiry_min = SIGNED_URL_EXPIRY // 60
+                        _cat_emoji = {
+                            "bills": "🧾", "rx": "💊",
+                            "lab": "🔬", "dialysis": "🩸",
+                        }.get(category, "📄")
+                        _flex_msg = {
+                            "type": "flex",
+                            "altText": f"{_cat_emoji} เอกสาร {cat_name} — กดเพื่อเปิด",
+                            "contents": {
+                                "type": "bubble",
+                                "body": {
+                                    "type": "box",
+                                    "layout": "vertical",
+                                    "contents": [
+                                        {
+                                            "type": "text",
+                                            "text": f"{_cat_emoji} {cat_name}",
+                                            "weight": "bold",
+                                            "size": "lg",
+                                        },
+                                        {"type": "separator", "margin": "md"},
+                                        {
+                                            "type": "box",
+                                            "layout": "vertical",
+                                            "margin": "md",
+                                            "contents": [
+                                                {
+                                                    "type": "box",
+                                                    "layout": "horizontal",
+                                                    "contents": [
+                                                        {
+                                                            "type": "text",
+                                                            "text": "จัดเก็บ:",
+                                                            "size": "sm",
+                                                            "color": "#555555",
+                                                            "flex": 0,
+                                                        },
+                                                        {
+                                                            "type": "text",
+                                                            "text": _storage_display[:40],
+                                                            "size": "sm",
+                                                            "color": "#111111",
+                                                            "align": "end",
+                                                            "wrap": True,
+                                                        },
+                                                    ],
+                                                },
+                                            ],
+                                        },
+                                        {
+                                            "type": "text",
+                                            "text": f"⏱️ ลิงก์หมดอายุใน {_expiry_min} นาที",
+                                            "size": "xxs",
+                                            "color": "#999999",
+                                            "margin": "md",
+                                        },
+                                    ],
+                                },
+                                "footer": {
+                                    "type": "box",
+                                    "layout": "vertical",
+                                    "contents": [
+                                        {
+                                            "type": "button",
+                                            "style": "primary",
+                                            "color": "#1DB446",
+                                            "action": {
+                                                "type": "uri",
+                                                "label": "📎 เปิดเอกสาร",
+                                                "uri": _doc_download_url,
+                                            },
+                                        },
+                                    ],
+                                },
+                            },
+                        }
+                        _admin_messages.append(_flex_msg)
+
                     # ดึงรายชื่อผู้รับจาก _alert_recipients (module-level)
                     _notif_ids = list(
                         _alert_recipients.get("physician", [])
@@ -7863,12 +8007,14 @@ def process_file_async(
 
                     _notif_sent = 0
                     for _rid in _notif_ids:
-                        if push_message(_rid, _admin_notify_text):
+                        if push_messages(_rid, _admin_messages):
                             _notif_sent += 1
                     if _notif_sent:
                         logger.info(
                             "แจ้งเตือนเอกสารใหม่ส่งถึงผู้รับ %d ราย "
-                            "(doc_id=%s)", _notif_sent, _doc_id,
+                            "(doc_id=%s, has_doc_link=%s)",
+                            _notif_sent, _doc_id,
+                            bool(_doc_download_url),
                         )
                     elif _notif_ids:
                         logger.warning(
