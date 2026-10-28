@@ -6900,7 +6900,9 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "diagnosis", "cc:", "hpi:", "pe text",
              "mh/pe", "อาการสำคัญ", "ประวัติปัจจุบัน",
              "ประวัติโรคประจำตัว", "ประวัติการแพ้ยา",
-             "โรงพยาบาลระนอง",
+             # หมายเหตุ: "โรงพยาบาลระนอง" ย้ายออกจาก rx แล้ว เพราะเป็นชื่อ
+             # โรงพยาบาลซึ่งปรากฏบนเอกสารทุกประเภท (ใบแล็บ ใบยา ใบฟอก ฯลฯ)
+             # ทำให้ใบแล็บถูกจัดเป็น rx เมื่อ OCR อ่านได้แค่หัวกระดาษ
              # ชื่อยาสามัญที่พบบ่อยในคลินิกไต
              "losartan", "enalapril", "amlodipine",
              "atorvastatin", "omeprazole", "aspirin",
@@ -6932,6 +6934,9 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "ห้องปฏิบัติการ", "ผลแล็บ", "ผลlab", "ผล lab",
              "specimen", "serum", "blood", "urine",
              "mmol", "umol", "g/dl", "g/dL",
+             # ── ฟอร์มใบแล็บโรงพยาบาล ──
+             "ใบรายงานผลการตรวจ", "ใบรายงานผล", "รายงานผลการตรวจ",
+             "request form", "request by", "request date",
              # Microbiology / Culture & Sensitivity
              "microbiology", "culture", "sensitivity",
              "susceptible", "resistant", "intermediate",
@@ -7033,6 +7038,45 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             ),
             "confidence": min(
                 _vendor_match.confidence + _money_hits / 20.0, 1.0
+            ),
+        }
+
+    # ── Pre-check: ใบรายงานผลตรวจทางห้องปฏิบัติการ (Lab Report) ──
+    # *** ต้องอยู่ก่อน rx pre-check ***
+    # ถ้าพบชื่อฟอร์มแล็บ + ผลตรวจ lab ≥2 รายการ → บังคับ lab
+    # ป้องกัน "mg" (หน่วยผลแล็บ) จากการดึงเอกสารเข้า rx
+    # ป้องกันใบแล็บโรงพยาบาลที่ OCR อ่านได้แค่หัวกระดาษถูกจัดผิดประเภท
+    _lab_form_kws = [
+        "ใบรายงานผลการตรวจ", "ใบรายงานผล", "ห้องปฏิบัติการ",
+        "laboratory", "lab report", "ผลตรวจ", "ผลเลือด",
+        "ผลแล็บ", "ผลlab", "ผล lab",
+        "request no", "collection date", "specimen",
+        "reference range", "normal range",
+    ]
+    _lab_result_kws = [
+        "creatinine", "BUN", "eGFR", "hemoglobin", "hematocrit",
+        "WBC", "RBC", "platelet", "potassium", "sodium",
+        "albumin", "glucose", "cholesterol", "HbA1c",
+        "uric acid", "calcium", "phosphorus",
+        "mg/dL", "mg/dl", "mmol", "umol", "g/dl", "g/dL",
+        "CBC", "result", "abnormal",
+    ]
+    _lab_form_hits = [k for k in _lab_form_kws if k.lower() in content_lower]
+    _lab_result_hits = [k for k in _lab_result_kws if k.lower() in content_lower]
+    if len(_lab_form_hits) >= 1 and len(_lab_result_hits) >= 2:
+        logger.info(
+            "  pre-check: lab report detected "
+            "(%d form kws, %d result kws) → lab",
+            len(_lab_form_hits), len(_lab_result_hits),
+        )
+        return {
+            "category": "lab",
+            "reason": (
+                f"lab report pre-check "
+                f"({len(_lab_form_hits)} form, {len(_lab_result_hits)} results)"
+            ),
+            "confidence": min(
+                (len(_lab_form_hits) + len(_lab_result_hits)) / 6.0, 1.0
             ),
         }
 
