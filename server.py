@@ -6912,6 +6912,9 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "order for one day", "order for continuation",
              "manidipine", "epiao", "bicarbo", "iron venofe",
              "calcium carbon", "medication",
+             # ── Medication Record (ใบบันทึกยาผู้ป่วยไตเทียม) ──
+             "medication record", "medication list",
+             "แพทย์ผู้สั่ง", "วันที่สั่ง",
              ],
             2,
         ),
@@ -7055,6 +7058,8 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
         # ── ยาที่พบบ่อยในคลินิกไต เพิ่มเติม ──
         "manidipine", "epiao", "bicarbo", "iron venofe",
         "calcium carbon",
+        # ── สะกดผิดที่พบบ่อยจาก OCR หรือฟอร์มจริง ──
+        "atrovastatin",  # = atorvastatin
     ]
     _rx_medical_kws = [
         "mg", "mcg", "tab", "cap", "เม็ด", "หลังอาหาร",
@@ -7066,7 +7071,8 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
         "oral", "p.c.", "h.s.", "order form",
         "order for one day", "order for continuation",
         "1x1", "1x2", "1 x 1", "1 x 2", "3x1", "2x1",
-        "medication",
+        "medication", "medication record", "medication list",
+        "แพทย์ผู้สั่ง", "วันที่สั่ง",
     ]
     _drug_hits = [d for d in _rx_drug_names if d.lower() in content_lower]
     _rx_med_hits = [k for k in _rx_medical_kws if k.lower() in content_lower]
@@ -7111,10 +7117,47 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "confidence": min(len(_hd_hits) / 4.0, 1.0),
         }
 
+    # ── keyword matching helper ──
+    # คำสั้น ≤3 ตัวอักษร (เช่น "HD", "UF", "QB") ต้อง match แบบ
+    # word boundary เพื่อไม่ให้ "HD" ใน "ทุกHD" นับเป็น dialysis hit
+    # (ยกเว้นคำภาษาไทยที่ไม่มี word boundary ธรรมชาติ)
+    import unicodedata as _ucd
+
+    def _is_thai(ch: str) -> bool:
+        try:
+            return "THAI" in _ucd.name(ch, "")
+        except Exception:
+            return False
+
+    def _kw_in_text(kw_lower: str, text_lower: str) -> bool:
+        """ตรวจว่า keyword อยู่ใน text — คำสั้น (≤3 chars, ASCII)
+        ใช้ word-boundary match เพื่อลด false positive เช่น
+        "HD" ไม่ควร match "ทุกHD" (Thai prefix)"""
+        if len(kw_lower) <= 3 and kw_lower.isascii():
+            # ใช้ Unicode word boundary (\b ไม่พอ เพราะ \b ไม่นับ Thai)
+            # ตรวจว่าตัวอักษรก่อน/หลัง keyword ไม่ใช่ letter (ทุกภาษา)
+            idx = 0
+            while True:
+                idx = text_lower.find(kw_lower, idx)
+                if idx == -1:
+                    return False
+                # ตรวจ char ก่อนหน้า
+                if idx > 0 and text_lower[idx - 1].isalpha():
+                    idx += 1
+                    continue
+                # ตรวจ char หลัง
+                end = idx + len(kw_lower)
+                if end < len(text_lower) and text_lower[end].isalpha():
+                    idx += 1
+                    continue
+                return True
+            return False
+        return kw_lower in text_lower
+
     best, best_score = "review", 0
     all_matches = {}
     for cat, (kws, min_match) in rules.items():
-        matched = [kw for kw in kws if kw.lower() in content_lower]
+        matched = [kw for kw in kws if _kw_in_text(kw.lower(), content_lower)]
         score = len(matched)
         all_matches[cat] = matched
         if score >= min_match and score > best_score:

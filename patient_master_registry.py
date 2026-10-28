@@ -917,6 +917,10 @@ def _normalize_hn(hn: str) -> str:
 _HN_PATTERNS = [
     # "HN: 12345" or "HN:12345" or "H.N. 12345" or "HN 12345"
     re.compile(r'(?:H\.?N\.?|HN)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
+    # OCR อาจอ่าน "HN" เป็น "H N" (มีเว้นวรรค) — เช่น "H N 56001"
+    re.compile(r'(?:H\s+N)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
+    # OCR อาจอ่านเป็น "H.N" หรือ "H .N." (มี dot/space ปน)
+    re.compile(r'H\s*\.\s*N\s*\.?\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
     # "เลขที่ 12345" or "เลขที่ผู้ป่วย 12345"
     re.compile(r'เลข(?:ที่)?(?:\s*ผู้ป่วย)?\s*[:=]?\s*(\d{2,10})'),
     # "รหัสผู้ป่วย 12345" or "รหัส HN 12345"
