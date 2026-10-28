@@ -1597,6 +1597,40 @@ class DocumentIndex:
                 break
         return results
 
+    def list_by_patient_folder(
+        self, patient_folder: str, category: str = "", limit: int = 100
+    ) -> list[dict]:
+        """รายการเอกสารตาม patient_hn_folder — สำหรับ admin/physician.
+
+        ค้นจาก field patient_hn_folder ก่อน ถ้าไม่มีให้ fallback
+        ดูจาก gcs_object_path (folder อยู่ segment ที่ 4)
+        """
+        self._ensure_fresh()
+        results = []
+        pf_upper = patient_folder.upper()
+        for doc in self._docs:
+            # ── ตรวจจาก patient_hn_folder field ──
+            doc_folder = doc.get("patient_hn_folder", "")
+            if not doc_folder:
+                # fallback: extract from gcs_object_path
+                # format: folder/YYYY-QN/YYYY-MM/patient_folder/uuid.pdf
+                gcs_path = doc.get("gcs_object_path", "")
+                parts = gcs_path.split("/")
+                if len(parts) >= 5:
+                    doc_folder = parts[3]
+            if not doc_folder:
+                continue
+            # match: exact or prefix (e.g. "56001" matches "56001_ชื่อ")
+            df_upper = doc_folder.upper()
+            if df_upper != pf_upper and not df_upper.startswith(pf_upper + "_"):
+                continue
+            if category and doc.get("category") != category:
+                continue
+            results.append(doc)
+            if len(results) >= limit:
+                break
+        return results
+
     def list_all(self, limit: int = 1000) -> list[dict]:
         """รายการเอกสารทั้งหมด — สำหรับ admin KPI เท่านั้น."""
         self._ensure_fresh()
@@ -5273,27 +5307,45 @@ def handle_search_command(
                         lines.append(f"  • HN {m.clinic_hn or m.hospital_hn or '?'} — {name}")
                     return "\n".join(lines)
 
-            if not patient:
-                return f"❌ ไม่พบผู้ป่วย HN '{hn_query}' ในระบบ"
-
-            target_hash = patient.owner_hash
-            patient_label = f" (HN {patient.clinic_hn or patient.hospital_hn})"
-            if patient.display_name:
-                patient_label = f" ({patient.display_name}, HN {patient.clinic_hn or patient.hospital_hn})"
+            if patient:
+                # พบใน hn_registry → ใช้ owner_hash ตามเดิม
+                target_hash = patient.owner_hash
+                _patient_folder = ""
+                patient_label = f" (HN {patient.clinic_hn or patient.hospital_hn})"
+                if patient.display_name:
+                    patient_label = f" ({patient.display_name}, HN {patient.clinic_hn or patient.hospital_hn})"
+            else:
+                # ── Fallback: ค้นจาก master_registry ──
+                master_matches = master_registry.search(hn_query) if master_registry else []
+                if len(master_matches) == 1:
+                    master_patient = master_matches[0]
+                    # ใช้ patient_folder แทน owner_hash
+                    target_hash = ""
+                    _patient_folder = master_patient.folder_name
+                    patient_label = f" ({master_patient.patient_name}, HN {master_patient.clinic_hn or master_patient.hospital_hn})"
+                elif len(master_matches) > 1:
+                    lines = ["🔍 พบหลายรายการ กรุณาระบุ HN ให้ชัดเจน:"]
+                    for mp in master_matches[:5]:
+                        lines.append(f"  • HN {mp.clinic_hn or mp.hospital_hn or '?'} — {mp.patient_name}")
+                    return "\n".join(lines)
+                else:
+                    return f"❌ ไม่พบผู้ป่วย HN '{hn_query}' ในระบบ"
+        else:
+            _patient_folder = ""
 
         # ── เรียกฟังก์ชันตามประเภท ──
         cmd = parsed.command_type
         try:
             if cmd == CommandType.COMPARE_LAB_TIMELINE:
-                result = compare_lab_timeline(storage, doc_index, target_hash)
+                result = compare_lab_timeline(storage, doc_index, target_hash, patient_folder=_patient_folder)
                 log_type = "compare_lab_timeline"
                 err_msg = "ขออภัย ไม่สามารถเปรียบเทียบผลแล็บย้อนหลังได้ในขณะนี้"
             elif cmd == CommandType.COMPARE_RX_TIMELINE:
-                result = compare_rx_timeline(storage, doc_index, target_hash)
+                result = compare_rx_timeline(storage, doc_index, target_hash, patient_folder=_patient_folder)
                 log_type = "compare_rx_timeline"
                 err_msg = "ขออภัย ไม่สามารถเปรียบเทียบใบยาย้อนหลังได้ในขณะนี้"
             else:
-                result = compare_dialysis_timeline(storage, doc_index, target_hash)
+                result = compare_dialysis_timeline(storage, doc_index, target_hash, patient_folder=_patient_folder)
                 log_type = "compare_dialysis_timeline"
                 err_msg = "ขออภัย ไม่สามารถเปรียบเทียบข้อมูลฟอกเลือดย้อนหลังได้ในขณะนี้"
 
@@ -7718,6 +7770,10 @@ def process_file_async(
                     # ผู้ใช้เห็นเฉพาะเอกสารที่ตัวเองส่ง
                     "owner_hash": owner_hash or "",
                 }
+                # ── patient_hn_folder: ให้ค้นเอกสารจาก HN ผู้ป่วยได้ ──
+                _hn_folder = metadata.get("patient_hn_folder", "")
+                if _hn_folder:
+                    doc_meta["patient_hn_folder"] = _hn_folder
                 # เวลาส่งแบบเต็ม — ให้การจัดประเภทใหม่ภายหลังคำนวณเดือน
                 # ได้ตรงกับตอนส่ง ไม่ใช่เดือนที่จัดประเภทใหม่
                 if _submitted_dt:

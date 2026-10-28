@@ -554,11 +554,20 @@ def get_patient_lab_history(
     doc_index,
     owner_hash: str,
     lab_prefix: str = "_lab_results/",
+    patient_folder: str = "",
 ) -> list[dict]:
-    """ดึงประวัติผลแล็บของผู้ป่วย — เรียงตามวันที่"""
+    """ดึงประวัติผลแล็บของผู้ป่วย — เรียงตามวันที่
+
+    ถ้าระบุ patient_folder → ค้นจาก patient_hn_folder แทน owner_hash
+    """
     try:
         # ดึง doc ทั้งหมดของ owner ที่เป็น lab
-        all_docs = doc_index.list_by_owner(owner_hash) if hasattr(doc_index, 'list_by_owner') else []
+        if patient_folder and hasattr(doc_index, "list_by_patient_folder"):
+            all_docs = doc_index.list_by_patient_folder(patient_folder)
+        elif hasattr(doc_index, 'list_by_owner'):
+            all_docs = doc_index.list_by_owner(owner_hash)
+        else:
+            all_docs = []
         lab_docs = [d for d in all_docs if d.get("category") == "lab"]
 
         results = []
@@ -802,18 +811,23 @@ def get_patient_rx_history(
     storage,
     doc_index,
     owner_hash: str,
+    patient_folder: str = "",
 ) -> list[dict]:
     """ดึงประวัติใบยาของผู้ป่วย — เรียงตามวันที่.
 
     ดึงจาก DocumentIndex: เอกสาร category=rx ของ owner
     แล้วใช้ extracted_text ดึงรายชื่อยาจาก OCR text
+
+    ถ้าระบุ patient_folder → ค้นจาก patient_hn_folder แทน owner_hash
+    (สำหรับเอกสารที่ admin/staff อัปโหลดให้ผู้ป่วย)
     """
     try:
-        all_docs = (
-            doc_index.list_by_owner(owner_hash)
-            if hasattr(doc_index, "list_by_owner")
-            else []
-        )
+        if patient_folder and hasattr(doc_index, "list_by_patient_folder"):
+            all_docs = doc_index.list_by_patient_folder(patient_folder)
+        elif hasattr(doc_index, "list_by_owner"):
+            all_docs = doc_index.list_by_owner(owner_hash)
+        else:
+            all_docs = []
         rx_docs = [d for d in all_docs if d.get("category") == "rx"]
 
         results = []
@@ -987,13 +1001,14 @@ def compare_lab_timeline(
     doc_index,
     owner_hash: str,
     lab_prefix: str = "_lab_results/",
+    patient_folder: str = "",
 ) -> dict:
     """เปรียบเทียบผลแล็บย้อนหลัง: ปัจจุบัน vs 3 เดือน vs 6 เดือน
 
     คืน dict พร้อม text_th สำหรับแสดงใน LINE
     ต้องมีผลอย่างน้อย 2 ครั้งจึงจะเปรียบเทียบได้
     """
-    history = get_patient_lab_history(storage, doc_index, owner_hash, lab_prefix)
+    history = get_patient_lab_history(storage, doc_index, owner_hash, lab_prefix, patient_folder=patient_folder)
 
     if len(history) < 2:
         return {
@@ -1252,9 +1267,10 @@ def compare_rx_timeline(
     storage,
     doc_index,
     owner_hash: str,
+    patient_folder: str = "",
 ) -> dict:
     """เปรียบเทียบใบยาย้อนหลัง: ปัจจุบัน vs 3 เดือน vs 6 เดือน"""
-    history = get_patient_rx_history(storage, doc_index, owner_hash)
+    history = get_patient_rx_history(storage, doc_index, owner_hash, patient_folder=patient_folder)
 
     if len(history) < 2:
         if len(history) == 1:
@@ -1450,14 +1466,19 @@ def get_patient_dialysis_history(
     storage,
     doc_index,
     owner_hash: str,
+    patient_folder: str = "",
 ) -> list[dict]:
-    """ดึงประวัติใบฟอกเลือดของผู้ป่วย — เรียงตามวันที่"""
+    """ดึงประวัติใบฟอกเลือดของผู้ป่วย — เรียงตามวันที่
+
+    ถ้าระบุ patient_folder → ค้นจาก patient_hn_folder แทน owner_hash
+    """
     try:
-        all_docs = (
-            doc_index.list_by_owner(owner_hash)
-            if hasattr(doc_index, "list_by_owner")
-            else []
-        )
+        if patient_folder and hasattr(doc_index, "list_by_patient_folder"):
+            all_docs = doc_index.list_by_patient_folder(patient_folder)
+        elif hasattr(doc_index, "list_by_owner"):
+            all_docs = doc_index.list_by_owner(owner_hash)
+        else:
+            all_docs = []
         dialysis_docs = [d for d in all_docs if d.get("category") == "dialysis"]
 
         results = []
@@ -1492,9 +1513,10 @@ def compare_dialysis_timeline(
     storage,
     doc_index,
     owner_hash: str,
+    patient_folder: str = "",
 ) -> dict:
     """เปรียบเทียบข้อมูลฟอกเลือดย้อนหลัง: ปัจจุบัน vs 3 เดือน vs 6 เดือน"""
-    history = get_patient_dialysis_history(storage, doc_index, owner_hash)
+    history = get_patient_dialysis_history(storage, doc_index, owner_hash, patient_folder=patient_folder)
 
     if len(history) < 2:
         if len(history) == 1:
