@@ -56,6 +56,9 @@ class CommandType(Enum):
     # ── Feature: Quarterly Compare & HN Registry ──
     COMPARE_LAB = "compare_lab"
     COMPARE_RX = "compare_rx"
+    COMPARE_LAB_TIMELINE = "compare_lab_timeline"
+    COMPARE_RX_TIMELINE = "compare_rx_timeline"
+    COMPARE_DIALYSIS_TIMELINE = "compare_dialysis_timeline"
     REGISTER_HN = "register_hn"
     MY_HN = "my_hn"
     UNKNOWN = "unknown"
@@ -201,6 +204,28 @@ COMMAND_ALIASES: list[tuple[str, CommandType, int | None]] = [
     (r"^เทียบยา$", CommandType.COMPARE_RX, None),
     (r"^compare\s*rx$", CommandType.COMPARE_RX, None),
     (r"^เปรียบเทียบใบยา$", CommandType.COMPARE_RX, None),
+
+    # ─── Feature: Timeline Comparison (ย้อนหลัง 3-6 เดือน) ───
+    (r"^เทียบแล็บย้อนหลัง$", CommandType.COMPARE_LAB_TIMELINE, None),
+    (r"^เปรียบเทียบแล็บย้อนหลัง$", CommandType.COMPARE_LAB_TIMELINE, None),
+    (r"^เทียบผลแล็บย้อนหลัง$", CommandType.COMPARE_LAB_TIMELINE, None),
+    (r"^แล็บย้อนหลัง$", CommandType.COMPARE_LAB_TIMELINE, None),
+    (r"^lab\s*timeline$", CommandType.COMPARE_LAB_TIMELINE, None),
+    (r"^compare\s*lab\s*timeline$", CommandType.COMPARE_LAB_TIMELINE, None),
+
+    (r"^เทียบยาย้อนหลัง$", CommandType.COMPARE_RX_TIMELINE, None),
+    (r"^เปรียบเทียบยาย้อนหลัง$", CommandType.COMPARE_RX_TIMELINE, None),
+    (r"^เปรียบเทียบใบยาย้อนหลัง$", CommandType.COMPARE_RX_TIMELINE, None),
+    (r"^ใบยาย้อนหลัง$", CommandType.COMPARE_RX_TIMELINE, None),
+    (r"^rx\s*timeline$", CommandType.COMPARE_RX_TIMELINE, None),
+    (r"^compare\s*rx\s*timeline$", CommandType.COMPARE_RX_TIMELINE, None),
+
+    (r"^เทียบฟอกเลือดย้อนหลัง$", CommandType.COMPARE_DIALYSIS_TIMELINE, None),
+    (r"^เปรียบเทียบฟอกเลือดย้อนหลัง$", CommandType.COMPARE_DIALYSIS_TIMELINE, None),
+    (r"^เปรียบเทียบใบฟอกเลือดย้อนหลัง$", CommandType.COMPARE_DIALYSIS_TIMELINE, None),
+    (r"^ฟอกเลือดย้อนหลัง$", CommandType.COMPARE_DIALYSIS_TIMELINE, None),
+    (r"^dialysis\s*timeline$", CommandType.COMPARE_DIALYSIS_TIMELINE, None),
+    (r"^compare\s*dialysis\s*timeline$", CommandType.COMPARE_DIALYSIS_TIMELINE, None),
 
     # ─── Feature: ลงทะเบียน HN ───
     (r"^ลงทะเบียนHN\s+(.+)$", CommandType.REGISTER_HN, 1),

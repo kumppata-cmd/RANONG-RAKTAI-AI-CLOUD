@@ -938,3 +938,681 @@ def compare_latest_rx(
     result["old_date"] = old.get("upload_date", "")
     result["new_date"] = new.get("upload_date", "")
     return result
+
+
+# ─────────────────────────────────────────────────────────────
+# Timeline Comparison — ปัจจุบัน vs 3 เดือน vs 6 เดือน
+# ─────────────────────────────────────────────────────────────
+
+def _find_closest_to_target(
+    history: list[dict],
+    target_date: datetime,
+    window_days: int = 45,
+) -> dict | None:
+    """หาผลที่ใกล้ target_date ที่สุด ภายใน window_days
+
+    history: list ของ dict ที่มี upload_date (YYYY-MM-DD)
+    target_date: วันที่เป้าหมาย
+    window_days: ช่วงวันที่ยอมรับ (±)
+    """
+    best = None
+    best_diff = None
+    for item in history:
+        date_str = item.get("upload_date", "")
+        if not date_str:
+            continue
+        try:
+            item_date = datetime.strptime(date_str, "%Y-%m-%d")
+        except (ValueError, TypeError):
+            continue
+        diff = abs((item_date - target_date).days)
+        if diff <= window_days:
+            if best_diff is None or diff < best_diff:
+                best = item
+                best_diff = diff
+    return best
+
+
+def _format_timeline_value(val: float | None) -> str:
+    """จัดรูปแบบค่าตัวเลขสำหรับแสดงผล"""
+    if val is None:
+        return "-"
+    if val == int(val):
+        return str(int(val))
+    return f"{val:.1f}"
+
+
+def compare_lab_timeline(
+    storage,
+    doc_index,
+    owner_hash: str,
+    lab_prefix: str = "_lab_results/",
+) -> dict:
+    """เปรียบเทียบผลแล็บย้อนหลัง: ปัจจุบัน vs 3 เดือน vs 6 เดือน
+
+    คืน dict พร้อม text_th สำหรับแสดงใน LINE
+    ต้องมีผลอย่างน้อย 2 ครั้งจึงจะเปรียบเทียบได้
+    """
+    history = get_patient_lab_history(storage, doc_index, owner_hash, lab_prefix)
+
+    if len(history) < 2:
+        return {
+            "error": (
+                f"ต้องมีผลแล็บอย่างน้อย 2 ครั้งจึงจะเปรียบเทียบได้\n"
+                f"(พบ {len(history)} ครั้ง)"
+            ),
+            "available": len(history),
+        }
+
+    # ผลล่าสุด = ปัจจุบัน
+    current = history[0]
+    current_date_str = current.get("upload_date", "")
+    try:
+        current_date = datetime.strptime(current_date_str, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        current_date = datetime.now()
+
+    # หาผลที่ใกล้ 3 เดือนก่อน (±45 วัน)
+    from dateutil.relativedelta import relativedelta
+    target_3m = current_date - relativedelta(months=3)
+    target_6m = current_date - relativedelta(months=6)
+
+    # ไม่เอาผลปัจจุบัน
+    past_history = history[1:]
+    result_3m = _find_closest_to_target(past_history, target_3m, window_days=45)
+    result_6m = _find_closest_to_target(past_history, target_6m, window_days=45)
+
+    # ถ้า 3m กับ 6m เป็นตัวเดียวกัน ให้เอาแค่ 3m
+    if (result_3m and result_6m
+            and result_3m.get("doc_id") == result_6m.get("doc_id")):
+        result_6m = None
+
+    # ต้องมีอย่างน้อย 1 ผลย้อนหลัง (ไม่ใช่แค่ปัจจุบัน)
+    if not result_3m and not result_6m:
+        # ใช้ผลก่อนหน้าที่มี (fallback)
+        result_3m = past_history[0] if past_history else None
+        if not result_3m:
+            return {"error": "ไม่พบผลแล็บย้อนหลังสำหรับเปรียบเทียบ"}
+
+    # รวบรวม analytes จากทุกช่วงเวลา
+    current_results = {
+        r.get("analyte_name", "").strip().upper(): r
+        for r in current.get("results", [])
+        if r.get("analyte_name", "").strip()
+    }
+    results_3m = {}
+    results_6m = {}
+    if result_3m:
+        results_3m = {
+            r.get("analyte_name", "").strip().upper(): r
+            for r in result_3m.get("results", [])
+            if r.get("analyte_name", "").strip()
+        }
+    if result_6m:
+        results_6m = {
+            r.get("analyte_name", "").strip().upper(): r
+            for r in result_6m.get("results", [])
+            if r.get("analyte_name", "").strip()
+        }
+
+    all_analytes = sorted(set(
+        list(current_results.keys())
+        + list(results_3m.keys())
+        + list(results_6m.keys())
+    ))
+
+    # สร้างผลเปรียบเทียบ
+    comparisons = []
+    improved = 0
+    worsened = 0
+    stable = 0
+
+    for analyte in all_analytes:
+        cur = current_results.get(analyte, {})
+        m3 = results_3m.get(analyte, {})
+        m6 = results_6m.get(analyte, {})
+
+        cur_val = _safe_float(cur.get("value"))
+        m3_val = _safe_float(m3.get("value"))
+        m6_val = _safe_float(m6.get("value"))
+
+        ref_min = _safe_float(
+            cur.get("ref_min") or m3.get("ref_min") or m6.get("ref_min")
+        )
+        ref_max = _safe_float(
+            cur.get("ref_max") or m3.get("ref_max") or m6.get("ref_max")
+        )
+        unit = cur.get("unit") or m3.get("unit") or m6.get("unit", "")
+
+        # กำหนดแนวโน้ม
+        trend = _determine_trend(cur_val, m3_val, m6_val, ref_min, ref_max)
+
+        comp_item = {
+            "analyte": analyte,
+            "current": cur_val,
+            "month_3": m3_val,
+            "month_6": m6_val,
+            "unit": unit,
+            "ref_min": ref_min,
+            "ref_max": ref_max,
+            "trend": trend,
+        }
+        comparisons.append(comp_item)
+
+        if trend in ("improving", "normalized"):
+            improved += 1
+        elif trend in ("worsening", "became_abnormal"):
+            worsened += 1
+        else:
+            stable += 1
+
+    # สร้างข้อความ
+    lines = []
+    lines.append("📊 เปรียบเทียบผลแล็บย้อนหลัง")
+    lines.append(f"📅 ปัจจุบัน: {current_date_str}")
+    if result_3m:
+        lines.append(f"📅 ~3 เดือนก่อน: {result_3m.get('upload_date', '?')}")
+    if result_6m:
+        lines.append(f"📅 ~6 เดือนก่อน: {result_6m.get('upload_date', '?')}")
+    lines.append("")
+
+    # แสดงผลที่เปลี่ยนแปลงสำคัญก่อน
+    important = [c for c in comparisons
+                 if c["trend"] in ("worsening", "became_abnormal",
+                                   "improving", "normalized")]
+    if important:
+        lines.append("⚠️ ค่าที่เปลี่ยนแปลงสำคัญ:")
+        for c in important:
+            emoji = "🔴" if c["trend"] in ("worsening", "became_abnormal") else "🟢"
+            vals = []
+            if result_6m and c["month_6"] is not None:
+                vals.append(_format_timeline_value(c["month_6"]))
+            if result_3m and c["month_3"] is not None:
+                vals.append(_format_timeline_value(c["month_3"]))
+            vals.append(_format_timeline_value(c["current"]))
+            trend_text = _trend_thai(c["trend"])
+            unit_str = f" {c['unit']}" if c["unit"] else ""
+            lines.append(f"  {emoji} {c['analyte']}: {' → '.join(vals)}{unit_str} ({trend_text})")
+        lines.append("")
+
+    # แสดงค่าผิดปกติที่คงที่
+    stable_abnormal = [c for c in comparisons
+                       if c["trend"] == "stable_abnormal"]
+    if stable_abnormal:
+        lines.append("🟡 ค่าผิดปกติที่ยังไม่เปลี่ยน:")
+        for c in stable_abnormal:
+            vals = []
+            if result_6m and c["month_6"] is not None:
+                vals.append(_format_timeline_value(c["month_6"]))
+            if result_3m and c["month_3"] is not None:
+                vals.append(_format_timeline_value(c["month_3"]))
+            vals.append(_format_timeline_value(c["current"]))
+            unit_str = f" {c['unit']}" if c["unit"] else ""
+            lines.append(f"  ⚡ {c['analyte']}: {' → '.join(vals)}{unit_str}")
+        lines.append("")
+
+    # สรุป
+    lines.append(
+        f"📋 สรุป: ดีขึ้น {improved} / แย่ลง {worsened} / คงที่ {stable}"
+    )
+    lines.append(f"  📈 ตรวจทั้งหมด {len(comparisons)} รายการ")
+
+    return {
+        "text_th": "\n".join(lines),
+        "current_date": current_date_str,
+        "date_3m": result_3m.get("upload_date", "") if result_3m else "",
+        "date_6m": result_6m.get("upload_date", "") if result_6m else "",
+        "summary": {
+            "improved": improved,
+            "worsened": worsened,
+            "stable": stable,
+            "total": len(comparisons),
+        },
+        "comparisons": comparisons,
+    }
+
+
+def _determine_trend(
+    current: float | None,
+    month_3: float | None,
+    month_6: float | None,
+    ref_min: float | None,
+    ref_max: float | None,
+) -> str:
+    """กำหนดแนวโน้มจากค่า 3 จุด
+
+    Returns: improving, worsening, stable, stable_abnormal,
+             normalized, became_abnormal, new, insufficient
+    """
+    if current is None:
+        return "insufficient"
+
+    # ค่าก่อนหน้าที่ใกล้ที่สุด
+    prev = month_3 if month_3 is not None else month_6
+    if prev is None:
+        return "new"
+
+    def is_abnormal(val: float | None) -> bool:
+        if val is None:
+            return False
+        if ref_min is not None and val < ref_min:
+            return True
+        if ref_max is not None and val > ref_max:
+            return True
+        return False
+
+    cur_abnormal = is_abnormal(current)
+    prev_abnormal = is_abnormal(prev)
+
+    if prev_abnormal and not cur_abnormal:
+        return "normalized"
+    if not prev_abnormal and cur_abnormal:
+        return "became_abnormal"
+
+    if cur_abnormal and prev_abnormal:
+        # ทั้งคู่ผิดปกติ — ดูทิศทาง
+        diff = current - prev
+        if abs(diff) < 0.01:
+            return "stable_abnormal"
+        # ดูว่าเข้าใกล้ค่าปกติไหม
+        if ref_max is not None and current > ref_max:
+            return "improving" if diff < 0 else "worsening"
+        if ref_min is not None and current < ref_min:
+            return "improving" if diff > 0 else "worsening"
+        return "stable_abnormal"
+
+    # ทั้งคู่ปกติ
+    diff = current - prev
+    if abs(diff) < 0.01:
+        return "stable"
+
+    # ดูทิศทาง — ถ้ายังอยู่ในเกณฑ์ปกติ ถือว่า stable
+    return "stable"
+
+
+def _trend_thai(trend: str) -> str:
+    """แปลง trend เป็นข้อความไทย"""
+    return {
+        "improving": "↑ ดีขึ้น",
+        "worsening": "↓ แย่ลง",
+        "stable": "→ คงที่",
+        "stable_abnormal": "⚡ ผิดปกติต่อเนื่อง",
+        "normalized": "✅ กลับสู่ปกติ",
+        "became_abnormal": "⚠️ เริ่มผิดปกติ",
+        "new": "🆕 ค่าใหม่",
+        "insufficient": "? ข้อมูลไม่พอ",
+    }.get(trend, trend)
+
+
+# ─────────────────────────────────────────────────────────────
+# RX Timeline — เปรียบเทียบใบยาย้อนหลัง
+# ─────────────────────────────────────────────────────────────
+
+def compare_rx_timeline(
+    storage,
+    doc_index,
+    owner_hash: str,
+) -> dict:
+    """เปรียบเทียบใบยาย้อนหลัง: ปัจจุบัน vs 3 เดือน vs 6 เดือน"""
+    history = get_patient_rx_history(storage, doc_index, owner_hash)
+
+    if len(history) < 2:
+        if len(history) == 1:
+            current = history[0]
+            drugs_text = "\n".join(f"  • {d}" for d in current["drugs"])
+            return {
+                "error": (
+                    f"💊 ใบยาปัจจุบัน ({current['upload_date']})\n"
+                    f"พบ {current['drug_count']} รายการ:\n"
+                    f"{drugs_text}\n\n"
+                    "ต้องมีใบยาอย่างน้อย 2 ครั้งจึงจะเปรียบเทียบได้"
+                ),
+                "available": 1,
+            }
+        return {
+            "error": "ไม่พบใบยาในระบบ กรุณาส่งรูปใบยาก่อน",
+            "available": 0,
+        }
+
+    current = history[0]
+    current_date_str = current.get("upload_date", "")
+    try:
+        current_date = datetime.strptime(current_date_str, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        current_date = datetime.now()
+
+    from dateutil.relativedelta import relativedelta
+    target_3m = current_date - relativedelta(months=3)
+    target_6m = current_date - relativedelta(months=6)
+
+    past_history = history[1:]
+    rx_3m = _find_closest_to_target(past_history, target_3m, window_days=45)
+    rx_6m = _find_closest_to_target(past_history, target_6m, window_days=45)
+
+    if rx_3m and rx_6m and rx_3m.get("doc_id") == rx_6m.get("doc_id"):
+        rx_6m = None
+
+    if not rx_3m and not rx_6m:
+        rx_3m = past_history[0] if past_history else None
+        if not rx_3m:
+            return {"error": "ไม่พบใบยาย้อนหลังสำหรับเปรียบเทียบ"}
+
+    # รวบรวมยาทุกช่วง
+    current_drugs = set(d.upper() for d in current.get("drugs", []))
+    drugs_3m = set(d.upper() for d in rx_3m.get("drugs", [])) if rx_3m else set()
+    drugs_6m = set(d.upper() for d in rx_6m.get("drugs", [])) if rx_6m else set()
+
+    all_drugs = sorted(current_drugs | drugs_3m | drugs_6m)
+
+    lines = []
+    lines.append("💊 เปรียบเทียบใบยาย้อนหลัง")
+    lines.append(f"📅 ปัจจุบัน: {current_date_str}")
+    if rx_3m:
+        lines.append(f"📅 ~3 เดือนก่อน: {rx_3m.get('upload_date', '?')}")
+    if rx_6m:
+        lines.append(f"📅 ~6 เดือนก่อน: {rx_6m.get('upload_date', '?')}")
+    lines.append("")
+
+    # ยาที่เพิ่มมาใหม่ (ไม่มีใน 3m หรือ 6m)
+    all_past = drugs_3m | drugs_6m
+    newly_added = current_drugs - all_past
+    recently_stopped = all_past - current_drugs
+    continuous = current_drugs & all_past
+
+    if newly_added:
+        lines.append("🟢 ยาที่เพิ่มใหม่:")
+        for d in sorted(newly_added):
+            lines.append(f"  + {d.title()}")
+        lines.append("")
+
+    if recently_stopped:
+        lines.append("🔴 ยาที่หยุดแล้ว:")
+        for d in sorted(recently_stopped):
+            # ระบุว่าหยุดตั้งแต่เมื่อไหร่
+            was_in_3m = d in drugs_3m
+            was_in_6m = d in drugs_6m
+            if was_in_3m and was_in_6m:
+                note = "ใช้มาตลอด"
+            elif was_in_3m:
+                note = "ใช้ 3 เดือนก่อน"
+            else:
+                note = "ใช้ 6 เดือนก่อน"
+            lines.append(f"  - {d.title()} ({note})")
+        lines.append("")
+
+    if continuous:
+        lines.append(f"✅ ยาต่อเนื่อง: {len(continuous)} รายการ")
+        lines.append("")
+
+    # สรุป
+    lines.append(
+        f"📋 สรุป: ปัจจุบัน {len(current_drugs)} รายการ"
+    )
+    if rx_3m:
+        lines.append(f"  3 เดือนก่อน {len(drugs_3m)} รายการ")
+    if rx_6m:
+        lines.append(f"  6 เดือนก่อน {len(drugs_6m)} รายการ")
+    lines.append(
+        f"  (เพิ่ม {len(newly_added)} / หยุด {len(recently_stopped)} / "
+        f"ต่อเนื่อง {len(continuous)})"
+    )
+
+    return {
+        "text_th": "\n".join(lines),
+        "current_date": current_date_str,
+        "date_3m": rx_3m.get("upload_date", "") if rx_3m else "",
+        "date_6m": rx_6m.get("upload_date", "") if rx_6m else "",
+        "summary": {
+            "current_count": len(current_drugs),
+            "newly_added": len(newly_added),
+            "recently_stopped": len(recently_stopped),
+            "continuous": len(continuous),
+        },
+    }
+
+
+# ─────────────────────────────────────────────────────────────
+# Dialysis History & Timeline — ใบฟอกเลือดย้อนหลัง
+# ─────────────────────────────────────────────────────────────
+
+# ── Regex สำหรับจับข้อมูลฟอกเลือดจาก OCR text ──
+_DIALYSIS_PATTERNS = {
+    "pre_weight": re.compile(
+        r"(?:pre[- ]?(?:hd|dialysis)?[- ]?weight|น้ำหนักก่อน(?:ฟอก)?)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:kg)?",
+        re.IGNORECASE,
+    ),
+    "post_weight": re.compile(
+        r"(?:post[- ]?(?:hd|dialysis)?[- ]?weight|น้ำหนักหลัง(?:ฟอก)?)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:kg)?",
+        re.IGNORECASE,
+    ),
+    "dry_weight": re.compile(
+        r"(?:dry[- ]?weight|น้ำหนักแห้ง|DW)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:kg)?",
+        re.IGNORECASE,
+    ),
+    "uf_volume": re.compile(
+        r"(?:UF|ultra\s*filtration|ปริมาณน้ำที่ดึง)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:ml|cc|L|ลิตร)?",
+        re.IGNORECASE,
+    ),
+    "blood_flow": re.compile(
+        r"(?:QB|Qb|blood\s*flow|อัตราการไหลเลือด)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:ml/?min)?",
+        re.IGNORECASE,
+    ),
+    "duration": re.compile(
+        r"(?:duration|ระยะเวลา(?:ฟอก)?|เวลาฟอก)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:hr|hrs|hours?|ชม\.?|ชั่วโมง)?",
+        re.IGNORECASE,
+    ),
+    "pre_bp": re.compile(
+        r"(?:pre[- ]?(?:hd[- ]?)?BP|ความดันก่อน(?:ฟอก)?)\s*[:\s]*"
+        r"(\d{2,3})\s*/\s*(\d{2,3})",
+        re.IGNORECASE,
+    ),
+    "post_bp": re.compile(
+        r"(?:post[- ]?(?:hd[- ]?)?BP|ความดันหลัง(?:ฟอก)?)\s*[:\s]*"
+        r"(\d{2,3})\s*/\s*(\d{2,3})",
+        re.IGNORECASE,
+    ),
+    "kt_v": re.compile(
+        r"(?:Kt/?V|KT/?V)\s*[:\s]*(\d+\.?\d*)",
+        re.IGNORECASE,
+    ),
+}
+
+
+def extract_dialysis_data_from_text(ocr_text: str) -> dict:
+    """ดึงข้อมูลฟอกเลือดจาก OCR text
+
+    Returns: dict ของค่าที่ดึงได้ เช่น
+    {"pre_weight": 65.0, "post_weight": 62.5, "uf_volume": 2500, ...}
+    """
+    if not ocr_text or len(ocr_text.strip()) < 10:
+        return {}
+
+    data = {}
+    for key, pattern in _DIALYSIS_PATTERNS.items():
+        match = pattern.search(ocr_text)
+        if match:
+            if key in ("pre_bp", "post_bp"):
+                data[f"{key}_sys"] = _safe_float(match.group(1))
+                data[f"{key}_dia"] = _safe_float(match.group(2))
+            else:
+                data[key] = _safe_float(match.group(1))
+
+    return data
+
+
+def get_patient_dialysis_history(
+    storage,
+    doc_index,
+    owner_hash: str,
+) -> list[dict]:
+    """ดึงประวัติใบฟอกเลือดของผู้ป่วย — เรียงตามวันที่"""
+    try:
+        all_docs = (
+            doc_index.list_by_owner(owner_hash)
+            if hasattr(doc_index, "list_by_owner")
+            else []
+        )
+        dialysis_docs = [d for d in all_docs if d.get("category") == "dialysis"]
+
+        results = []
+        for doc in dialysis_docs:
+            doc_id = doc.get("document_id", "")
+            extracted_text = doc.get("extracted_text", "").strip()
+
+            if not extracted_text:
+                continue
+
+            data = extract_dialysis_data_from_text(extracted_text)
+            if not data:
+                continue
+
+            results.append({
+                "doc_id": doc_id,
+                "upload_date": doc.get("upload_date", ""),
+                "quarter": _date_to_quarter(doc.get("upload_date", "")),
+                "data": data,
+                "param_count": len(data),
+            })
+
+        results.sort(key=lambda x: x.get("upload_date", ""), reverse=True)
+        return results
+
+    except Exception as e:
+        logger.error("get_patient_dialysis_history failed: %s", e)
+        return []
+
+
+def compare_dialysis_timeline(
+    storage,
+    doc_index,
+    owner_hash: str,
+) -> dict:
+    """เปรียบเทียบข้อมูลฟอกเลือดย้อนหลัง: ปัจจุบัน vs 3 เดือน vs 6 เดือน"""
+    history = get_patient_dialysis_history(storage, doc_index, owner_hash)
+
+    if len(history) < 2:
+        if len(history) == 1:
+            current = history[0]
+            data_text = "\n".join(
+                f"  • {_dialysis_param_thai(k)}: {_format_timeline_value(v)}"
+                for k, v in sorted(current["data"].items())
+            )
+            return {
+                "error": (
+                    f"🩸 ข้อมูลฟอกเลือดปัจจุบัน ({current['upload_date']})\n"
+                    f"พบ {current['param_count']} รายการ:\n"
+                    f"{data_text}\n\n"
+                    "ต้องมีข้อมูลฟอกเลือดอย่างน้อย 2 ครั้งจึงจะเปรียบเทียบได้"
+                ),
+                "available": 1,
+            }
+        return {
+            "error": "ไม่พบข้อมูลฟอกเลือดในระบบ กรุณาส่งรูปใบฟอกเลือดก่อน",
+            "available": 0,
+        }
+
+    current = history[0]
+    current_date_str = current.get("upload_date", "")
+    try:
+        current_date = datetime.strptime(current_date_str, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        current_date = datetime.now()
+
+    from dateutil.relativedelta import relativedelta
+    target_3m = current_date - relativedelta(months=3)
+    target_6m = current_date - relativedelta(months=6)
+
+    past_history = history[1:]
+    d_3m = _find_closest_to_target(past_history, target_3m, window_days=45)
+    d_6m = _find_closest_to_target(past_history, target_6m, window_days=45)
+
+    if d_3m and d_6m and d_3m.get("doc_id") == d_6m.get("doc_id"):
+        d_6m = None
+
+    if not d_3m and not d_6m:
+        d_3m = past_history[0] if past_history else None
+        if not d_3m:
+            return {"error": "ไม่พบข้อมูลฟอกเลือดย้อนหลังสำหรับเปรียบเทียบ"}
+
+    # รวบรวมค่าทั้งหมด
+    current_data = current.get("data", {})
+    data_3m = d_3m.get("data", {}) if d_3m else {}
+    data_6m = d_6m.get("data", {}) if d_6m else {}
+
+    all_params = sorted(set(
+        list(current_data.keys()) + list(data_3m.keys()) + list(data_6m.keys())
+    ))
+
+    lines = []
+    lines.append("🩸 เปรียบเทียบข้อมูลฟอกเลือดย้อนหลัง")
+    lines.append(f"📅 ปัจจุบัน: {current_date_str}")
+    if d_3m:
+        lines.append(f"📅 ~3 เดือนก่อน: {d_3m.get('upload_date', '?')}")
+    if d_6m:
+        lines.append(f"📅 ~6 เดือนก่อน: {d_6m.get('upload_date', '?')}")
+    lines.append("")
+
+    for param in all_params:
+        label = _dialysis_param_thai(param)
+        cur_val = current_data.get(param)
+        m3_val = data_3m.get(param)
+        m6_val = data_6m.get(param)
+
+        vals = []
+        if d_6m and m6_val is not None:
+            vals.append(_format_timeline_value(m6_val))
+        if d_3m and m3_val is not None:
+            vals.append(_format_timeline_value(m3_val))
+        if cur_val is not None:
+            vals.append(_format_timeline_value(cur_val))
+
+        if len(vals) >= 2:
+            # มีค่าให้เปรียบเทียบ
+            # หาแนวโน้ม
+            prev_val = m3_val if m3_val is not None else m6_val
+            if cur_val is not None and prev_val is not None:
+                diff = cur_val - prev_val
+                if abs(diff) < 0.01:
+                    arrow = "→"
+                elif diff > 0:
+                    arrow = "↑"
+                else:
+                    arrow = "↓"
+            else:
+                arrow = "?"
+            lines.append(f"  {label}: {' → '.join(vals)} {arrow}")
+        elif len(vals) == 1:
+            lines.append(f"  {label}: {vals[0]}")
+
+    lines.append("")
+    lines.append(f"📋 ตรวจทั้งหมด {len(all_params)} รายการ")
+
+    return {
+        "text_th": "\n".join(lines),
+        "current_date": current_date_str,
+        "date_3m": d_3m.get("upload_date", "") if d_3m else "",
+        "date_6m": d_6m.get("upload_date", "") if d_6m else "",
+    }
+
+
+def _dialysis_param_thai(param: str) -> str:
+    """แปลชื่อ parameter ฟอกเลือดเป็นไทย"""
+    return {
+        "pre_weight": "น้ำหนักก่อนฟอก (kg)",
+        "post_weight": "น้ำหนักหลังฟอก (kg)",
+        "dry_weight": "น้ำหนักแห้ง (kg)",
+        "uf_volume": "ปริมาณน้ำที่ดึง (ml)",
+        "blood_flow": "อัตราไหลเลือด (ml/min)",
+        "duration": "ระยะเวลาฟอก (ชม.)",
+        "pre_bp_sys": "ความดันก่อนฟอก (ตัวบน)",
+        "pre_bp_dia": "ความดันก่อนฟอก (ตัวล่าง)",
+        "post_bp_sys": "ความดันหลังฟอก (ตัวบน)",
+        "post_bp_dia": "ความดันหลังฟอก (ตัวล่าง)",
+        "kt_v": "Kt/V",
+    }.get(param, param)
