@@ -5236,53 +5236,82 @@ def handle_search_command(
             logger.warning(f"Compare rx error: {type(e).__name__}")
             return "ขออภัย ไม่สามารถเปรียบเทียบใบยาได้ในขณะนี้"
 
-    # ── เปรียบเทียบผลแล็บย้อนหลัง (ปัจจุบัน vs 3 เดือน vs 6 เดือน) ──
-    if parsed.command_type == CommandType.COMPARE_LAB_TIMELINE:
-        try:
-            result = compare_lab_timeline(storage, doc_index, user_hash)
-            if "error" in result:
-                return result["error"]
-            audit_logger.log("compare_lab_timeline", user_hash, {
-                "current": result.get("current_date", ""),
-                "date_3m": result.get("date_3m", ""),
-                "date_6m": result.get("date_6m", ""),
-            })
-            return result.get("text_th", "ไม่สามารถเปรียบเทียบได้")
-        except Exception as e:
-            logger.warning(f"Compare lab timeline error: {type(e).__name__}")
-            return "ขออภัย ไม่สามารถเปรียบเทียบผลแล็บย้อนหลังได้ในขณะนี้"
+    # ── เปรียบเทียบผลแล็บ/ยา/ฟอกเลือด ย้อนหลัง (ปัจจุบัน vs 3 เดือน vs 6 เดือน) ──
+    # รองรับระบุ HN เฉพาะคน (เฉพาะ admin/แพทย์)
+    if parsed.command_type in (
+        CommandType.COMPARE_LAB_TIMELINE,
+        CommandType.COMPARE_RX_TIMELINE,
+        CommandType.COMPARE_DIALYSIS_TIMELINE,
+    ):
+        # ── Resolve target owner_hash ──
+        target_hash = user_hash
+        patient_label = ""
+        hn_arg = (parsed.args or "").strip()
 
-    # ── เปรียบเทียบใบยาย้อนหลัง ──
-    if parsed.command_type == CommandType.COMPARE_RX_TIMELINE:
-        try:
-            result = compare_rx_timeline(storage, doc_index, user_hash)
-            if "error" in result:
-                return result["error"]
-            audit_logger.log("compare_rx_timeline", user_hash, {
-                "current": result.get("current_date", ""),
-                "date_3m": result.get("date_3m", ""),
-                "date_6m": result.get("date_6m", ""),
-            })
-            return result.get("text_th", "ไม่สามารถเปรียบเทียบได้")
-        except Exception as e:
-            logger.warning(f"Compare rx timeline error: {type(e).__name__}")
-            return "ขออภัย ไม่สามารถเปรียบเทียบใบยาย้อนหลังได้ในขณะนี้"
+        if hn_arg:
+            # ระบุ HN — ต้องเป็น admin หรือแพทย์เท่านั้น
+            if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+                return "⚠️ เฉพาะแพทย์หรือผู้ดูแลระบบเท่านั้นที่สามารถดูข้อมูลผู้ป่วยรายอื่นได้"
 
-    # ── เปรียบเทียบฟอกเลือดย้อนหลัง ──
-    if parsed.command_type == CommandType.COMPARE_DIALYSIS_TIMELINE:
+            # ลอง resolve HN
+            hn_query = hn_arg.replace("HN", "").replace("hn", "").strip()
+            patient = hn_registry.get_by_clinic_hn(hn_query)
+            if not patient:
+                patient = hn_registry.get_by_hospital_hn(hn_query)
+            if not patient:
+                # ลองค้นหา
+                matches = hn_registry.search_hn(hn_query)
+                if len(matches) == 1:
+                    patient = matches[0]
+                elif len(matches) > 1:
+                    lines = ["🔍 พบหลายรายการ กรุณาระบุ HN ให้ชัดเจน:"]
+                    for m in matches[:5]:
+                        name = m.display_name or m.owner_hash[:8]
+                        lines.append(f"  • HN {m.clinic_hn or m.hospital_hn or '?'} — {name}")
+                    return "\n".join(lines)
+
+            if not patient:
+                return f"❌ ไม่พบผู้ป่วย HN '{hn_query}' ในระบบ"
+
+            target_hash = patient.owner_hash
+            patient_label = f" (HN {patient.clinic_hn or patient.hospital_hn})"
+            if patient.display_name:
+                patient_label = f" ({patient.display_name}, HN {patient.clinic_hn or patient.hospital_hn})"
+
+        # ── เรียกฟังก์ชันตามประเภท ──
+        cmd = parsed.command_type
         try:
-            result = compare_dialysis_timeline(storage, doc_index, user_hash)
+            if cmd == CommandType.COMPARE_LAB_TIMELINE:
+                result = compare_lab_timeline(storage, doc_index, target_hash)
+                log_type = "compare_lab_timeline"
+                err_msg = "ขออภัย ไม่สามารถเปรียบเทียบผลแล็บย้อนหลังได้ในขณะนี้"
+            elif cmd == CommandType.COMPARE_RX_TIMELINE:
+                result = compare_rx_timeline(storage, doc_index, target_hash)
+                log_type = "compare_rx_timeline"
+                err_msg = "ขออภัย ไม่สามารถเปรียบเทียบใบยาย้อนหลังได้ในขณะนี้"
+            else:
+                result = compare_dialysis_timeline(storage, doc_index, target_hash)
+                log_type = "compare_dialysis_timeline"
+                err_msg = "ขออภัย ไม่สามารถเปรียบเทียบข้อมูลฟอกเลือดย้อนหลังได้ในขณะนี้"
+
             if "error" in result:
                 return result["error"]
-            audit_logger.log("compare_dialysis_timeline", user_hash, {
+
+            audit_logger.log(log_type, user_hash, {
+                "target": target_hash[:8] if target_hash != user_hash else "self",
                 "current": result.get("current_date", ""),
                 "date_3m": result.get("date_3m", ""),
                 "date_6m": result.get("date_6m", ""),
             })
-            return result.get("text_th", "ไม่สามารถเปรียบเทียบได้")
+
+            text = result.get("text_th", "ไม่สามารถเปรียบเทียบได้")
+            if patient_label:
+                text = f"👤 ผู้ป่วย{patient_label}\n\n{text}"
+            return text
+
         except Exception as e:
-            logger.warning(f"Compare dialysis timeline error: {type(e).__name__}")
-            return "ขออภัย ไม่สามารถเปรียบเทียบข้อมูลฟอกเลือดย้อนหลังได้ในขณะนี้"
+            logger.warning(f"Compare timeline error: {type(e).__name__}")
+            return err_msg
 
     # ── ลงทะเบียน HN ──
     if parsed.command_type == CommandType.REGISTER_HN:
