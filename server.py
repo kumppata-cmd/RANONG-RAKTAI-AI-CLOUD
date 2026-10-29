@@ -1220,7 +1220,7 @@ storage = get_storage()
 
 # ─── Dead Letter Queue ─────────────────────────────────────
 try:
-    from dead_letter import DeadLetterQueue
+    from dead_letter import DeadLetterQueue, MAX_RETRIES as DLQ_MAX_RETRIES
     dead_letter_queue = DeadLetterQueue(storage)
     logger.info("Dead-letter queue initialized")
 except Exception as _dlq_init_err:
@@ -2034,6 +2034,20 @@ except ImportError:
     alert_service = None
     describe_alert_recipients = None
     logger.warning("Phase 2A: alert_delivery module not available")
+
+# ─── System Monitor (init after _alert_recipients) ─────
+try:
+    from system_monitor import SystemMonitor
+    _system_monitor = SystemMonitor(
+        storage, doc_index, dead_letter_queue, _alert_recipients
+    )
+    logger.info("System monitor initialized")
+except Exception as _sm_err:
+    _system_monitor = None
+    logger.warning(
+        "System monitor init failed: %s",
+        type(_sm_err).__name__,
+    )
 
 # ─── Phase 2A: Patient Identity ─────────────────────────
 try:
@@ -9390,6 +9404,12 @@ def process_file_async(
             if not is_valid:
                 logger.warning(f"ไฟล์ไม่ผ่านการตรวจสอบ: {reason}")
                 result = {"category": "review", "reason": reason}
+                # DLQ: validation failed
+                if dead_letter_queue:
+                    dead_letter_queue.add(
+                        _doc_id, "validation_failed",
+                        reason[:100],
+                    )
             elif ENABLE_AI_CLASSIFY:
                 result = classify_with_claude(filepath)
             else:
@@ -9400,6 +9420,15 @@ def process_file_async(
                     result = classify_with_keywords(filepath)
 
             category = result.get("category", "review")
+
+            # DLQ: classification ไม่ชัดเจน → review
+            if category == "review" and dead_letter_queue:
+                dead_letter_queue.add(
+                    _doc_id, "classify_review",
+                    result.get("reason", "ไม่สามารถจำแนกได้")[:100],
+                    category="review",
+                )
+
             # ชื่อแฟ้มบริษัทต้องมาจากทะเบียนเท่านั้น
             #
             # ห้ามนำค่าที่ผู้จำแนกส่งกลับมาใช้เป็นชื่อแฟ้มโดยตรง เพราะถ้า
@@ -9563,6 +9592,13 @@ def process_file_async(
                             "Auto HN route: no HN found in OCR text "
                             "(category=%s)", category
                         )
+                        # DLQ: ไม่พบ HN ในเอกสาร
+                        if dead_letter_queue and category in CLINICAL_CATEGORIES:
+                            dead_letter_queue.add(
+                                _doc_id, "hn_not_found",
+                                "ไม่พบ HN ในเอกสาร",
+                                category=category,
+                            )
                 except Exception as hn_err:
                     logger.warning(
                         "HN extraction failed: %s", type(hn_err).__name__
@@ -13323,6 +13359,224 @@ def admin_normalize_folders():
             "errors": errors[:50],
         },
     })
+
+
+# ─── Dead-Letter Queue: Admin Endpoints ─────────────────
+
+@app.route("/admin/api/v2/dead-letter/list", methods=["GET"])
+def api_dead_letter_list():
+    """รายการเอกสารใน dead-letter queue"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not dead_letter_queue:
+        return jsonify({"error": "DLQ ไม่ได้เปิดใช้"}), 400
+    entries = dead_letter_queue.list_all(
+        limit=int(request.args.get("limit", "50"))
+    )
+    return jsonify({"entries": entries, "count": len(entries)})
+
+
+@app.route("/admin/api/v2/dead-letter/stats", methods=["GET"])
+def api_dead_letter_stats():
+    """สถิติ dead-letter queue"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not dead_letter_queue:
+        return jsonify({"error": "DLQ ไม่ได้เปิดใช้"}), 400
+    return jsonify(dead_letter_queue.get_stats())
+
+
+@app.route("/admin/api/v2/dead-letter/resolve", methods=["POST"])
+def api_dead_letter_resolve():
+    """แก้ไข dead-letter entry (mark as resolved)"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not dead_letter_queue:
+        return jsonify({"error": "DLQ ไม่ได้เปิดใช้"}), 400
+
+    body = request.get_json(silent=True) or {}
+    doc_id = str(body.get("doc_id", "")).strip()[:64]
+    resolution = str(body.get("resolution", "manual")).strip()[:64]
+    if not doc_id:
+        return jsonify({"error": "ต้องระบุ doc_id"}), 400
+
+    ok = dead_letter_queue.mark_resolved(doc_id, resolution)
+    if ok:
+        return jsonify({
+            "success": True,
+            "message": f"แก้ไขแล้ว: {doc_id[:8]}",
+        })
+    return jsonify({"error": "ไม่พบรายการ"}), 404
+
+
+@app.route("/admin/api/v2/system-health", methods=["GET"])
+def api_system_health():
+    """สถานะสุขภาพระบบทั้งหมด"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not _system_monitor:
+        return jsonify({"error": "System monitor ไม่พร้อม"}), 400
+    health = _system_monitor.check_health()
+    return jsonify(health)
+
+
+@app.route("/admin/v2/dead-letter")
+def admin_dead_letter_page():
+    """หน้าเว็บ Dead-Letter Queue — ดูเอกสารที่มีปัญหา"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return "ระบบยังไม่ได้ตั้งค่า", 500
+    secret = request.args.get("secret", "")
+    if not secret or not hmac.compare_digest(
+        secret.encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
+    ):
+        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+
+    # ดึงข้อมูล
+    entries = []
+    stats = {"total": 0, "pending": 0, "resolved": 0, "abandoned": 0}
+    if dead_letter_queue:
+        entries = dead_letter_queue.list_all(limit=100)
+        stats = dead_letter_queue.get_stats()
+
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+
+    # สร้าง rows HTML
+    rows_html = ""
+    for e in entries:
+        _ts = e.get("created_at", "")[:19].replace("T", " ")
+        _eid = e.get("doc_id", "")[:8]
+        _etype = e.get("error_type", "")
+        _emsg = e.get("error_message", "")[:50]
+        _status = e.get("status", "")
+        _retry = e.get("retry_count", 0)
+        _cat = e.get("category", "")
+
+        _status_badge = {
+            "pending": "🟡 รอ",
+            "retrying": "🔄 กำลัง retry",
+            "resolved": "✅ แก้แล้ว",
+            "abandoned": "❌ abandon",
+        }.get(_status, _status)
+
+        _resolve_btn = ""
+        if _status in ("pending", "retrying"):
+            _resolve_btn = (
+                f"<button onclick=\"resolve('{e.get('doc_id', '')}')\" "
+                f"class='btn-resolve'>✅ แก้ไขแล้ว</button>"
+            )
+
+        rows_html += (
+            f"<tr>"
+            f"<td>{_ts}</td>"
+            f"<td>{_eid}</td>"
+            f"<td>{_etype}</td>"
+            f"<td>{_emsg}</td>"
+            f"<td>{_cat}</td>"
+            f"<td>{_status_badge}</td>"
+            f"<td>{_retry}/3</td>"
+            f"<td>{_resolve_btn}</td>"
+            f"</tr>"
+        )
+
+    if not rows_html:
+        rows_html = (
+            "<tr><td colspan='8' style='text-align:center;"
+            "padding:20px;color:#999'>ไม่มีรายการ</td></tr>"
+        )
+
+    html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dead-Letter Queue — RANONG RAKTAI AI</title>
+<style>
+body {{ font-family: -apple-system, sans-serif; margin: 0;
+  padding: 16px; background: #f5f5f5; }}
+h1 {{ font-size: 20px; color: #1a1a1a; }}
+.stats {{ display: flex; gap: 12px; margin: 12px 0; flex-wrap: wrap; }}
+.stat {{ background: #fff; padding: 12px 16px; border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.1); text-align: center; }}
+.stat .num {{ font-size: 24px; font-weight: 700; }}
+.stat .label {{ font-size: 12px; color: #666; }}
+table {{ width: 100%; border-collapse: collapse; background: #fff;
+  border-radius: 8px; overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0,0,0,.1); }}
+th {{ background: #2c3e50; color: #fff; padding: 8px 6px;
+  text-align: left; font-size: 12px; }}
+td {{ padding: 6px; border-bottom: 1px solid #eee;
+  font-size: 12px; word-break: break-all; }}
+tr:hover {{ background: #f8f9fa; }}
+.btn-resolve {{ padding: 4px 10px; background: #1DB446; color: #fff;
+  border: none; border-radius: 4px; cursor: pointer; font-size: 11px; }}
+.btn-resolve:hover {{ background: #179c3c; }}
+#msg {{ padding: 8px; margin: 8px 0; border-radius: 4px;
+  display: none; text-align: center; }}
+</style>
+</head>
+<body>
+<h1>📋 Dead-Letter Queue</h1>
+<div class="stats">
+<div class="stat"><div class="num">{stats.get('total', 0)}</div>
+  <div class="label">ทั้งหมด</div></div>
+<div class="stat"><div class="num" style="color:#f39c12">
+  {stats.get('pending', 0)}</div>
+  <div class="label">รอตรวจ</div></div>
+<div class="stat"><div class="num" style="color:#27ae60">
+  {stats.get('resolved', 0)}</div>
+  <div class="label">แก้แล้ว</div></div>
+<div class="stat"><div class="num" style="color:#e74c3c">
+  {stats.get('abandoned', 0)}</div>
+  <div class="label">abandon</div></div>
+</div>
+<div id="msg"></div>
+<div style="overflow-x:auto">
+<table>
+<thead>
+<tr><th>เวลา</th><th>Doc ID</th><th>ประเภท Error</th>
+<th>ข้อความ</th><th>หมวด</th><th>สถานะ</th>
+<th>Retry</th><th>จัดการ</th></tr>
+</thead>
+<tbody>{rows_html}</tbody>
+</table>
+</div>
+<script>
+function resolve(docId) {{
+    var msg = document.getElementById('msg');
+    fetch('{base_url}/admin/api/v2/dead-letter/resolve', {{
+        method: 'POST',
+        headers: {{
+            'Content-Type': 'application/json',
+            'X-Admin-Secret': '{admin_secret}'
+        }},
+        body: JSON.stringify({{ doc_id: docId, resolution: 'manual' }})
+    }})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+        if (data.success) {{
+            msg.style.display = 'block';
+            msg.style.background = '#e8f5e9';
+            msg.style.color = '#2e7d32';
+            msg.textContent = '✅ ' + data.message;
+            setTimeout(function() {{ location.reload(); }}, 1500);
+        }} else {{
+            msg.style.display = 'block';
+            msg.style.background = '#ffebee';
+            msg.style.color = '#c62828';
+            msg.textContent = '❌ ' + (data.error || 'เกิดข้อผิดพลาด');
+        }}
+    }});
+}}
+</script>
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 # ─── Admin Dashboard: Stats API ──────────────────────────
