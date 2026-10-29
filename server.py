@@ -4131,6 +4131,10 @@ def api_physician_order():
 
     cat_name = _CAT_NAMES.get(category, "เอกสาร")
 
+    # สร้าง order_id สำหรับติดตามคำสั่ง
+    import uuid as _uuid_mod
+    _order_id = _uuid_mod.uuid4().hex
+
     # สร้างข้อความสำหรับพยาบาล
     nurse_msg_lines = [
         "📋 คำสั่งแพทย์ (คลินิกระนอง รักษ์ไต)",
@@ -4149,6 +4153,24 @@ def api_physician_order():
     )
     nurse_msg = "\n".join(nurse_msg_lines)
 
+    # บันทึก order metadata ลง GCS (ไม่เก็บเนื้อหาคำสั่ง — PDPA)
+    _order_base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    _order_admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    try:
+        _order_meta = {
+            "order_id": _order_id,
+            "doc_id": doc_id[:8],
+            "category": category,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "status": "sent",
+        }
+        storage.put(
+            f"{_ORDER_PREFIX}{_order_id}/meta.json",
+            json.dumps(_order_meta, ensure_ascii=False).encode("utf-8"),
+        )
+    except Exception:
+        pass  # ถ้าบันทึกไม่ได้ ไม่ block การส่งคำสั่ง
+
     # ดึง LINE IDs ของพยาบาล
     nurse_ids = _resolve_nurse_line_ids()
     if not nurse_ids:
@@ -4158,28 +4180,396 @@ def api_physician_order():
         }), 400
 
     sent_count = 0
+    # สร้าง Flex Message พร้อมปุ่มยืนยัน (ถ้ามี URL)
+    _ack_url = ""
+    if _order_base_url and _order_admin_secret:
+        _ack_url = (
+            f"{_order_base_url}/admin/order/ack/{_order_id}"
+            f"?secret={_order_admin_secret}"
+        )
+
     for nid in nurse_ids:
-        if push_message(nid, nurse_msg):
+        # ส่งข้อความ + ลิงก์ยืนยัน
+        _full_msg = nurse_msg
+        if _ack_url and len(_ack_url) <= LINE_URI_ACTION_MAX_LENGTH:
+            _full_msg += (
+                f"\n\n🔗 กดยืนยันรับทราบ:\n{_ack_url}"
+            )
+        if push_message(nid, _full_msg):
             sent_count += 1
 
     if sent_count > 0:
         logger.info(
-            "คำสั่งแพทย์ส่งสำเร็จ %d/%d ราย (doc_id=%s)",
-            sent_count, len(nurse_ids), doc_id[:8],
+            "คำสั่งแพทย์ส่งสำเร็จ %d/%d ราย (order=%s)",
+            sent_count, len(nurse_ids), _order_id[:8],
         )
         return jsonify({
             "success": True,
             "message": f"ส่งคำสั่งถึงพยาบาล {sent_count} ราย สำเร็จ",
+            "order_id": _order_id[:8],
         })
     else:
         logger.error(
-            "คำสั่งแพทย์ส่งไม่สำเร็จ: ไม่มีรายการที่ส่งได้ (doc_id=%s)",
-            doc_id[:8],
+            "คำสั่งแพทย์ส่งไม่สำเร็จ: ไม่มีรายการที่ส่งได้ (order=%s)",
+            _order_id[:8],
         )
         return jsonify({
             "success": False,
             "error": "ส่งคำสั่งไม่สำเร็จ — กรุณาลองใหม่",
         }), 500
+
+
+# ── คำสั่งรักษา: Order Prefix + ระบบยืนยันรับทราบ ──
+_ORDER_PREFIX = "_orders/"
+_APP_START_TIME = time.time()
+
+
+@app.route("/admin/api/v2/order-ack", methods=["POST"])
+def api_order_ack():
+    """พยาบาลยืนยันรับทราบคำสั่งรักษา"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"success": False, "error": "ระบบยังไม่ได้ตั้งค่า"}), 500
+
+    # Accept both header and query string
+    secret = (
+        request.headers.get("X-Admin-Secret", "")
+        or request.args.get("secret", "")
+    )
+    if not secret or not hmac.compare_digest(
+        secret.encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
+    ):
+        return jsonify({"success": False, "error": "ไม่มีสิทธิ์"}), 401
+
+    body = request.get_json(silent=True) or {}
+    order_id = str(body.get("order_id", "")).strip()[:64]
+    ack_status = str(body.get("status", "acknowledged")).strip()[:32]
+
+    if not order_id:
+        return jsonify({"success": False, "error": "ไม่มีรหัสคำสั่ง"}), 400
+
+    if ack_status not in ("acknowledged", "completed", "seen"):
+        ack_status = "acknowledged"
+
+    # บันทึก acknowledgment ลง GCS
+    try:
+        ack_path = f"{_ORDER_PREFIX}{order_id}/ack.json"
+        ack_data = {
+            "order_id": order_id,
+            "status": ack_status,
+            "ack_at": datetime.now(timezone.utc).isoformat(),
+        }
+        storage.put(
+            ack_path,
+            json.dumps(ack_data, ensure_ascii=False).encode("utf-8"),
+        )
+
+        # แจ้งแพทย์ว่าพยาบาลรับทราบแล้ว
+        _status_text = {
+            "acknowledged": "รับทราบ",
+            "completed": "ดำเนินการแล้ว",
+            "seen": "เห็นแล้ว",
+        }.get(ack_status, ack_status)
+
+        _physician_ids = list(
+            _alert_recipients.get("physician", [])
+        )
+        _ack_msg = (
+            f"✅ พยาบาลแจ้ง: {_status_text}\n"
+            f"📋 คำสั่ง: {order_id[:8]}"
+        )
+        for _pid in _physician_ids:
+            try:
+                push_message(_pid, _ack_msg)
+            except Exception:
+                pass
+
+        # ไม่ log เนื้อหาคำสั่ง (PDPA)
+        logger.info(
+            "Order acknowledged: %s → %s",
+            order_id[:8], ack_status,
+        )
+
+        return jsonify({
+            "success": True,
+            "message": f"บันทึกสถานะ: {_status_text}",
+        })
+    except Exception as e:
+        logger.warning("Order ack error: %s", type(e).__name__)
+        return jsonify({
+            "success": False,
+            "error": "ไม่สามารถบันทึกได้",
+        }), 500
+
+
+@app.route("/admin/order/ack/<order_id>")
+def order_ack_page(order_id):
+    """หน้าเว็บสำหรับพยาบาลยืนยันรับทราบคำสั่ง"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return "ระบบยังไม่ได้ตั้งค่า", 500
+    secret = request.args.get("secret", "")
+    if not secret or not hmac.compare_digest(
+        secret.encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
+    ):
+        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+
+    order_id = order_id.strip()[:64]
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+
+    html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ยืนยันคำสั่งรักษา</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+       margin: 0; padding: 16px; background: #f5f5f5; }}
+.card {{ background: #fff; border-radius: 12px; padding: 20px;
+         margin-bottom: 12px;
+         box-shadow: 0 1px 3px rgba(0,0,0,.1); }}
+h2 {{ font-size: 18px; margin: 0 0 16px; color: #1a1a1a; }}
+.btn {{ display: block; width: 100%; padding: 14px; border: none;
+        border-radius: 8px; font-size: 16px; font-weight: 600;
+        cursor: pointer; margin-bottom: 8px; color: #fff; }}
+.btn-ack {{ background: #1DB446; }}
+.btn-done {{ background: #0066CC; }}
+.btn:disabled {{ background: #999; cursor: not-allowed; }}
+.status {{ text-align: center; padding: 12px; border-radius: 8px;
+           display: none; margin-top: 12px; }}
+.status.success {{ background: #e8f5e9; color: #2e7d32;
+                   display: block; }}
+.status.error {{ background: #ffebee; color: #c62828;
+                 display: block; }}
+</style>
+</head>
+<body>
+<div class="card">
+<h2>📋 คำสั่งรักษา</h2>
+<p>รหัสคำสั่ง: {order_id[:8]}...</p>
+</div>
+<div class="card">
+<h2>ยืนยันสถานะ</h2>
+<button class="btn btn-ack" onclick="ack('acknowledged')">
+  ✅ รับทราบ
+</button>
+<button class="btn btn-done" onclick="ack('completed')">
+  ✔️ ดำเนินการแล้ว
+</button>
+<div id="status" class="status"></div>
+</div>
+<script>
+function ack(st) {{
+    var btns = document.querySelectorAll('.btn');
+    btns.forEach(function(b) {{ b.disabled = true; }});
+    var status = document.getElementById('status');
+    status.className = 'status';
+    status.style.display = 'block';
+    status.textContent = '⏳ กำลังบันทึก...';
+
+    fetch('{base_url}/admin/api/v2/order-ack', {{
+        method: 'POST',
+        headers: {{
+            'Content-Type': 'application/json',
+            'X-Admin-Secret': '{admin_secret}'
+        }},
+        body: JSON.stringify({{
+            order_id: '{order_id}',
+            status: st
+        }})
+    }})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+        if (data.success) {{
+            status.className = 'status success';
+            status.textContent = '✅ ' + data.message;
+        }} else {{
+            status.className = 'status error';
+            status.textContent = '❌ ' + (data.error ||
+              'เกิดข้อผิดพลาด');
+            btns.forEach(function(b) {{ b.disabled = false; }});
+        }}
+    }})
+    .catch(function() {{
+        status.className = 'status error';
+        status.textContent = '❌ ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์';
+        btns.forEach(function(b) {{ b.disabled = false; }});
+    }});
+}}
+</script>
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+# ── Audit Log Viewer — PDPA Compliance ──
+@app.route("/admin/v2/audit-log")
+def admin_audit_log_page():
+    """หน้าเว็บดูบันทึกการเข้าถึง (Audit Log)"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return "ระบบยังไม่ได้ตั้งค่า", 500
+    secret = request.args.get("secret", "")
+    if not secret or not hmac.compare_digest(
+        secret.encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
+    ):
+        return "⛔ ไม่มีสิทธิ์เข้าถึง — ต้องการรหัสผู้ดูแล", 401
+
+    # ดึง audit events จากเดือนปัจจุบัน (อ่าน JSONL จาก GCS)
+    _entries = []
+    try:
+        _month_key = datetime.now().strftime("%Y-%m")
+        _audit_path = f"{AUDIT_PREFIX}{_month_key}.jsonl"
+        _raw = storage.get(_audit_path)
+        if _raw:
+            if isinstance(_raw, bytes):
+                _raw = _raw.decode("utf-8", errors="replace")
+            for _line in _raw.strip().split("\n"):
+                _line = _line.strip()
+                if _line:
+                    try:
+                        _entries.append(json.loads(_line))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # เรียงจากใหม่ไปเก่า
+    _entries.sort(
+        key=lambda e: e.get("timestamp", ""), reverse=True
+    )
+
+    # สร้างตาราง HTML
+    _rows_html = ""
+    for _e in _entries[:100]:
+        _ts = _e.get("timestamp", "")[:19]
+        _action = _e.get("action", "")
+        _user = (_e.get("actor_hash", "") or "")[:8]
+        if _user:
+            _user += "..."
+        _outcome = _e.get("outcome", "")
+        _cat = _e.get("category", "")
+        _detail_dict = _e.get("details", {})
+        _detail = json.dumps(
+            _detail_dict, ensure_ascii=False
+        )[:120] if _detail_dict else ""
+        _outcome_icon = "✅" if _outcome == "success" else "❌"
+        _rows_html += (
+            f"<tr>"
+            f"<td>{_ts}</td>"
+            f"<td><span class='cat-{_cat}'>{_cat}</span></td>"
+            f"<td>{_action}</td>"
+            f"<td>{_user}</td>"
+            f"<td>{_outcome_icon}</td>"
+            f"<td>{_detail}</td>"
+            f"</tr>\n"
+        )
+
+    if not _rows_html:
+        _rows_html = (
+            "<tr><td colspan='6' style='text-align:center;"
+            "padding:20px;color:#999'>"
+            "ยังไม่มีบันทึกในเดือนนี้</td></tr>"
+        )
+
+    _month_now = datetime.now().strftime("%Y-%m")
+    _shown = min(len(_entries), 100)
+
+    html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Audit Log — RANONG RAKTAI AI</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+       margin: 0; padding: 16px; background: #f5f5f5; }}
+h1 {{ font-size: 20px; color: #1a1a1a; }}
+.subtitle {{ color: #666; font-size: 13px; margin-bottom: 16px; }}
+.table-wrap {{ overflow-x: auto; }}
+table {{ width: 100%; border-collapse: collapse; background: #fff;
+         border-radius: 8px; overflow: hidden;
+         box-shadow: 0 1px 3px rgba(0,0,0,.1); }}
+th {{ background: #2c3e50; color: #fff; padding: 10px 8px;
+      text-align: left; font-size: 13px; white-space: nowrap; }}
+td {{ padding: 8px; border-bottom: 1px solid #eee;
+      font-size: 12px; word-break: break-all; }}
+tr:hover {{ background: #f8f9fa; }}
+.count {{ color: #666; font-size: 13px; margin-top: 12px; }}
+.cat-security {{ color: #e74c3c; font-weight: 600; }}
+.cat-clinical {{ color: #3498db; font-weight: 600; }}
+.cat-document {{ color: #27ae60; font-weight: 600; }}
+.cat-patient {{ color: #f39c12; font-weight: 600; }}
+.cat-admin {{ color: #9b59b6; font-weight: 600; }}
+.cat-system {{ color: #95a5a6; }}
+</style>
+</head>
+<body>
+<h1>📋 Audit Log</h1>
+<p class="subtitle">
+  บันทึกการเข้าถึงระบบ — PDPA Compliance |
+  เดือน: {_month_now}
+</p>
+<div class="table-wrap">
+<table>
+<thead>
+<tr>
+  <th>เวลา</th><th>หมวด</th><th>การกระทำ</th>
+  <th>ผู้ใช้</th><th>ผล</th><th>รายละเอียด</th>
+</tr>
+</thead>
+<tbody>
+{_rows_html}
+</tbody>
+</table>
+</div>
+<p class="count">แสดง {_shown} รายการล่าสุด</p>
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+# ── Uptime Status — สถานะระบบ ──
+@app.route("/admin/api/v2/uptime-status", methods=["GET"])
+def api_uptime_status():
+    """สถานะ uptime และทรัพยากรของระบบ"""
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    _uptime_secs = int(time.time() - _APP_START_TIME)
+    _uptime_days = _uptime_secs // 86400
+    _uptime_hours = (_uptime_secs % 86400) // 3600
+    _uptime_mins = (_uptime_secs % 3600) // 60
+
+    _uptime_info = {
+        "status": "running",
+        "version": "cloud-2.0-production-docroute",
+        "uptime": f"{_uptime_days}d {_uptime_hours}h {_uptime_mins}m",
+        "uptime_seconds": _uptime_secs,
+        "gcs_connected": bool(
+            storage
+            and hasattr(storage, "_bucket")
+            and storage._bucket
+        ),
+        "workers": int(os.getenv("WEB_CONCURRENCY", "2")),
+        "doc_count": len(doc_index._docs) if doc_index else 0,
+    }
+
+    try:
+        import resource
+        _usage = resource.getrusage(resource.RUSAGE_SELF)
+        _uptime_info["memory_mb"] = round(
+            _usage.ru_maxrss / 1024, 1
+        )
+    except Exception:
+        pass
+
+    return jsonify(_uptime_info)
 
 
 def is_authorized_user(user_hash: str) -> bool:
@@ -4474,6 +4864,48 @@ def handle_search_command(
             logger.warning(f"Feature 6 error: {type(e).__name__}")
             return "ขออภัย ระบบขัดข้องชั่วคราว กรุณาลองใหม่"
 
+    # ── วิธีใช้ / Help — เปิดให้ทุกคน (ไม่ต้อง authorize) ──
+    if text_stripped in ("วิธีใช้", "help", "คำสั่ง", "เมนู", "ช่วยเหลือ"):
+        return (
+            "📋 คำสั่งที่ใช้ได้ในระบบ RANONG RAKTAI AI\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "\n"
+            "📂 ค้นหาเอกสาร\n"
+            "• ค้นหา [คำ] — ค้นเอกสาร\n"
+            "• ขอไฟล์ [รหัส] — ดาวน์โหลดเอกสาร\n"
+            "• รายการล่าสุด — เอกสาร 5 รายการล่าสุด\n"
+            "\n"
+            "🔬 ผลตรวจแล็บ\n"
+            "• ผลแล็บ — ผลแล็บล่าสุด\n"
+            "• ผลแล็บ HN [เลข] — ผลแล็บผู้ป่วย\n"
+            "• วิเคราะห์แล็บ — วิเคราะห์ผลแล็บตาม KDIGO\n"
+            "• แนวโน้มแล็บ — กราฟแนวโน้มค่าแล็บ\n"
+            "• เปรียบเทียบแล็บ — เทียบผลแล็บล่าสุด vs ก่อนหน้า\n"
+            "• รายงานแล็บ — สรุปผลแล็บทั้งหมด\n"
+            "\n"
+            "💊 ยาและการรักษา\n"
+            "• ตรวจยา — ตรวจสอบรายการยาปัจจุบัน\n"
+            "• ตรวจยา HN [เลข] — ตรวจยาผู้ป่วย\n"
+            "\n"
+            "📊 เปรียบเทียบย้อนหลัง\n"
+            "• เปรียบเทียบแล็บย้อนหลัง HN [เลข]\n"
+            "• เปรียบเทียบยาย้อนหลัง HN [เลข]\n"
+            "• เปรียบเทียบฟอกเลือดย้อนหลัง HN [เลข]\n"
+            "\n"
+            "📈 KPI และตารางตรวจ\n"
+            "• KPI — ดัชนีคุณภาพ\n"
+            "• KPIไต — KPI โรคไตเฉพาะทาง\n"
+            "• ตารางตรวจ — กำหนดเจาะเลือดครั้งถัดไป\n"
+            "\n"
+            "👤 ข้อมูลผู้ป่วย\n"
+            "• สรุป HN [เลข] — สรุปข้อมูลผู้ป่วย\n"
+            "• HN ของฉัน — ดู HN ที่ลงทะเบียน\n"
+            "• ยืนยันผลแล็บ [รหัส] — อนุมัติผลแล็บ\n"
+            "\n"
+            "💡 พิมพ์คำสั่งตามตัวอย่างด้านบน\n"
+            "หรือส่งเอกสาร (รูป/PDF) เพื่อบันทึกอัตโนมัติ"
+        )
+
     if not is_authorized_user(user_hash):
         if parsed.command_type in PROTECTED_COMMANDS:
             audit_logger.log("unauthorized_access", user_hash, {
@@ -4493,7 +4925,9 @@ def handle_search_command(
                 or text_stripped == "KPI"
                 or text_stripped.startswith("ตรวจยา")
                 or text_stripped in ("ตารางตรวจ", "กำหนดตรวจ", "แล็บถัดไป")
-                or text_stripped in ("KPIไต", "kpiไต", "เป้าหมายไต", "dashboard")):
+                or text_stripped in ("KPIไต", "kpiไต", "เป้าหมายไต", "dashboard")
+                or text_stripped.startswith("สรุป HN")
+                or text_stripped.startswith("สรุปHN")):
             audit_logger.log("unauthorized_access", user_hash, {
                 "command": text_stripped[:20]
             })
@@ -5940,6 +6374,178 @@ def handle_search_command(
         except Exception as e:
             logger.warning(f"Nephrology KPI error: {type(e).__name__}")
             return "ขออภัย ไม่สามารถสร้างรายงาน KPI ไตได้ในขณะนี้"
+
+    # ── สรุปผู้ป่วย (Patient Summary) ──
+    if (text_stripped.startswith("สรุป HN ")
+            or text_stripped.startswith("สรุป HN")
+            or text_stripped.startswith("สรุปHN")
+            or text_stripped.startswith("สรุป ")):
+        _summary_hn = (
+            text_stripped
+            .replace("สรุป HN ", "")
+            .replace("สรุป HN", "")
+            .replace("สรุปHN", "")
+            .replace("สรุป", "")
+            .strip()
+        )
+        if not _summary_hn:
+            return "กรุณาระบุ HN เช่น: สรุป HN 56001"
+
+        try:
+            # ค้นหาผู้ป่วยจาก master registry
+            _summary_patient = None
+            _summary_folder = ""
+            if master_registry:
+                _mr_patients = master_registry.list_patients()
+                for _p in _mr_patients:
+                    if (str(_p.get("clinic_hn", "")) == _summary_hn
+                            or str(_p.get("hospital_hn", "")) == _summary_hn):
+                        _summary_patient = _p
+                        _summary_folder = _p.get("folder_name", "")
+                        break
+
+            if not _summary_patient:
+                return f"ไม่พบผู้ป่วย HN {_summary_hn} ในทะเบียน"
+
+            _p_name = _summary_patient.get("patient_name", "ไม่ทราบชื่อ")
+            _p_clinic_hn = _summary_patient.get("clinic_hn", "")
+            _p_hospital_hn = _summary_patient.get("hospital_hn", "")
+
+            lines = [
+                "👤 สรุปข้อมูลผู้ป่วย",
+                "━━━━━━━━━━━━━━━━━━━━",
+                f"ชื่อ: {_p_name}",
+                f"HN คลินิก: {_p_clinic_hn}",
+                f"HN รพ.: {_p_hospital_hn}",
+                "",
+            ]
+
+            # ── ผลแล็บล่าสุด ──
+            try:
+                _lab_history = get_patient_lab_history(
+                    storage, doc_index, "",
+                    patient_folder=_summary_folder,
+                )
+                if _lab_history:
+                    _latest_lab = _lab_history[0]
+                    lines.append("🔬 ผลแล็บล่าสุด")
+                    _lab_date = _latest_lab.get("date", "ไม่ทราบ")
+                    lines.append(f"   วันที่: {_lab_date}")
+                    _lab_items = _latest_lab.get("items", [])
+                    _key_labs = [
+                        "Cr", "BUN", "Hb", "Hct", "K",
+                        "Ca", "PO4", "Alb", "eGFR",
+                    ]
+                    _found_labs = []
+                    for _li in _lab_items:
+                        _lname = _li.get("name", "")
+                        for _kl in _key_labs:
+                            if _kl.lower() in _lname.lower():
+                                _found_labs.append(
+                                    f"{_lname}: {_li.get('value', '')} "
+                                    f"{_li.get('unit', '')}"
+                                )
+                                break
+                    for _fl in _found_labs[:8]:
+                        lines.append(f"   • {_fl}")
+                    if not _found_labs:
+                        lines.append("   (ไม่มีข้อมูลค่าแล็บ)")
+                else:
+                    lines.append("🔬 ผลแล็บ: ยังไม่มีข้อมูล")
+            except Exception:
+                lines.append("🔬 ผลแล็บ: ไม่สามารถดึงข้อมูลได้")
+
+            lines.append("")
+
+            # ── ยาปัจจุบัน ──
+            try:
+                _rx_history = get_patient_rx_history(
+                    storage, doc_index, "",
+                    patient_folder=_summary_folder,
+                )
+                if _rx_history:
+                    _latest_rx = _rx_history[0]
+                    lines.append("💊 ยาปัจจุบัน")
+                    _rx_date = _latest_rx.get("date", "ไม่ทราบ")
+                    lines.append(f"   วันที่: {_rx_date}")
+                    _rx_items = _latest_rx.get("medications", [])
+                    for _ri in _rx_items[:8]:
+                        if isinstance(_ri, dict):
+                            _rname = _ri.get("name", str(_ri))
+                            _rdose = _ri.get("dosage", "")
+                            lines.append(
+                                f"   • {_rname} {_rdose}".strip()
+                            )
+                        else:
+                            lines.append(f"   • {_ri}")
+                    if len(_rx_items) > 8:
+                        lines.append(
+                            f"   ... และอีก {len(_rx_items) - 8} รายการ"
+                        )
+                    if not _rx_items:
+                        lines.append("   (ไม่มีข้อมูลรายการยา)")
+                else:
+                    lines.append("💊 ยา: ยังไม่มีข้อมูล")
+            except Exception:
+                lines.append("💊 ยา: ไม่สามารถดึงข้อมูลได้")
+
+            lines.append("")
+
+            # ── ฟอกเลือดล่าสุด ──
+            try:
+                _dial_history = get_patient_dialysis_history(
+                    storage, doc_index, "",
+                    patient_folder=_summary_folder,
+                )
+                if _dial_history:
+                    _latest_dial = _dial_history[0]
+                    lines.append("🩸 ฟอกเลือดล่าสุด")
+                    _dial_date = _latest_dial.get("date", "ไม่ทราบ")
+                    lines.append(f"   วันที่: {_dial_date}")
+                    _dial_params = _latest_dial.get("parameters", {})
+                    if isinstance(_dial_params, dict):
+                        for _dk, _dv in list(
+                            _dial_params.items()
+                        )[:6]:
+                            lines.append(f"   • {_dk}: {_dv}")
+                else:
+                    lines.append("🩸 ฟอกเลือด: ยังไม่มีข้อมูล")
+            except Exception:
+                lines.append("🩸 ฟอกเลือด: ไม่สามารถดึงข้อมูลได้")
+
+            # จำนวนเอกสาร
+            try:
+                _all_docs = doc_index.list_by_patient_folder(
+                    _summary_folder
+                )
+                _doc_count = len(_all_docs) if _all_docs else 0
+                lines.append("")
+                lines.append(f"📁 เอกสารทั้งหมด: {_doc_count} ฉบับ")
+            except Exception:
+                pass
+
+            lines.append("")
+            lines.append("💡 พิมพ์คำสั่งเพิ่มเติม:")
+            lines.append(f"• ผลแล็บ HN {_summary_hn}")
+            lines.append(f"• ตรวจยา HN {_summary_hn}")
+            lines.append(
+                f"• เปรียบเทียบแล็บย้อนหลัง HN {_summary_hn}"
+            )
+
+            audit_logger.log("patient_summary_view", user_hash, {
+                "hn": _summary_hn,
+            })
+
+            return "\n".join(lines)
+
+        except Exception as e:
+            logger.warning(
+                "Patient summary error: %s", type(e).__name__
+            )
+            return (
+                f"ขออภัย ไม่สามารถสรุปข้อมูลผู้ป่วย "
+                f"HN {_summary_hn} ได้ในขณะนี้"
+            )
 
     return None  # ไม่ใช่คำสั่งค้นหา
 
