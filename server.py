@@ -4711,16 +4711,33 @@ def api_patient_data(hn):
     if not found:
         return jsonify({"error": err}), 404
 
-    # ── ดึงข้อมูลทั้งหมด ──
-    lab_history = _try_history_multi(
-        get_patient_lab_history, oh, folders
-    )
-    rx_history = _try_history_multi(
-        get_patient_rx_history, oh, folders
-    )
-    dial_history = _try_history_multi(
-        get_patient_dialysis_history, oh, folders
-    )
+    # ── ดึงข้อมูลทั้งหมด (จำกัดเวลา) ──
+    lab_history = []
+    rx_history = []
+    dial_history = []
+    try:
+        lab_history = _try_history_multi(
+            get_patient_lab_history, oh, folders
+        )
+    except Exception as _e:
+        logger.warning("Patient API lab: %s", type(_e).__name__)
+    try:
+        rx_history = _try_history_multi(
+            get_patient_rx_history, oh, folders
+        )
+    except Exception as _e:
+        logger.warning("Patient API rx: %s", type(_e).__name__)
+    try:
+        dial_history = _try_history_multi(
+            get_patient_dialysis_history, oh, folders
+        )
+    except Exception as _e:
+        logger.warning("Patient API dial: %s", type(_e).__name__)
+
+    # จำกัดจำนวนที่ส่ง (ป้องกัน response ใหญ่เกิน)
+    lab_history = lab_history[:20]
+    rx_history = rx_history[:20]
+    dial_history = dial_history[:20]
 
     # ── รายการเอกสาร ──
     all_docs = []
@@ -5249,17 +5266,44 @@ function renderData(data) {{
 }}
 
 // ── Load data ──
-fetch(BASE + '/admin/api/v2/patient-data/' + HN + '?secret=' + SECRET)
-    .then(function(r) {{ return r.json(); }})
+var apiUrl = BASE + '/admin/api/v2/patient-data/' + HN + '?secret=' + SECRET;
+var ctrl = new AbortController();
+var timer = setTimeout(function() {{ ctrl.abort(); }}, 25000);
+
+fetch(apiUrl, {{ signal: ctrl.signal }})
+    .then(function(r) {{
+        clearTimeout(timer);
+        if (!r.ok) {{
+            return r.json().then(function(d) {{
+                throw new Error(d.error || 'HTTP ' + r.status);
+            }}).catch(function() {{
+                throw new Error('HTTP ' + r.status);
+            }});
+        }}
+        return r.json();
+    }})
     .then(function(data) {{
         if (data.error) {{
             document.getElementById('patientName').textContent = '❌ ' + data.error;
+            document.getElementById('tabContent').innerHTML =
+                '<p style="padding:20px;color:#c62828">' + data.error + '</p>';
             return;
         }}
         renderData(data);
     }})
     .catch(function(err) {{
-        document.getElementById('patientName').textContent = '❌ ไม่สามารถโหลดข้อมูลได้';
+        clearTimeout(timer);
+        var msg = err.name === 'AbortError'
+            ? 'โหลดข้อมูลหมดเวลา — กรุณาลองใหม่'
+            : 'ไม่สามารถโหลดข้อมูลได้: ' + err.message;
+        document.getElementById('patientName').textContent = '❌ ' + msg;
+        document.getElementById('tabContent').innerHTML =
+            '<div style="padding:20px;text-align:center">'
+            + '<p style="color:#c62828;margin-bottom:12px">' + msg + '</p>'
+            + '<button onclick="location.reload()" '
+            + 'style="padding:10px 24px;background:#1DB446;color:#fff;'
+            + 'border:none;border-radius:8px;font-size:15px;cursor:pointer">'
+            + '🔄 ลองใหม่</button></div>';
     }});
 </script>
 </body>
