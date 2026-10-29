@@ -3832,6 +3832,65 @@ def _resolve_nurse_line_ids() -> list[str]:
     return nurse_ids
 
 
+@app.route("/admin/doc/view/<doc_id>")
+def admin_doc_view(doc_id):
+    """ดูเอกสาร — ลิงก์ถาวรไม่หมดอายุ (สร้าง Signed URL ใหม่ทุกครั้งที่เปิด)
+
+    Auth: ?secret=ADMIN_SECRET (ส่งผ่าน query string เพราะ LINE uri action
+    ไม่สามารถตั้ง header ได้)
+    ลิงก์นี้ใช้ใน LINE Flex Message แทน Signed URL ที่หมดอายุ 15 นาที
+    """
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return "ระบบยังไม่ได้ตั้งค่า", 500
+    secret = request.args.get("secret", "")
+    if not secret or not hmac.compare_digest(
+        secret.encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
+    ):
+        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+
+    doc_id = doc_id.strip()[:64]
+    if not doc_id:
+        return "รหัสเอกสารไม่ถูกต้อง", 400
+
+    # ดึงข้อมูลเอกสารจาก DocumentIndex
+    doc_meta = None
+    if doc_index:
+        doc_meta = doc_index.get(doc_id)
+    if not doc_meta:
+        return (
+            "<html><body style='font-family:sans-serif;text-align:center;"
+            "padding:40px'>"
+            "<h2>ไม่พบเอกสาร</h2>"
+            "<p>เอกสารนี้อาจถูกลบหรือรหัสไม่ถูกต้อง</p>"
+            "</body></html>"
+        ), 404
+
+    gcs_path = doc_meta.get("gcs_object_path", "")
+    if not gcs_path:
+        return (
+            "<html><body style='font-family:sans-serif;text-align:center;"
+            "padding:40px'>"
+            "<h2>ไม่พบไฟล์เอกสาร</h2>"
+            "<p>ไม่มีข้อมูลตำแหน่งจัดเก็บ</p>"
+            "</body></html>"
+        ), 404
+
+    # สร้าง Signed URL ใหม่ (อายุ 15 นาที) แล้ว redirect
+    signed_url = generate_signed_url(gcs_path, expiry_seconds=SIGNED_URL_EXPIRY)
+    if not signed_url:
+        return (
+            "<html><body style='font-family:sans-serif;text-align:center;"
+            "padding:40px'>"
+            "<h2>ไม่สามารถสร้างลิงก์ได้</h2>"
+            "<p>กรุณาลองใหม่ในอีกสักครู่</p>"
+            "</body></html>"
+        ), 500
+
+    return redirect(signed_url)
+
+
 @app.route("/admin/annotate/<doc_id>")
 def admin_annotate_page(doc_id):
     """หน้าเว็บสำหรับแพทย์สั่งการรักษา — เปิดจาก LINE Flex Message
@@ -8616,8 +8675,40 @@ def process_file_async(
                             )
 
                     if _doc_download_url:
+                        # สร้าง URL ถาวร (ไม่หมดอายุ) สำหรับเปิดเอกสาร
+                        _persistent_doc_url = ""
+                        _base_url_flex = os.getenv(
+                            "RENDER_EXTERNAL_URL", ""
+                        ).rstrip("/")
+                        _admin_secret_flex = os.getenv(
+                            "ADMIN_SECRET", ""
+                        ).strip()
+                        if (
+                            _base_url_flex
+                            and _admin_secret_flex
+                            and _doc_id
+                        ):
+                            _persistent_doc_url = (
+                                f"{_base_url_flex}/admin/doc/view/"
+                                f"{_doc_id}"
+                                f"?secret={_admin_secret_flex}"
+                            )
+                        # ใช้ URL ถาวรถ้ามี, ไม่งั้นใช้ signed URL เดิม
+                        if (
+                            _persistent_doc_url
+                            and len(_persistent_doc_url)
+                            <= LINE_URI_ACTION_MAX_LENGTH
+                        ):
+                            _final_doc_url = _persistent_doc_url
+                            _link_expiry_note = ""
+                        else:
+                            _final_doc_url = _doc_download_url
+                            _link_expiry_note = (
+                                f"⏱️ ลิงก์หมดอายุใน "
+                                f"{SIGNED_URL_EXPIRY // 60} นาที"
+                            )
+
                         # สร้าง Flex Message พร้อมปุ่มเปิดเอกสาร + สั่งการรักษา
-                        _expiry_min = SIGNED_URL_EXPIRY // 60
                         _cat_emoji = {
                             "bills": "🧾", "rx": "💊",
                             "lab": "🔬", "dialysis": "🩸",
@@ -8646,7 +8737,7 @@ def process_file_async(
                                 "action": {
                                     "type": "uri",
                                     "label": "📎 เปิดเอกสาร",
-                                    "uri": _doc_download_url,
+                                    "uri": _final_doc_url,
                                 },
                             },
                         ]
@@ -8712,13 +8803,19 @@ def process_file_async(
                                                 },
                                             ],
                                         },
-                                        {
-                                            "type": "text",
-                                            "text": f"⏱️ ลิงก์หมดอายุใน {_expiry_min} นาที",
-                                            "size": "xxs",
-                                            "color": "#999999",
-                                            "margin": "md",
-                                        },
+                                        *(
+                                            [
+                                                {
+                                                    "type": "text",
+                                                    "text": _link_expiry_note,
+                                                    "size": "xxs",
+                                                    "color": "#999999",
+                                                    "margin": "md",
+                                                },
+                                            ]
+                                            if _link_expiry_note
+                                            else []
+                                        ),
                                     ],
                                 },
                                 "footer": {
