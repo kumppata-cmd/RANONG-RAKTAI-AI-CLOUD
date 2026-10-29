@@ -2,23 +2,101 @@
 # -*- coding: utf-8 -*-
 """
 LINE OA Webhook Server — คลินิกระนอง รักษ์ไต (Cloud Version)
-Deploy บน Render Managed Cloud ด้วย Gunicorn
+RANONG-RAKTAI-AI Production-Grade Intelligent Command Center
 
-รองรับ: TXT, PDF (ข้อความ + สแกน), JPG, JPEG, PNG
+Deploy: Render Managed Cloud (Gunicorn, Docker, Singapore)
+Storage: Google Cloud Storage (GCS)
+Messaging: LINE OA Webhook (Messaging API)
+
+═══════════════════════════════════════════════════════════════
+ FILE STRUCTURE MAP — server.py (~14,800 lines)
+═══════════════════════════════════════════════════════════════
+
+ Lines 1-340:      Imports, Config, Constants
+ Lines 340-520:    Flask App, CORS, EnrollmentTokenStore
+ Lines 520-1220:   Storage Classes (Local, S3, GCS), get_storage()
+ Lines 1220-1270:  Module Init (DLQ, Monitor, Registries)
+ Lines 1270-1810:  DocumentIndex Class
+ Lines 1810-2140:  AuditLogger, Phase 2A/2B Module Init
+ Lines 2140-2730:  Admin API: Compare, HN Registry, Master Registry
+ Lines 2730-2840:  Classification Helpers (masking, shapes)
+ Lines 2840-3090:  Admin API: Alerts, Labs Re-extract
+ Lines 3090-3430:  Admin Registry Page (HTML)
+ Lines 3430-3690:  Document Reading, OCR, Search Helpers
+ Lines 3690-3835:  Download Proxy (HMAC Token), Flex Message Builder
+ Lines 3835-4260:  Physician Order System (annotate, order API)
+ Lines 4260-4570:  Order Ack, Audit Log Viewer, Uptime Status
+ Lines 4570-4770:  Google Integration Endpoints
+ Lines 4770-5330:  Patient Dashboard (resolve, API, HTML page)
+ Lines 5330-5470:  Authorization Helpers (is_authorized, is_physician)
+ Lines 5470-7560:  LINE Command Handlers (search, lab, rx, compare,
+                   summary, register, KPI, monitoring)
+ Lines 7560-7840:  Rate Limiting, Deduplication (StateStore, DedupGuard)
+ Lines 7840-7930:  File Validation (magic bytes, type detection)
+ Lines 7930-8250:  PDF/OCR Text Extraction (multi-pass, Thai+Eng)
+ Lines 8250-8640:  LINE API (push, reply, download, metadata)
+ Lines 8640-9310:  Classification (keyword matching, vendor detect)
+ Lines 9310-9860:  process_file_async (document processing pipeline)
+ Lines 9860-10700: Admin Notification (Flex Message, push to admins)
+ Lines 10700-11000: Webhook Handler + Download Proxy Route
+ Lines 11000-11600: Legacy Admin Endpoints (backfill, debug)
+ Lines 11600-12300: Admin API (stats, normalize-folders, retroactive)
+ Lines 12300-12500: Clinical Dashboard, LIFF
+ Lines 12500-12600: Dashboard V2 Chart
+ Lines 12600-13200: System Health, Dead-letter Endpoints
+ Lines 13200-13600: Dead-letter Admin Page
+ Lines 13600-14000: Startup: Keep-alive, Alert Driver
+ Lines 14000-14800: App Runner (__main__)
+
+═══════════════════════════════════════════════════════════════
+ EXTERNAL MODULES (แยกไฟล์แล้ว)
+═══════════════════════════════════════════════════════════════
+ quarterly_compare.py    — Lab/Rx/Dialysis history + comparison
+ lab_extractor.py        — Lab result extraction (regex)
+ lab_models.py           — LabResult, LabReport dataclasses
+ lab_alert.py            — Critical lab value alerts
+ lab_tracker.py          — Lab tracking over time
+ alert_delivery.py       — LINE push alert delivery + retry
+ medication_review.py    — Drug interaction checking
+ nephrology_drug_db.py   — Nephrology drug database (275 drugs)
+ nephrology_kpi.py       — KPI dashboard for nephrology
+ clinical_analyzer.py    — Clinical analysis engine
+ clinical_reports.py     — Monthly/weekly report generation
+ patient_identity.py     — Patient name/HN extraction from OCR
+ patient_hn_registry.py  — LINE user → HN mapping
+ patient_master_registry.py — Clinic-wide patient registry
+ vendor_registry.py      — Bill vendor detection + routing
+ monitoring_schedule.py  — Lab monitoring schedule
+ ckd_progression.py      — CKD stage tracking
+ audit_trail.py          — Audit logging (PDPA)
+ ocr_safety.py           — OCR clinical safety checks
+ physician_approval.py   — Lab result approval workflow
+ health_check.py         — Health check endpoints
+ dashboard.py            — Dashboard V2 web UI
+ ocr_review.py           — OCR review admin UI
+ lab_dashboard.py        — Lab dashboard web UI
+ line_patient_assistant.py — LINE patient assistant
+ document_workflow.py    — Document approval workflow
+ line_bot_enhancer.py    — LINE command parser
+ auto_report.py          — Automated report generation
+ clinical_dashboard.py   — Clinical dashboard web UI
+ liff_app.py             — LIFF (LINE Front-end Framework) app
+ dead_letter.py          — Dead letter queue for failed docs
+ system_monitor.py       — System health monitoring
+ google_drive_sync.py    — GCS → Google Drive backup
+ google_sheets_sync.py   — Patient data → Google Sheets export
+ gmail_report.py         — Email report delivery
+
+═══════════════════════════════════════════════════════════════
 
 กฎความปลอดภัย:
   - ตรวจสอบ LINE Webhook Signature ทุกครั้ง
   - ตรวจสอบชนิดไฟล์จริง (magic bytes) ก่อนประมวลผล
   - ไม่ลบไฟล์ต้นฉบับ
   - ไม่แก้ไขข้อมูลทางการแพทย์
-  - ไม่ส่งข้อมูลผู้ป่วยจริงไปยัง Claude API (เฉพาะเอกสารทดสอบ)
-
-ความแตกต่างจาก Windows version:
-  - ใช้ Gunicorn แทน Flask dev server
-  - PORT จาก environment variable (Render กำหนดให้)
-  - Tesseract path สำหรับ Linux (apt install)
-  - Storage abstraction สำหรับ cloud storage (S3/GCS) — ยังไม่เชื่อมต่อจริง
-  - ไม่มี ngrok, batch files, Windows-specific code
+  - EXTERNAL_AI_CLASSIFICATION_ALLOWED = False (hardcoded)
+  - ไม่ส่งข้อมูลผู้ป่วยลง logs
+  - PDPA compliant
 """
 
 import fcntl
@@ -5324,7 +5402,6 @@ function toggleCard(hdr) {{
 </script>
 </body>
 </html>"""
-    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
