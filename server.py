@@ -6394,50 +6394,100 @@ def handle_search_command(
             return "กรุณาระบุ HN เช่น: สรุป HN 56001"
 
         try:
-            # ค้นหาผู้ป่วยจาก master registry
-            _summary_patient = None
-            _summary_folder = ""
-            if master_registry:
-                _mr_matches = master_registry.search(_summary_hn)
-                if len(_mr_matches) == 1:
-                    _summary_patient = _mr_matches[0]
-                    _summary_folder = _summary_patient.folder_name
-                elif len(_mr_matches) > 1:
-                    # พบหลายรายการ — ให้ระบุให้ชัดเจน
-                    _multi_lines = [
-                        f"🔍 พบหลายรายการสำหรับ HN {_summary_hn}:"
-                    ]
-                    for _mp in _mr_matches[:5]:
-                        _multi_lines.append(
+            # ── Resolve patient: hn_registry → master_registry ──
+            # (เหมือนกับที่ compare timeline ทำ)
+            _s_oh = ""       # owner_hash (จาก hn_registry)
+            _s_pf = ""       # patient_folder (จาก master_registry)
+            _s_name = ""
+            _s_clinic_hn = ""
+            _s_hospital_hn = ""
+            _s_found = False
+            _s_hn_q = _summary_hn.replace("HN", "").replace(
+                "hn", ""
+            ).strip()
+
+            # 1) ค้นจาก hn_registry ก่อน
+            _s_phn = None
+            if hn_registry:
+                _s_phn = hn_registry.get_by_clinic_hn(_s_hn_q)
+                if not _s_phn:
+                    _s_phn = hn_registry.get_by_hospital_hn(
+                        _s_hn_q
+                    )
+                if not _s_phn:
+                    _s_hn_m = hn_registry.search_hn(_s_hn_q)
+                    if len(_s_hn_m) == 1:
+                        _s_phn = _s_hn_m[0]
+                    elif len(_s_hn_m) > 1:
+                        _ml = [f"🔍 พบหลายรายการ HN {_summary_hn}:"]
+                        for _m in _s_hn_m[:5]:
+                            _ml.append(
+                                f"  • HN {_m.clinic_hn or _m.hospital_hn}"
+                                f" — {_m.display_name or _m.owner_hash[:8]}"
+                            )
+                        _ml.append("\nกรุณาระบุ HN ให้ชัดเจน")
+                        return "\n".join(_ml)
+
+            if _s_phn:
+                _s_oh = _s_phn.owner_hash
+                _s_clinic_hn = _s_phn.clinic_hn
+                _s_hospital_hn = _s_phn.hospital_hn
+                _s_name = _s_phn.display_name
+                _s_found = True
+
+            # 2) ค้นจาก master_registry
+            if not _s_found and master_registry:
+                _mr_m = master_registry.search(_s_hn_q)
+                if len(_mr_m) == 1:
+                    _s_pf = _mr_m[0].folder_name
+                    _s_clinic_hn = _mr_m[0].clinic_hn
+                    _s_hospital_hn = _mr_m[0].hospital_hn
+                    _s_name = _mr_m[0].patient_name
+                    _s_found = True
+                elif len(_mr_m) > 1:
+                    _ml = [f"🔍 พบหลายรายการ HN {_summary_hn}:"]
+                    for _mp in _mr_m[:5]:
+                        _ml.append(
                             f"  • HN {_mp.clinic_hn or _mp.hospital_hn}"
                             f" — {_mp.patient_name}"
                         )
-                    _multi_lines.append(
-                        "\nกรุณาระบุ HN ให้ชัดเจน เช่น: สรุป HN 56001"
-                    )
-                    return "\n".join(_multi_lines)
+                    _ml.append("\nกรุณาระบุ HN ให้ชัดเจน")
+                    return "\n".join(_ml)
 
-            if not _summary_patient:
-                return f"ไม่พบผู้ป่วย HN {_summary_hn} ในทะเบียน"
+            # 3) ลองค้นจาก doc_index โดยตรง
+            if not _s_found:
+                _s_pf = _s_hn_q
+                try:
+                    _s_dd = doc_index.list_by_patient_folder(_s_hn_q)
+                except Exception:
+                    _s_dd = []
+                if _s_dd:
+                    _s_found = True
+                    _s_clinic_hn = _s_hn_q
 
-            _p_name = _summary_patient.patient_name or "ไม่ทราบชื่อ"
-            _p_clinic_hn = _summary_patient.clinic_hn or ""
-            _p_hospital_hn = _summary_patient.hospital_hn or ""
+            if not _s_found:
+                return (
+                    f"ไม่พบผู้ป่วย HN {_summary_hn} ในทะเบียน\n"
+                    f"ลองลงทะเบียนก่อน หรือตรวจสอบ HN"
+                )
 
             lines = [
                 "👤 สรุปข้อมูลผู้ป่วย",
                 "━━━━━━━━━━━━━━━━━━━━",
-                f"ชื่อ: {_p_name}",
-                f"HN คลินิก: {_p_clinic_hn}",
-                f"HN รพ.: {_p_hospital_hn}",
-                "",
             ]
+            if _s_name:
+                lines.append(f"ชื่อ: {_s_name}")
+            if _s_clinic_hn:
+                lines.append(f"HN คลินิก: {_s_clinic_hn}")
+            if _s_hospital_hn:
+                lines.append(f"HN รพ.: {_s_hospital_hn}")
+            lines.append("")
 
             # ── ผลแล็บล่าสุด ──
             try:
                 _lab_history = get_patient_lab_history(
-                    storage, doc_index, "",
-                    patient_folder=_summary_folder,
+                    storage, doc_index, _s_oh,
+                    patient_folder=_s_pf,
                 )
                 logger.info(
                     "Patient summary lab: folder=%s, count=%d",
@@ -6497,8 +6547,8 @@ def handle_search_command(
             # ── ยาปัจจุบัน ──
             try:
                 _rx_history = get_patient_rx_history(
-                    storage, doc_index, "",
-                    patient_folder=_summary_folder,
+                    storage, doc_index, _s_oh,
+                    patient_folder=_s_pf,
                 )
                 if _rx_history:
                     _latest_rx = _rx_history[0]
@@ -6536,8 +6586,8 @@ def handle_search_command(
             # ── ฟอกเลือดล่าสุด ──
             try:
                 _dial_history = get_patient_dialysis_history(
-                    storage, doc_index, "",
-                    patient_folder=_summary_folder,
+                    storage, doc_index, _s_oh,
+                    patient_folder=_s_pf,
                 )
                 if _dial_history:
                     _latest_dial = _dial_history[0]
@@ -6562,33 +6612,43 @@ def handle_search_command(
                 lines.append("🩸 ฟอกเลือด: ไม่สามารถดึงข้อมูลได้")
 
             # จำนวนเอกสาร
+            _doc_count = 0
             try:
-                _all_docs = doc_index.list_by_patient_folder(
-                    _summary_folder
-                )
+                if _s_pf:
+                    _all_docs = doc_index.list_by_patient_folder(
+                        _s_pf
+                    )
+                elif _s_oh:
+                    _all_docs = doc_index.list_by_owner(_s_oh)
+                else:
+                    _all_docs = []
                 _doc_count = len(_all_docs) if _all_docs else 0
-                lines.append("")
-                lines.append(f"📁 เอกสารทั้งหมด: {_doc_count} ฉบับ")
             except Exception:
                 pass
+            lines.append("")
+            lines.append(f"📁 เอกสารทั้งหมด: {_doc_count} ฉบับ")
 
             lines.append("")
-            lines.append("💡 พิมพ์คำสั่งเพิ่มเติม:")
-            lines.append(f"• ผลแล็บ HN {_summary_hn}")
-            lines.append(f"• ตรวจยา HN {_summary_hn}")
+            lines.append("💡 คำสั่งเพิ่มเติม:")
+            lines.append(f"• ผลแล็บ HN {_s_hn_q}")
+            lines.append(f"• ตรวจยา HN {_s_hn_q}")
             lines.append(
-                f"• เปรียบเทียบแล็บย้อนหลัง HN {_summary_hn}"
+                f"• เปรียบเทียบแล็บย้อนหลัง HN {_s_hn_q}"
+            )
+            lines.append(
+                f"• เปรียบเทียบยาย้อนหลัง HN {_s_hn_q}"
             )
 
             audit_logger.log("patient_summary_view", user_hash, {
-                "hn": _summary_hn,
+                "hn": _s_hn_q,
             })
 
             return "\n".join(lines)
 
         except Exception as e:
             logger.warning(
-                "Patient summary error: %s", type(e).__name__
+                "Patient summary error: %s: %s",
+                type(e).__name__, e,
             )
             return (
                 f"ขออภัย ไม่สามารถสรุปข้อมูลผู้ป่วย "
