@@ -4675,15 +4675,29 @@ def _resolve_patient_for_api(hn_q: str):
 
 
 def _try_history_multi(fn, oh, folders):
-    """ลองดึงข้อมูลจาก owner_hash แล้ว fallback หลาย folder"""
-    if oh:
-        result = fn(storage, doc_index, oh, patient_folder="")
-        if result:
-            return result
+    """ดึงข้อมูลจาก patient_folder เป็นหลัก (ไม่ใช้ owner_hash)
+
+    ปัญหาเดิม: owner_hash ของ staff ที่ส่งแทนคนไข้หลายคน
+    จะดึงเอกสารทุกคนมา → ข้อมูลคนไข้อื่นปน
+
+    แก้: ใช้ patient_folder เสมอ → ได้เฉพาะ HN ที่ระบุ
+    """
+    # ลอง patient_folder ก่อน (เฉพาะ HN)
     for pf in folders:
-        result = fn(storage, doc_index, "", patient_folder=pf)
-        if result:
-            return result
+        try:
+            result = fn(storage, doc_index, "", patient_folder=pf)
+            if result:
+                return result
+        except Exception:
+            pass
+    # Fallback: owner_hash เฉพาะเมื่อไม่มี folder เลย
+    if oh and not folders:
+        try:
+            result = fn(storage, doc_index, oh, patient_folder="")
+            if result:
+                return result
+        except Exception:
+            pass
     return []
 
 
@@ -4739,16 +4753,15 @@ def api_patient_data(hn):
     rx_history = rx_history[:20]
     dial_history = dial_history[:20]
 
-    # ── รายการเอกสาร ──
+    # ── รายการเอกสาร (เฉพาะ HN ที่ระบุ) ──
     all_docs = []
     try:
-        if oh:
+        for f in folders:
+            all_docs = doc_index.list_by_patient_folder(f)
+            if all_docs:
+                break
+        if not all_docs and oh and not folders:
             all_docs = doc_index.list_by_owner(oh)
-        if not all_docs:
-            for f in folders:
-                all_docs = doc_index.list_by_patient_folder(f)
-                if all_docs:
-                    break
     except Exception:
         pass
 
@@ -4831,16 +4844,18 @@ def admin_patient_page(hn):
     except Exception:
         pass
 
-    # ── เอกสารทั้งหมด ──
+    # ── เอกสารทั้งหมด (เฉพาะ HN ที่ระบุ) ──
     all_docs = []
     try:
-        if oh:
+        # ใช้ patient_folder เป็นหลัก ไม่ใช้ owner_hash
+        # (owner_hash ของ staff จะดึงเอกสารคนไข้ทุกคนมา)
+        for _f in folders:
+            all_docs = doc_index.list_by_patient_folder(_f)
+            if all_docs:
+                break
+        # Fallback: owner_hash เฉพาะเมื่อไม่มี folder
+        if not all_docs and oh and not folders:
             all_docs = doc_index.list_by_owner(oh)
-        if not all_docs:
-            for _f in folders:
-                all_docs = doc_index.list_by_patient_folder(_f)
-                if all_docs:
-                    break
     except Exception:
         pass
     doc_count = len(all_docs) if all_docs else 0
@@ -7266,20 +7281,20 @@ def handle_search_command(
                 )
                 lines.append("🩸 ฟอกเลือด: ยังไม่มีข้อมูล")
 
-            # จำนวนเอกสาร + แยกประเภท
+            # จำนวนเอกสาร + แยกประเภท (เฉพาะ HN)
             _doc_count = 0
             _cat_counts = {}
             try:
                 _all_docs = []
-                if _s_oh:
+                # ใช้ patient_folder เป็นหลัก (ไม่ใช้ owner_hash)
+                for _f in _s_folders:
+                    _all_docs = (
+                        doc_index.list_by_patient_folder(_f)
+                    )
+                    if _all_docs:
+                        break
+                if not _all_docs and _s_oh and not _s_folders:
                     _all_docs = doc_index.list_by_owner(_s_oh)
-                if not _all_docs:
-                    for _f in _s_folders:
-                        _all_docs = (
-                            doc_index.list_by_patient_folder(_f)
-                        )
-                        if _all_docs:
-                            break
                 _doc_count = len(_all_docs) if _all_docs else 0
                 for _d in (_all_docs or []):
                     _dc = _d.get("category", "other")
