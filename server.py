@@ -13033,6 +13033,126 @@ def admin_debug_hn_extract():
     }), 200
 
 
+# ─── Normalize Patient Folders ────────────────────────────
+
+@app.route("/admin/api/v2/normalize-folders", methods=["POST"])
+def admin_normalize_folders():
+    """Normalize patient_hn_folder ที่เป็น HN... ให้เป็น format มาตรฐาน.
+
+    Scan เอกสารทั้งหมดใน doc_index ที่ patient_hn_folder ขึ้นต้นด้วย "HN"
+    → จับคู่ HN กับ master_registry → อัปเดต doc index metadata เป็น
+    format มาตรฐาน ({clinic_hn}_{sanitized_name})
+
+    ไม่ย้ายไฟล์บน GCS — อัปเดตแค่ index metadata เท่านั้น
+    ข้อมูลเดิมไม่สูญหาย เพราะ list_by_patient_folder ยังค้น prefix ได้
+
+    Query params:
+      secret: ADMIN_SECRET
+      dry_run: "true" (default) เพื่อดู preview, "false" เพื่ออัปเดตจริง
+    """
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    dry_run = request.args.get("dry_run", "true").lower() == "true"
+
+    if not master_registry:
+        return jsonify({"error": "Master registry ไม่พร้อม"}), 500
+
+    reg_count = master_registry.count()
+    if reg_count == 0:
+        return jsonify({"error": "Registry ว่าง"}), 400
+
+    # Force reload
+    doc_index._ensure_fresh()
+
+    normalized = []
+    skipped = []
+    already_ok = 0
+    errors = []
+
+    for doc in doc_index._docs:
+        doc_id = doc.get("document_id", "")
+        old_folder = doc.get("patient_hn_folder", "")
+
+        if not old_folder:
+            continue
+
+        # เฉพาะ folder ที่ขึ้นต้นด้วย "HN" (format เก่า)
+        if not old_folder.upper().startswith("HN"):
+            already_ok += 1
+            continue
+
+        # ดึง HN ออกจาก "HN{hn}"
+        raw_hn = old_folder[2:]  # ตัด "HN" ออก
+        if not raw_hn:
+            continue
+
+        # ค้นหาใน master_registry
+        new_folder = master_registry.get_folder_for_hn(raw_hn)
+        if not new_folder:
+            skipped.append({
+                "doc_id": doc_id[:8],
+                "old_folder": old_folder[:20],
+                "reason": "ไม่พบใน master registry",
+            })
+            continue
+
+        if new_folder == old_folder:
+            already_ok += 1
+            continue
+
+        if dry_run:
+            normalized.append({
+                "doc_id": doc_id[:8],
+                "old": old_folder[:30],
+                "new": new_folder[:30],
+            })
+        else:
+            # อัปเดต doc index metadata
+            try:
+                doc["patient_hn_folder"] = new_folder
+                # เขียน per-doc JSON ใน GCS
+                if storage.is_ready:
+                    blob_path = f"{INDEX_DOC_PREFIX}{doc_id}.json"
+                    doc_json = json.dumps(doc, ensure_ascii=False)
+                    blob = storage._bucket.blob(blob_path)
+                    blob.upload_from_string(
+                        doc_json,
+                        content_type="application/json",
+                    )
+                normalized.append({
+                    "doc_id": doc_id[:8],
+                    "old": old_folder[:30],
+                    "new": new_folder[:30],
+                })
+                # ไม่ log ข้อมูลผู้ป่วย (PDPA)
+                logger.info(
+                    "Normalize folder: %s → standard format",
+                    doc_id[:8],
+                )
+            except Exception as e:
+                errors.append({
+                    "doc_id": doc_id[:8],
+                    "error": type(e).__name__,
+                })
+
+    return jsonify({
+        "dry_run": dry_run,
+        "registry_count": reg_count,
+        "total_docs": len(doc_index._docs),
+        "already_standard": already_ok,
+        "normalized": len(normalized),
+        "skipped": len(skipped),
+        "errors": len(errors),
+        "details": {
+            "normalized": normalized[:50],
+            "skipped": skipped[:50],
+            "errors": errors[:50],
+        },
+    })
+
+
 # ─── Admin Dashboard: Stats API ──────────────────────────
 
 @app.route("/admin/api/v2/retroactive-route", methods=["POST"])

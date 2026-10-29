@@ -666,41 +666,112 @@ def _date_to_quarter(date_str: str) -> str:
 
 # ── รายชื่อยาที่พบบ่อยในคลินิกไต (ใช้สำหรับ extraction) ──
 _KNOWN_DRUGS = [
-    # Antihypertensives
+    # ── Antihypertensives ──
     "losartan", "enalapril", "amlodipine", "carvedilol", "metoprolol",
     "nifedipine", "diltiazem", "verapamil", "hydralazine",
     "spironolactone", "hydrochlorothiazide", "doxazosin", "atenolol",
     "prazosin", "furosemide", "manidipine", "felodipine",
-    # Statins / Lipid
+    "lisinopril", "valsartan", "irbesartan", "telmisartan",
+    "candesartan", "olmesartan", "propranolol", "bisoprolol",
+    "labetalol", "methyldopa", "clonidine", "minoxidil",
+    "indapamide", "torsemide", "bumetanide", "chlorthalidone",
+    "eplerenone", "perindopril", "ramipril", "benazepril",
+    "mannitol", "isosorbide",
+    # Brand names (Thailand)
+    "norvasc", "cozaar", "diovan", "micardis", "atacand",
+    "concor", "betaloc", "lasix", "aldactone",
+    # ── Statins / Lipid ──
     "atorvastatin", "simvastatin", "rosuvastatin", "fenofibrate",
-    # Anti-platelet / Anticoagulant
-    "aspirin", "clopidogrel", "warfarin",
-    # DM
+    "ezetimibe", "gemfibrozil", "pravastatin", "fluvastatin",
+    "lipitor", "crestor", "zocor",
+    # ── Anti-platelet / Anticoagulant ──
+    "aspirin", "clopidogrel", "warfarin", "enoxaparin",
+    "heparin", "rivaroxaban", "apixaban", "dabigatran",
+    "ticagrelor", "dipyridamole", "cilostazol",
+    "plavix", "xarelto", "eliquis", "clexane",
+    # ── DM / Antidiabetics ──
     "metformin", "insulin", "glipizide", "gliclazide", "sitagliptin",
-    # CKD-specific
+    "vildagliptin", "linagliptin", "saxagliptin", "alogliptin",
+    "empagliflozin", "dapagliflozin", "canagliflozin",
+    "pioglitazone", "glimepiride", "acarbose", "repaglinide",
+    "liraglutide", "semaglutide", "dulaglutide",
+    "insulin glargine", "insulin aspart", "insulin lispro",
+    "insulin nph", "insulin mixtard",
+    "glucophage", "januvia", "galvus", "jardiance", "forxiga",
+    # ── CKD-specific / Nephrology ──
     "calcium carbonate", "folic acid", "ferrous sulfate", "calcitriol",
     "sodium bicarbonate", "sevelamer", "lanthanum", "cinacalcet",
-    "epo", "erythropoietin", "darbepoetin", "epoetin", "venofer",
-    # GI
+    "epo", "erythropoietin", "darbepoetin", "epoetin",
+    "epoetin alfa", "epoetin beta",
+    "venofer", "iron sucrose", "ferric carboxymaltose",
+    "iron dextran", "sodium ferric gluconate",
+    "alfacalcidol", "paricalcitol", "cholecalciferol",
+    "calcium acetate", "caco3",
+    "recormon", "eprex", "aranesp", "mircera", "cera",
+    "ferinject", "injectafer",
+    "sodium polystyrene sulfonate", "kayexalate",
+    "patiromer", "lokelma",
+    "desmopressin",
+    # Thai names for CKD drugs
+    "แคลเซียม คาร์บอเนต", "โฟลิค แอซิด", "เฟอรัส ซัลเฟต",
+    "โซเดียม ไบคาร์บอเนต", "อีพีโอ", "อิริโทรพอยอิติน",
+    "เฮปาริน", "แคลซิไตรออล",
+    # ── GI ──
     "omeprazole", "pantoprazole", "ranitidine", "domperidone",
-    "ondansetron",
-    # Pain / Neuro
+    "ondansetron", "metoclopramide", "esomeprazole", "lansoprazole",
+    "rabeprazole", "famotidine", "cimetidine",
+    "lactulose", "bisacodyl", "magnesium hydroxide",
+    "aluminium hydroxide", "sucralfate",
+    "losec", "nexium", "pariet",
+    # ── Pain / Neuro ──
     "paracetamol", "tramadol", "gabapentin", "pregabalin",
-    "amitriptyline",
-    # Psych
+    "amitriptyline", "nortriptyline",
+    "celecoxib", "meloxicam", "diclofenac", "ibuprofen",
+    "naproxen", "ketorolac", "morphine", "fentanyl",
+    "carbamazepine", "oxcarbazepine",
+    # ── Psych ──
     "fluoxetine", "diazepam", "alprazolam",
-    # Anti-convulsant
-    "phenytoin", "levetiracetam",
-    # Antibiotics
+    "sertraline", "escitalopram", "mirtazapine",
+    "quetiapine", "risperidone", "haloperidol",
+    "lorazepam", "clonazepam", "midazolam",
+    # ── Anti-convulsant ──
+    "phenytoin", "levetiracetam", "valproic acid", "topiramate",
+    "lamotrigine",
+    # ── Antibiotics ──
     "ciprofloxacin", "amoxicillin", "cephalexin", "clindamycin",
     "metronidazole", "doxycycline", "azithromycin", "levofloxacin",
-    "co-trimoxazole",
-    # Gout
+    "co-trimoxazole", "trimethoprim",
+    "ceftriaxone", "cefazolin", "ceftazidime", "cefixime",
+    "meropenem", "imipenem", "ertapenem",
+    "vancomycin", "teicoplanin", "linezolid",
+    "gentamicin", "amikacin",
+    "augmentin", "amoxicillin-clavulanate",
+    "piperacillin-tazobactam", "ampicillin-sulbactam",
+    "fluconazole", "itraconazole",
+    "nitrofurantoin", "fosfomycin",
+    # ── Gout ──
     "allopurinol", "colchicine", "febuxostat",
-    # Steroids
-    "prednisolone", "dexamethasone",
-    # Others
+    # ── Steroids ──
+    "prednisolone", "dexamethasone", "hydrocortisone",
+    "methylprednisolone", "fludrocortisone",
+    # ── Immunosuppressants (transplant) ──
+    "tacrolimus", "cyclosporine", "mycophenolate",
+    "azathioprine", "sirolimus", "everolimus",
+    "prograf", "cellcept", "sandimmun",
+    # ── Supplements / Vitamins ──
     "multivitamin", "vitamin b", "vitamin d", "iron",
+    "vitamin b1", "vitamin b6", "vitamin b12", "vitamin c",
+    "thiamine", "pyridoxine", "cyanocobalamin",
+    "ascorbic acid", "biotin", "zinc", "selenium",
+    "potassium chloride", "kcl",
+    "calcium", "magnesium",
+    # ── Thyroid ──
+    "levothyroxine", "propylthiouracil", "methimazole",
+    # ── Respiratory ──
+    "salbutamol", "ipratropium", "budesonide", "theophylline",
+    # ── Others ──
+    "sildenafil", "amlodipine-atorvastatin",
+    "losartan-hydrochlorothiazide",
 ]
 
 # ── Regex สำหรับจับชื่อยาจาก OCR text ──
@@ -1437,6 +1508,36 @@ _DIALYSIS_PATTERNS = {
         r"(?:Kt/?V|KT/?V)\s*[:\s]*(\d+\.?\d*)",
         re.IGNORECASE,
     ),
+    # ── เพิ่มเติม Phase 2B ──
+    "hd_no": re.compile(
+        r"(?:HD\s*(?:No\.?|no\.?|number)|ครั้งที่|H\.?D\.?\s*#?)\s*[:\s]*(\d+)",
+        re.IGNORECASE,
+    ),
+    "dialyzer": re.compile(
+        r"(?:Dialyzer|Filter|ตัวกรอง)\s*[:\s]*"
+        r"((?:FX|F|Polyflux|Elisio|Revaclear|Xevonta|Toray|Nipro)"
+        r"[- ]?\d*[A-Za-z]*)",
+        re.IGNORECASE,
+    ),
+    "heparin_dose": re.compile(
+        r"(?:Heparin|เฮปาริน|hep)\s*[:\s]*(\d+)\s*(?:unit|u|ยูนิต|IU)?",
+        re.IGNORECASE,
+    ),
+    "access_type": re.compile(
+        r"(?:Access|Vascular\s*access|ทางเข้าหลอดเลือด)\s*[:\s]*"
+        r"(AVF|AVG|AV\s*fistula|AV\s*graft|Perm\s*cath|Temp\s*cath|"
+        r"permanent\s*catheter|temporary\s*catheter|DLC|TDC|"
+        r"เอวีเอฟ|เอวีจี)",
+        re.IGNORECASE,
+    ),
+    "dialysate_flow": re.compile(
+        r"(?:QD|Qd|dialysate\s*flow)\s*[:\s]*(\d+)\s*(?:ml/?min)?",
+        re.IGNORECASE,
+    ),
+    "conductivity": re.compile(
+        r"(?:conductivity|cond\.?)\s*[:\s]*(\d+\.?\d*)\s*(?:mS/?cm)?",
+        re.IGNORECASE,
+    ),
 }
 
 
@@ -1450,12 +1551,16 @@ def extract_dialysis_data_from_text(ocr_text: str) -> dict:
         return {}
 
     data = {}
+    # Fields ที่เป็น string ไม่ใช่ตัวเลข
+    _string_fields = {"dialyzer", "access_type"}
     for key, pattern in _DIALYSIS_PATTERNS.items():
         match = pattern.search(ocr_text)
         if match:
             if key in ("pre_bp", "post_bp"):
                 data[f"{key}_sys"] = _safe_float(match.group(1))
                 data[f"{key}_dia"] = _safe_float(match.group(2))
+            elif key in _string_fields:
+                data[key] = match.group(1).strip()
             else:
                 data[key] = _safe_float(match.group(1))
 
