@@ -7269,6 +7269,90 @@ def handle_search_command(
             logger.warning(f"Nephrology KPI error: {type(e).__name__}")
             return "ขออภัย ไม่สามารถสร้างรายงาน KPI ไตได้ในขณะนี้"
 
+    # ── สรุปค่าใช้จ่าย (Expense Summary) ──
+    if text_stripped.startswith("สรุปค่าใช้จ่าย"):
+        if not expense_tracker:
+            return "ระบบติดตามค่าใช้จ่ายยังไม่พร้อมใช้งาน"
+
+        _exp_args = text_stripped.replace("สรุปค่าใช้จ่าย", "").strip()
+        try:
+            if _exp_args:
+                # parse month/year: "10/2569", "10/2026", "10 2026"
+                import re as _exp_re
+                _exp_m = _exp_re.search(r"(\d{1,2})[/\-\s]+(\d{2,4})", _exp_args)
+                if _exp_m:
+                    _exp_month = int(_exp_m.group(1))
+                    _exp_year = int(_exp_m.group(2))
+                    if _exp_year > 2400:
+                        _exp_year -= 543
+                    if _exp_year < 100:
+                        _exp_year += 2000
+                else:
+                    now = datetime.now(timezone.utc)
+                    _exp_month = now.month
+                    _exp_year = now.year
+            else:
+                now = datetime.now(timezone.utc)
+                _exp_month = now.month
+                _exp_year = now.year
+
+            summary = expense_tracker.get_monthly_summary(
+                _exp_year, _exp_month
+            )
+
+            _thai_yr = _exp_year + 543
+            _lines = [
+                f"🧾 สรุปค่าใช้จ่าย {_exp_month}/{_thai_yr}",
+                "━━━━━━━━━━━━━━━━━━━━",
+            ]
+
+            _inv_count = summary.get("invoice_count", 0)
+            if _inv_count == 0:
+                _lines.append("ไม่พบข้อมูลค่าใช้จ่ายในเดือนนี้")
+            else:
+                _total = summary.get("total", 0)
+                _vat = summary.get("vat_total", 0)
+                _lines.append(f"📊 จำนวน invoice: {_inv_count} ใบ")
+                _lines.append(f"💰 รวมทั้งสิ้น: {_total:,.2f} บาท")
+                if _vat > 0:
+                    _lines.append(f"📋 VAT รวม: {_vat:,.2f} บาท")
+
+                # แยกตามบริษัท (top 5)
+                _by_vendor = summary.get("by_vendor", {})
+                if _by_vendor:
+                    _lines.append("")
+                    _lines.append("🏢 แยกตามบริษัท:")
+                    for i, (v_name, v_total) in enumerate(
+                        _by_vendor.items()
+                    ):
+                        if i >= 5:
+                            _remain = len(_by_vendor) - 5
+                            _lines.append(f"  ... อีก {_remain} บริษัท")
+                            break
+                        _lines.append(
+                            f"  • {v_name}: {v_total:,.2f} บาท"
+                        )
+
+                # สถานะการชำระ
+                _by_status = summary.get("by_status", {})
+                if _by_status:
+                    _lines.append("")
+                    _paid = _by_status.get("paid", 0)
+                    _unpaid = _by_status.get("unpaid", 0)
+                    if _paid:
+                        _lines.append(f"✅ ชำระแล้ว: {_paid} ใบ")
+                    if _unpaid:
+                        _lines.append(f"⏳ ยังไม่ชำระ: {_unpaid} ใบ")
+
+            return "\n".join(_lines)
+
+        except Exception as exp_err:
+            logger.warning(
+                "Expense summary LINE cmd error: %s",
+                type(exp_err).__name__,
+            )
+            return "ขออภัย ไม่สามารถดึงข้อมูลค่าใช้จ่ายได้ในขณะนี้"
+
     # ── สรุปผู้ป่วย (Patient Summary) ──
     if (text_stripped.startswith("สรุป HN ")
             or text_stripped.startswith("สรุป HN")
