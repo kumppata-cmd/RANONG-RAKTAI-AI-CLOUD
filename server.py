@@ -5776,7 +5776,8 @@ def handle_search_command(
                 or text_stripped in ("ตารางตรวจ", "กำหนดตรวจ", "แล็บถัดไป")
                 or text_stripped in ("KPIไต", "kpiไต", "เป้าหมายไต", "dashboard")
                 or text_stripped.startswith("สรุป HN")
-                or text_stripped.startswith("สรุปHN")):
+                or text_stripped.startswith("สรุปHN")
+                or text_stripped.startswith("สรุปค่าใช้จ่าย")):
             audit_logger.log("unauthorized_access", user_hash, {
                 "command": text_stripped[:20]
             })
