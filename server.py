@@ -1308,6 +1308,18 @@ except Exception as _dlq_init_err:
         type(_dlq_init_err).__name__,
     )
 
+# ─── Expense Tracker ──────────────────────────────────────
+try:
+    from expense_tracker import ExpenseTracker
+    expense_tracker = ExpenseTracker(storage)
+    logger.info("Expense tracker initialized")
+except Exception as _et_init_err:
+    expense_tracker = None
+    logger.warning(
+        "Expense tracker init failed: %s",
+        type(_et_init_err).__name__,
+    )
+
 # ─── System Monitor ────────────────────────────────────────
 _system_monitor = None  # initialized after _alert_recipients
 
@@ -9498,12 +9510,35 @@ def process_file_async(
 
             category = result.get("category", "review")
 
+            # ── Confidence scoring + review_status ──
+            _confidence = result.get("confidence", 0.0)
+            try:
+                _confidence = float(_confidence)
+            except (TypeError, ValueError):
+                _confidence = 0.0
+            _review_status = (
+                "auto_approved" if _confidence >= 0.7
+                else "needs_review"
+            )
+
             # DLQ: classification ไม่ชัดเจน → review
             if category == "review" and dead_letter_queue:
                 dead_letter_queue.add(
                     _doc_id, "classify_review",
                     result.get("reason", "ไม่สามารถจำแนกได้")[:100],
                     category="review",
+                )
+            # DLQ: confidence ต่ำ (ไม่ใช่ review) → needs_review
+            elif (
+                _review_status == "needs_review"
+                and category != "review"
+                and dead_letter_queue
+            ):
+                dead_letter_queue.add(
+                    _doc_id, "low_confidence",
+                    f"confidence={_confidence:.2f} "
+                    f"({result.get('reason', '')[:80]})",
+                    category=category,
                 )
 
             # ชื่อแฟ้มบริษัทต้องมาจากทะเบียนเท่านั้น
@@ -9869,6 +9904,14 @@ def process_file_async(
                     # Owner tracking — ป้องกัน cross-patient access
                     # ผู้ใช้เห็นเฉพาะเอกสารที่ตัวเองส่ง
                     "owner_hash": owner_hash or "",
+                    # ── Schema V2 fields ──
+                    "schema_version": 2,
+                    "content_sha256": sha256_hex or "",
+                    "confidence": round(_confidence, 3),
+                    "review_status": _review_status,
+                    "classify_reason": (
+                        result.get("reason", "")[:200]
+                    ),
                 }
                 # ── patient_hn_folder: ให้ค้นเอกสารจาก HN ผู้ป่วยได้ ──
                 _hn_folder = metadata.get("patient_hn_folder", "")
