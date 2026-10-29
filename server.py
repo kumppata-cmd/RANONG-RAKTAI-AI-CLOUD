@@ -10203,6 +10203,47 @@ def process_file_async(
                         f"(doc_id={_doc_id[:8]})"
                     )
 
+            # ── Invoice Auto-Parse: ดึงข้อมูลบิลอัตโนมัติ ──
+            invoice_parsed = False
+            if (
+                category == "bills"
+                and stored_in_gcs
+                and extracted_text
+                and expense_tracker is not None
+            ):
+                try:
+                    from invoice_parser import parse_invoice
+                    _inv_result = parse_invoice(
+                        extracted_text, bill_company or ""
+                    )
+                    if _inv_result and _inv_result.get("total_amount", 0) > 0:
+                        # ตรวจ invoice ซ้ำ
+                        _dup = expense_tracker.detect_duplicate_invoice(
+                            _inv_result.get("invoice_number", ""),
+                            _inv_result.get("vendor_name", ""),
+                            _inv_result.get("total_amount", 0),
+                        )
+                        if not _dup:
+                            expense_tracker.record_invoice(
+                                _doc_id, _inv_result
+                            )
+                            invoice_parsed = True
+                            logger.info(
+                                "Invoice auto-parsed: doc=%s, conf=%.2f",
+                                _doc_id[:8],
+                                _inv_result.get("confidence", 0),
+                            )
+                        else:
+                            logger.info(
+                                "Invoice duplicate skipped: doc=%s",
+                                _doc_id[:8],
+                            )
+                except Exception as inv_err:
+                    logger.warning(
+                        "Invoice auto-parse failed: %s",
+                        type(inv_err).__name__,
+                    )
+
             # บันทึก log — ไม่เก็บ path หรือชื่อไฟล์ต้นฉบับ
             log_entry = {
                 "timestamp": datetime.now().isoformat(),
@@ -10214,6 +10255,7 @@ def process_file_async(
                 "classification": result,
                 "lab_extracted": lab_extracted,
                 "clinical_analyzed": clinical_analyzed,
+                "invoice_parsed": invoice_parsed,
             }
             log_file = os.path.join(BASE_DIR, "logs", "classification_log.jsonl")
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
@@ -10289,6 +10331,11 @@ def process_file_async(
             ]
             if bill_company and category == "bills":
                 _reply_lines.append(f"🏢 บริษัท: {bill_company}")
+            if invoice_parsed and category == "bills":
+                _reply_lines.append("🧾 บันทึกค่าใช้จ่ายอัตโนมัติแล้ว")
+                _reply_lines.append(
+                    "พิมพ์ 'สรุปค่าใช้จ่าย' เพื่อดูสรุปรายเดือน"
+                )
             if merged_page_count > 1:
                 _reply_lines.insert(0, f"📄 รวมผลแล็บ {merged_page_count} หน้าสำเร็จ")
             if lab_extracted:
