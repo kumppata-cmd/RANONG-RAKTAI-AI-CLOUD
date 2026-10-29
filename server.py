@@ -3795,6 +3795,334 @@ def build_file_flex_message(doc: dict, download_url: str) -> dict:
     }
 
 
+# ─── Physician annotation / treatment order system ───────
+# แพทย์กดปุ่ม "สั่งการรักษา" ใน LINE → เปิดหน้าเว็บที่แสดงเอกสาร
+# + ฟอร์มเขียนคำสั่งรักษา → กดส่ง → ระบบ push ไปยังพยาบาลทาง LINE
+# ─────────────────────────────────────────────────────────
+
+
+def _resolve_nurse_line_ids() -> list[str]:
+    """ดึง LINE user ID ของพยาบาลจากทะเบียนผู้รับ — สำหรับส่งคำสั่งรักษา
+
+    ค้นจากทะเบียนผู้รับ (alert_delivery) เฉพาะ role=nurse ที่ active=True
+    ถ้าไม่มีพยาบาลลงทะเบียน → fallback ส่งไปยัง physician ทั้งหมด
+    (เพราะแพทย์อาจส่งให้พยาบาลที่อยู่ตรงหน้าเอง)
+    ไม่ log LINE user ID
+    """
+    nurse_ids = []
+    try:
+        from alert_delivery import (
+            load_recipient_registry, _lookup_enrolled_line_id,
+        )
+        registry = load_recipient_registry(storage)
+        for r in registry.get("recipients", []):
+            if not r.get("active", True):
+                continue
+            if r.get("role", "").lower() != "nurse":
+                continue
+            uid = _lookup_enrolled_line_id(storage, r.get("user_hash", ""))
+            if uid:
+                nurse_ids.append(uid)
+    except Exception as e:
+        logger.warning("ค้นหาพยาบาลไม่สำเร็จ: %s", type(e).__name__)
+
+    if not nurse_ids:
+        # Fallback: ส่งไปยัง physician recipients ทั้งหมด
+        nurse_ids = list(_alert_recipients.get("physician", []))
+    return nurse_ids
+
+
+@app.route("/admin/annotate/<doc_id>")
+def admin_annotate_page(doc_id):
+    """หน้าเว็บสำหรับแพทย์สั่งการรักษา — เปิดจาก LINE Flex Message
+
+    Auth: ?secret=ADMIN_SECRET (ส่งผ่าน query string เพราะ LINE uri action
+    ไม่สามารถตั้ง header ได้ — URL นี้เข้าถึงได้เฉพาะแพทย์ที่มี secret)
+    """
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return "ระบบยังไม่ได้ตั้งค่า", 500
+    secret = request.args.get("secret", "")
+    if not secret or not hmac.compare_digest(
+        secret.encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
+    ):
+        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+
+    # Sanitize doc_id
+    doc_id = doc_id.strip()[:64]
+    if not doc_id:
+        return "รหัสเอกสารไม่ถูกต้อง", 400
+
+    # ดึงข้อมูลเอกสารจาก DocumentIndex
+    doc_meta = None
+    doc_download_url = None
+    if doc_index:
+        doc_meta = doc_index.get(doc_id)
+    if doc_meta:
+        gcs_path = doc_meta.get("gcs_object_path", "")
+        if gcs_path:
+            doc_download_url = get_download_url(gcs_path)
+
+    cat_name = _CAT_NAMES.get(
+        (doc_meta or {}).get("category", ""), "เอกสาร"
+    )
+    upload_date = (doc_meta or {}).get("upload_date", "ไม่ทราบ")
+    patient_folder = (doc_meta or {}).get("patient_hn_folder", "")
+    # ดึงข้อมูลผู้ป่วยจาก patient_folder
+    patient_info = patient_folder.replace("_", " ") if patient_folder else ""
+    storage_display = (doc_meta or {}).get("storage_display", "")
+
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+
+    # Pre-compute values for JavaScript (escape single quotes)
+    _cat_code = (doc_meta or {}).get("category", "").replace("'", "\\'")
+    _patient_info_js = patient_info.replace("'", "\\'")
+
+    html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>สั่งการรักษา</title>
+<style>
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #f5f5f5; color: #333;
+    padding: 16px; max-width: 600px; margin: 0 auto;
+    padding-bottom: env(safe-area-inset-bottom, 16px);
+}}
+.card {{
+    background: #fff; border-radius: 12px; padding: 20px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.08); margin-bottom: 16px;
+}}
+.card h2 {{ font-size: 18px; margin-bottom: 12px; color: #1a1a1a; }}
+.doc-info {{ display: flex; flex-direction: column; gap: 8px; }}
+.info-row {{ display: flex; justify-content: space-between; font-size: 14px; }}
+.info-label {{ color: #888; }}
+.info-value {{ color: #333; font-weight: 500; }}
+.btn-view {{
+    display: block; text-align: center; padding: 12px;
+    background: #1DB446; color: #fff; border-radius: 8px;
+    text-decoration: none; font-weight: 600; font-size: 15px;
+    margin-top: 12px;
+}}
+.btn-view:active {{ background: #179c3c; }}
+.order-form {{ display: flex; flex-direction: column; gap: 12px; }}
+.order-form label {{ font-size: 14px; color: #555; font-weight: 500; }}
+.order-form textarea {{
+    width: 100%; min-height: 140px; border: 1.5px solid #ddd;
+    border-radius: 8px; padding: 12px; font-size: 15px;
+    font-family: inherit; resize: vertical;
+}}
+.order-form textarea:focus {{
+    outline: none; border-color: #1DB446;
+    box-shadow: 0 0 0 3px rgba(29,180,70,.15);
+}}
+.quick-btns {{ display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }}
+.quick-btn {{
+    background: #f0f0f0; border: 1px solid #ddd; border-radius: 20px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer;
+    transition: background .15s;
+}}
+.quick-btn:active {{ background: #e0e0e0; }}
+.btn-send {{
+    display: block; width: 100%; padding: 14px; border: none;
+    background: #0066cc; color: #fff; border-radius: 8px;
+    font-size: 16px; font-weight: 600; cursor: pointer;
+}}
+.btn-send:active {{ background: #0055aa; }}
+.btn-send:disabled {{ background: #999; cursor: not-allowed; }}
+.status {{
+    text-align: center; padding: 12px; border-radius: 8px;
+    margin-top: 12px; font-size: 14px; display: none;
+}}
+.status.success {{ background: #e8f5e9; color: #2e7d32; display: block; }}
+.status.error {{ background: #fce4ec; color: #c62828; display: block; }}
+.status.sending {{ background: #e3f2fd; color: #1565c0; display: block; }}
+</style>
+</head>
+<body>
+
+<div class="card">
+    <h2>📋 ข้อมูลเอกสาร</h2>
+    <div class="doc-info">
+        <div class="info-row">
+            <span class="info-label">ประเภท</span>
+            <span class="info-value">{cat_name}</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">วันที่</span>
+            <span class="info-value">{upload_date}</span>
+        </div>
+        {"<div class='info-row'><span class='info-label'>ผู้ป่วย</span><span class='info-value'>" + patient_info + "</span></div>" if patient_info else ""}
+        {"<div class='info-row'><span class='info-label'>จัดเก็บ</span><span class='info-value'>" + storage_display[:60] + "</span></div>" if storage_display else ""}
+    </div>
+    {"<a href='" + doc_download_url + "' target='_blank' class='btn-view'>📎 เปิดดูเอกสาร</a>" if doc_download_url else "<p style='color:#c62828;margin-top:12px;font-size:14px'>⚠️ ไม่สามารถสร้างลิงก์ดูเอกสาร — กดปุ่มเปิดเอกสารจาก LINE แทน</p>"}
+</div>
+
+<div class="card">
+    <h2>✏️ สั่งการรักษา</h2>
+    <form class="order-form" id="orderForm" onsubmit="return sendOrder(event)">
+        <label>คำสั่งด่วน:</label>
+        <div class="quick-btns">
+            <span class="quick-btn" onclick="appendOrder('ปรับยา: ')">💊 ปรับยา</span>
+            <span class="quick-btn" onclick="appendOrder('ปรับน้ำหนักแห้ง: ')">⚖️ ปรับน้ำหนัก</span>
+            <span class="quick-btn" onclick="appendOrder('ปรับ UF goal: ')">💧 ปรับ UF</span>
+            <span class="quick-btn" onclick="appendOrder('เจาะแล็บ: ')">🔬 เจาะแล็บ</span>
+            <span class="quick-btn" onclick="appendOrder('นัดพบแพทย์: ')">📅 นัดพบแพทย์</span>
+            <span class="quick-btn" onclick="appendOrder('หมายเหตุ: ')">📝 หมายเหตุ</span>
+        </div>
+        <label for="orderText">รายละเอียดคำสั่ง:</label>
+        <textarea id="orderText" placeholder="เช่น ปรับ Losartan 50→100 mg 1x1&#10;ปรับน้ำหนักแห้ง 65→64 kg&#10;เจาะ CBC, BUN, Cr ก่อนฟอกครั้งหน้า" required></textarea>
+        <button type="submit" class="btn-send" id="btnSend">📤 ส่งคำสั่งให้พยาบาล</button>
+    </form>
+    <div id="status"></div>
+</div>
+
+<script>
+function appendOrder(text) {{
+    var ta = document.getElementById('orderText');
+    if (ta.value && !ta.value.endsWith('\\n')) ta.value += '\\n';
+    ta.value += text;
+    ta.focus();
+}}
+
+function sendOrder(e) {{
+    e.preventDefault();
+    var orderText = document.getElementById('orderText').value.trim();
+    if (!orderText) return false;
+
+    var btn = document.getElementById('btnSend');
+    var status = document.getElementById('status');
+    btn.disabled = true;
+    btn.textContent = '⏳ กำลังส่ง...';
+    status.className = 'status sending';
+    status.style.display = 'block';
+    status.textContent = 'กำลังส่งคำสั่งไปยังพยาบาล...';
+
+    fetch('{base_url}/admin/api/v2/physician-order', {{
+        method: 'POST',
+        headers: {{
+            'Content-Type': 'application/json',
+            'X-Admin-Secret': '{admin_secret}'
+        }},
+        body: JSON.stringify({{
+            doc_id: '{doc_id}',
+            order_text: orderText,
+            category: '{_cat_code}',
+            patient_info: '{_patient_info_js}'
+        }})
+    }})
+    .then(function(r) {{ return r.json(); }})
+    .then(function(data) {{
+        if (data.success) {{
+            status.className = 'status success';
+            status.textContent = '✅ ' + data.message;
+            btn.textContent = '✅ ส่งสำเร็จ';
+            // ล้างฟอร์ม
+            document.getElementById('orderText').value = '';
+            setTimeout(function() {{
+                btn.disabled = false;
+                btn.textContent = '📤 ส่งคำสั่งให้พยาบาล';
+            }}, 3000);
+        }} else {{
+            status.className = 'status error';
+            status.textContent = '❌ ' + (data.error || 'เกิดข้อผิดพลาด');
+            btn.disabled = false;
+            btn.textContent = '📤 ส่งคำสั่งให้พยาบาล';
+        }}
+    }})
+    .catch(function(err) {{
+        status.className = 'status error';
+        status.textContent = '❌ ไม่สามารถเชื่อมต่อเซิร์ฟเวอร์';
+        btn.disabled = false;
+        btn.textContent = '📤 ส่งคำสั่งให้พยาบาล';
+    }});
+
+    return false;
+}}
+</script>
+</body>
+</html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/admin/api/v2/physician-order", methods=["POST"])
+def api_physician_order():
+    """รับคำสั่งรักษาจากแพทย์แล้ว push ไปยังพยาบาลทาง LINE
+
+    ไม่ log เนื้อหาคำสั่งหรือข้อมูลผู้ป่วย
+    """
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    order_text = str(body.get("order_text", "")).strip()
+    doc_id = str(body.get("doc_id", "")).strip()[:64]
+    category = str(body.get("category", "")).strip()
+    patient_info = str(body.get("patient_info", "")).strip()
+
+    if not order_text:
+        return jsonify({"success": False, "error": "กรุณาระบุคำสั่งรักษา"}), 400
+    if len(order_text) > 2000:
+        return jsonify({"success": False, "error": "คำสั่งยาวเกินไป (สูงสุด 2000 ตัวอักษร)"}), 400
+
+    cat_name = _CAT_NAMES.get(category, "เอกสาร")
+
+    # สร้างข้อความสำหรับพยาบาล
+    nurse_msg_lines = [
+        "📋 คำสั่งแพทย์ (คลินิกระนอง รักษ์ไต)",
+        f"━━━━━━━━━━━━━━━━━",
+    ]
+    if patient_info:
+        nurse_msg_lines.append(f"👤 ผู้ป่วย: {patient_info}")
+    nurse_msg_lines.append(f"📁 เอกสาร: {cat_name}")
+    nurse_msg_lines.append(f"━━━━━━━━━━━━━━━━━")
+    nurse_msg_lines.append(f"")
+    nurse_msg_lines.append(order_text)
+    nurse_msg_lines.append(f"")
+    nurse_msg_lines.append(f"━━━━━━━━━━━━━━━━━")
+    nurse_msg_lines.append(
+        f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+    )
+    nurse_msg = "\n".join(nurse_msg_lines)
+
+    # ดึง LINE IDs ของพยาบาล
+    nurse_ids = _resolve_nurse_line_ids()
+    if not nurse_ids:
+        return jsonify({
+            "success": False,
+            "error": "ไม่พบผู้รับคำสั่ง — กรุณาเพิ่มพยาบาลในระบบก่อน",
+        }), 400
+
+    sent_count = 0
+    for nid in nurse_ids:
+        if push_message(nid, nurse_msg):
+            sent_count += 1
+
+    if sent_count > 0:
+        logger.info(
+            "คำสั่งแพทย์ส่งสำเร็จ %d/%d ราย (doc_id=%s)",
+            sent_count, len(nurse_ids), doc_id[:8],
+        )
+        return jsonify({
+            "success": True,
+            "message": f"ส่งคำสั่งถึงพยาบาล {sent_count} ราย สำเร็จ",
+        })
+    else:
+        logger.error(
+            "คำสั่งแพทย์ส่งไม่สำเร็จ: ไม่มีรายการที่ส่งได้ (doc_id=%s)",
+            doc_id[:8],
+        )
+        return jsonify({
+            "success": False,
+            "error": "ส่งคำสั่งไม่สำเร็จ — กรุณาลองใหม่",
+        }), 500
+
+
 def is_authorized_user(user_hash: str) -> bool:
     """ตรวจสอบว่า user hash อยู่ใน Allowlist.
 
@@ -8288,12 +8616,58 @@ def process_file_async(
                             )
 
                     if _doc_download_url:
-                        # สร้าง Flex Message พร้อมปุ่มเปิดเอกสาร
+                        # สร้าง Flex Message พร้อมปุ่มเปิดเอกสาร + สั่งการรักษา
                         _expiry_min = SIGNED_URL_EXPIRY // 60
                         _cat_emoji = {
                             "bills": "🧾", "rx": "💊",
                             "lab": "🔬", "dialysis": "🩸",
                         }.get(category, "📄")
+
+                        # สร้าง URL สำหรับหน้าสั่งการรักษา
+                        _annotate_url = ""
+                        _base_url = os.getenv(
+                            "RENDER_EXTERNAL_URL", ""
+                        ).rstrip("/")
+                        _admin_secret_val = os.getenv(
+                            "ADMIN_SECRET", ""
+                        ).strip()
+                        if _base_url and _admin_secret_val and _doc_id:
+                            _annotate_url = (
+                                f"{_base_url}/admin/annotate/{_doc_id}"
+                                f"?secret={_admin_secret_val}"
+                            )
+
+                        # ── Footer buttons ──
+                        _footer_buttons = [
+                            {
+                                "type": "button",
+                                "style": "primary",
+                                "color": "#1DB446",
+                                "action": {
+                                    "type": "uri",
+                                    "label": "📎 เปิดเอกสาร",
+                                    "uri": _doc_download_url,
+                                },
+                            },
+                        ]
+                        # เพิ่มปุ่มสั่งการรักษา (เฉพาะเมื่อมี URL)
+                        if _annotate_url and len(
+                            _annotate_url
+                        ) <= LINE_URI_ACTION_MAX_LENGTH:
+                            _footer_buttons.append(
+                                {
+                                    "type": "button",
+                                    "style": "primary",
+                                    "color": "#0066CC",
+                                    "action": {
+                                        "type": "uri",
+                                        "label": "✏️ สั่งการรักษา",
+                                        "uri": _annotate_url,
+                                    },
+                                    "margin": "sm",
+                                },
+                            )
+
                         _flex_msg = {
                             "type": "flex",
                             "altText": f"{_cat_emoji} เอกสาร {cat_name} — กดเพื่อเปิด",
@@ -8350,18 +8724,7 @@ def process_file_async(
                                 "footer": {
                                     "type": "box",
                                     "layout": "vertical",
-                                    "contents": [
-                                        {
-                                            "type": "button",
-                                            "style": "primary",
-                                            "color": "#1DB446",
-                                            "action": {
-                                                "type": "uri",
-                                                "label": "📎 เปิดเอกสาร",
-                                                "uri": _doc_download_url,
-                                            },
-                                        },
-                                    ],
+                                    "contents": _footer_buttons,
                                 },
                             },
                         }
