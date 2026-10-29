@@ -6156,21 +6156,65 @@ def handle_search_command(
         else:
             _patient_folder = ""
 
-        # ── เรียกฟังก์ชันตามประเภท ──
+        # ── สร้างรายการ folder ที่จะลองค้น ──
+        _cmp_folders = [_patient_folder] if _patient_folder else []
+        if hn_arg:
+            _cmp_hn_q = hn_arg.replace("HN", "").replace(
+                "hn", ""
+            ).strip()
+            if _cmp_hn_q and _cmp_hn_q not in _cmp_folders:
+                _cmp_folders.append(_cmp_hn_q)
+            _cmp_hn_pf = f"HN{_cmp_hn_q}"
+            if _cmp_hn_pf not in _cmp_folders:
+                _cmp_folders.append(_cmp_hn_pf)
+            # hospital HN
+            if patient:
+                _cmp_hhn = getattr(patient, "hospital_hn", "") or ""
+                if _cmp_hhn:
+                    for _cmp_v in [
+                        f"HN{_cmp_hhn}", _cmp_hhn,
+                    ]:
+                        if _cmp_v not in _cmp_folders:
+                            _cmp_folders.append(_cmp_v)
+            elif len(master_matches) == 1 if 'master_matches' in dir() else False:
+                pass  # folder_name already in _cmp_folders
+
+        # ── เรียกฟังก์ชันตามประเภท (ลองหลาย folder) ──
         cmd = parsed.command_type
         try:
+            # ลองค้นจาก target_hash ก่อน ถ้าไม่ได้ ลองแต่ละ folder
             if cmd == CommandType.COMPARE_LAB_TIMELINE:
-                result = compare_lab_timeline(storage, doc_index, target_hash, patient_folder=_patient_folder)
+                _cmp_fn = compare_lab_timeline
                 log_type = "compare_lab_timeline"
                 err_msg = "ขออภัย ไม่สามารถเปรียบเทียบผลแล็บย้อนหลังได้ในขณะนี้"
             elif cmd == CommandType.COMPARE_RX_TIMELINE:
-                result = compare_rx_timeline(storage, doc_index, target_hash, patient_folder=_patient_folder)
+                _cmp_fn = compare_rx_timeline
                 log_type = "compare_rx_timeline"
                 err_msg = "ขออภัย ไม่สามารถเปรียบเทียบใบยาย้อนหลังได้ในขณะนี้"
             else:
-                result = compare_dialysis_timeline(storage, doc_index, target_hash, patient_folder=_patient_folder)
+                _cmp_fn = compare_dialysis_timeline
                 log_type = "compare_dialysis_timeline"
                 err_msg = "ขออภัย ไม่สามารถเปรียบเทียบข้อมูลฟอกเลือดย้อนหลังได้ในขณะนี้"
+
+            # ลองค้น: target_hash แล้ว fallback หลาย folder
+            result = None
+            if target_hash:
+                result = _cmp_fn(
+                    storage, doc_index, target_hash,
+                    patient_folder=_patient_folder,
+                )
+            if (not result or "error" in result) and _cmp_folders:
+                for _cf in _cmp_folders:
+                    _r = _cmp_fn(
+                        storage, doc_index, "",
+                        patient_folder=_cf,
+                    )
+                    if _r and "error" not in _r:
+                        result = _r
+                        break
+
+            if not result:
+                result = {"error": err_msg}
 
             if "error" in result:
                 return result["error"]
@@ -6638,8 +6682,9 @@ def handle_search_command(
                 )
                 lines.append("🩸 ฟอกเลือด: ไม่สามารถดึงข้อมูลได้")
 
-            # จำนวนเอกสาร
+            # จำนวนเอกสาร + แยกประเภท
             _doc_count = 0
+            _cat_counts = {}
             try:
                 _all_docs = []
                 if _s_oh:
@@ -6652,10 +6697,32 @@ def handle_search_command(
                         if _all_docs:
                             break
                 _doc_count = len(_all_docs) if _all_docs else 0
+                for _d in (_all_docs or []):
+                    _dc = _d.get("category", "other")
+                    _cat_counts[_dc] = _cat_counts.get(_dc, 0) + 1
             except Exception:
                 pass
             lines.append("")
-            lines.append(f"📁 เอกสารทั้งหมด: {_doc_count} ฉบับ")
+            lines.append(
+                f"📁 เอกสารทั้งหมด: {_doc_count} ฉบับ"
+            )
+            if _cat_counts:
+                _cat_emojis = {
+                    "lab": "🔬", "rx": "💊",
+                    "dialysis": "🩸", "bills": "🧾",
+                    "review": "📋",
+                }
+                _cat_parts = []
+                for _ck, _cv in sorted(
+                    _cat_counts.items(),
+                    key=lambda x: -x[1],
+                ):
+                    _ce = _cat_emojis.get(_ck, "📄")
+                    _cn = _CAT_NAMES.get(_ck, _ck)
+                    _cat_parts.append(f"{_ce}{_cn} {_cv}")
+                lines.append(
+                    "   " + " | ".join(_cat_parts)
+                )
 
             lines.append("")
             lines.append("💡 คำสั่งเพิ่มเติม:")
