@@ -1218,6 +1218,21 @@ def get_storage():
 
 storage = get_storage()
 
+# ─── Dead Letter Queue ─────────────────────────────────────
+try:
+    from dead_letter import DeadLetterQueue
+    dead_letter_queue = DeadLetterQueue(storage)
+    logger.info("Dead-letter queue initialized")
+except Exception as _dlq_init_err:
+    dead_letter_queue = None
+    logger.warning(
+        "Dead-letter queue init failed: %s",
+        type(_dlq_init_err).__name__,
+    )
+
+# ─── System Monitor ────────────────────────────────────────
+_system_monitor = None  # initialized after _alert_recipients
+
 # ─── HN Registry: จัดการรหัส HN คลินิก + HN โรงพยาบาล ────
 hn_registry = HNRegistry()
 if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
@@ -4572,6 +4587,163 @@ def api_uptime_status():
         pass
 
     return jsonify(_uptime_info)
+
+
+# ═══════════════════════════════════════════════════════════
+# Google Integration — Drive / Sheets / Gmail
+# เปิดใช้งานผ่าน ENV: GOOGLE_DRIVE_ENABLED, GOOGLE_SHEETS_ENABLED,
+# GMAIL_ENABLED (default: ปิดทั้งหมด — ไม่กระทบระบบเดิม)
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/admin/api/v2/integrations/status", methods=["GET"])
+def api_integration_status():
+    """สถานะการเชื่อมต่อ Google services ทั้งหมด."""
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    status = {}
+    try:
+        import google_drive_sync
+        status["drive"] = google_drive_sync.get_status()
+    except Exception as _e:
+        status["drive"] = {"enabled": False, "error": type(_e).__name__}
+    try:
+        import google_sheets_sync
+        status["sheets"] = google_sheets_sync.get_status()
+    except Exception as _e:
+        status["sheets"] = {"enabled": False, "error": type(_e).__name__}
+    try:
+        import gmail_report
+        status["gmail"] = gmail_report.get_status()
+    except Exception as _e:
+        status["gmail"] = {"enabled": False, "error": type(_e).__name__}
+
+    return jsonify(status)
+
+
+@app.route("/admin/api/v2/sheets/sync-registry", methods=["POST"])
+def api_sheets_sync_registry():
+    """Sync รายชื่อผู้ป่วยไป Google Sheets."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import google_sheets_sync
+        if not google_sheets_sync.is_available():
+            return jsonify({
+                "error": "Google Sheets ไม่ได้เปิดใช้งาน — "
+                "ตั้ง GOOGLE_SHEETS_ENABLED=true และ GOOGLE_SHEETS_ID"
+            }), 400
+        result = google_sheets_sync.sync_patient_registry(
+            master_registry
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.warning("Sheets sync error: %s", type(e).__name__)
+        return jsonify({"error": type(e).__name__}), 500
+
+
+@app.route("/admin/api/v2/sheets/sync-labs", methods=["POST"])
+def api_sheets_sync_labs():
+    """Sync สรุปผลแล็บไป Google Sheets."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import google_sheets_sync
+        if not google_sheets_sync.is_available():
+            return jsonify({
+                "error": "Google Sheets ไม่ได้เปิดใช้งาน"
+            }), 400
+        result = google_sheets_sync.sync_lab_summary(
+            doc_index, storage
+        )
+        return jsonify(result)
+    except Exception as e:
+        logger.warning("Sheets lab sync error: %s", type(e).__name__)
+        return jsonify({"error": type(e).__name__}), 500
+
+
+@app.route("/admin/api/v2/drive/backup", methods=["POST"])
+def api_drive_backup():
+    """Backup เอกสารจาก GCS ไป Google Drive."""
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    doc_id = str(body.get("doc_id", "")).strip()[:64]
+
+    try:
+        import google_drive_sync
+        if not google_drive_sync.is_available():
+            return jsonify({
+                "error": "Google Drive ไม่ได้เปิดใช้งาน — "
+                "ตั้ง GOOGLE_DRIVE_ENABLED=true และ GOOGLE_DRIVE_FOLDER_ID"
+            }), 400
+
+        if doc_id:
+            # Backup เอกสารเฉพาะ
+            doc_meta = doc_index.get(doc_id) if doc_index else None
+            if not doc_meta:
+                return jsonify({"error": "ไม่พบเอกสาร"}), 404
+            gcs_path = doc_meta.get("gcs_object_path", "")
+            if not gcs_path:
+                return jsonify({"error": "ไม่มี GCS path"}), 400
+            category = doc_meta.get("category", "other")
+            result = google_drive_sync.backup_document_from_gcs(
+                storage, gcs_path, subfolder=category
+            )
+        else:
+            return jsonify({
+                "error": "กรุณาระบุ doc_id"
+            }), 400
+
+        return jsonify(result)
+    except Exception as e:
+        logger.warning("Drive backup error: %s", type(e).__name__)
+        return jsonify({"error": type(e).__name__}), 500
+
+
+@app.route("/admin/api/v2/gmail/send-summary", methods=["POST"])
+def api_gmail_send_summary():
+    """ส่งรายงานสรุปทาง Email."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import gmail_report
+        if not gmail_report.is_available():
+            return jsonify({
+                "error": "Gmail ไม่ได้เปิดใช้งาน — "
+                "ตั้ง GMAIL_ENABLED=true, GMAIL_SENDER, GMAIL_RECIPIENT"
+            }), 400
+
+        # สร้าง stats จากข้อมูลจริง
+        total_docs = len(doc_index._docs) if doc_index else 0
+        cat_counts: dict[str, int] = {}
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        new_today = 0
+        for d in (doc_index._docs if doc_index else []):
+            cat = d.get("category", "other")
+            cat_counts[cat] = cat_counts.get(cat, 0) + 1
+            if d.get("upload_date", "").startswith(today):
+                new_today += 1
+
+        stats = {
+            "date": today,
+            "total_docs": total_docs,
+            "new_today": new_today,
+            "by_category": cat_counts,
+            "alerts": 0,
+        }
+        result = gmail_report.send_daily_summary(stats)
+        return jsonify(result)
+    except Exception as e:
+        logger.warning("Gmail summary error: %s", type(e).__name__)
+        return jsonify({"error": type(e).__name__}), 500
 
 
 # ═══════════════════════════════════════════════════════════

@@ -59,6 +59,9 @@ Pillow==13.0.0
 google-cloud-storage==2.18.2
 google-auth==2.35.0
 
+# Google APIs (Drive, Sheets, Gmail) — ใช้เมื่อเปิด GOOGLE_*_ENABLED
+google-api-python-client==2.147.0
+
 # Chart Generation
 matplotlib==3.9.3
 
