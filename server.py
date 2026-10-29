@@ -5747,6 +5747,10 @@ def handle_search_command(
             "• HN ของฉัน — ดู HN ที่ลงทะเบียน\n"
             "• ยืนยันผลแล็บ [รหัส] — อนุมัติผลแล็บ\n"
             "\n"
+            "🧾 ค่าใช้จ่าย\n"
+            "• สรุปค่าใช้จ่าย — สรุปค่าใช้จ่ายเดือนนี้\n"
+            "• สรุปค่าใช้จ่าย [เดือน/ปี] — สรุปเดือนที่ระบุ\n"
+            "\n"
             "💡 พิมพ์คำสั่งตามตัวอย่างด้านบน\n"
             "หรือส่งเอกสาร (รูป/PDF) เพื่อบันทึกอัตโนมัติ"
         )
@@ -13589,6 +13593,135 @@ def api_system_health():
         return jsonify({"error": "System monitor ไม่พร้อม"}), 400
     health = _system_monitor.check_health()
     return jsonify(health)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+#  FINANCE MODULE — สรุปค่าใช้จ่ายคลินิก
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+
+@app.route("/admin/api/v2/finance/monthly-summary", methods=["GET"])
+def api_finance_monthly_summary():
+    """สรุปค่าใช้จ่ายรายเดือน"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not expense_tracker:
+        return jsonify({"error": "Expense tracker ไม่พร้อม"}), 400
+
+    year = request.args.get("year", "")
+    month = request.args.get("month", "")
+    if not year or not month:
+        now = datetime.now(timezone.utc)
+        year = year or str(now.year)
+        month = month or str(now.month)
+
+    try:
+        summary = expense_tracker.get_monthly_summary(
+            int(year), int(month)
+        )
+        return jsonify(summary)
+    except (ValueError, TypeError):
+        return jsonify({"error": "year/month ไม่ถูกต้อง"}), 400
+    except Exception as e:
+        logger.warning(
+            "Finance monthly summary error: %s", type(e).__name__
+        )
+        return jsonify({"error": "เกิดข้อผิดพลาด"}), 500
+
+
+@app.route("/admin/api/v2/finance/vendor-summary", methods=["GET"])
+def api_finance_vendor_summary():
+    """สรุปค่าใช้จ่ายรายบริษัท"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not expense_tracker:
+        return jsonify({"error": "Expense tracker ไม่พร้อม"}), 400
+
+    vendor = request.args.get("vendor", "")
+    if not vendor:
+        return jsonify({"error": "กรุณาระบุ vendor"}), 400
+
+    months = int(request.args.get("months", "6"))
+    months = min(max(months, 1), 24)  # จำกัด 1-24 เดือน
+
+    try:
+        summary = expense_tracker.get_vendor_summary(vendor, months)
+        return jsonify(summary)
+    except Exception as e:
+        logger.warning(
+            "Finance vendor summary error: %s", type(e).__name__
+        )
+        return jsonify({"error": "เกิดข้อผิดพลาด"}), 500
+
+
+@app.route("/admin/api/v2/finance/yearly-summary", methods=["GET"])
+def api_finance_yearly_summary():
+    """สรุปค่าใช้จ่ายรายปี"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not expense_tracker:
+        return jsonify({"error": "Expense tracker ไม่พร้อม"}), 400
+
+    year = request.args.get("year", "")
+    if not year:
+        year = str(datetime.now(timezone.utc).year)
+
+    try:
+        summary = expense_tracker.get_yearly_summary(int(year))
+        return jsonify(summary)
+    except (ValueError, TypeError):
+        return jsonify({"error": "year ไม่ถูกต้อง"}), 400
+    except Exception as e:
+        logger.warning(
+            "Finance yearly summary error: %s", type(e).__name__
+        )
+        return jsonify({"error": "เกิดข้อผิดพลาด"}), 500
+
+
+@app.route("/admin/api/v2/finance/parse-invoice", methods=["POST"])
+def api_finance_parse_invoice():
+    """Parse invoice จาก OCR text (manual)"""
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    data = request.get_json(silent=True) or {}
+    ocr_text = data.get("ocr_text", "")
+    vendor_hint = data.get("vendor_hint", "")
+    if not ocr_text or len(ocr_text.strip()) < 20:
+        return jsonify({"error": "กรุณาส่ง ocr_text (≥20 ตัวอักษร)"}), 400
+
+    try:
+        from invoice_parser import parse_invoice
+        result = parse_invoice(ocr_text, vendor_hint)
+        if not result:
+            return jsonify({"error": "ไม่สามารถ parse invoice ได้"}), 400
+        return jsonify(result)
+    except Exception as e:
+        logger.warning(
+            "Finance parse-invoice error: %s", type(e).__name__
+        )
+        return jsonify({"error": "เกิดข้อผิดพลาด"}), 500
+
+
+@app.route("/admin/api/v2/finance/status", methods=["GET"])
+def api_finance_status():
+    """สถานะระบบ finance"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not expense_tracker:
+        return jsonify({"enabled": False})
+    try:
+        return jsonify(expense_tracker.get_status())
+    except Exception as e:
+        logger.warning(
+            "Finance status error: %s", type(e).__name__
+        )
+        return jsonify({"enabled": False, "error": str(type(e).__name__)})
 
 
 @app.route("/admin/v2/dead-letter")
