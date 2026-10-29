@@ -4783,7 +4783,7 @@ def api_patient_data(hn):
 
 @app.route("/admin/patient/<hn>")
 def admin_patient_page(hn):
-    """หน้าเว็บสรุปผู้ป่วย — แล็บ/ยา/ฟอกเลือด + เปรียบเทียบ"""
+    """หน้าเว็บสรุปผู้ป่วย — Server-Side Render (ไม่ต้อง fetch API)"""
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return "ระบบยังไม่ได้ตั้งค่า", 500
@@ -4796,518 +4796,334 @@ def admin_patient_page(hn):
 
     hn = hn.strip()[:20]
     base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    hn_q = hn.replace("HN", "").replace("hn", "").strip()
+
+    # ── ดึงข้อมูลทั้งหมด server-side ──
+    (found, oh, pf, p_name, p_clinic, p_hospital,
+     folders, err) = _resolve_patient_for_api(hn_q)
+    if not found:
+        return (
+            f"<html><body style='font-family:sans-serif;"
+            f"text-align:center;padding:40px'>"
+            f"<h2>ไม่พบผู้ป่วย HN {hn}</h2>"
+            f"<p>{err}</p></body></html>"
+        ), 404
+
+    lab_h = []
+    rx_h = []
+    dial_h = []
+    try:
+        lab_h = _try_history_multi(
+            get_patient_lab_history, oh, folders
+        )[:15]
+    except Exception:
+        pass
+    try:
+        rx_h = _try_history_multi(
+            get_patient_rx_history, oh, folders
+        )[:15]
+    except Exception:
+        pass
+    try:
+        dial_h = _try_history_multi(
+            get_patient_dialysis_history, oh, folders
+        )[:15]
+    except Exception:
+        pass
+
+    # ── เอกสารทั้งหมด ──
+    all_docs = []
+    try:
+        if oh:
+            all_docs = doc_index.list_by_owner(oh)
+        if not all_docs:
+            for _f in folders:
+                all_docs = doc_index.list_by_patient_folder(_f)
+                if all_docs:
+                    break
+    except Exception:
+        pass
+    doc_count = len(all_docs) if all_docs else 0
+
+    # ── สร้าง HTML สำหรับ tab ผลแล็บ ──
+    _dial_names = {
+        "dry_weight": "น้ำหนักแห้ง", "uf_volume": "UF",
+        "duration": "เวลาฟอก(ชม.)", "dialyzer": "Dialyzer",
+        "blood_flow": "Blood Flow", "hd_no": "HD No.",
+        "pre_weight": "น้ำหนักก่อน", "post_weight": "น้ำหนักหลัง",
+        "pre_bp": "BP ก่อน", "post_bp": "BP หลัง", "kt_v": "Kt/V",
+    }
+
+    def _build_lab_cards():
+        if not lab_h:
+            return "<p class='empty'>ยังไม่มีผลแล็บในระบบ</p>"
+        parts = []
+        for i, lb in enumerate(lab_h):
+            dt = lb.get("upload_date", "?")
+            results = lb.get("results", [])
+            did = lb.get("doc_id", "")
+            rows = ""
+            for r in results:
+                rows += (
+                    f"<tr><td>{r.get('analyte', '?')}</td>"
+                    f"<td><b>{r.get('value', '')}</b></td>"
+                    f"<td>{r.get('unit', '')}</td></tr>"
+                )
+            if not rows:
+                rows = "<tr><td colspan='3'>ไม่มีข้อมูล</td></tr>"
+            view_btn = ""
+            if did and base_url:
+                view_btn = (
+                    f"<a href='{base_url}/admin/doc/view/{did}"
+                    f"?secret={secret}' class='btn-sm'>📎 เปิดเอกสาร</a>"
+                )
+            parts.append(
+                f"<div class='card'>"
+                f"<div class='card-hdr' onclick='toggleCard(this)'>"
+                f"<span>📅 {dt}</span>"
+                f"<span class='badge'>{len(results)} ค่า</span>"
+                f"<span class='arrow'>▼</span></div>"
+                f"<div class='card-body' style='display:none'>"
+                f"<table class='data-tbl'>"
+                f"<tr><th>ค่า</th><th>ผล</th><th>หน่วย</th></tr>"
+                f"{rows}</table>"
+                f"{view_btn}</div></div>"
+            )
+        return "".join(parts)
+
+    def _build_rx_cards():
+        if not rx_h:
+            return "<p class='empty'>ยังไม่มีใบยาในระบบ</p>"
+        parts = []
+        for rx in rx_h:
+            dt = rx.get("upload_date", "?")
+            drugs = rx.get("drugs", [])
+            did = rx.get("doc_id", "")
+            drug_list = ""
+            for d in drugs:
+                drug_list += f"<li>{d}</li>"
+            if not drug_list:
+                drug_list = "<li>ไม่พบรายการยา</li>"
+            view_btn = ""
+            if did and base_url:
+                view_btn = (
+                    f"<a href='{base_url}/admin/doc/view/{did}"
+                    f"?secret={secret}' class='btn-sm'>📎 เปิดเอกสาร</a>"
+                )
+            parts.append(
+                f"<div class='card'>"
+                f"<div class='card-hdr' onclick='toggleCard(this)'>"
+                f"<span>📅 {dt}</span>"
+                f"<span class='badge'>{len(drugs)} รายการ</span>"
+                f"<span class='arrow'>▼</span></div>"
+                f"<div class='card-body' style='display:none'>"
+                f"<ul class='drug-list'>{drug_list}</ul>"
+                f"{view_btn}</div></div>"
+            )
+        return "".join(parts)
+
+    def _build_dial_cards():
+        if not dial_h:
+            return "<p class='empty'>ยังไม่มีข้อมูลฟอกเลือดในระบบ</p>"
+        parts = []
+        for dl in dial_h:
+            dt = dl.get("upload_date", "?")
+            data = dl.get("data", {})
+            did = dl.get("doc_id", "")
+            rows = ""
+            if isinstance(data, dict):
+                for k, v in data.items():
+                    dn = _dial_names.get(k, k)
+                    rows += f"<tr><td>{dn}</td><td><b>{v}</b></td></tr>"
+            if not rows:
+                rows = "<tr><td colspan='2'>ไม่มีข้อมูล</td></tr>"
+            view_btn = ""
+            if did and base_url:
+                view_btn = (
+                    f"<a href='{base_url}/admin/doc/view/{did}"
+                    f"?secret={secret}' class='btn-sm'>📎 เปิดเอกสาร</a>"
+                )
+            parts.append(
+                f"<div class='card'>"
+                f"<div class='card-hdr' onclick='toggleCard(this)'>"
+                f"<span>📅 {dt}</span>"
+                f"<span class='badge'>{len(data)} ค่า</span>"
+                f"<span class='arrow'>▼</span></div>"
+                f"<div class='card-body' style='display:none'>"
+                f"<table class='data-tbl'>"
+                f"<tr><th>พารามิเตอร์</th><th>ค่า</th></tr>"
+                f"{rows}</table>"
+                f"{view_btn}</div></div>"
+            )
+        return "".join(parts)
+
+    lab_cards = _build_lab_cards()
+    rx_cards = _build_rx_cards()
+    dial_cards = _build_dial_cards()
+
+    # ── สร้าง comparison data สำหรับ JS ──
+    # เปรียบเทียบ 2 รายการล่าสุดของแล็บ
+    _cmp_html = ""
+    if len(lab_h) >= 2:
+        _new = lab_h[0]
+        _old = lab_h[1]
+        _cmp_rows = ""
+        _new_map = {}
+        for r in _new.get("results", []):
+            _new_map[r.get("analyte", "")] = r
+        for r in _old.get("results", []):
+            a = r.get("analyte", "")
+            ov = r.get("value", "")
+            nv_r = _new_map.pop(a, {})
+            nv = nv_r.get("value", "-")
+            unit = r.get("unit", "") or nv_r.get("unit", "")
+            trend = "→"
+            try:
+                if float(nv) > float(ov):
+                    trend = "<span class='up'>↑</span>"
+                elif float(nv) < float(ov):
+                    trend = "<span class='down'>↓</span>"
+            except (ValueError, TypeError):
+                pass
+            _cmp_rows += (
+                f"<tr><td>{a}</td><td>{ov}</td>"
+                f"<td>{nv}</td><td>{unit}</td>"
+                f"<td>{trend}</td></tr>"
+            )
+        # ค่าที่มีเฉพาะครั้งใหม่
+        for a, r in _new_map.items():
+            _cmp_rows += (
+                f"<tr><td>{a}</td><td>-</td>"
+                f"<td>{r.get('value', '')}</td>"
+                f"<td>{r.get('unit', '')}</td>"
+                f"<td><span class='new'>ใหม่</span></td></tr>"
+            )
+        _cmp_html = (
+            f"<div class='card cmp-card'>"
+            f"<h3>📊 เปรียบเทียบแล็บ</h3>"
+            f"<p class='cmp-dates'>"
+            f"ครั้งก่อน: {_old.get('upload_date', '?')} → "
+            f"ล่าสุด: {_new.get('upload_date', '?')}</p>"
+            f"<table class='data-tbl cmp-tbl'>"
+            f"<tr><th>ค่า</th><th>ก่อน</th>"
+            f"<th>ใหม่</th><th>หน่วย</th><th>แนวโน้ม</th></tr>"
+            f"{_cmp_rows}</table></div>"
+        )
+
+    # ปุ่มสั่งการรักษา
+    _annotate_btn = ""
+    if all_docs and base_url:
+        _latest_did = all_docs[0].get("document_id", "")
+        if _latest_did:
+            _annotate_btn = (
+                f"<a href='{base_url}/admin/annotate/{_latest_did}"
+                f"?secret={secret}' class='bottom-btn'>"
+                f"✏️ สั่งการรักษา</a>"
+            )
 
     html = f"""<!DOCTYPE html>
 <html lang="th">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-<title>สรุปผู้ป่วย — HN {hn}</title>
+<title>สรุปผู้ป่วย — HN {hn_q}</title>
 <style>
-* {{ box-sizing: border-box; margin: 0; padding: 0; }}
-body {{
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: #f0f2f5; color: #1a1a1a; padding-bottom: 80px;
-}}
-.header {{
-    background: linear-gradient(135deg, #1a73e8, #0d47a1);
-    color: #fff; padding: 20px 16px 16px;
-}}
-.header h1 {{ font-size: 18px; font-weight: 600; }}
-.header .hn-info {{ font-size: 13px; opacity: .85; margin-top: 4px; }}
-.header .doc-count {{
-    display: inline-block; background: rgba(255,255,255,.2);
-    border-radius: 12px; padding: 2px 10px; font-size: 12px; margin-top: 8px;
-}}
-.tabs {{
-    display: flex; background: #fff; border-bottom: 1px solid #e0e0e0;
-    position: sticky; top: 0; z-index: 10;
-}}
-.tab {{
-    flex: 1; padding: 12px 4px; text-align: center; font-size: 13px;
-    font-weight: 500; cursor: pointer; border-bottom: 3px solid transparent;
-    transition: all .15s; color: #666;
-}}
-.tab.active {{ color: #1a73e8; border-bottom-color: #1a73e8; }}
-.tab-content {{ display: none; padding: 12px 16px; }}
-.tab-content.active {{ display: block; }}
-.card {{
-    background: #fff; border-radius: 12px; padding: 14px;
-    margin-bottom: 10px; box-shadow: 0 1px 3px rgba(0,0,0,.08);
-    cursor: pointer; transition: box-shadow .15s;
-}}
-.card:active {{ box-shadow: 0 2px 8px rgba(0,0,0,.15); }}
-.card-header {{
-    display: flex; justify-content: space-between; align-items: center;
-}}
-.card-date {{ font-size: 13px; color: #1a73e8; font-weight: 600; }}
-.card-badge {{
-    font-size: 11px; padding: 2px 8px; border-radius: 10px;
-    background: #e8f0fe; color: #1a73e8;
-}}
-.card-details {{
-    display: none; margin-top: 10px; padding-top: 10px;
-    border-top: 1px solid #f0f0f0;
-}}
-.card.expanded .card-details {{ display: block; }}
-.detail-row {{
-    display: flex; justify-content: space-between; padding: 3px 0;
-    font-size: 13px;
-}}
-.detail-name {{ color: #555; }}
-.detail-value {{ font-weight: 500; color: #1a1a1a; }}
-.card-actions {{
-    display: flex; gap: 8px; margin-top: 10px;
-}}
-.btn-sm {{
-    flex: 1; padding: 8px; border: none; border-radius: 8px;
-    font-size: 12px; font-weight: 600; cursor: pointer; text-align: center;
-    text-decoration: none; color: #fff;
-}}
-.btn-green {{ background: #1DB446; }}
-.btn-blue {{ background: #1a73e8; }}
-.btn-orange {{ background: #e67e22; }}
-.compare-bar {{
-    display: none; position: fixed; bottom: 60px; left: 0; right: 0;
-    background: #fff; padding: 10px 16px; border-top: 1px solid #e0e0e0;
-    box-shadow: 0 -2px 8px rgba(0,0,0,.1); z-index: 20;
-    text-align: center;
-}}
-.compare-bar.show {{ display: block; }}
-.compare-bar button {{
-    padding: 10px 24px; background: #e67e22; color: #fff;
-    border: none; border-radius: 8px; font-size: 14px;
-    font-weight: 600; cursor: pointer;
-}}
-.bottom-bar {{
-    position: fixed; bottom: 0; left: 0; right: 0;
-    background: #fff; padding: 10px 16px;
-    border-top: 1px solid #e0e0e0; z-index: 20;
-    display: flex; gap: 8px;
-}}
-.bottom-bar a {{
-    flex: 1; padding: 12px; border: none; border-radius: 8px;
-    font-size: 14px; font-weight: 600; cursor: pointer;
-    text-align: center; text-decoration: none; color: #fff;
-}}
-.modal-overlay {{
-    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5);
-    z-index: 100; overflow-y: auto; padding: 20px 12px;
-}}
-.modal-overlay.show {{ display: block; }}
-.modal {{
-    background: #fff; border-radius: 16px; max-width: 600px;
-    margin: 0 auto; overflow: hidden;
-}}
-.modal-header {{
-    background: #e67e22; color: #fff; padding: 14px 16px;
-    display: flex; justify-content: space-between; align-items: center;
-}}
-.modal-header h2 {{ font-size: 16px; }}
-.modal-close {{
-    background: none; border: none; color: #fff;
-    font-size: 24px; cursor: pointer;
-}}
-.compare-table {{
-    width: 100%; border-collapse: collapse; font-size: 13px;
-}}
-.compare-table th {{
-    background: #f8f9fa; padding: 8px 10px; text-align: left;
-    border-bottom: 2px solid #e0e0e0; font-weight: 600;
-}}
-.compare-table td {{
-    padding: 6px 10px; border-bottom: 1px solid #f0f0f0;
-}}
-.trend-up {{ color: #e74c3c; }}
-.trend-down {{ color: #27ae60; }}
-.trend-same {{ color: #95a5a6; }}
-.empty-state {{
-    text-align: center; padding: 40px 16px; color: #999; font-size: 14px;
-}}
-.loading {{ text-align: center; padding: 40px; color: #999; }}
-.cb {{
-    width: 18px; height: 18px; margin-right: 8px;
-    vertical-align: middle; accent-color: #e67e22;
-}}
+*{{box-sizing:border-box;margin:0;padding:0}}
+body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;background:#f5f5f5;color:#1a1a1a;padding-bottom:70px}}
+.hdr{{background:linear-gradient(135deg,#1a73e8,#0d47a1);color:#fff;padding:20px 16px}}
+.hdr h1{{font-size:18px}} .hdr p{{font-size:13px;opacity:.85;margin-top:4px}}
+.stats{{display:flex;gap:8px;margin-top:8px}}
+.stat{{background:rgba(255,255,255,.2);padding:4px 10px;border-radius:12px;font-size:12px}}
+.tabs{{display:flex;border-bottom:2px solid #e0e0e0;background:#fff;position:sticky;top:0;z-index:10}}
+.tab{{flex:1;padding:12px 0;text-align:center;font-size:14px;font-weight:600;color:#666;cursor:pointer;border-bottom:3px solid transparent}}
+.tab.active{{color:#1a73e8;border-bottom-color:#1a73e8}}
+.content{{padding:12px}}
+.card{{background:#fff;border-radius:10px;margin-bottom:8px;box-shadow:0 1px 2px rgba(0,0,0,.08);overflow:hidden}}
+.card-hdr{{display:flex;align-items:center;justify-content:space-between;padding:12px;cursor:pointer}}
+.card-hdr:active{{background:#f0f0f0}}
+.badge{{background:#e3f2fd;color:#1565c0;padding:2px 8px;border-radius:10px;font-size:12px}}
+.arrow{{color:#999;font-size:12px;transition:transform .2s}}
+.arrow.open{{transform:rotate(180deg)}}
+.card-body{{padding:0 12px 12px;border-top:1px solid #f0f0f0}}
+.data-tbl{{width:100%;border-collapse:collapse;font-size:13px;margin-top:8px}}
+.data-tbl th{{text-align:left;color:#666;padding:6px 4px;border-bottom:1px solid #eee;font-weight:500}}
+.data-tbl td{{padding:6px 4px;border-bottom:1px solid #f5f5f5}}
+.drug-list{{list-style:none;padding:8px 0}} .drug-list li{{padding:4px 0;font-size:14px}}
+.drug-list li::before{{content:'💊 '}}
+.btn-sm{{display:inline-block;padding:6px 14px;background:#1DB446;color:#fff;border-radius:6px;text-decoration:none;font-size:13px;margin-top:8px}}
+.empty{{text-align:center;padding:30px;color:#999}}
+.cmp-card{{border:2px solid #1a73e8;margin:12px}}
+.cmp-card h3{{padding:12px;color:#1a73e8;font-size:16px}}
+.cmp-dates{{padding:0 12px 8px;font-size:13px;color:#666}}
+.cmp-tbl{{margin:0 12px 12px;width:calc(100% - 24px)}}
+.up{{color:#c62828;font-weight:700}} .down{{color:#2e7d32;font-weight:700}}
+.new{{color:#1565c0;font-size:12px}}
+.bottom-btn{{display:block;position:fixed;bottom:0;left:0;right:0;padding:14px;background:#0066cc;color:#fff;text-align:center;font-size:16px;font-weight:600;text-decoration:none;z-index:20}}
+.tab-content{{display:none}} .tab-content.active{{display:block}}
+
 </style>
 </head>
 <body>
-<div class="header" id="hdr">
-    <h1 id="patientName">กำลังโหลด...</h1>
-    <div class="hn-info" id="hnInfo"></div>
-    <span class="doc-count" id="docCount"></span>
+<div class="hdr">
+<h1>{p_name or 'ผู้ป่วย'}</h1>
+<p>HN คลินิก: {p_clinic} | HN รพ.: {p_hospital}</p>
+<div class="stats">
+<span class="stat">🔬 แล็บ {len(lab_h)}</span>
+<span class="stat">💊 ยา {len(rx_h)}</span>
+<span class="stat">🩸 ฟอก {len(dial_h)}</span>
+<span class="stat">📁 ทั้งหมด {doc_count}</span>
+</div>
 </div>
 
 <div class="tabs">
-    <div class="tab active" onclick="switchTab('lab')">🔬 ผลแล็บ</div>
-    <div class="tab" onclick="switchTab('rx')">💊 ใบยา</div>
-    <div class="tab" onclick="switchTab('dial')">🩸 ฟอกเลือด</div>
+<div class="tab active" onclick="showTab('lab',this)">🔬 ผลแล็บ</div>
+<div class="tab" onclick="showTab('rx',this)">💊 ใบยา</div>
+<div class="tab" onclick="showTab('dial',this)">🩸 ฟอกเลือด</div>
 </div>
 
-<div class="tab-content active" id="tab-lab">
-    <div class="loading">⏳ กำลังโหลดข้อมูล...</div>
+<div id="tab-lab" class="tab-content active">
+<div class="content">
+{_cmp_html}
+{lab_cards}
 </div>
-<div class="tab-content" id="tab-rx">
-    <div class="loading">⏳ กำลังโหลดข้อมูล...</div>
-</div>
-<div class="tab-content" id="tab-dial">
-    <div class="loading">⏳ กำลังโหลดข้อมูล...</div>
 </div>
 
-<div class="compare-bar" id="compareBar">
-    <button onclick="showCompare()">📊 เปรียบเทียบที่เลือก</button>
+<div id="tab-rx" class="tab-content">
+<div class="content">
+{rx_cards}
+</div>
 </div>
 
-<div class="bottom-bar" id="bottomBar"></div>
-
-<div class="modal-overlay" id="compareModal">
-    <div class="modal">
-        <div class="modal-header">
-            <h2>📊 เปรียบเทียบ</h2>
-            <button class="modal-close" onclick="closeCompare()">✕</button>
-        </div>
-        <div id="compareBody" style="padding:12px;overflow-x:auto;"></div>
-    </div>
+<div id="tab-dial" class="tab-content">
+<div class="content">
+{dial_cards}
 </div>
+</div>
+
+{_annotate_btn}
 
 <script>
-var DATA = null;
-var SECRET = '{secret}';
-var BASE = '{base_url}';
-var HN = '{hn}';
-var activeTab = 'lab';
-var selected = {{}};
-
-function switchTab(t) {{
-    activeTab = t;
-    selected = {{}};
-    updateCompareBar();
-    document.querySelectorAll('.tab').forEach(function(el, i) {{
-        el.classList.toggle('active', ['lab','rx','dial'][i] === t);
-    }});
-    document.querySelectorAll('.tab-content').forEach(function(el) {{
-        el.classList.toggle('active', el.id === 'tab-' + t);
-    }});
+function showTab(id,el) {{
+    document.querySelectorAll('.tab-content').forEach(function(t){{t.classList.remove('active')}});
+    document.querySelectorAll('.tab').forEach(function(t){{t.classList.remove('active')}});
+    document.getElementById('tab-'+id).classList.add('active');
+    el.classList.add('active');
 }}
-
-function toggleCard(id) {{
-    var el = document.getElementById(id);
-    if (el) el.classList.toggle('expanded');
-}}
-
-function toggleSelect(type, idx, cb) {{
-    var key = type + '_' + idx;
-    if (cb.checked) {{
-        selected[key] = true;
+function toggleCard(hdr) {{
+    var body = hdr.nextElementSibling;
+    var arrow = hdr.querySelector('.arrow');
+    if (body.style.display === 'none') {{
+        body.style.display = 'block';
+        if (arrow) arrow.classList.add('open');
     }} else {{
-        delete selected[key];
+        body.style.display = 'none';
+        if (arrow) arrow.classList.remove('open');
     }}
-    updateCompareBar();
 }}
-
-function updateCompareBar() {{
-    var keys = Object.keys(selected).filter(function(k) {{
-        return k.startsWith(activeTab + '_');
-    }});
-    var bar = document.getElementById('compareBar');
-    bar.classList.toggle('show', keys.length === 2);
-}}
-
-function showCompare() {{
-    var keys = Object.keys(selected).filter(function(k) {{
-        return k.startsWith(activeTab + '_');
-    }});
-    if (keys.length !== 2) return;
-    var i1 = parseInt(keys[0].split('_')[1]);
-    var i2 = parseInt(keys[1].split('_')[1]);
-    if (i1 > i2) {{ var tmp = i1; i1 = i2; i2 = tmp; }}
-
-    var body = document.getElementById('compareBody');
-
-    if (activeTab === 'lab') {{
-        var older = DATA.lab_history[i2];
-        var newer = DATA.lab_history[i1];
-        body.innerHTML = buildLabCompare(older, newer);
-    }} else if (activeTab === 'rx') {{
-        var older = DATA.rx_history[i2];
-        var newer = DATA.rx_history[i1];
-        body.innerHTML = buildRxCompare(older, newer);
-    }} else {{
-        var older = DATA.dialysis_history[i2];
-        var newer = DATA.dialysis_history[i1];
-        body.innerHTML = buildDialCompare(older, newer);
-    }}
-
-    document.getElementById('compareModal').classList.add('show');
-}}
-
-function closeCompare() {{
-    document.getElementById('compareModal').classList.remove('show');
-}}
-
-function buildLabCompare(older, newer) {{
-    var allKeys = {{}};
-    (older.results || []).forEach(function(r) {{ allKeys[r.analyte] = true; }});
-    (newer.results || []).forEach(function(r) {{ allKeys[r.analyte] = true; }});
-
-    var oMap = {{}};
-    (older.results || []).forEach(function(r) {{ oMap[r.analyte] = r; }});
-    var nMap = {{}};
-    (newer.results || []).forEach(function(r) {{ nMap[r.analyte] = r; }});
-
-    var h = '<table class="compare-table">';
-    h += '<tr><th>ค่า</th><th>' + (older.upload_date||'เก่า') + '</th>';
-    h += '<th>' + (newer.upload_date||'ใหม่') + '</th><th>แนวโน้ม</th></tr>';
-
-    Object.keys(allKeys).forEach(function(k) {{
-        var ov = oMap[k] ? oMap[k].value : '-';
-        var nv = nMap[k] ? nMap[k].value : '-';
-        var unit = (nMap[k]||oMap[k]||{{}}).unit || '';
-        var trend = '→';
-        var cls = 'trend-same';
-        if (typeof ov === 'number' && typeof nv === 'number') {{
-            if (nv > ov) {{ trend = '↑'; cls = 'trend-up'; }}
-            else if (nv < ov) {{ trend = '↓'; cls = 'trend-down'; }}
-        }}
-        h += '<tr><td>' + k + ' (' + unit + ')</td>';
-        h += '<td>' + ov + '</td><td>' + nv + '</td>';
-        h += '<td class="' + cls + '">' + trend + '</td></tr>';
-    }});
-    h += '</table>';
-    return h;
-}}
-
-function buildRxCompare(older, newer) {{
-    var oSet = {{}};
-    (older.drugs || []).forEach(function(d) {{ oSet[d] = true; }});
-    var nSet = {{}};
-    (newer.drugs || []).forEach(function(d) {{ nSet[d] = true; }});
-
-    var h = '<table class="compare-table">';
-    h += '<tr><th>ยา</th><th>' + (older.upload_date||'เก่า') + '</th>';
-    h += '<th>' + (newer.upload_date||'ใหม่') + '</th><th>สถานะ</th></tr>';
-
-    var allDrugs = {{}};
-    Object.keys(oSet).forEach(function(d) {{ allDrugs[d] = true; }});
-    Object.keys(nSet).forEach(function(d) {{ allDrugs[d] = true; }});
-
-    Object.keys(allDrugs).sort().forEach(function(d) {{
-        var inOld = oSet[d] ? '✓' : '-';
-        var inNew = nSet[d] ? '✓' : '-';
-        var status = '';
-        if (oSet[d] && nSet[d]) status = 'คงเดิม';
-        else if (!oSet[d] && nSet[d]) status = '<span class="trend-up">+ เพิ่ม</span>';
-        else status = '<span class="trend-down">− หยุด</span>';
-        h += '<tr><td>' + d + '</td><td>' + inOld + '</td>';
-        h += '<td>' + inNew + '</td><td>' + status + '</td></tr>';
-    }});
-    h += '</table>';
-    return h;
-}}
-
-function buildDialCompare(older, newer) {{
-    var oData = older.data || {{}};
-    var nData = newer.data || {{}};
-    var names = {{
-        dry_weight:'น้ำหนักแห้ง', uf_volume:'UF', duration:'เวลาฟอก',
-        dialyzer:'Dialyzer', blood_flow:'Blood Flow', hd_no:'HD No.',
-        pre_weight:'น้ำหนักก่อน', post_weight:'น้ำหนักหลัง',
-        pre_bp:'BP ก่อน', post_bp:'BP หลัง', kt_v:'Kt/V',
-    }};
-
-    var allKeys = {{}};
-    Object.keys(oData).forEach(function(k) {{ allKeys[k] = true; }});
-    Object.keys(nData).forEach(function(k) {{ allKeys[k] = true; }});
-
-    var h = '<table class="compare-table">';
-    h += '<tr><th>พารามิเตอร์</th><th>' + (older.upload_date||'เก่า') + '</th>';
-    h += '<th>' + (newer.upload_date||'ใหม่') + '</th><th>แนวโน้ม</th></tr>';
-
-    Object.keys(allKeys).forEach(function(k) {{
-        var label = names[k] || k;
-        var ov = oData[k] !== undefined ? oData[k] : '-';
-        var nv = nData[k] !== undefined ? nData[k] : '-';
-        var trend = '→';
-        var cls = 'trend-same';
-        var ovn = parseFloat(ov);
-        var nvn = parseFloat(nv);
-        if (!isNaN(ovn) && !isNaN(nvn)) {{
-            if (nvn > ovn) {{ trend = '↑'; cls = 'trend-up'; }}
-            else if (nvn < ovn) {{ trend = '↓'; cls = 'trend-down'; }}
-        }}
-        h += '<tr><td>' + label + '</td><td>' + ov + '</td>';
-        h += '<td>' + nv + '</td><td class="' + cls + '">' + trend + '</td></tr>';
-    }});
-    h += '</table>';
-    return h;
-}}
-
-function renderData(data) {{
-    DATA = data;
-    var p = data.patient;
-    document.getElementById('patientName').textContent =
-        (p.name || 'HN ' + HN);
-    var info = [];
-    if (p.clinic_hn) info.push('HN คลินิก: ' + p.clinic_hn);
-    if (p.hospital_hn) info.push('HN รพ.: ' + p.hospital_hn);
-    document.getElementById('hnInfo').textContent = info.join(' | ');
-    document.getElementById('docCount').textContent =
-        '📁 เอกสาร ' + data.doc_count + ' ฉบับ';
-
-    // ── Lab tab ──
-    var labHtml = '';
-    if (data.lab_history.length === 0) {{
-        labHtml = '<div class="empty-state">ยังไม่มีผลแล็บ</div>';
-    }}
-    data.lab_history.forEach(function(lab, i) {{
-        var results = lab.results || [];
-        labHtml += '<div class="card" id="lab_card_' + i + '">';
-        labHtml += '<div class="card-header" onclick="toggleCard(\'lab_card_'+i+'\')">';
-        labHtml += '<div><input type="checkbox" class="cb" onclick="event.stopPropagation();toggleSelect(\'lab\','+i+',this)">';
-        labHtml += '<span class="card-date">' + (lab.upload_date||'ไม่ทราบ') + '</span></div>';
-        labHtml += '<span class="card-badge">' + results.length + ' ค่า</span>';
-        labHtml += '</div>';
-        labHtml += '<div class="card-details">';
-        results.forEach(function(r) {{
-            labHtml += '<div class="detail-row"><span class="detail-name">'
-                + r.analyte + '</span><span class="detail-value">'
-                + r.value + ' ' + (r.unit||'') + '</span></div>';
-        }});
-        if (lab.doc_id) {{
-            labHtml += '<div class="card-actions">';
-            labHtml += '<a class="btn-sm btn-green" href="' + BASE
-                + '/admin/doc/view/' + lab.doc_id + '?secret=' + SECRET
-                + '">📎 เปิดเอกสาร</a>';
-            labHtml += '</div>';
-        }}
-        labHtml += '</div></div>';
-    }});
-    document.getElementById('tab-lab').innerHTML = labHtml;
-
-    // ── Rx tab ──
-    var rxHtml = '';
-    if (data.rx_history.length === 0) {{
-        rxHtml = '<div class="empty-state">ยังไม่มีใบยา</div>';
-    }}
-    data.rx_history.forEach(function(rx, i) {{
-        var drugs = rx.drugs || [];
-        rxHtml += '<div class="card" id="rx_card_' + i + '">';
-        rxHtml += '<div class="card-header" onclick="toggleCard(\'rx_card_'+i+'\')">';
-        rxHtml += '<div><input type="checkbox" class="cb" onclick="event.stopPropagation();toggleSelect(\'rx\','+i+',this)">';
-        rxHtml += '<span class="card-date">' + (rx.upload_date||'ไม่ทราบ') + '</span></div>';
-        rxHtml += '<span class="card-badge">' + drugs.length + ' ตัว</span>';
-        rxHtml += '</div>';
-        rxHtml += '<div class="card-details">';
-        drugs.forEach(function(d) {{
-            rxHtml += '<div class="detail-row"><span class="detail-name">💊</span>';
-            rxHtml += '<span class="detail-value">' + d + '</span></div>';
-        }});
-        if (rx.doc_id) {{
-            rxHtml += '<div class="card-actions">';
-            rxHtml += '<a class="btn-sm btn-green" href="' + BASE
-                + '/admin/doc/view/' + rx.doc_id + '?secret=' + SECRET
-                + '">📎 เปิดเอกสาร</a>';
-            rxHtml += '</div>';
-        }}
-        rxHtml += '</div></div>';
-    }});
-    document.getElementById('tab-rx').innerHTML = rxHtml;
-
-    // ── Dialysis tab ──
-    var dialHtml = '';
-    if (data.dialysis_history.length === 0) {{
-        dialHtml = '<div class="empty-state">ยังไม่มีข้อมูลฟอกเลือด</div>';
-    }}
-    var dialNames = {{
-        dry_weight:'น้ำหนักแห้ง', uf_volume:'UF', duration:'เวลาฟอก (ชม.)',
-        dialyzer:'Dialyzer', blood_flow:'Blood Flow', hd_no:'HD No.',
-        pre_weight:'น้ำหนักก่อน', post_weight:'น้ำหนักหลัง',
-        pre_bp:'BP ก่อน', post_bp:'BP หลัง', kt_v:'Kt/V',
-    }};
-    data.dialysis_history.forEach(function(d, i) {{
-        var params = d.data || {{}};
-        var paramKeys = Object.keys(params);
-        dialHtml += '<div class="card" id="dial_card_' + i + '">';
-        dialHtml += '<div class="card-header" onclick="toggleCard(\'dial_card_'+i+'\')">';
-        dialHtml += '<div><input type="checkbox" class="cb" onclick="event.stopPropagation();toggleSelect(\'dial\','+i+',this)">';
-        dialHtml += '<span class="card-date">' + (d.upload_date||'ไม่ทราบ') + '</span></div>';
-        dialHtml += '<span class="card-badge">' + paramKeys.length + ' ค่า</span>';
-        dialHtml += '</div>';
-        dialHtml += '<div class="card-details">';
-        paramKeys.forEach(function(k) {{
-            var label = dialNames[k] || k;
-            dialHtml += '<div class="detail-row"><span class="detail-name">'
-                + label + '</span><span class="detail-value">'
-                + params[k] + '</span></div>';
-        }});
-        if (d.doc_id) {{
-            dialHtml += '<div class="card-actions">';
-            dialHtml += '<a class="btn-sm btn-green" href="' + BASE
-                + '/admin/doc/view/' + d.doc_id + '?secret=' + SECRET
-                + '">📎 เปิดเอกสาร</a>';
-            dialHtml += '</div>';
-        }}
-        dialHtml += '</div></div>';
-    }});
-    document.getElementById('tab-dial').innerHTML = dialHtml;
-
-    // ── Bottom bar ──
-    var bottomHtml = '';
-    var latestDocId = '';
-    if (data.documents.length > 0) {{
-        latestDocId = data.documents[0].doc_id;
-    }}
-    if (latestDocId) {{
-        bottomHtml += '<a href="' + BASE + '/admin/annotate/' + latestDocId
-            + '?secret=' + SECRET + '" class="btn-blue" '
-            + 'style="background:#0066CC">✏️ สั่งการรักษา</a>';
-    }}
-    document.getElementById('bottomBar').innerHTML = bottomHtml;
-}}
-
-// ── Load data ──
-var apiUrl = BASE + '/admin/api/v2/patient-data/' + HN + '?secret=' + SECRET;
-var ctrl = new AbortController();
-var timer = setTimeout(function() {{ ctrl.abort(); }}, 25000);
-
-fetch(apiUrl, {{ signal: ctrl.signal }})
-    .then(function(r) {{
-        clearTimeout(timer);
-        if (!r.ok) {{
-            return r.json().then(function(d) {{
-                throw new Error(d.error || 'HTTP ' + r.status);
-            }}).catch(function() {{
-                throw new Error('HTTP ' + r.status);
-            }});
-        }}
-        return r.json();
-    }})
-    .then(function(data) {{
-        if (data.error) {{
-            document.getElementById('patientName').textContent = '❌ ' + data.error;
-            document.getElementById('tabContent').innerHTML =
-                '<p style="padding:20px;color:#c62828">' + data.error + '</p>';
-            return;
-        }}
-        renderData(data);
-    }})
-    .catch(function(err) {{
-        clearTimeout(timer);
-        var msg = err.name === 'AbortError'
-            ? 'โหลดข้อมูลหมดเวลา — กรุณาลองใหม่'
-            : 'ไม่สามารถโหลดข้อมูลได้: ' + err.message;
-        document.getElementById('patientName').textContent = '❌ ' + msg;
-        document.getElementById('tabContent').innerHTML =
-            '<div style="padding:20px;text-align:center">'
-            + '<p style="color:#c62828;margin-bottom:12px">' + msg + '</p>'
-            + '<button onclick="location.reload()" '
-            + 'style="padding:10px 24px;background:#1DB446;color:#fff;'
-            + 'border:none;border-radius:8px;font-size:15px;cursor:pointer">'
-            + '🔄 ลองใหม่</button></div>';
-    }});
 </script>
 </body>
 </html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
