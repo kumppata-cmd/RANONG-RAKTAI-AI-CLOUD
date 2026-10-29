@@ -6483,16 +6483,43 @@ def handle_search_command(
                 lines.append(f"HN รพ.: {_s_hospital_hn}")
             lines.append("")
 
+            # ── สร้างรายการ folder ที่จะลองค้น ──
+            _s_folders = []
+            if _s_pf:
+                _s_folders.append(_s_pf)
+            # เพิ่ม patterns อื่นๆ
+            if _s_clinic_hn:
+                if _s_clinic_hn not in _s_folders:
+                    _s_folders.append(_s_clinic_hn)
+                _hn_pf = f"HN{_s_clinic_hn}"
+                if _hn_pf not in _s_folders:
+                    _s_folders.append(_hn_pf)
+            if _s_hospital_hn:
+                _hn_hp = f"HN{_s_hospital_hn}"
+                if _hn_hp not in _s_folders:
+                    _s_folders.append(_hn_hp)
+                if _s_hospital_hn not in _s_folders:
+                    _s_folders.append(_s_hospital_hn)
+
+            def _try_history(fn, oh, folders):
+                """ลองดึงข้อมูลจาก owner_hash หรือหลาย folder"""
+                if oh:
+                    result = fn(storage, doc_index, oh,
+                                patient_folder="")
+                    if result:
+                        return result
+                for pf in folders:
+                    result = fn(storage, doc_index, "",
+                                patient_folder=pf)
+                    if result:
+                        return result
+                return []
+
             # ── ผลแล็บล่าสุด ──
             try:
-                _lab_history = get_patient_lab_history(
-                    storage, doc_index, _s_oh,
-                    patient_folder=_s_pf,
-                )
-                logger.info(
-                    "Patient summary lab: folder=%s, count=%d",
-                    _summary_folder[:20] if _summary_folder else "(empty)",
-                    len(_lab_history) if _lab_history else 0,
+                _lab_history = _try_history(
+                    get_patient_lab_history,
+                    _s_oh, _s_folders,
                 )
                 if _lab_history:
                     _latest_lab = _lab_history[0]
@@ -6546,9 +6573,9 @@ def handle_search_command(
 
             # ── ยาปัจจุบัน ──
             try:
-                _rx_history = get_patient_rx_history(
-                    storage, doc_index, _s_oh,
-                    patient_folder=_s_pf,
+                _rx_history = _try_history(
+                    get_patient_rx_history,
+                    _s_oh, _s_folders,
                 )
                 if _rx_history:
                     _latest_rx = _rx_history[0]
@@ -6585,9 +6612,9 @@ def handle_search_command(
 
             # ── ฟอกเลือดล่าสุด ──
             try:
-                _dial_history = get_patient_dialysis_history(
-                    storage, doc_index, _s_oh,
-                    patient_folder=_s_pf,
+                _dial_history = _try_history(
+                    get_patient_dialysis_history,
+                    _s_oh, _s_folders,
                 )
                 if _dial_history:
                     _latest_dial = _dial_history[0]
@@ -6614,14 +6641,16 @@ def handle_search_command(
             # จำนวนเอกสาร
             _doc_count = 0
             try:
-                if _s_pf:
-                    _all_docs = doc_index.list_by_patient_folder(
-                        _s_pf
-                    )
-                elif _s_oh:
+                _all_docs = []
+                if _s_oh:
                     _all_docs = doc_index.list_by_owner(_s_oh)
-                else:
-                    _all_docs = []
+                if not _all_docs:
+                    for _f in _s_folders:
+                        _all_docs = (
+                            doc_index.list_by_patient_folder(_f)
+                        )
+                        if _all_docs:
+                            break
                 _doc_count = len(_all_docs) if _all_docs else 0
             except Exception:
                 pass
