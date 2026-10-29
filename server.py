@@ -83,6 +83,8 @@ from quarterly_compare import (
     compare_rx_timeline,
     compare_dialysis_timeline,
     get_patient_lab_history,
+    get_patient_rx_history,
+    get_patient_dialysis_history,
 )
 
 # ─── OCR (Tesseract) ────────────────────────────────────────
@@ -6437,6 +6439,11 @@ def handle_search_command(
                     storage, doc_index, "",
                     patient_folder=_summary_folder,
                 )
+                logger.info(
+                    "Patient summary lab: folder=%s, count=%d",
+                    _summary_folder[:20] if _summary_folder else "(empty)",
+                    len(_lab_history) if _lab_history else 0,
+                )
                 if _lab_history:
                     _latest_lab = _lab_history[0]
                     lines.append("🔬 ผลแล็บล่าสุด")
@@ -6478,7 +6485,11 @@ def handle_search_command(
                         lines.append("   (ไม่มีข้อมูลค่าแล็บ)")
                 else:
                     lines.append("🔬 ผลแล็บ: ยังไม่มีข้อมูล")
-            except Exception:
+            except Exception as _lab_err:
+                logger.warning(
+                    "Patient summary lab error: %s: %s",
+                    type(_lab_err).__name__, _lab_err,
+                )
                 lines.append("🔬 ผลแล็บ: ไม่สามารถดึงข้อมูลได้")
 
             lines.append("")
@@ -6513,7 +6524,11 @@ def handle_search_command(
                         lines.append("   (ไม่มีข้อมูลรายการยา)")
                 else:
                     lines.append("💊 ยา: ยังไม่มีข้อมูล")
-            except Exception:
+            except Exception as _rx_err:
+                logger.warning(
+                    "Patient summary rx error: %s: %s",
+                    type(_rx_err).__name__, _rx_err,
+                )
                 lines.append("💊 ยา: ไม่สามารถดึงข้อมูลได้")
 
             lines.append("")
@@ -6539,7 +6554,11 @@ def handle_search_command(
                             lines.append(f"   • {_dk}: {_dv}")
                 else:
                     lines.append("🩸 ฟอกเลือด: ยังไม่มีข้อมูล")
-            except Exception:
+            except Exception as _dial_err:
+                logger.warning(
+                    "Patient summary dialysis error: %s: %s",
+                    type(_dial_err).__name__, _dial_err,
+                )
                 lines.append("🩸 ฟอกเลือด: ไม่สามารถดึงข้อมูลได้")
 
             # จำนวนเอกสาร
