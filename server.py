@@ -6396,20 +6396,31 @@ def handle_search_command(
             _summary_patient = None
             _summary_folder = ""
             if master_registry:
-                _mr_patients = master_registry.list_patients()
-                for _p in _mr_patients:
-                    if (str(_p.get("clinic_hn", "")) == _summary_hn
-                            or str(_p.get("hospital_hn", "")) == _summary_hn):
-                        _summary_patient = _p
-                        _summary_folder = _p.get("folder_name", "")
-                        break
+                _mr_matches = master_registry.search(_summary_hn)
+                if len(_mr_matches) == 1:
+                    _summary_patient = _mr_matches[0]
+                    _summary_folder = _summary_patient.folder_name
+                elif len(_mr_matches) > 1:
+                    # พบหลายรายการ — ให้ระบุให้ชัดเจน
+                    _multi_lines = [
+                        f"🔍 พบหลายรายการสำหรับ HN {_summary_hn}:"
+                    ]
+                    for _mp in _mr_matches[:5]:
+                        _multi_lines.append(
+                            f"  • HN {_mp.clinic_hn or _mp.hospital_hn}"
+                            f" — {_mp.patient_name}"
+                        )
+                    _multi_lines.append(
+                        "\nกรุณาระบุ HN ให้ชัดเจน เช่น: สรุป HN 56001"
+                    )
+                    return "\n".join(_multi_lines)
 
             if not _summary_patient:
                 return f"ไม่พบผู้ป่วย HN {_summary_hn} ในทะเบียน"
 
-            _p_name = _summary_patient.get("patient_name", "ไม่ทราบชื่อ")
-            _p_clinic_hn = _summary_patient.get("clinic_hn", "")
-            _p_hospital_hn = _summary_patient.get("hospital_hn", "")
+            _p_name = _summary_patient.patient_name or "ไม่ทราบชื่อ"
+            _p_clinic_hn = _summary_patient.clinic_hn or ""
+            _p_hospital_hn = _summary_patient.hospital_hn or ""
 
             lines = [
                 "👤 สรุปข้อมูลผู้ป่วย",
@@ -6429,26 +6440,41 @@ def handle_search_command(
                 if _lab_history:
                     _latest_lab = _lab_history[0]
                     lines.append("🔬 ผลแล็บล่าสุด")
-                    _lab_date = _latest_lab.get("date", "ไม่ทราบ")
+                    _lab_date = _latest_lab.get(
+                        "upload_date", "ไม่ทราบ"
+                    )
                     lines.append(f"   วันที่: {_lab_date}")
-                    _lab_items = _latest_lab.get("items", [])
+                    _lab_results = _latest_lab.get("results", [])
                     _key_labs = [
-                        "Cr", "BUN", "Hb", "Hct", "K",
-                        "Ca", "PO4", "Alb", "eGFR",
+                        "creatinine", "bun", "hemoglobin", "hb",
+                        "hematocrit", "hct", "potassium", "calcium",
+                        "phosph", "po4", "albumin", "egfr",
+                        "uric", "glucose", "fbs",
                     ]
                     _found_labs = []
-                    for _li in _lab_items:
-                        _lname = _li.get("name", "")
+                    for _lr in _lab_results:
+                        _analyte = str(
+                            _lr.get("analyte", "")
+                        ).lower()
                         for _kl in _key_labs:
-                            if _kl.lower() in _lname.lower():
+                            if _kl in _analyte:
                                 _found_labs.append(
-                                    f"{_lname}: {_li.get('value', '')} "
-                                    f"{_li.get('unit', '')}"
+                                    f"{_lr.get('analyte', '')}: "
+                                    f"{_lr.get('value', '')} "
+                                    f"{_lr.get('unit', '')}"
                                 )
                                 break
-                    for _fl in _found_labs[:8]:
+                    for _fl in _found_labs[:10]:
                         lines.append(f"   • {_fl}")
-                    if not _found_labs:
+                    if not _found_labs and _lab_results:
+                        # แสดงทุกค่าถ้าไม่ match key labs
+                        for _lr in _lab_results[:8]:
+                            lines.append(
+                                f"   • {_lr.get('analyte', '?')}: "
+                                f"{_lr.get('value', '')} "
+                                f"{_lr.get('unit', '')}"
+                            )
+                    elif not _lab_results:
                         lines.append("   (ไม่มีข้อมูลค่าแล็บ)")
                 else:
                     lines.append("🔬 ผลแล็บ: ยังไม่มีข้อมูล")
@@ -6466,21 +6492,22 @@ def handle_search_command(
                 if _rx_history:
                     _latest_rx = _rx_history[0]
                     lines.append("💊 ยาปัจจุบัน")
-                    _rx_date = _latest_rx.get("date", "ไม่ทราบ")
+                    _rx_date = _latest_rx.get(
+                        "upload_date", "ไม่ทราบ"
+                    )
                     lines.append(f"   วันที่: {_rx_date}")
-                    _rx_items = _latest_rx.get("medications", [])
-                    for _ri in _rx_items[:8]:
-                        if isinstance(_ri, dict):
+                    _rx_items = _latest_rx.get("drugs", [])
+                    for _ri in _rx_items[:10]:
+                        if isinstance(_ri, str):
+                            lines.append(f"   • {_ri}")
+                        elif isinstance(_ri, dict):
                             _rname = _ri.get("name", str(_ri))
-                            _rdose = _ri.get("dosage", "")
-                            lines.append(
-                                f"   • {_rname} {_rdose}".strip()
-                            )
+                            lines.append(f"   • {_rname}")
                         else:
                             lines.append(f"   • {_ri}")
-                    if len(_rx_items) > 8:
+                    if len(_rx_items) > 10:
                         lines.append(
-                            f"   ... และอีก {len(_rx_items) - 8} รายการ"
+                            f"   ... และอีก {len(_rx_items) - 10} รายการ"
                         )
                     if not _rx_items:
                         lines.append("   (ไม่มีข้อมูลรายการยา)")
@@ -6500,13 +6527,15 @@ def handle_search_command(
                 if _dial_history:
                     _latest_dial = _dial_history[0]
                     lines.append("🩸 ฟอกเลือดล่าสุด")
-                    _dial_date = _latest_dial.get("date", "ไม่ทราบ")
+                    _dial_date = _latest_dial.get(
+                        "upload_date", "ไม่ทราบ"
+                    )
                     lines.append(f"   วันที่: {_dial_date}")
-                    _dial_params = _latest_dial.get("parameters", {})
-                    if isinstance(_dial_params, dict):
+                    _dial_data = _latest_dial.get("data", {})
+                    if isinstance(_dial_data, dict):
                         for _dk, _dv in list(
-                            _dial_params.items()
-                        )[:6]:
+                            _dial_data.items()
+                        )[:8]:
                             lines.append(f"   • {_dk}: {_dv}")
                 else:
                     lines.append("🩸 ฟอกเลือด: ยังไม่มีข้อมูล")
