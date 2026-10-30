@@ -2819,6 +2819,92 @@ def api_vendors_relocation_plan():
     })
 
 
+@app.route("/admin/api/v2/vendors/relocation-execute", methods=["POST"])
+def api_vendors_relocation_execute():
+    """ดำเนินการย้ายบิลตามแผน — คัดลอก GCS object + อัปเดต index.
+
+    ไม่ลบไฟล์ต้นฉบับ เพื่อให้ rollback ได้
+    จำกัด batch ละไม่เกิน 50 รายการ
+
+    Body JSON: {"confirm": true} — ต้องยืนยัน
+    """
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    body = request.get_json(silent=True) or {}
+    if not body.get("confirm"):
+        return jsonify({
+            "error": "ต้องส่ง {\"confirm\": true} เพื่อยืนยัน",
+            "note": "ดูแผนก่อนที่ GET /admin/api/v2/vendors/relocation-plan",
+        }), 400
+
+    limit = min(int(body.get("limit", 50)), 50)
+    moved = 0
+    errors_list = []
+
+    try:
+        doc_index._ensure_fresh()
+        for d in doc_index._docs:
+            if moved >= limit:
+                break
+            if d.get("category") != "bills":
+                continue
+            raw = d.get("gcs_object_path", "")
+            current = raw.replace(f"gs://{STORAGE_BUCKET}/", "")
+            if not current:
+                continue
+
+            match = resolve_bill_vendor(d.get("extracted_text", ""))
+            if match.needs_review:
+                continue
+
+            filename = current.rsplit("/", 1)[-1]
+            proposed = build_document_path(
+                FOLDERS["bills"], filename, "bills",
+                subfolder=match.folder,
+                date=_doc_submitted_date(d),
+            )
+            if proposed == current:
+                continue
+
+            # คัดลอก GCS object ไปที่ใหม่ (ไม่ลบต้นฉบับ)
+            try:
+                src_blob = storage._bucket.blob(current)
+                storage._bucket.copy_blob(
+                    src_blob, storage._bucket, proposed
+                )
+                # อัปเดต index
+                d["gcs_object_path"] = proposed
+                if match.folder:
+                    d["bill_company"] = match.folder
+                    d["vendor_method"] = match.method
+                moved += 1
+            except Exception as cp_err:
+                errors_list.append({
+                    "doc": d.get("document_id", "")[:8],
+                    "error": type(cp_err).__name__,
+                })
+
+        # บันทึก index ที่อัปเดตแล้ว
+        if moved > 0:
+            doc_index._save()
+            logger.info(
+                "Vendor relocation: moved %d bills", moved
+            )
+
+    except Exception as e:
+        logger.error("relocation-execute failed: %s", type(e).__name__)
+        return jsonify({"error": type(e).__name__}), 500
+
+    return jsonify({
+        "success": True,
+        "moved": moved,
+        "errors": errors_list,
+        "note": "ไฟล์ต้นฉบับไม่ถูกลบ",
+    })
+
+
 # ═══════════════════════════════════════════════════════════
 # Lab Re-extraction API
 # ═══════════════════════════════════════════════════════════
@@ -5565,6 +5651,45 @@ def handle_search_command(
         คู่ hash -> ID ไว้ส่งการแจ้งเตือน ไม่ถูกแสดง ไม่ใส่ log
     """
     text_stripped = text.strip()
+
+    # ── Rich Menu Quick Commands ─────────────────────────────
+    # "ส่งเอกสาร" — แนะนำวิธีส่งเอกสาร
+    if text_stripped == "ส่งเอกสาร":
+        return (
+            "📄 วิธีส่งเอกสาร\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "\n"
+            "📸 ส่งรูปถ่ายหรือ PDF ของเอกสารได้เลย:\n"
+            "• ใบผลแล็บ\n"
+            "• ใบยา/ใบสั่งยา\n"
+            "• ใบฟอกเลือด\n"
+            "• บิล/ใบเสร็จ\n"
+            "\n"
+            "💡 ระบบจะจัดประเภทและเก็บเข้าแฟ้มอัตโนมัติ\n"
+            "\n"
+            "📌 หากต้องการระบุผู้ป่วย:\n"
+            "พิมพ์ 'ผู้ป่วย <HN>' ก่อนส่งเอกสาร\n"
+            "ตัวอย่าง: ผู้ป่วย 1234"
+        )
+
+    # "ลงทะเบียน" — แนะนำวิธีลงทะเบียน HN
+    if text_stripped == "ลงทะเบียน":
+        return (
+            "📝 ลงทะเบียน HN กับ LINE\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "\n"
+            "ผูก HN ของคุณกับบัญชี LINE\n"
+            "เพื่อให้เอกสารเข้าแฟ้มอัตโนมัติ\n"
+            "\n"
+            "📌 พิมพ์คำสั่ง:\n"
+            "ลงทะเบียนHN <HNคลินิก> <HNรพ.>\n"
+            "\n"
+            "ตัวอย่าง:\n"
+            "• ลงทะเบียนHN 1234 56789\n"
+            "• ลงทะเบียนHN 1234\n"
+            "\n"
+            "💡 หลังลงทะเบียนแล้ว เอกสารที่ส่งจะเข้าแฟ้มของคุณอัตโนมัติ"
+        )
 
     # ── ยืนยันตัวตน (One-Time Enrollment Token) ──────────────
     # คำสั่ง: "ยืนยัน [TOKEN]"
@@ -10068,6 +10193,41 @@ def process_file_async(
                     raise RuntimeError(
                         f"ไฟล์ถูกอัปโหลดแล้ว แต่บันทึก metadata ล้มเหลว — "
                         f"กรุณาแจ้งผู้ดูแลระบบ"
+                    )
+
+                # ── Google Drive Auto-Backup ────────────────────
+                # สำเนาเอกสารไป Google Drive อัตโนมัติ (ถ้าเปิดใช้งาน)
+                try:
+                    import google_drive_sync as _gd
+                    if _gd.is_available() and gcs_object_path:
+                        _drive_subfolder = category
+                        _hn_f = metadata.get("patient_hn_folder", "")
+                        if _hn_f:
+                            _drive_subfolder = f"{category}/{_hn_f}"
+                        _gd.backup_document_from_gcs(
+                            storage, gcs_object_path,
+                            subfolder=_drive_subfolder,
+                        )
+                        logger.info(
+                            "Drive backup queued (category=%s)", category
+                        )
+                except Exception as _drv_err:
+                    # Drive backup ล้มเหลวไม่กระทบ pipeline หลัก
+                    logger.warning(
+                        "Drive backup failed: %s",
+                        type(_drv_err).__name__,
+                    )
+
+                # ── Google Sheets Document Log ──────────────────
+                # บันทึกเอกสารใหม่ลง Sheets (ถ้าเปิดใช้งาน)
+                try:
+                    import google_sheets_sync as _gs
+                    if _gs.is_available():
+                        _gs.append_document_log(doc_meta)
+                except Exception as _sh_err:
+                    logger.warning(
+                        "Sheets log failed: %s",
+                        type(_sh_err).__name__,
                     )
 
             # ── Lab Extraction V1: ดึงผลแล็บอัตโนมัติ ──
@@ -15443,6 +15603,64 @@ def api_analytics_status():
         except Exception as _e:
             status[mod_name] = {"error": type(_e).__name__}
     return jsonify(status), 200
+
+
+# ═══════════════════════════════════════════════════════════
+# Google Sheets Sync — Admin API สำหรับ sync ข้อมูลไป Sheets
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/admin/api/v2/sheets/sync-registry", methods=["POST"])
+def api_sheets_sync_registry():
+    """Sync ทะเบียนผู้ป่วยทั้งหมดไป Google Sheets."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import google_sheets_sync as _gs
+        if not _gs.is_available():
+            return jsonify({"error": "Google Sheets ไม่ได้เปิดใช้งาน"}), 400
+        result = _gs.sync_patient_registry(master_registry)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/sheets/sync-labs", methods=["POST"])
+def api_sheets_sync_labs():
+    """Sync สรุปผลแล็บล่าสุดไป Google Sheets."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import google_sheets_sync as _gs
+        if not _gs.is_available():
+            return jsonify({"error": "Google Sheets ไม่ได้เปิดใช้งาน"}), 400
+        result = _gs.sync_lab_summary(doc_index, storage)
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/sheets/sync-all", methods=["POST"])
+def api_sheets_sync_all():
+    """Sync ทุกข้อมูลไป Google Sheets (registry + labs + KPI)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import google_sheets_sync as _gs
+        if not _gs.is_available():
+            return jsonify({"error": "Google Sheets ไม่ได้เปิดใช้งาน"}), 400
+        results = {}
+        results["registry"] = _gs.sync_patient_registry(master_registry)
+        results["labs"] = _gs.sync_lab_summary(doc_index, storage)
+        try:
+            results["kpi"] = _gs.sync_kpi_data(doc_index, master_registry)
+        except Exception:
+            results["kpi"] = {"error": "sync_kpi_data not available"}
+        return jsonify(results), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
 
 
 # ═══════════════════════════════════════════════════════════
