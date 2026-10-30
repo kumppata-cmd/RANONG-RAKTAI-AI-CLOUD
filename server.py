@@ -15336,6 +15336,57 @@ def api_send_hd_reminders():
         return jsonify({"error": type(e).__name__, "message": str(e)}), 500
 
 
+@app.route("/admin/api/v2/ckd-staging", methods=["GET"])
+def api_ckd_distribution():
+    """สรุป CKD Stage ทั้งคลินิก."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import ckd_staging
+        dist = ckd_staging.get_clinic_ckd_distribution(
+            storage, master_registry
+        )
+        return jsonify(dist), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/ckd-staging/alerts", methods=["GET"])
+def api_ckd_alerts():
+    """รายการผู้ป่วย eGFR ลดเร็ว."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import ckd_staging
+        alerts = ckd_staging.get_rapid_decliners_alert(
+            storage, master_registry
+        )
+        return jsonify({"alerts": alerts, "count": len(alerts)}), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/ckd-staging/<hn>", methods=["GET"])
+def api_ckd_patient(hn):
+    """CKD Profile ของผู้ป่วยรายเดียว."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import ckd_staging
+        patient_folder = master_registry.get_folder_for_hn(hn)
+        if not patient_folder:
+            return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+        profile = ckd_staging.get_patient_ckd_profile(
+            storage, patient_folder
+        )
+        return jsonify(profile), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
 @app.route("/admin/api/v2/analytics/status", methods=["GET"])
 def api_analytics_status():
     """สถานะ modules วิเคราะห์ทั้งหมด."""
@@ -15346,6 +15397,7 @@ def api_analytics_status():
     for mod_name in [
         "auto_weekly_report", "dialysis_adequacy",
         "epo_response_tracker", "hd_schedule_reminder",
+        "ckd_staging",
     ]:
         try:
             mod = __import__(mod_name)

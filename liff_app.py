@@ -261,24 +261,37 @@ def get_patient_labs_for_liff(
                 "report_date", patient_labs[0].get("upload_date", "")
             )
 
-        # CKD Info from registry
+        # CKD Info — คำนวณ eGFR จากค่า Cr ล่าสุดด้วย ckd_staging module
         try:
-            reg_blobs = list(storage._bucket.list_blobs(
-                prefix="_patient_master/", max_results=10
-            ))
-            if reg_blobs:
-                # Use latest version
-                reg_blobs.sort(key=lambda b: b.name, reverse=True)
-                reg_data = json.loads(reg_blobs[0].download_as_text())
-                patients = reg_data.get("patients", {})
-                for pid, pdata in patients.items():
-                    if pdata.get("owner_hash") == owner_hash:
+            cr_trend = result["trends"].get("creatinine", [])
+            if cr_trend:
+                latest_cr = cr_trend[-1].get("value")
+                if latest_cr is not None:
+                    cr_val = float(latest_cr)
+                    try:
+                        import ckd_staging
+                        _default_age = int(
+                            os.environ.get("DEFAULT_PATIENT_AGE", "55")
+                        )
+                        egfr = ckd_staging.calculate_egfr_ckd_epi(
+                            cr_val, _default_age
+                        )
+                        stage_info = ckd_staging.get_ckd_stage(egfr)
                         result["ckd_info"] = {
-                            "ckd_stage": pdata.get("ckd_stage", ""),
-                            "latest_egfr": pdata.get("latest_egfr"),
-                            "latest_cr": pdata.get("latest_cr"),
+                            "egfr": round(egfr, 1),
+                            "ckd_stage": stage_info["stage"],
+                            "description": stage_info["description"],
+                            "color": stage_info["color"],
+                            "latest_cr": cr_val,
+                            "estimated": True,
                         }
-                        break
+                    except ImportError:
+                        # ckd_staging module ยังไม่พร้อม — ข้าม
+                        result["ckd_info"] = {
+                            "latest_cr": cr_val,
+                        }
+                    except (ValueError, TypeError):
+                        pass
         except Exception:
             pass
 
@@ -530,6 +543,7 @@ body {
 
 <!-- Tab: ผลแล็บล่าสุด -->
 <div class="tab-content active" id="tab-results">
+    <div id="ckdCard" style="display:none;margin-bottom:12px"></div>
     <div class="loading" id="loadingLabs">
         <div>⏳ กำลังโหลดผลแล็บ...</div>
     </div>
@@ -722,10 +736,38 @@ async function initApp() {
     }
 }
 
+// ── Render CKD Card ──
+function renderCkdCard() {
+    const ckdEl = document.getElementById('ckdCard');
+    if (!ckdEl) return;
+    if (!labData || !labData.ckd_info || !labData.ckd_info.egfr) {
+        ckdEl.style.display = 'none';
+        return;
+    }
+    const ckd = labData.ckd_info;
+    const colorMap = {green:'#27ae60',yellow:'#f39c12',orange:'#e67e22',red:'#e74c3c',darkred:'#8b0000'};
+    const clr = colorMap[ckd.color] || '#666';
+    ckdEl.innerHTML =
+        '<div style="display:flex;align-items:center;gap:16px;padding:16px;border-radius:12px;'+
+        'background:linear-gradient(135deg,'+clr+'22,'+clr+'11);border:2px solid '+clr+'66">' +
+        '<div style="text-align:center;min-width:80px">' +
+        '<div style="font-size:28px;font-weight:700;color:'+clr+'">'+ckd.egfr+'</div>' +
+        '<div style="font-size:11px;color:#888">eGFR<br>ml/min</div></div>' +
+        '<div style="flex:1">' +
+        '<div style="font-size:18px;font-weight:600;color:'+clr+'">CKD Stage '+ckd.ckd_stage+'</div>' +
+        '<div style="font-size:13px;color:#666;margin-top:4px">'+ckd.description+'</div>' +
+        (ckd.estimated ? '<div style="font-size:11px;color:#aaa;margin-top:4px">* ประมาณจาก Cr '+ckd.latest_cr+' mg/dL</div>':'')+
+        '</div></div>';
+    ckdEl.style.display = 'block';
+}
+
 // ── Render Labs ──
 function renderLabs() {
     const container = document.getElementById('labList');
     document.getElementById('loadingLabs').style.display = 'none';
+
+    // Show CKD card above labs
+    renderCkdCard();
 
     if (!labData || !labData.labs || labData.labs.length === 0) {
         container.innerHTML = '<div class="empty-state"><div class="icon">📋</div>'+

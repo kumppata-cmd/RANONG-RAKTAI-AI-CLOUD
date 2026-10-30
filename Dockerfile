@@ -73,6 +73,7 @@ COPY auto_weekly_report.py .
 COPY dialysis_adequacy.py .
 COPY epo_response_tracker.py .
 COPY hd_schedule_reminder.py .
+COPY ckd_staging.py .
 
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \
