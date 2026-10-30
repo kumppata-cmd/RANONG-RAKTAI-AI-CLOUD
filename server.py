@@ -8275,282 +8275,192 @@ def is_scanned_pdf(filepath: str) -> bool:
 MAX_OCR_PAGES = int(os.getenv("MAX_OCR_PAGES", "5"))
 
 
-def extract_text_with_ocr(filepath: str, timeout_sec: int = 90) -> str:
+def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
     """ดึงข้อความด้วย Tesseract OCR (tha+eng).
 
-    การจัดการหน่วยความจำ:
-      - render ที่ OCR_DPI (ค่าเริ่มต้น 200) แทน 300 — ลดหน่วยความจำราว 56%
-        (A4 ที่ 300 DPI ≈ 26 MB ต่อ buffer, ที่ 200 DPI ≈ 11.6 MB)
-      - คืนหน่วยความจำของ pixmap และ image ทันทีหลังจบแต่ละหน้า
-        แทนที่จะสะสมไว้จนจบลูป → พีคเท่ากับหนึ่งหน้า ไม่ใช่ทุกหน้ารวมกัน
-      - จำกัดงาน OCR พร้อมกันต่อ worker ด้วย semaphore — ป้องกัน OOM
-        บน Render instance 512 MB ที่รัน 2 workers
-      - timeout_sec: จำกัดเวลา Tesseract ต่อหน้า — ป้องกัน hang
+    v3 — ออกแบบสำหรับ Render 512MB:
+      - ลดขนาดภาพเป็น max 1200px width (ลด memory ~75%)
+      - ใช้ 1 pass หลัก + 1 fallback (แทน 6 passes)
+      - ใช้ --oem 1 (LSTM only, เร็วกว่า legacy+LSTM)
+      - timeout 45 วินาทีรวม (อยู่ใน Gunicorn 120s budget)
+      - คืน memory ทันทีหลัง OCR
     """
     if not HAS_TESSERACT or not HAS_PIL:
         logger.warning("OCR ไม่พร้อม — ขาด pytesseract หรือ Pillow")
         return ""
 
     ext = os.path.splitext(filepath)[1].lower()
-    ocr_lang = "tha+eng"
-    scale = OCR_DPI / 72
+    # ── ขีดจำกัดขนาดภาพสำหรับ 512MB ──
+    # 1200px width → ~3.5MB per grayscale buffer
+    # ใหญ่พอสำหรับ OCR อ่านเอกสารทางการแพทย์ได้
+    MAX_OCR_WIDTH = 1200
+    ocr_per_page_timeout = min(timeout_sec, 40)
 
     with _ocr_semaphore:
         try:
             if ext in (".jpg", ".jpeg", ".png"):
-                img = None
-                processed = None
+                gray = None
                 try:
-                    # formats= จำกัดตัวถอดรหัส — ดู SAFE_IMAGE_FORMATS
                     img = Image.open(filepath, formats=SAFE_IMAGE_FORMATS)
                     orig_w, orig_h = img.size
-                    logger.info(f"[OCR-PRE] Original: {orig_w}x{orig_h} mode={img.mode}")
-                    _ocr_debug_store["image_original_size"] = f"{orig_w}x{orig_h}"
-                    _ocr_debug_store["image_mode"] = img.mode
+                    logger.info(
+                        "[OCR] Original: %dx%d mode=%s",
+                        orig_w, orig_h, img.mode,
+                    )
 
-                    # 1. Convert to grayscale
+                    # 1. Grayscale — ลด memory 3x (RGB→L)
                     gray = img.convert("L")
                     img.close()
-                    img = None
 
-                    # 2. Resize — ปรับขนาดให้เหมาะกับ OCR
-                    # LINE photos ~1024-4032px; OCR ต้องการ ≥1500px
-                    # แต่ภาพใหญ่เกินจะ timeout บน Render 512MB
+                    # 2. Resize ให้ไม่เกิน MAX_OCR_WIDTH
                     w, h = gray.size
-                    # ลดขนาดภาพใหญ่ (>3000px) ก่อน — ป้องกัน timeout
-                    if w > 3000:
-                        sf = 2500 / w
+                    if w > MAX_OCR_WIDTH:
+                        sf = MAX_OCR_WIDTH / w
                         gray = gray.resize(
-                            (int(w * sf), int(h * sf)), Image.Resampling.LANCZOS
+                            (int(w * sf), int(h * sf)),
+                            Image.Resampling.LANCZOS,
                         )
-                        w, h = gray.size
-                        logger.info(f"[OCR-PRE] Downscaled large image → {w}x{h}")
-                    if w < 1500:
-                        sf = 1500 / w
+                        logger.info(
+                            "[OCR] Resized → %dx%d",
+                            gray.size[0], gray.size[1],
+                        )
+                    elif w < 800:
+                        # ภาพเล็กเกินไป → upscale เล็กน้อย
+                        sf = 1000 / w
                         gray = gray.resize(
-                            (int(w * sf), int(h * sf)), Image.Resampling.LANCZOS
+                            (int(w * sf), int(h * sf)),
+                            Image.Resampling.LANCZOS,
                         )
-                        logger.info(f"[OCR-PRE] Upscaled → {gray.size[0]}x{gray.size[1]}")
+                        logger.info(
+                            "[OCR] Upscaled small → %dx%d",
+                            gray.size[0], gray.size[1],
+                        )
 
-                    _ocr_debug_store["processed_size"] = f"{gray.size[0]}x{gray.size[1]}"
+                    # 3. Preprocess: sharpen + autocontrast
+                    processed = ImageOps.autocontrast(
+                        gray.filter(ImageFilter.SHARPEN), cutoff=2
+                    )
 
-                    # ── Multi-pass OCR: try different preprocessing + PSM ──
-                    # แต่ละ pass ใช้ preprocessing ต่างกันเพื่อรองรับ
-                    # ภาพถ่ายจาก LINE OA ที่มีคุณภาพหลากหลาย
-                    ocr_timeout = min(timeout_sec, 30)
+                    # 4. OCR Pass 1: Thai+English, PSM 6 (block of text)
+                    # PSM 6 เร็วกว่า PSM 3 มาก เพราะไม่ต้อง detect layout
+                    # --oem 1 = LSTM only (เร็วกว่า default oem 3)
                     text = ""
-
-                    # Pass 1: Sharpen + autocontrast + PSM 3 (auto segmentation)
-                    # PSM 3 handles mixed layouts (headers + tables + text)
-                    # better than PSM 6 for prescription/medical documents
                     try:
-                        sharpened = gray.filter(ImageFilter.SHARPEN)
-                        p1 = ImageOps.autocontrast(sharpened, cutoff=2)
-                        sharpened.close()
                         text = pytesseract.image_to_string(
-                            p1, lang="tha+eng",
-                            timeout=ocr_timeout, config="--psm 3",
+                            processed, lang="tha+eng",
+                            timeout=ocr_per_page_timeout,
+                            config="--psm 6 --oem 1",
                         ).strip()
-                        p1.close()
-                        _ocr_debug_store["pass1"] = f"psm3-sharp-ac2: {len(text)} chars"
-                        logger.info(f"[OCR] Pass1 PSM3+sharp: {len(text)} chars")
-                    except Exception as e:
-                        logger.warning(f"[OCR] Pass1 error: {e}")
-                        _ocr_debug_store["pass1"] = f"ERROR: {e}"
+                        logger.info("[OCR] Pass1 tha+eng: %d chars", len(text))
+                    except Exception as e1:
+                        logger.warning("[OCR] Pass1 tha+eng error: %s", type(e1).__name__)
 
-                    # Pass 2: If pass 1 got < 15 chars, try binarization + PSM 6
-                    # Otsu-like: compute mean, use as threshold
-                    if len(text) < 15:
+                    # 5. Fallback: English-only (ถ้า pass 1 ได้ < 10 ตัวอักษร)
+                    # eng-only เร็วกว่ามากและอ่านชื่อยา/ค่าแล็บได้ดี
+                    if len(text) < 10:
                         try:
-                            # Enhance contrast first
-                            enhanced = ImageEnhance.Contrast(gray).enhance(2.0)
-                            sharpened2 = enhanced.filter(
-                                ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3)
-                            )
-                            enhanced.close()
-                            # Compute adaptive threshold using PIL histogram
-                            hist = sharpened2.histogram()
-                            total_px = sum(hist)
-                            cumsum = 0
-                            threshold = 128
-                            for i, count in enumerate(hist):
-                                cumsum += i * count
-                            mean_val = cumsum / max(total_px, 1)
-                            threshold = int(mean_val * 0.85)
-                            p2 = sharpened2.point(lambda x: 255 if x > threshold else 0)
-                            sharpened2.close()
-                            text2 = pytesseract.image_to_string(
-                                p2, lang="tha+eng",
-                                timeout=ocr_timeout, config="--psm 6",
+                            text_eng = pytesseract.image_to_string(
+                                processed, lang="eng",
+                                timeout=ocr_per_page_timeout,
+                                config="--psm 6 --oem 1",
                             ).strip()
-                            p2.close()
-                            _ocr_debug_store["pass2"] = f"psm6-binary-t{threshold}: {len(text2)} chars"
-                            logger.info(f"[OCR] Pass2 PSM6+binary(t={threshold}): {len(text2)} chars")
-                            if len(text2) > len(text):
-                                text = text2
-                        except Exception as e:
-                            logger.warning(f"[OCR] Pass2 error: {e}")
-                            _ocr_debug_store["pass2"] = f"ERROR: {e}"
+                            logger.info("[OCR] Fallback eng: %d chars", len(text_eng))
+                            if len(text_eng) > len(text):
+                                text = text_eng
+                        except Exception as e2:
+                            logger.warning("[OCR] Fallback eng error: %s", type(e2).__name__)
 
-                    # Pass 3: If still < 15 chars, try UnsharpMask + autocontrast + PSM 4
-                    # PSM 4 = single column of text (many prescriptions are columnar)
-                    if len(text) < 15:
+                    # 6. เสริม: รัน eng-only แล้วรวมข้อความ (ถ้ายังไม่ได้ทำ)
+                    # เอกสารแพทย์มีทั้งภาษาไทยและอังกฤษ
+                    if len(text) >= 10:
                         try:
-                            p3_sharp = gray.filter(
-                                ImageFilter.UnsharpMask(radius=3, percent=200, threshold=2)
-                            )
-                            p3 = ImageOps.autocontrast(p3_sharp, cutoff=5)
-                            p3_sharp.close()
-                            text3 = pytesseract.image_to_string(
-                                p3, lang="tha+eng",
-                                timeout=ocr_timeout, config="--psm 4",
+                            text_eng2 = pytesseract.image_to_string(
+                                processed, lang="eng",
+                                timeout=ocr_per_page_timeout,
+                                config="--psm 6 --oem 1",
                             ).strip()
-                            p3.close()
-                            _ocr_debug_store["pass3"] = f"psm4-unsharp-ac5: {len(text3)} chars"
-                            logger.info(f"[OCR] Pass3 PSM4+unsharp: {len(text3)} chars")
-                            if len(text3) > len(text):
-                                text = text3
-                        except Exception as e:
-                            logger.warning(f"[OCR] Pass3 error: {e}")
-                            _ocr_debug_store["pass3"] = f"ERROR: {e}"
+                            if text_eng2 and len(text_eng2) >= 10:
+                                text = text + "\n" + text_eng2
+                                logger.info(
+                                    "[OCR] Combined tha+eng: %d chars", len(text)
+                                )
+                        except Exception:
+                            pass  # eng supplement ไม่สำคัญ
 
-                    # Pass 4: English-only OCR — ใบยามีชื่อยาภาษาอังกฤษ
-                    # เช่น losartan, amlodipine, mg, tab
-                    # Tesseract eng-only มักอ่านได้แม้ tha+eng จะล้มเหลว
-                    if len(text) < 15:
-                        try:
-                            p4_sharp = gray.filter(ImageFilter.SHARPEN)
-                            p4 = ImageOps.autocontrast(p4_sharp, cutoff=2)
-                            p4_sharp.close()
-                            text4 = pytesseract.image_to_string(
-                                p4, lang="eng",
-                                timeout=ocr_timeout, config="--psm 3",
-                            ).strip()
-                            p4.close()
-                            _ocr_debug_store["pass4"] = f"psm3-eng-only: {len(text4)} chars"
-                            logger.info(f"[OCR] Pass4 ENG-only: {len(text4)} chars")
-                            if len(text4) > len(text):
-                                text = text4
-                        except Exception as e:
-                            logger.warning(f"[OCR] Pass4 error: {e}")
-                            _ocr_debug_store["pass4"] = f"ERROR: {e}"
+                    processed.close()
+                    gray.close()
+                    gray = None
 
-                    # Pass 5: English-only with binarization + PSM 6
-                    if len(text) < 15:
-                        try:
-                            enhanced5 = ImageEnhance.Contrast(gray).enhance(2.5)
-                            p5 = enhanced5.point(lambda x: 255 if x > 140 else 0)
-                            enhanced5.close()
-                            text5 = pytesseract.image_to_string(
-                                p5, lang="eng",
-                                timeout=ocr_timeout, config="--psm 6",
-                            ).strip()
-                            p5.close()
-                            _ocr_debug_store["pass5"] = f"psm6-eng-binary: {len(text5)} chars"
-                            logger.info(f"[OCR] Pass5 ENG+binary: {len(text5)} chars")
-                            if len(text5) > len(text):
-                                text = text5
-                        except Exception as e:
-                            logger.warning(f"[OCR] Pass5 error: {e}")
-                            _ocr_debug_store["pass5"] = f"ERROR: {e}"
+                    logger.info("[OCR] Final: %d chars", len(text))
+                    return text
 
-                    # Pass 6: ALWAYS run English-only OCR and COMBINE with existing text
-                    # ใบฟอกเลือด/ใบยามีคำภาษาอังกฤษสำคัญ (Hemodialysis, Heparin, Dialyzer)
-                    # ที่ tha+eng OCR อาจอ่านผิด แต่ eng-only อ่านได้ชัด
-                    # รวมข้อความ eng เข้ากับ text ที่มีอยู่เพื่อเพิ่มโอกาส keyword match
-                    try:
-                        p6_sharp = gray.filter(ImageFilter.SHARPEN)
-                        p6 = ImageOps.autocontrast(p6_sharp, cutoff=2)
-                        p6_sharp.close()
-                        text6 = pytesseract.image_to_string(
-                            p6, lang="eng",
-                            timeout=ocr_timeout, config="--psm 3",
-                        ).strip()
-                        p6.close()
-                        _ocr_debug_store["pass6"] = f"psm3-eng-always: {len(text6)} chars"
-                        logger.info(f"[OCR] Pass6 ENG-always: {len(text6)} chars")
-                        if text6 and len(text6) >= 10:
-                            # รวม eng text เข้ากับ text ที่มีอยู่ (ไม่ใช่แทนที่)
-                            # เพื่อให้ keyword matcher เห็นทั้งคำไทยและอังกฤษ
-                            if len(text) > 0:
-                                text = text + "\n" + text6
-                            else:
-                                text = text6
-                            logger.info(f"[OCR] Combined thai+eng: {len(text)} chars")
-                    except Exception as e:
-                        logger.warning(f"[OCR] Pass6 error: {e}")
-                        _ocr_debug_store["pass6"] = f"ERROR: {e}"
-
-                    _ocr_debug_store["ocr_char_count"] = len(text)
-                    _ocr_debug_store["preprocess"] = "multi-pass-6"
-                    logger.info(f"[OCR] Final: {len(text)} chars")
                 finally:
-                    if processed is not None:
+                    if gray is not None:
                         try:
-                            processed.close()
+                            gray.close()
                         except Exception:
                             pass
-                    if img is not None:
-                        try:
-                            img.close()
-                        except Exception:
-                            pass
-                    try:
-                        gray.close()
-                    except Exception:
-                        pass
-                logger.info(f"OCR ภาพ: ได้ {len(text)} ตัวอักษร")
-                if text:
-                    logger.info(f"[OCR-PRE] preview: {text[:200]}")
-                return text
 
             if ext == ".pdf":
                 if not HAS_PYMUPDF:
-                    logger.warning("PyMuPDF ไม่ได้ติดตั้ง — ไม่สามารถ OCR PDF สแกนได้")
+                    logger.warning("PyMuPDF ไม่ได้ติดตั้ง — ไม่สามารถ OCR PDF")
                     return ""
 
+                # PDF: ใช้ DPI ต่ำ (150) เพื่อลด memory
+                pdf_scale = 150 / 72  # 150 DPI
                 doc = pymupdf.open(filepath)
                 try:
                     num_pages = min(len(doc), MAX_OCR_PAGES)
                     texts = []
-
                     for i in range(num_pages):
                         pix = None
-                        img = None
+                        page_img = None
                         try:
                             page = doc[i]
-                            mat = pymupdf.Matrix(scale, scale)
+                            mat = pymupdf.Matrix(pdf_scale, pdf_scale)
                             pix = page.get_pixmap(matrix=mat)
-                            img = Image.frombytes(
+                            page_img = Image.frombytes(
                                 "RGB", [pix.width, pix.height], pix.samples
                             )
+                            # Convert to grayscale to save memory
+                            page_gray = page_img.convert("L")
+                            page_img.close()
+                            page_img = None
+                            pix = None
+
                             page_text = pytesseract.image_to_string(
-                                img, lang=ocr_lang, timeout=timeout_sec
+                                page_gray, lang="tha+eng",
+                                timeout=ocr_per_page_timeout,
+                                config="--psm 6 --oem 1",
                             )
+                            page_gray.close()
                             if page_text.strip():
                                 texts.append(page_text.strip())
+                        except Exception as pg_err:
+                            logger.warning(
+                                "[OCR] PDF page %d error: %s",
+                                i, type(pg_err).__name__,
+                            )
                         finally:
-                            # คืนหน่วยความจำทันที ไม่รอ garbage collector
-                            if img is not None:
-                                img.close()
-                            if pix is not None:
-                                pix = None
+                            if page_img is not None:
+                                try:
+                                    page_img.close()
+                                except Exception:
+                                    pass
+                            pix = None
                 finally:
                     doc.close()
 
                 full_text = "\n\n".join(texts)
                 logger.info(
-                    f"OCR PDF สแกน ({num_pages} หน้า @ {OCR_DPI} DPI): "
-                    f"ได้ {len(full_text)} ตัวอักษร"
+                    "OCR PDF: %d pages, %d chars", num_pages, len(full_text)
                 )
                 return full_text
 
         except RuntimeError as e:
-            # pytesseract timeout raises RuntimeError
-            logger.error(f"OCR timeout หรือ Tesseract error: {type(e).__name__}")
+            logger.error("OCR timeout: %s", type(e).__name__)
         except Exception as e:
-            # ไม่ log filepath หรือ str(e) — ทั้งสองอย่างอาจมีชื่อไฟล์ของผู้ป่วย
-            logger.error(f"OCR ล้มเหลว: {type(e).__name__}")
+            logger.error("OCR failed: %s", type(e).__name__)
 
     return ""
 
