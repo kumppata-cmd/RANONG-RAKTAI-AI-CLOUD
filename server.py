@@ -15606,64 +15606,6 @@ def api_analytics_status():
 
 
 # ═══════════════════════════════════════════════════════════
-# Google Sheets Sync — Admin API สำหรับ sync ข้อมูลไป Sheets
-# ═══════════════════════════════════════════════════════════
-
-@app.route("/admin/api/v2/sheets/sync-registry", methods=["POST"])
-def api_sheets_sync_registry():
-    """Sync ทะเบียนผู้ป่วยทั้งหมดไป Google Sheets."""
-    err = _admin_api_auth()
-    if err:
-        return err
-    try:
-        import google_sheets_sync as _gs
-        if not _gs.is_available():
-            return jsonify({"error": "Google Sheets ไม่ได้เปิดใช้งาน"}), 400
-        result = _gs.sync_patient_registry(master_registry)
-        return jsonify(result), 200
-    except Exception as e:
-        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
-
-
-@app.route("/admin/api/v2/sheets/sync-labs", methods=["POST"])
-def api_sheets_sync_labs():
-    """Sync สรุปผลแล็บล่าสุดไป Google Sheets."""
-    err = _admin_api_auth()
-    if err:
-        return err
-    try:
-        import google_sheets_sync as _gs
-        if not _gs.is_available():
-            return jsonify({"error": "Google Sheets ไม่ได้เปิดใช้งาน"}), 400
-        result = _gs.sync_lab_summary(doc_index, storage)
-        return jsonify(result), 200
-    except Exception as e:
-        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
-
-
-@app.route("/admin/api/v2/sheets/sync-all", methods=["POST"])
-def api_sheets_sync_all():
-    """Sync ทุกข้อมูลไป Google Sheets (registry + labs + KPI)."""
-    err = _admin_api_auth()
-    if err:
-        return err
-    try:
-        import google_sheets_sync as _gs
-        if not _gs.is_available():
-            return jsonify({"error": "Google Sheets ไม่ได้เปิดใช้งาน"}), 400
-        results = {}
-        results["registry"] = _gs.sync_patient_registry(master_registry)
-        results["labs"] = _gs.sync_lab_summary(doc_index, storage)
-        try:
-            results["kpi"] = _gs.sync_kpi_data(doc_index, master_registry)
-        except Exception:
-            results["kpi"] = {"error": "sync_kpi_data not available"}
-        return jsonify(results), 200
-    except Exception as e:
-        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
-
-
-# ═══════════════════════════════════════════════════════════
 # Rich Menu Setup — สร้าง Rich Menu ผ่าน LINE Messaging API
 # ═══════════════════════════════════════════════════════════
 
