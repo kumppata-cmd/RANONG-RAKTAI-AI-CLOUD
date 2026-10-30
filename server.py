@@ -15446,6 +15446,164 @@ def api_analytics_status():
 
 
 # ═══════════════════════════════════════════════════════════
+# Rich Menu Setup — สร้าง Rich Menu ผ่าน LINE Messaging API
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/admin/api/v2/richmenu/setup", methods=["POST"])
+def api_richmenu_setup():
+    """สร้าง Rich Menu 3 ปุ่ม (ดูผลแล็บ / ส่งเอกสาร / ลงทะเบียน)
+    แล้วตั้งเป็น default Rich Menu อัตโนมัติ.
+
+    ต้องส่งภาพ Rich Menu (2500x843) เป็น multipart/form-data field 'image'
+    หรือเรียกโดยไม่ส่งภาพเพื่อสร้าง Rich Menu แบบไม่มีภาพ (ใช้ภาพทีหลัง)
+    """
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        return jsonify({"error": "LINE_CHANNEL_ACCESS_TOKEN not set"}), 500
+
+    import requests as _req
+
+    _liff_id = os.environ.get("LIFF_ID", "")
+    _liff_url = f"https://liff.line.me/{_liff_id}" if _liff_id else ""
+
+    # Step 1: สร้าง Rich Menu object
+    rich_menu_body = {
+        "size": {"width": 2500, "height": 843},
+        "selected": True,
+        "name": "ระนอง รักษ์ไต เมนูหลัก",
+        "chatBarText": "เมนู",
+        "areas": [
+            {
+                "bounds": {"x": 0, "y": 0, "width": 833, "height": 843},
+                "action": {
+                    "type": "uri",
+                    "label": "ดูผลแล็บ",
+                    "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff",
+                },
+            },
+            {
+                "bounds": {"x": 833, "y": 0, "width": 834, "height": 843},
+                "action": {
+                    "type": "message",
+                    "label": "ส่งเอกสาร",
+                    "text": "ส่งเอกสาร",
+                },
+            },
+            {
+                "bounds": {"x": 1667, "y": 0, "width": 833, "height": 843},
+                "action": {
+                    "type": "message",
+                    "label": "ลงทะเบียน",
+                    "text": "ลงทะเบียน",
+                },
+            },
+        ],
+    }
+
+    headers = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    try:
+        # สร้าง Rich Menu
+        resp1 = _req.post(
+            "https://api.line.me/v2/bot/richmenu",
+            json=rich_menu_body,
+            headers=headers,
+            timeout=15,
+        )
+        if resp1.status_code != 200:
+            return jsonify({
+                "error": "create_rich_menu_failed",
+                "status": resp1.status_code,
+                "detail": resp1.text[:500],
+            }), 500
+
+        rich_menu_id = resp1.json().get("richMenuId", "")
+        logger.info("Rich Menu created: %s", rich_menu_id[:16])
+
+        # Step 2: อัปโหลดภาพ (ถ้ามี)
+        image_uploaded = False
+        image_file = request.files.get("image")
+        if image_file:
+            img_data = image_file.read()
+            resp2 = _req.post(
+                f"https://api-data.line.me/v2/bot/richmenu/{rich_menu_id}/content",
+                data=img_data,
+                headers={
+                    "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                    "Content-Type": image_file.content_type or "image/png",
+                },
+                timeout=30,
+            )
+            image_uploaded = resp2.status_code == 200
+            if not image_uploaded:
+                logger.warning(
+                    "Rich Menu image upload failed: %d", resp2.status_code
+                )
+
+        # Step 3: ตั้งเป็น default
+        resp3 = _req.post(
+            f"https://api.line.me/v2/bot/user/all/richmenu/{rich_menu_id}",
+            headers={
+                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+        default_set = resp3.status_code == 200
+
+        return jsonify({
+            "success": True,
+            "richMenuId": rich_menu_id,
+            "image_uploaded": image_uploaded,
+            "default_set": default_set,
+            "liff_url": _liff_url,
+            "note": "อัปโหลดภาพภายหลังได้ที่ POST /admin/api/v2/richmenu/{id}/image"
+            if not image_uploaded else "",
+        }), 200
+
+    except Exception as e:
+        logger.warning("Rich Menu setup failed: %s", type(e).__name__)
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/richmenu/<menu_id>/image", methods=["POST"])
+def api_richmenu_upload_image(menu_id):
+    """อัปโหลดภาพ Rich Menu (2500x843 PNG/JPEG)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        return jsonify({"error": "LINE_CHANNEL_ACCESS_TOKEN not set"}), 500
+
+    import requests as _req
+
+    image_file = request.files.get("image")
+    if not image_file:
+        return jsonify({"error": "กรุณาส่งไฟล์ภาพใน field 'image'"}), 400
+
+    img_data = image_file.read()
+    resp = _req.post(
+        f"https://api-data.line.me/v2/bot/richmenu/{menu_id}/content",
+        data=img_data,
+        headers={
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": image_file.content_type or "image/png",
+        },
+        timeout=30,
+    )
+    if resp.status_code == 200:
+        return jsonify({"success": True}), 200
+    return jsonify({"error": "upload_failed", "status": resp.status_code}), 500
+
+
+# ═══════════════════════════════════════════════════════════
 # Main (สำหรับทดสอบ local เท่านั้น — Render ใช้ Gunicorn)
 # ═══════════════════════════════════════════════════════════
 
