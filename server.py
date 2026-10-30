@@ -13576,14 +13576,19 @@ def admin_normalize_folders():
             # อัปเดต doc index metadata
             try:
                 doc["patient_hn_folder"] = new_folder
-                # เขียน per-doc JSON ใน GCS
+                # เขียน per-doc JSON ใน GCS — ใช้ versioned write
+                # เพราะ SA ไม่มี storage.objects.delete (ไม่สามารถ overwrite ได้)
                 if storage.is_ready:
-                    blob_path = f"{INDEX_DOC_PREFIX}{doc_id}.json"
+                    _ts = int(time.time())
+                    blob_path = (
+                        f"{INDEX_DOC_PREFIX}{doc_id}_v{_ts}.json"
+                    )
                     doc_json = json.dumps(doc, ensure_ascii=False)
                     blob = storage._bucket.blob(blob_path)
                     blob.upload_from_string(
                         doc_json,
                         content_type="application/json",
+                        if_generation_match=0,  # create-only
                     )
                 normalized.append({
                     "doc_id": doc_id[:8],
