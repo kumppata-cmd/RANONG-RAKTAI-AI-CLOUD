@@ -8275,7 +8275,7 @@ def is_scanned_pdf(filepath: str) -> bool:
 MAX_OCR_PAGES = int(os.getenv("MAX_OCR_PAGES", "5"))
 
 
-def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
+def extract_text_with_ocr(filepath: str, timeout_sec: int = 90) -> str:
     """ดึงข้อความด้วย Tesseract OCR (tha+eng).
 
     การจัดการหน่วยความจำ:
@@ -8313,10 +8313,20 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                     img.close()
                     img = None
 
-                    # 2. Upscale — LINE photos are ~1024px, OCR needs ≥2000px
+                    # 2. Resize — ปรับขนาดให้เหมาะกับ OCR
+                    # LINE photos ~1024-4032px; OCR ต้องการ ≥1500px
+                    # แต่ภาพใหญ่เกินจะ timeout บน Render 512MB
                     w, h = gray.size
-                    if w < 2000:
-                        sf = 2000 / w
+                    # ลดขนาดภาพใหญ่ (>3000px) ก่อน — ป้องกัน timeout
+                    if w > 3000:
+                        sf = 2500 / w
+                        gray = gray.resize(
+                            (int(w * sf), int(h * sf)), Image.Resampling.LANCZOS
+                        )
+                        w, h = gray.size
+                        logger.info(f"[OCR-PRE] Downscaled large image → {w}x{h}")
+                    if w < 1500:
+                        sf = 1500 / w
                         gray = gray.resize(
                             (int(w * sf), int(h * sf)), Image.Resampling.LANCZOS
                         )
@@ -8327,7 +8337,7 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 60) -> str:
                     # ── Multi-pass OCR: try different preprocessing + PSM ──
                     # แต่ละ pass ใช้ preprocessing ต่างกันเพื่อรองรับ
                     # ภาพถ่ายจาก LINE OA ที่มีคุณภาพหลากหลาย
-                    ocr_timeout = min(timeout_sec, 20)
+                    ocr_timeout = min(timeout_sec, 30)
                     text = ""
 
                     # Pass 1: Sharpen + autocontrast + PSM 3 (auto segmentation)
