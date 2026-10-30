@@ -1122,10 +1122,11 @@ _NAME_PATTERNS = [
         r'[ก-๙a-zA-ZÀ-ɏ][ก-๙a-zA-ZÀ-ɏ ]{2,40})',
         re.IGNORECASE,
     ),
-    # "Patient: Somchai Jaidee" หรือ "Patient Name: ..."
+    # "Patient: Somchai Jaidee" หรือ "Patient Name: ..." หรือ "Patient's name: ..."
     re.compile(
-        r'(?:Patient|Patient\s*Name)\s*[:=]\s*'
-        r'((?:Mr\.?|Mrs\.?|Ms\.?|Miss)?\s*[A-Za-zก-๙À-ɏ][A-Za-zก-๙À-ɏ ]{2,40})',
+        r"(?:Patient(?:'?s)?\s*(?:name)?|Patient\s*Name)\s*[:=]?\s*"
+        r'((?:Mr\.?|Mrs\.?|Ms\.?|Miss|นาย|นาง(?:สาว)?|เด็กชาย|เด็กหญิง)?\s*'
+        r'[A-Za-zก-๙À-ɏ][A-Za-zก-๙À-ɏ ]{2,40})',
         re.IGNORECASE,
     ),
     # "นาย/นาง/นางสาว + ชื่อ + สกุล" ที่ขึ้นต้นบรรทัดหรือหลัง prefix

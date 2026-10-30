@@ -10583,10 +10583,61 @@ def process_file_async(
                             f"'ผู้ป่วย <HN>' ให้ถูกแล้วส่งเอกสารใหม่"
                         )
                 else:
-                    _reply_lines.append(
-                        "👤 ยังไม่ระบุผู้ป่วย — เก็บไว้ที่ระดับไตรมาส/เดือน\n"
-                        "พิมพ์ 'ผู้ป่วย <HN>' ก่อนส่ง เพื่อเข้าแฟ้มรายคน"
-                    )
+                    # ── แสดงรายชื่อผู้ป่วยให้เลือก ──
+                    _patient_list_shown = False
+                    if (
+                        master_registry
+                        and category in CLINICAL_CATEGORIES
+                        and owner_hash
+                        and gcs_object_path
+                    ):
+                        try:
+                            _all_patients = master_registry.list_all()
+                            if _all_patients:
+                                # แสดง 5 คนล่าสุด (หรือทั้งหมดถ้า ≤ 5)
+                                _show = _all_patients[:9]
+                                _choices = []
+                                _choice_lines = []
+                                for _idx, _p in enumerate(_show, 1):
+                                    _choices.append({
+                                        "folder": _p.folder_name,
+                                        "hn": getattr(_p, "clinic_hn", "")
+                                            or getattr(_p, "hospital_hn", ""),
+                                        "name": _p.patient_name,
+                                    })
+                                    _hn_show = (
+                                        getattr(_p, "clinic_hn", "")
+                                        or getattr(_p, "hospital_hn", "")
+                                    )
+                                    _choice_lines.append(
+                                        f"  {_idx}. {_hn_show} {_p.patient_name}"
+                                    )
+                                # Save pending
+                                _set_pending_patient_assign(
+                                    owner_hash,
+                                    _doc_id,
+                                    gcs_object_path,
+                                    category,
+                                    _choices,
+                                )
+                                _reply_lines.append(
+                                    "👤 ยังไม่ระบุผู้ป่วย\n"
+                                    "📋 ตอบเลขเพื่อเลือกผู้ป่วย:\n"
+                                    + "\n".join(_choice_lines)
+                                )
+                                _patient_list_shown = True
+                        except Exception as _pex:
+                            logger.warning(
+                                "Patient list failed: %s",
+                                type(_pex).__name__,
+                            )
+                    if not _patient_list_shown:
+                        _reply_lines.append(
+                            "👤 ยังไม่ระบุผู้ป่วย — "
+                            "เก็บไว้ที่ระดับไตรมาส/เดือน\n"
+                            "พิมพ์ 'ผู้ป่วย <HN>' ก่อนส่ง "
+                            "เพื่อเข้าแฟ้มรายคน"
+                        )
                 # แสดงชื่อคนไข้ที่อ่านได้จากเอกสาร (ถ้ามี)
                 if metadata.get("ocr_patient_name"):
                     _reply_lines.append(
@@ -11128,6 +11179,124 @@ _PATIENT_CTX_GCS_PREFIX = "_state/patient_ctx/"
 # 30 นาที — พอสำหรับส่งเอกสารของผู้ป่วยหนึ่งคนเป็นชุด
 # แต่สั้นพอที่จะไม่ค้างข้ามคนไข้รายถัดไป
 _PATIENT_CTX_TIMEOUT = 1800
+
+# ── Pending Patient Assignment ─────────────────────────────────
+# เมื่อจำแนกเอกสารได้แต่ระบุผู้ป่วยไม่ได้ → เก็บ pending แล้วแสดง
+# รายชื่อผู้ป่วยเป็นเลข ผู้ใช้ตอบเลข → ย้ายเอกสารเข้าแฟ้มผู้ป่วย
+_PENDING_PATIENT_GCS_PREFIX = "_state/pending_patient/"
+_PENDING_PATIENT_TIMEOUT = 600  # 10 นาที
+
+
+def _set_pending_patient_assign(
+    user_hash: str, doc_id: str, gcs_path: str,
+    category: str, patient_choices: list[dict],
+):
+    """บันทึกเอกสารที่รอเลือกผู้ป่วย + ตัวเลือก"""
+    data = {
+        "timestamp": time.time(),
+        "doc_id": doc_id,
+        "gcs_path": gcs_path,
+        "category": category,
+        "choices": patient_choices,  # [{folder, hn, name}, ...]
+    }
+    try:
+        if not storage.is_ready or not hasattr(storage, '_bucket'):
+            return
+        blob = storage._bucket.blob(
+            f"{_PENDING_PATIENT_GCS_PREFIX}{user_hash}.json"
+        )
+        blob.upload_from_string(
+            json.dumps(data, ensure_ascii=False),
+            content_type="application/json",
+        )
+    except Exception as e:
+        logger.warning("Failed to set pending patient: %s", type(e).__name__)
+
+
+def _get_pending_patient_assign(user_hash: str) -> dict | None:
+    """ดึง pending patient assignment — None ถ้าไม่มีหรือหมดเวลา"""
+    try:
+        if not storage.is_ready or not hasattr(storage, '_bucket'):
+            return None
+        blob = storage._bucket.blob(
+            f"{_PENDING_PATIENT_GCS_PREFIX}{user_hash}.json"
+        )
+        if not blob.exists():
+            return None
+        data = json.loads(blob.download_as_text())
+        if data.get("expired"):
+            return None
+        if (time.time() - data.get("timestamp", 0)) < _PENDING_PATIENT_TIMEOUT:
+            return data
+        return None
+    except Exception:
+        return None
+
+
+def _clear_pending_patient_assign(user_hash: str):
+    """เคลียร์ pending patient"""
+    try:
+        if not storage.is_ready or not hasattr(storage, '_bucket'):
+            return
+        blob = storage._bucket.blob(
+            f"{_PENDING_PATIENT_GCS_PREFIX}{user_hash}.json"
+        )
+        blob.upload_from_string(
+            json.dumps({"expired": True, "timestamp": 0}),
+            content_type="application/json",
+        )
+    except Exception:
+        pass
+
+
+def _relocate_document_to_patient(
+    doc_id: str, old_gcs_path: str, category: str,
+    patient_folder: str,
+) -> tuple[bool, str]:
+    """ย้ายเอกสารจากโฟลเดอร์ไตรมาส/เดือน ไปยังแฟ้มผู้ป่วย
+
+    Returns: (success, message)
+    """
+    try:
+        if not storage.is_ready or not hasattr(storage, '_bucket'):
+            return False, "Storage ไม่พร้อม"
+
+        bucket = storage._bucket
+
+        # สร้าง path ใหม่ — แทรก patient_folder ก่อนชื่อไฟล์
+        # old: 05_DIALYSIS_RECORDS/2026-Q4/2026-10/xxx.jpg
+        # new: 05_DIALYSIS_RECORDS/2026-Q4/2026-10/66298_นาย.../xxx.jpg
+        path_parts = old_gcs_path.rsplit("/", 1)
+        if len(path_parts) != 2:
+            return False, "Path ไม่ถูกต้อง"
+
+        parent_dir, filename = path_parts
+        new_gcs_path = f"{parent_dir}/{patient_folder}/{filename}"
+
+        # Copy (ไม่ delete ต้นฉบับ — safety)
+        src_blob = bucket.blob(old_gcs_path)
+        if not src_blob.exists():
+            return False, "ไม่พบไฟล์ต้นฉบับ"
+
+        bucket.copy_blob(src_blob, bucket, new_gcs_path)
+
+        # อัปเดต doc index
+        if doc_index:
+            for doc in doc_index._docs:
+                if doc.get("document_id") == doc_id:
+                    doc["gcs_object_path"] = new_gcs_path
+                    doc["patient_hn_folder"] = patient_folder
+                    break
+            doc_index._save()
+
+        logger.info(
+            "Relocated doc to patient folder: %s → %s",
+            old_gcs_path[:30], patient_folder,
+        )
+        return True, new_gcs_path
+    except Exception as e:
+        logger.error("relocate doc failed: %s", type(e).__name__)
+        return False, f"ย้ายไม่สำเร็จ: {type(e).__name__}"
 
 
 def _set_patient_context(
@@ -12566,6 +12735,44 @@ def webhook():
                             "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อลองใหม่",
                         )
                     continue
+
+                # ── Pending Patient Assignment: ตอบเลขเลือกผู้ป่วย ──
+                _pending_patient = _get_pending_patient_assign(user_hash)
+                if _pending_patient and text.strip().isdigit():
+                    _pick_num = int(text.strip())
+                    _choices = _pending_patient.get("choices", [])
+                    if 1 <= _pick_num <= len(_choices):
+                        _picked = _choices[_pick_num - 1]
+                        _clear_pending_patient_assign(user_hash)
+                        _pd_id = _pending_patient["doc_id"]
+                        _pd_gcs = _pending_patient["gcs_path"]
+                        _pd_cat = _pending_patient["category"]
+                        _pd_folder = _picked["folder"]
+                        _pd_name = _picked["name"]
+                        _pd_hn = _picked["hn"]
+                        # ย้ายเอกสาร
+                        _ok, _msg = _relocate_document_to_patient(
+                            _pd_id, _pd_gcs, _pd_cat, _pd_folder,
+                        )
+                        if _ok:
+                            reply_message(
+                                reply_token,
+                                f"✅ ย้ายเอกสารเข้าแฟ้มเรียบร้อย\n"
+                                f"👤 {_pd_hn} {_pd_name}\n"
+                                f"📁 {_pd_folder}",
+                            )
+                            # ตั้ง patient context ด้วย
+                            _set_patient_context(
+                                user_hash, _pd_folder,
+                                _pd_hn, _pd_name,
+                            )
+                        else:
+                            reply_message(
+                                reply_token,
+                                f"❌ ย้ายไม่สำเร็จ: {_msg}\n"
+                                f"ลองพิมพ์ 'ผู้ป่วย {_pd_hn}' แล้วส่งเอกสารใหม่",
+                            )
+                        continue
 
                 # ── Pending Classification: ตรวจว่าผู้ใช้ตอบเลข 1-4 ──
                 _pending = _get_pending_classification(user_hash)
