@@ -35,7 +35,7 @@ def _get_drive_service():
         from googleapiclient.discovery import build
 
         credentials, _project = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/drive.file"]
+            scopes=["https://www.googleapis.com/auth/drive"]
         )
         _drive_service = build(
             "drive", "v3", credentials=credentials, cache_discovery=False
