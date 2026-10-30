@@ -502,6 +502,73 @@ class MasterPatientRegistry:
                 results.append(p)
         return results
 
+    def search_by_name(self, name: str) -> MasterPatient | None:
+        """ค้นหาผู้ป่วยจากชื่อ — ใช้เมื่อ OCR หา HN ไม่ได้
+
+        ลำดับการค้น:
+          1. ตรงทั้งชื่อ (exact, case-insensitive)
+          2. ชื่อ OCR เป็น substring ของชื่อใน registry
+          3. ชื่อใน registry เป็น substring ของชื่อ OCR
+          4. ตรงทั้งชื่อตัว + นามสกุล (แยก token)
+
+        คืน MasterPatient ถ้าพบ **ผู้ป่วยเพียง 1 คน** เท่านั้น
+        ถ้าพบหลายคน → คืน None (กันจัดเข้าแฟ้มผิดคน)
+        """
+        if not name or len(name.strip()) < 3:
+            return None
+
+        self._refresh_if_stale()
+        name_clean = name.strip()
+        name_upper = name_clean.upper()
+
+        # ─── Pass 1: exact match (case-insensitive) ───
+        exact = [p for p in self._patients if p.patient_name.upper() == name_upper]
+        if len(exact) == 1:
+            return exact[0]
+
+        # ─── ตัด prefix (นาย/นาง/นางสาว) ก่อน fuzzy ───
+        import re as _re
+        _prefix_re = _re.compile(
+            r'^(?:นาย|นาง(?:สาว)?|เด็กชาย|เด็กหญิง|ด\.ช\.|ด\.ญ\.)\s*',
+        )
+        name_no_prefix = _prefix_re.sub('', name_clean).strip()
+        name_no_prefix_upper = name_no_prefix.upper()
+
+        def _strip_prefix(n: str) -> str:
+            return _prefix_re.sub('', n).strip()
+
+        # ─── Pass 2: OCR name is substring of registry name ───
+        if len(name_no_prefix) >= 4:
+            matches = [
+                p for p in self._patients
+                if name_no_prefix_upper in _strip_prefix(p.patient_name).upper()
+            ]
+            if len(matches) == 1:
+                return matches[0]
+
+        # ─── Pass 3: registry name is substring of OCR name ───
+        if len(name_no_prefix) >= 4:
+            matches = [
+                p for p in self._patients
+                if len(_strip_prefix(p.patient_name)) >= 4
+                and _strip_prefix(p.patient_name).upper() in name_no_prefix_upper
+            ]
+            if len(matches) == 1:
+                return matches[0]
+
+        # ─── Pass 4: token match (ชื่อ + นามสกุล ตรงกัน) ───
+        name_tokens = set(name_no_prefix_upper.split())
+        if len(name_tokens) >= 2:
+            matches = []
+            for p in self._patients:
+                p_tokens = set(_strip_prefix(p.patient_name).upper().split())
+                if len(p_tokens) >= 2 and name_tokens == p_tokens:
+                    matches.append(p)
+            if len(matches) == 1:
+                return matches[0]
+
+        return None
+
     def list_all(self) -> list[MasterPatient]:
         """แสดงรายชื่อทั้งหมด"""
         # [perf] โหลดใหม่เฉพาะเมื่อแคชเก่าเกิน TTL — ดู _refresh_if_stale()

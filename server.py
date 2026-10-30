@@ -9819,6 +9819,40 @@ def process_file_async(
                             "OCR patient name extracted: (category=%s)",
                             category,
                         )
+
+                        # ── Name-Based Fallback: ค้นชื่อจาก registry ──
+                        # เมื่อ OCR หา HN ไม่ได้ แต่ดึงชื่อผู้ป่วยได้
+                        # → ค้นชื่อใน master_registry
+                        # ─ ปลอดภัย: ต้องพบ **ผู้ป่วยเพียง 1 คน**
+                        #   ถ้าพบหลายคน → ไม่จับคู่ (กันจัดเข้าแฟ้มผิดคน)
+                        _cur_folder = metadata.get("patient_hn_folder", "")
+                        if not _cur_folder and master_registry:
+                            try:
+                                _name_match = master_registry.search_by_name(
+                                    _ocr_patient_name
+                                )
+                                if _name_match:
+                                    metadata["patient_hn_folder"] = (
+                                        _name_match.folder_name
+                                    )
+                                    metadata["matched_by"] = "ocr_name"
+                                    logger.info(
+                                        "Name-based route: matched '%s' → "
+                                        "folder (category=%s)",
+                                        "(name)", category,
+                                    )
+                                else:
+                                    logger.info(
+                                        "Name-based route: no unique match "
+                                        "for OCR name (category=%s)",
+                                        category,
+                                    )
+                            except Exception as nm_err:
+                                logger.warning(
+                                    "Name-based route failed: %s",
+                                    type(nm_err).__name__,
+                                )
+
                         # ถ้า HN จาก OCR ได้ แต่ไม่อยู่ใน registry
                         # (folder ขึ้นต้นด้วย "HN") — เสริมชื่อเข้าไป
                         _cur_folder = metadata.get("patient_hn_folder", "")
@@ -10452,6 +10486,10 @@ def process_file_async(
                     _reply_lines.append(
                         f"👤 แฟ้มผู้ป่วย: {metadata['patient_hn_folder']}"
                     )
+                    if metadata.get("matched_by") == "ocr_name":
+                        _reply_lines.append(
+                            "🔍 จับคู่จากชื่อในเอกสาร (ตรวจสอบว่าถูกคนหรือไม่)"
+                        )
                     if _ctx_conflict:
                         _reply_lines.append(
                             f"⚠️ HN ในเอกสารอ่านได้เป็น: {_ctx_conflict}\n"
