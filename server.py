@@ -15167,6 +15167,195 @@ else:
 
 
 # ═══════════════════════════════════════════════════════════
+# Clinical Analytics API (modules แยก — ไม่แตะ logic เดิม)
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/admin/api/v2/report/weekly", methods=["POST"])
+def api_weekly_report():
+    """ส่งรายงานสรุปรายสัปดาห์ทาง email."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import auto_weekly_report
+        result = auto_weekly_report.send_scheduled_report(
+            storage, doc_index, master_registry, period="weekly"
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/report/monthly", methods=["POST"])
+def api_monthly_report():
+    """ส่งรายงานสรุปรายเดือนทาง email."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import auto_weekly_report
+        result = auto_weekly_report.send_scheduled_report(
+            storage, doc_index, master_registry, period="monthly"
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/dialysis-adequacy", methods=["GET"])
+def api_dialysis_adequacy():
+    """สรุป Dialysis Adequacy ทั้งคลินิก."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import dialysis_adequacy
+        summary = dialysis_adequacy.get_clinic_adequacy_summary(
+            storage, master_registry
+        )
+        return jsonify(summary), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/dialysis-adequacy/alerts", methods=["GET"])
+def api_dialysis_alerts():
+    """รายการผู้ป่วย Kt/V ต่ำกว่าเกณฑ์."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import dialysis_adequacy
+        alerts = dialysis_adequacy.get_inadequate_patients_alert(
+            storage, master_registry
+        )
+        return jsonify({"alerts": alerts, "count": len(alerts)}), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/epo-tracker", methods=["GET"])
+def api_epo_overview():
+    """สรุป EPO Response ทั้งคลินิก."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import epo_response_tracker
+        overview = epo_response_tracker.get_clinic_epo_overview(
+            storage, master_registry
+        )
+        return jsonify(overview), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/epo-tracker/<hn>", methods=["GET"])
+def api_epo_patient(hn):
+    """EPO Response ของผู้ป่วยรายเดียว."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import epo_response_tracker
+        patient_folder = master_registry.get_folder_for_hn(hn)
+        if not patient_folder:
+            return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+        summary = epo_response_tracker.get_patient_epo_summary(
+            storage, patient_folder
+        )
+        return jsonify(summary), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/hd-schedules", methods=["GET", "POST"])
+def api_hd_schedules():
+    """จัดการตารางฟอกเลือด."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import hd_schedule_reminder
+        if request.method == "GET":
+            schedules = hd_schedule_reminder.api_list_schedules(storage)
+            return jsonify(schedules), 200
+        else:
+            data = request.get_json(silent=True) or {}
+            if "schedules" in data:
+                result = hd_schedule_reminder.api_bulk_import_schedules(
+                    storage, data["schedules"]
+                )
+                return jsonify(result), 200
+            clinic_hn = data.get("clinic_hn", "").strip()
+            hd_per_week = data.get("hd_per_week", 3)
+            days = data.get("days")
+            time_str = data.get("time", "08:00")
+            if not clinic_hn:
+                return jsonify({"error": "ต้องระบุ clinic_hn"}), 400
+            result = hd_schedule_reminder.set_schedule(
+                storage, clinic_hn, hd_per_week, days, time_str
+            )
+            return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/hd-schedules/send-reminders", methods=["POST"])
+def api_send_hd_reminders():
+    """ส่ง LINE reminder สำหรับผู้ป่วยที่มีนัดฟอกพรุ่งนี้."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    try:
+        import hd_schedule_reminder
+
+        def _line_push(user_id, messages):
+            """Push LINE message ผ่าน existing infrastructure."""
+            import requests as _req
+            token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+            if not token:
+                return False
+            resp = _req.post(
+                "https://api.line.me/v2/bot/message/push",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+                json={"to": user_id, "messages": messages},
+                timeout=10,
+            )
+            return resp.status_code == 200
+
+        result = hd_schedule_reminder.send_reminders(
+            storage, master_registry, hn_registry, _line_push
+        )
+        return jsonify(result), 200
+    except Exception as e:
+        return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/analytics/status", methods=["GET"])
+def api_analytics_status():
+    """สถานะ modules วิเคราะห์ทั้งหมด."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    status = {}
+    for mod_name in [
+        "auto_weekly_report", "dialysis_adequacy",
+        "epo_response_tracker", "hd_schedule_reminder",
+    ]:
+        try:
+            mod = __import__(mod_name)
+            status[mod_name] = mod.get_status()
+        except Exception as _e:
+            status[mod_name] = {"error": type(_e).__name__}
+    return jsonify(status), 200
+
+
+# ═══════════════════════════════════════════════════════════
 # Main (สำหรับทดสอบ local เท่านั้น — Render ใช้ Gunicorn)
 # ═══════════════════════════════════════════════════════════
 

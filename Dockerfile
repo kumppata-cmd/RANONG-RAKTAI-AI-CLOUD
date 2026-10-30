@@ -68,6 +68,12 @@ COPY expense_tracker.py .
 COPY dead_letter.py .
 COPY system_monitor.py .
 
+# Clinical Analytics + Scheduling modules
+COPY auto_weekly_report.py .
+COPY dialysis_adequacy.py .
+COPY epo_response_tracker.py .
+COPY hd_schedule_reminder.py .
+
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \
     useradd -r -g appuser -d /app -s /sbin/nologin appuser
