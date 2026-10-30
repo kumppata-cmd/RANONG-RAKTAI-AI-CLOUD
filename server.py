@@ -9263,8 +9263,14 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              "clotted bloodline", "discharge by",
              "last TCV", "use No", "loading", "maintenance",
              "flush Nss", "machine", "SADL",
+             # ── OCR อ่านผิดบ่อย — เพิ่ม variant ──
+             "hemodlalysis", "hemodia", "hemod", "work sheet",
+             "hemodi", "dialysi", "dialyse",
+             "patient name", "age", "dx ckd",
+             "ckd stage", "pre weight", "post weight",
+             "weight gain", "needle", "gauge",
              ],
-            2,
+            1,  # min_match=1 เพราะ keyword เดียวก็ชัดพอ
         ),
     }
 
@@ -9440,7 +9446,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
         "flush Nss", "repletement", "clotted bloodline",
     ]
     _hd_hits = [kw for kw in _hd_strong_kws if kw.lower() in content_lower]
-    if len(_hd_hits) >= 2:
+    if len(_hd_hits) >= 1:
         logger.info(
             f"  pre-check: hemodialysis detected "
             f"({len(_hd_hits)} strong HD kws) → dialysis"
