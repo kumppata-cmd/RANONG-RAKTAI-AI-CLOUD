@@ -15556,12 +15556,14 @@ def api_richmenu_setup():
             timeout=15,
         )
         default_set = resp3.status_code == 200
+        default_error = "" if default_set else resp3.text[:300]
 
         return jsonify({
             "success": True,
             "richMenuId": rich_menu_id,
             "image_uploaded": image_uploaded,
             "default_set": default_set,
+            "default_error": default_error,
             "liff_url": _liff_url,
             "note": "อัปโหลดภาพภายหลังได้ที่ POST /admin/api/v2/richmenu/{id}/image"
             if not image_uploaded else "",
@@ -15570,6 +15572,35 @@ def api_richmenu_setup():
     except Exception as e:
         logger.warning("Rich Menu setup failed: %s", type(e).__name__)
         return jsonify({"error": type(e).__name__, "message": str(e)}), 500
+
+
+@app.route("/admin/api/v2/richmenu/<menu_id>/default", methods=["POST"])
+def api_richmenu_set_default(menu_id):
+    """ตั้ง Rich Menu เป็น default สำหรับผู้ใช้ทุกคน."""
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        return jsonify({"error": "LINE_CHANNEL_ACCESS_TOKEN not set"}), 500
+
+    import requests as _req
+
+    resp = _req.post(
+        f"https://api.line.me/v2/bot/user/all/richmenu/{menu_id}",
+        headers={
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json",
+        },
+        timeout=15,
+    )
+    if resp.status_code == 200:
+        return jsonify({"success": True, "richMenuId": menu_id}), 200
+    return jsonify({
+        "error": "set_default_failed",
+        "status": resp.status_code,
+        "detail": resp.text[:500],
+    }), 500
 
 
 @app.route("/admin/api/v2/richmenu/<menu_id>/image", methods=["POST"])
