@@ -59,6 +59,15 @@ COPY ckd_progression.py .
 COPY nephrology_drug_db.py .
 COPY liff_app.py .
 
+# Google Integration + Finance + Monitoring modules
+COPY google_drive_sync.py .
+COPY google_sheets_sync.py .
+COPY gmail_report.py .
+COPY invoice_parser.py .
+COPY expense_tracker.py .
+COPY dead_letter.py .
+COPY system_monitor.py .
+
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \
     useradd -r -g appuser -d /app -s /sbin/nologin appuser
