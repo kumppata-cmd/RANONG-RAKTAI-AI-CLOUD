@@ -7601,81 +7601,33 @@ def handle_search_command(
                     "ส่งเอกสารอีก 1 ครั้งเพื่อเปรียบเทียบ"
                 )
 
-            # มี ≥ 2 ครั้ง → เปรียบเทียบ 2 ครั้งล่าสุด
-            current = _hist[0]
-            previous = _hist[1]
-            current_data = current.get("data", {})
-            prev_data = previous.get("data", {})
-            cur_date = current.get("upload_date", "?")
-            prev_date = previous.get("upload_date", "?")
+            # มี ≥ 2 ครั้ง → ส่ง link ไปหน้าเปรียบเทียบรูปจริง
+            cur_date = _hist[0].get("upload_date", "?")
+            prev_date = _hist[1].get("upload_date", "?")
 
-            lines = [
-                "🩸 เปรียบเทียบฟอกเลือด",
-                "━━━━━━━━━━━━━━━━━━",
-                f"📅 ครั้งก่อน: {prev_date}",
-                f"📅 ครั้งนี้: {cur_date}",
-                "",
-            ]
-
-            changed_count = 0
-            same_count = 0
-            for section_name, section_keys in _DIALYSIS_SECTIONS:
-                section_items = []
-                for key in section_keys:
-                    cv = current_data.get(key)
-                    pv = prev_data.get(key)
-                    if cv is not None or pv is not None:
-                        section_items.append((key, cv, pv))
-                if not section_items:
-                    continue
-                lines.append(f"\n{section_name}")
-                for key, cv, pv in section_items:
-                    label = _dialysis_param_thai(key)
-                    cs = _format_timeline_value(cv) if cv is not None else "-"
-                    ps = _format_timeline_value(pv) if pv is not None else "-"
-                    if cv is not None and pv is not None:
-                        if isinstance(cv, (int, float)) and isinstance(pv, (int, float)):
-                            d = cv - pv
-                            if abs(d) < 0.01:
-                                m = "="
-                                same_count += 1
-                            else:
-                                m = f"↑{abs(d):.1f}" if d > 0 else f"↓{abs(d):.1f}"
-                                changed_count += 1
-                        else:
-                            if str(cv).strip() == str(pv).strip():
-                                m = "="
-                                same_count += 1
-                            else:
-                                m = "🔄"
-                                changed_count += 1
-                        lines.append(f"  {label}: {ps} → {cs} {m}")
-                    elif cv is not None:
-                        lines.append(f"  {label}: {cs}")
-                    else:
-                        lines.append(f"  {label}: {ps} → -")
-
-            lines.append("")
-            lines.append(f"📊 เปลี่ยน {changed_count} | คงเดิม {same_count}")
-            if len(_hist) > 2:
-                lines.append(f"📋 มีข้อมูลทั้งหมด {len(_hist)} ครั้ง")
-
-            # ── Link ไปหน้าเปรียบเทียบรูปจริง ──
             _base = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
             _admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-            if _base and _admin_secret:
-                _cmp_type = "dialysis"
-                if cmd == CommandType.COMPARE_LAB_TIMELINE:
-                    _cmp_type = "lab"
-                elif cmd == CommandType.COMPARE_RX_TIMELINE:
-                    _cmp_type = "rx"
-                _cmp_url = (
-                    f"{_base}/admin/compare/{hn_query}"
-                    f"?secret={_admin_secret}&type={_cmp_type}"
-                )
-                lines.append(f"\n🔍 ดูรูปเอกสารจริง + สั่งการรักษา:\n{_cmp_url}")
+            _cmp_type = "dialysis"
+            _type_label = "ฟอกเลือด"
+            if cmd == CommandType.COMPARE_LAB_TIMELINE:
+                _cmp_type = "lab"
+                _type_label = "ผลแล็บ"
+            elif cmd == CommandType.COMPARE_RX_TIMELINE:
+                _cmp_type = "rx"
+                _type_label = "ใบยา"
 
-            result = {"text_th": "\n".join(lines), "current_date": cur_date}
+            _cmp_url = (
+                f"{_base}/admin/compare/{hn_query}"
+                f"?secret={_admin_secret}&type={_cmp_type}"
+            )
+
+            _text = (
+                f"📋 เปรียบเทียบ{_type_label}{patient_label}\n"
+                f"มี {len(_hist)} ครั้ง ({prev_date} — {cur_date})\n\n"
+                f"🔍 กดดูรูปเอกสาร + สั่งการรักษา:\n{_cmp_url}"
+            )
+
+            result = {"text_th": _text, "current_date": cur_date}
 
             audit_logger.log(log_type, user_hash, {
                 "target": target_hash[:8] if target_hash != user_hash else "self",
