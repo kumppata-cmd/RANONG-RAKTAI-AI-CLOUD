@@ -5159,6 +5159,386 @@ def api_patient_data(hn):
     })
 
 
+# ══════════════════════════════════════════════════════════════
+# Admin Compare Page: เปรียบเทียบเอกสาร — รูปจริง 2 รูปคู่กัน
+# ══════════════════════════════════════════════════════════════
+
+@app.route("/admin/compare/<hn>")
+def admin_compare_page(hn):
+    """หน้าเว็บเปรียบเทียบเอกสาร — แสดงรูปจริง 2 รูปคู่กัน + ปุ่มสั่งการ
+
+    ใช้ได้ทุกเอกสาร: ฟอกเลือด, ยา, แล็บ, บิล
+    Query params:
+      - secret: admin secret
+      - type: lab|rx|dialysis|bills (default: dialysis)
+    """
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return "ระบบยังไม่ได้ตั้งค่า", 500
+    secret = request.args.get("secret", "")
+    if not secret or not hmac.compare_digest(
+        secret.encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
+    ):
+        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+
+    hn = hn.strip()[:20]
+    doc_type = request.args.get("type", "dialysis").strip().lower()
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    hn_q = hn.replace("HN", "").replace("hn", "").strip()
+
+    # ── ค้นผู้ป่วย ──
+    (found, oh, pf, p_name, p_clinic, p_hospital,
+     folders, err) = _resolve_patient_for_api(hn_q)
+    if not found:
+        return (
+            f"<html><body style='font-family:sans-serif;"
+            f"text-align:center;padding:40px'>"
+            f"<h2>ไม่พบผู้ป่วย HN {hn}</h2>"
+            f"<p>{err}</p></body></html>"
+        ), 404
+
+    # ── ค้นเอกสารตาม type ──
+    all_docs = []
+    if oh:
+        all_docs = doc_index.list_by_owner(oh, limit=200) if hasattr(doc_index, 'list_by_owner') else []
+    for pf_try in folders:
+        pf_docs = doc_index.list_by_patient_folder(pf_try, limit=200) if hasattr(doc_index, 'list_by_patient_folder') else []
+        for d in pf_docs:
+            if d.get("document_id") not in [x.get("document_id") for x in all_docs]:
+                all_docs.append(d)
+
+    # กรองตาม type
+    type_docs = [d for d in all_docs if d.get("category") == doc_type]
+    type_docs.sort(key=lambda x: x.get("upload_date", ""), reverse=True)
+
+    # ── สร้าง signed URLs สำหรับรูป ──
+    doc_items = []
+    for doc in type_docs[:20]:  # จำกัด 20 ฉบับ
+        gcs_path = doc.get("gcs_object_path", "")
+        doc_id = doc.get("document_id", "")
+        upload_date = doc.get("upload_date", "?")
+        signed = ""
+        if gcs_path:
+            signed = generate_signed_url(gcs_path, expiry_seconds=3600) or ""
+        if signed:
+            doc_items.append({
+                "id": doc_id,
+                "date": upload_date,
+                "url": signed,
+                "gcs": gcs_path,
+            })
+
+    # ── Type labels ──
+    type_labels = {
+        "dialysis": "ฟอกเลือด",
+        "lab": "ผลแล็บ",
+        "rx": "ใบยา",
+        "bills": "ใบเสร็จ/บิล",
+    }
+    type_label = type_labels.get(doc_type, doc_type)
+
+    # ── Build HTML ──
+    # สร้าง JSON สำหรับ JavaScript
+    import json as _json
+    docs_json = _json.dumps(doc_items, ensure_ascii=False)
+
+    html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>เปรียบเทียบ {type_label} — {p_name or hn}</title>
+<style>
+* {{ margin:0; padding:0; box-sizing:border-box; }}
+body {{ font-family:'Sarabun',sans-serif; background:#f0f2f5; color:#333; }}
+.header {{ background:linear-gradient(135deg,#1a6b3c,#0d7a40); color:#fff;
+  padding:16px 20px; position:sticky; top:0; z-index:100; }}
+.header h1 {{ font-size:18px; font-weight:600; }}
+.header .sub {{ font-size:13px; opacity:0.85; margin-top:4px; }}
+.tabs {{ display:flex; background:#fff; border-bottom:2px solid #e0e0e0;
+  overflow-x:auto; padding:0 8px; }}
+.tab {{ padding:10px 16px; font-size:14px; cursor:pointer; white-space:nowrap;
+  border-bottom:3px solid transparent; color:#666; }}
+.tab.active {{ color:#1a6b3c; border-bottom-color:#1a6b3c; font-weight:600; }}
+.compare-area {{ padding:12px; }}
+.doc-selector {{ display:flex; gap:8px; margin-bottom:12px; align-items:center; }}
+.doc-selector select {{ flex:1; padding:8px; border:1px solid #ccc;
+  border-radius:8px; font-size:14px; }}
+.doc-selector label {{ font-size:13px; font-weight:600; color:#555; min-width:60px; }}
+.images {{ display:flex; gap:8px; margin-bottom:12px; }}
+.img-box {{ flex:1; background:#fff; border-radius:12px;
+  box-shadow:0 2px 8px rgba(0,0,0,0.1); overflow:hidden; }}
+.img-box .label {{ padding:8px 12px; background:#f8f9fa; font-size:12px;
+  font-weight:600; color:#555; border-bottom:1px solid #eee; text-align:center; }}
+.img-box img {{ width:100%; display:block; cursor:pointer; }}
+.img-box img.zoomed {{ position:fixed; top:0; left:0; width:100%; height:100%;
+  object-fit:contain; background:rgba(0,0,0,0.9); z-index:200; cursor:zoom-out; }}
+.actions {{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:12px; }}
+.btn {{ padding:10px 16px; border:none; border-radius:8px; font-size:14px;
+  cursor:pointer; font-weight:600; display:flex; align-items:center; gap:6px; }}
+.btn-primary {{ background:#1a6b3c; color:#fff; }}
+.btn-warn {{ background:#e65100; color:#fff; }}
+.btn-blue {{ background:#1565c0; color:#fff; }}
+.btn-gray {{ background:#78909c; color:#fff; }}
+.note-area {{ margin-bottom:12px; }}
+.note-area textarea {{ width:100%; padding:12px; border:1px solid #ccc;
+  border-radius:8px; font-size:14px; resize:vertical; min-height:80px; }}
+.note-area textarea::placeholder {{ color:#999; }}
+.status {{ padding:12px; background:#fff; border-radius:8px;
+  margin-bottom:12px; font-size:13px; color:#666; text-align:center; }}
+.toast {{ position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
+  background:#333; color:#fff; padding:12px 24px; border-radius:8px;
+  font-size:14px; z-index:300; display:none; }}
+@media(max-width:600px) {{
+  .images {{ flex-direction:column; }}
+}}
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>📋 เปรียบเทียบ{type_label} — {p_name or hn}</h1>
+  <div class="sub">HN: {p_clinic or p_hospital or hn} | เอกสาร {len(doc_items)} ฉบับ</div>
+</div>
+
+<div class="tabs">
+  <div class="tab {'active' if doc_type=='dialysis' else ''}"
+       onclick="switchType('dialysis')">🩸 ฟอกเลือด</div>
+  <div class="tab {'active' if doc_type=='lab' else ''}"
+       onclick="switchType('lab')">🔬 แล็บ</div>
+  <div class="tab {'active' if doc_type=='rx' else ''}"
+       onclick="switchType('rx')">💊 ยา</div>
+  <div class="tab {'active' if doc_type=='bills' else ''}"
+       onclick="switchType('bills')">📄 บิล</div>
+</div>
+
+<div class="compare-area">
+
+  <div class="doc-selector">
+    <label>ครั้งก่อน:</label>
+    <select id="selPrev" onchange="updateImages()"></select>
+  </div>
+  <div class="doc-selector">
+    <label>ครั้งนี้:</label>
+    <select id="selCur" onchange="updateImages()"></select>
+  </div>
+
+  <div class="images">
+    <div class="img-box">
+      <div class="label" id="labelPrev">ครั้งก่อน</div>
+      <img id="imgPrev" src="" alt="ครั้งก่อน" onclick="toggleZoom(this)">
+    </div>
+    <div class="img-box">
+      <div class="label" id="labelCur">ครั้งนี้</div>
+      <img id="imgCur" src="" alt="ครั้งนี้" onclick="toggleZoom(this)">
+    </div>
+  </div>
+
+  <div class="note-area">
+    <textarea id="noteText" placeholder="📝 บันทึกคำสั่งการรักษา / แก้ไข..."></textarea>
+  </div>
+
+  <div class="actions">
+    <button class="btn btn-primary" onclick="saveNote('treatment')">
+      💊 สั่งการรักษา
+    </button>
+    <button class="btn btn-blue" onclick="saveNote('edit')">
+      ✏️ แก้ไขข้อมูล
+    </button>
+    <button class="btn btn-warn" onclick="refreshDocs()">
+      🔄 Update ล่าสุด
+    </button>
+    <button class="btn btn-gray" onclick="sendToLine()">
+      📤 ส่ง LINE
+    </button>
+  </div>
+
+  <div class="status" id="statusBar">
+    เลือกเอกสาร 2 ฉบับเพื่อเปรียบเทียบ
+  </div>
+
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const DOCS = {docs_json};
+const HN = "{hn_q}";
+const SECRET = "{secret}";
+const BASE = "{base_url}";
+const DOC_TYPE = "{doc_type}";
+
+// ── Populate selects ──
+function populateSelects() {{
+  const selPrev = document.getElementById('selPrev');
+  const selCur = document.getElementById('selCur');
+  selPrev.innerHTML = '';
+  selCur.innerHTML = '';
+
+  if (DOCS.length === 0) {{
+    selPrev.innerHTML = '<option>ไม่มีเอกสาร</option>';
+    selCur.innerHTML = '<option>ไม่มีเอกสาร</option>';
+    document.getElementById('statusBar').textContent = 'ยังไม่มีเอกสาร กรุณาส่งเอกสารผ่าน LINE OA ก่อน';
+    return;
+  }}
+
+  DOCS.forEach((d, i) => {{
+    const opt1 = new Option(d.date + ' (#' + (i+1) + ')', i);
+    const opt2 = new Option(d.date + ' (#' + (i+1) + ')', i);
+    selPrev.add(opt1);
+    selCur.add(opt2);
+  }});
+
+  // Default: ครั้งก่อน = index 1, ครั้งนี้ = index 0
+  if (DOCS.length >= 2) {{
+    selPrev.value = 1;
+    selCur.value = 0;
+  }}
+  updateImages();
+}}
+
+function updateImages() {{
+  const pi = parseInt(document.getElementById('selPrev').value);
+  const ci = parseInt(document.getElementById('selCur').value);
+
+  if (DOCS[pi]) {{
+    document.getElementById('imgPrev').src = DOCS[pi].url;
+    document.getElementById('labelPrev').textContent = '📅 ครั้งก่อน: ' + DOCS[pi].date;
+  }}
+  if (DOCS[ci]) {{
+    document.getElementById('imgCur').src = DOCS[ci].url;
+    document.getElementById('labelCur').textContent = '📅 ครั้งนี้: ' + DOCS[ci].date;
+  }}
+
+  document.getElementById('statusBar').textContent =
+    'แสดง ' + DOCS.length + ' ฉบับ | กดรูปเพื่อซูม';
+}}
+
+function toggleZoom(img) {{
+  img.classList.toggle('zoomed');
+}}
+
+function switchType(type) {{
+  window.location.href = BASE + '/admin/compare/' + HN + '?secret=' + SECRET + '&type=' + type;
+}}
+
+function showToast(msg) {{
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  setTimeout(() => t.style.display = 'none', 3000);
+}}
+
+function saveNote(action) {{
+  const note = document.getElementById('noteText').value.trim();
+  if (!note) {{
+    showToast('กรุณาพิมพ์ข้อความก่อน');
+    return;
+  }}
+
+  const ci = parseInt(document.getElementById('selCur').value);
+  const docId = DOCS[ci] ? DOCS[ci].id : '';
+
+  fetch(BASE + '/admin/api/v2/treatment-note', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{
+      secret: SECRET,
+      hn: HN,
+      doc_id: docId,
+      action: action,
+      note: note,
+      doc_type: DOC_TYPE,
+    }})
+  }})
+  .then(r => r.json())
+  .then(data => {{
+    if (data.success) {{
+      showToast('✅ บันทึกเรียบร้อย');
+      document.getElementById('noteText').value = '';
+    }} else {{
+      showToast('❌ ' + (data.error || 'เกิดข้อผิดพลาด'));
+    }}
+  }})
+  .catch(e => showToast('❌ เชื่อมต่อไม่ได้'));
+}}
+
+function refreshDocs() {{
+  window.location.reload();
+}}
+
+function sendToLine() {{
+  const note = document.getElementById('noteText').value.trim();
+  const ci = parseInt(document.getElementById('selCur').value);
+  const docId = DOCS[ci] ? DOCS[ci].id : '';
+
+  fetch(BASE + '/admin/api/v2/send-note-line', {{
+    method: 'POST',
+    headers: {{ 'Content-Type': 'application/json' }},
+    body: JSON.stringify({{
+      secret: SECRET,
+      hn: HN,
+      doc_id: docId,
+      note: note || 'ดูเอกสารแล้ว',
+      doc_type: DOC_TYPE,
+    }})
+  }})
+  .then(r => r.json())
+  .then(data => {{
+    if (data.success) showToast('✅ ส่ง LINE แล้ว');
+    else showToast('❌ ' + (data.error || 'ส่งไม่ได้'));
+  }})
+  .catch(e => showToast('❌ เชื่อมต่อไม่ได้'));
+}}
+
+populateSelects();
+</script>
+</body></html>"""
+
+    return html
+
+
+# ── Treatment Note API ──
+@app.route("/admin/api/v2/treatment-note", methods=["POST"])
+def api_treatment_note():
+    """บันทึกคำสั่งการรักษา/แก้ไข จากหน้าเปรียบเทียบ"""
+    _check_admin_secret()
+    data = request.get_json(force=True)
+    hn = data.get("hn", "")
+    doc_id = data.get("doc_id", "")
+    action = data.get("action", "")
+    note = data.get("note", "")
+    doc_type = data.get("doc_type", "")
+
+    if not note:
+        return jsonify({"error": "กรุณาพิมพ์ข้อความ"}), 400
+
+    # บันทึกลง GCS
+    try:
+        note_data = {
+            "timestamp": time.time(),
+            "hn": hn,
+            "doc_id": doc_id,
+            "action": action,
+            "note": note,
+            "doc_type": doc_type,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        note_path = f"_treatment_notes/{hn}/{int(time.time())}.json"
+        if storage.is_ready and hasattr(storage, '_bucket'):
+            blob = storage._bucket.blob(note_path)
+            blob.upload_from_string(
+                json.dumps(note_data, ensure_ascii=False),
+                content_type="application/json",
+            )
+        logger.info("Treatment note saved: HN=%s action=%s", hn, action)
+        return jsonify({"success": True, "path": note_path})
+    except Exception as e:
+        logger.error("Treatment note failed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/admin/patient/<hn>")
 def admin_patient_page(hn):
     """หน้าเว็บสรุปผู้ป่วย — Server-Side Render (ไม่ต้อง fetch API)"""
@@ -7279,6 +7659,21 @@ def handle_search_command(
             lines.append(f"📊 เปลี่ยน {changed_count} | คงเดิม {same_count}")
             if len(_hist) > 2:
                 lines.append(f"📋 มีข้อมูลทั้งหมด {len(_hist)} ครั้ง")
+
+            # ── Link ไปหน้าเปรียบเทียบรูปจริง ──
+            _base = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+            _admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+            if _base and _admin_secret:
+                _cmp_type = "dialysis"
+                if cmd == CommandType.COMPARE_LAB_TIMELINE:
+                    _cmp_type = "lab"
+                elif cmd == CommandType.COMPARE_RX_TIMELINE:
+                    _cmp_type = "rx"
+                _cmp_url = (
+                    f"{_base}/admin/compare/{hn_query}"
+                    f"?secret={_admin_secret}&type={_cmp_type}"
+                )
+                lines.append(f"\n🔍 ดูรูปเอกสารจริง + สั่งการรักษา:\n{_cmp_url}")
 
             result = {"text_th": "\n".join(lines), "current_date": cur_date}
 
