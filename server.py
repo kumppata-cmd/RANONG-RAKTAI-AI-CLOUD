@@ -10104,31 +10104,37 @@ def process_file_async(
                         type(date_err).__name__,
                     )
 
-            # ── โหมดเลือกผู้ป่วย: เจ้าหน้าที่ระบุผู้ป่วยไว้ก่อนส่งเอกสาร ──
-            # เอกสารคลินิกส่งจากบัญชีหมอ/เจ้าหน้าที่ จึงใช้ HN จากเอกสาร
-            # (OCR) ไม่ได้เสมอ — ถ้าเจ้าหน้าที่เลือกผู้ป่วยไว้ ให้ใช้ค่านั้น
+            # ── โหมดเลือกผู้ป่วย: fallback เมื่อ OCR หาผู้ป่วยไม่ได้ ──
+            # ลำดับความสำคัญ:
+            #   1. HN/ชื่อจากเอกสาร (OCR) → แม่นยำที่สุด (Vision API)
+            #   2. Patient context (เจ้าหน้าที่เลือกไว้) → ใช้เมื่อ OCR หาไม่เจอ
+            # เหตุผล: เอกสารคนละคนอาจส่งติดกัน — ต้องใช้ข้อมูลจาก
+            # เอกสารแต่ละฉบับ ไม่ใช่ค่าจากเอกสารก่อนหน้า
             _ctx_conflict = ""
             if category in CLINICAL_CATEGORIES and owner_hash:
                 try:
+                    _ocr_folder = metadata.get("patient_hn_folder", "")
                     _ctx = _get_patient_context(owner_hash)
                     if _ctx:
                         _ctx_folder = _ctx.get("patient_folder", "")
-                        _ocr_folder = metadata.get("patient_hn_folder", "")
-                        if _ctx_folder and _ocr_folder and _ctx_folder != _ocr_folder:
-                            # OCR กับที่เจ้าหน้าที่เลือกไม่ตรงกัน — ใช้ค่าที่
-                            # เจ้าหน้าที่เลือก (เป็นการระบุโดยเจตนา) แต่ต้อง
-                            # เตือนให้เห็นชัด เพื่อให้แก้ได้ทันทีถ้าผิด
-                            _ctx_conflict = _ocr_folder
-                            metadata["patient_hn_folder"] = _ctx_folder
-                            logger.warning(
-                                "Patient context conflicts with OCR HN "
-                                "(category=%s) — using staff selection",
+                        if _ocr_folder and _ctx_folder and _ctx_folder != _ocr_folder:
+                            # OCR กับ context ไม่ตรงกัน
+                            # → ใช้ OCR เพราะเป็นข้อมูลจากเอกสารฉบับนี้
+                            # → แจ้งให้ทราบว่า context เปลี่ยน
+                            _ctx_conflict = _ctx_folder
+                            # ไม่เปลี่ยน — ใช้ _ocr_folder ที่ OCR อ่านได้
+                            logger.info(
+                                "OCR HN differs from context "
+                                "(category=%s) — using OCR result "
+                                "(document data takes priority)",
                                 category,
                             )
-                        elif _ctx_folder and not _ocr_folder:
+                        elif not _ocr_folder and _ctx_folder:
+                            # OCR หาไม่เจอ → ใช้ context เป็น fallback
                             metadata["patient_hn_folder"] = _ctx_folder
                             logger.info(
-                                "Patient context applied (category=%s)",
+                                "Patient context applied as fallback "
+                                "(category=%s)",
                                 category,
                             )
                 except Exception as ctx_err:
@@ -10714,9 +10720,8 @@ def process_file_async(
                         )
                     if _ctx_conflict:
                         _reply_lines.append(
-                            f"⚠️ HN ในเอกสารอ่านได้เป็น: {_ctx_conflict}\n"
-                            f"ระบบใช้ผู้ป่วยที่เลือกไว้ หากผิดให้พิมพ์ "
-                            f"'ผู้ป่วย <HN>' ให้ถูกแล้วส่งเอกสารใหม่"
+                            f"🔄 เปลี่ยนผู้ป่วยอัตโนมัติจากเอกสาร\n"
+                            f"(ก่อนหน้า: {_ctx_conflict})"
                         )
                 else:
                     _reply_lines.append(
