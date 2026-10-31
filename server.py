@@ -4972,6 +4972,187 @@ def api_events_stats():
 
 
 # ═══════════════════════════════════════════════════════════
+# V4.0 Phase 2.2: Metrics Dashboard API
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/admin/api/v2/metrics", methods=["GET"])
+def api_metrics():
+    """รวมสถิติทุกระบบ — events, queue, documents, health."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    total_docs = len(doc_index._docs) if doc_index else 0
+    cat_counts: dict[str, int] = {}
+    for d in (doc_index._docs if doc_index else []):
+        c = d.get("category", "other")
+        cat_counts[c] = cat_counts.get(c, 0) + 1
+
+    return jsonify({
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "documents": {
+            "total": total_docs,
+            "by_category": cat_counts,
+        },
+        "events": event_logger.get_stats(),
+        "queue": task_queue.get_stats(),
+        "state_store": {
+            "status": state_store.status,
+            "shared": state_store.is_shared,
+        },
+        "system": {
+            "storage": STORAGE_BACKEND,
+            "external_ai": EXTERNAL_AI_CLASSIFICATION_ALLOWED,
+            "workers": 2,
+        },
+    })
+
+
+# ═══════════════════════════════════════════════════════════
+# V4.0 Phase 2.3: Dead-letter Queue API + Task Queue API
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/admin/api/v2/queue/stats", methods=["GET"])
+def api_queue_stats():
+    """สถิติ task queue (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify(task_queue.get_stats())
+
+
+@app.route("/admin/api/v2/queue/dlq", methods=["GET"])
+def api_queue_dlq():
+    """ดู dead-letter items (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    limit = min(int(request.args.get("limit", 20)), 100)
+    return jsonify({
+        "items": task_queue.get_dlq_items(limit),
+    })
+
+
+@app.route("/admin/api/v2/queue/dlq/retry", methods=["POST"])
+def api_queue_dlq_retry():
+    """Retry task จาก dead-letter queue (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    task_id = str(body.get("task_id", "")).strip()
+    if not task_id:
+        return jsonify({"error": "กรุณาระบุ task_id"}), 400
+    ok = task_queue.retry_dlq_item(task_id)
+    if ok:
+        return jsonify({"success": True, "message": f"Re-enqueued {task_id}"})
+    return jsonify({"error": "ไม่พบ task ใน dead-letter queue"}), 404
+
+
+@app.route("/admin/dead-letter", methods=["GET"])
+def admin_dead_letter_ui():
+    """หน้าเว็บ Dead-letter Queue — ดู/จัดการเอกสารที่จำแนกไม่ได้."""
+    err = _admin_api_auth()
+    if err:
+        # ลอง cookie-based auth สำหรับ browser
+        admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+        if not admin_secret:
+            return "ADMIN_SECRET not configured", 500
+        cookie_secret = request.cookies.get("admin_secret", "")
+        if not cookie_secret or not hmac.compare_digest(
+            cookie_secret.encode(), admin_secret.encode()
+        ):
+            return "Unauthorized", 401
+
+    return f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Dead-letter Queue — RANONG RAKTAI AI</title>
+<style>
+body {{ font-family: -apple-system, sans-serif; margin: 0; padding: 20px; background: #1a1a2e; color: #e0e0e0; }}
+h1 {{ color: #ff6b6b; font-size: 1.4rem; }}
+.card {{ background: #16213e; border-radius: 8px; padding: 16px; margin: 12px 0; border-left: 4px solid #ff6b6b; }}
+.card.pending {{ border-left-color: #ffd93d; }}
+.task-id {{ font-family: monospace; color: #4fc3f7; font-size: 0.85rem; }}
+.type {{ background: #0f3460; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; }}
+.error {{ color: #ff6b6b; font-size: 0.85rem; margin-top: 4px; }}
+.btn {{ background: #e94560; color: white; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }}
+.btn:hover {{ background: #c81d4e; }}
+.stats {{ display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }}
+.stat {{ background: #16213e; padding: 12px 20px; border-radius: 8px; text-align: center; }}
+.stat .num {{ font-size: 1.5rem; font-weight: bold; color: #4fc3f7; }}
+.stat .label {{ font-size: 0.75rem; color: #888; }}
+.empty {{ text-align: center; padding: 40px; color: #666; }}
+#items {{ min-height: 100px; }}
+</style>
+</head>
+<body>
+<h1>📋 Dead-letter Queue</h1>
+<div class="stats" id="stats"></div>
+<div id="items"><div class="empty">กำลังโหลด...</div></div>
+<script>
+const SECRET = document.cookie.split('admin_secret=')[1]?.split(';')[0] || '';
+const headers = {{'X-Admin-Secret': SECRET}};
+
+async function load() {{
+  try {{
+    const [statsR, dlqR] = await Promise.all([
+      fetch('/admin/api/v2/queue/stats', {{headers}}),
+      fetch('/admin/api/v2/queue/dlq', {{headers}}),
+    ]);
+    const stats = await statsR.json();
+    const dlq = await dlqR.json();
+    renderStats(stats);
+    renderItems(dlq.items || []);
+  }} catch(e) {{
+    document.getElementById('items').innerHTML = '<div class="empty">❌ ' + e.message + '</div>';
+  }}
+}}
+
+function renderStats(s) {{
+  document.getElementById('stats').innerHTML = `
+    <div class="stat"><div class="num">${{s.enqueued||0}}</div><div class="label">Enqueued</div></div>
+    <div class="stat"><div class="num">${{s.completed||0}}</div><div class="label">Completed</div></div>
+    <div class="stat"><div class="num">${{s.failed||0}}</div><div class="label">Failed</div></div>
+    <div class="stat"><div class="num">${{s.dead||0}}</div><div class="label">Dead</div></div>
+    <div class="stat"><div class="num">${{s.mode||'?'}}</div><div class="label">Mode</div></div>
+  `;
+}}
+
+function renderItems(items) {{
+  if (!items.length) {{
+    document.getElementById('items').innerHTML = '<div class="empty">✅ ไม่มีรายการใน Dead-letter Queue</div>';
+    return;
+  }}
+  document.getElementById('items').innerHTML = items.map(t => `
+    <div class="card">
+      <div><span class="task-id">${{t.task_id}}</span> <span class="type">${{t.task_type}}</span></div>
+      <div style="margin-top:4px;font-size:0.85rem;color:#888">Attempts: ${{t.attempts}} | ${{t.created_at?.slice(0,19)||''}}</div>
+      <div class="error">${{t.error||''}}</div>
+      <button class="btn" onclick="retryTask('${{t.task_id}}')" style="margin-top:8px">🔄 Retry</button>
+    </div>
+  `).join('');
+}}
+
+async function retryTask(id) {{
+  const r = await fetch('/admin/api/v2/queue/dlq/retry', {{
+    method: 'POST', headers: {{'Content-Type':'application/json', ...headers}},
+    body: JSON.stringify({{task_id: id}})
+  }});
+  const d = await r.json();
+  alert(d.message || d.error);
+  load();
+}}
+
+load();
+setInterval(load, 30000);
+</script>
+</body></html>"""
+
+
+# ═══════════════════════════════════════════════════════════
 # Patient Dashboard — หน้าเว็บสรุปผู้ป่วยรายบุคคล
 # เปิดจาก LINE (สรุป HN) — แสดงแล็บ/ยา/ฟอกเลือด + เปรียบเทียบ
 # ═══════════════════════════════════════════════════════════
@@ -8904,6 +9085,10 @@ rate_limiter = RateLimiter(state_store)
 # ── Structured Event Logger (V4.0 Phase 1.2) ──
 from event_logger import EventLogger, generate_job_id, EventTimer
 event_logger = EventLogger(max_buffer=1000)
+
+# ── Task Queue (V4.0 Phase 2.1) ──
+from task_queue import TaskQueue
+task_queue = TaskQueue(redis_url=REDIS_URL)
 
 # จำกัดงาน OCR ที่ทำพร้อมกันต่อ worker — ป้องกัน OOM บน instance เล็ก
 _ocr_semaphore = threading.Semaphore(max(1, OCR_MAX_CONCURRENT))
