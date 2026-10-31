@@ -7215,8 +7215,12 @@ def handle_search_command(
             return text
 
         except Exception as e:
-            logger.warning(f"Compare timeline error: {type(e).__name__}")
-            return err_msg
+            import traceback
+            logger.error(
+                "Compare timeline error: %s\n%s",
+                e, traceback.format_exc(),
+            )
+            return f"{err_msg}\n\n🔧 Debug: {type(e).__name__}: {e}"
 
     # ── ลงทะเบียน HN ──
     if parsed.command_type == CommandType.REGISTER_HN:

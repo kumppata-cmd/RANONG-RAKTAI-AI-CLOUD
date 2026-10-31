@@ -1099,9 +1099,14 @@ def compare_lab_timeline(
         current_date = datetime.now()
 
     # หาผลที่ใกล้ 3 เดือนก่อน (±45 วัน)
-    from dateutil.relativedelta import relativedelta
-    target_3m = current_date - relativedelta(months=3)
-    target_6m = current_date - relativedelta(months=6)
+    try:
+        from dateutil.relativedelta import relativedelta
+        target_3m = current_date - relativedelta(months=3)
+        target_6m = current_date - relativedelta(months=6)
+    except ImportError:
+        from datetime import timedelta
+        target_3m = current_date - timedelta(days=90)
+        target_6m = current_date - timedelta(days=180)
 
     # ไม่เอาผลปัจจุบัน
     past_history = history[1:]
@@ -1368,9 +1373,14 @@ def compare_rx_timeline(
     except (ValueError, TypeError):
         current_date = datetime.now()
 
-    from dateutil.relativedelta import relativedelta
-    target_3m = current_date - relativedelta(months=3)
-    target_6m = current_date - relativedelta(months=6)
+    try:
+        from dateutil.relativedelta import relativedelta
+        target_3m = current_date - relativedelta(months=3)
+        target_6m = current_date - relativedelta(months=6)
+    except ImportError:
+        from datetime import timedelta
+        target_3m = current_date - timedelta(days=90)
+        target_6m = current_date - timedelta(days=180)
 
     past_history = history[1:]
     rx_3m = _find_closest_to_target(past_history, target_3m, window_days=45)
@@ -1858,17 +1868,30 @@ def compare_dialysis_timeline(
     except (ValueError, TypeError):
         current_date = datetime.now()
 
-    from dateutil.relativedelta import relativedelta
-    target_3m = current_date - relativedelta(months=3)
-    target_6m = current_date - relativedelta(months=6)
+    try:
+        from dateutil.relativedelta import relativedelta
+        target_3m = current_date - relativedelta(months=3)
+        target_6m = current_date - relativedelta(months=6)
+    except ImportError:
+        # fallback: ใช้ timedelta แทน relativedelta
+        from datetime import timedelta
+        target_3m = current_date - timedelta(days=90)
+        target_6m = current_date - timedelta(days=180)
 
     past_history = history[1:]
-    d_3m = _find_closest_to_target(past_history, target_3m, window_days=45)
-    d_6m = _find_closest_to_target(past_history, target_6m, window_days=45)
+
+    # ถ้ามี ≥ 2 เอกสาร → เปรียบเทียบครั้งล่าสุด vs ก่อนหน้า
+    # (ไม่ต้องหา 3 เดือน/6 เดือน เพราะเอกสารอาจไม่ได้ส่งทุกเดือน)
+    d_3m = None
+    d_6m = None
+    if past_history:
+        d_3m = _find_closest_to_target(past_history, target_3m, window_days=60)
+        d_6m = _find_closest_to_target(past_history, target_6m, window_days=60)
 
     if d_3m and d_6m and d_3m.get("doc_id") == d_6m.get("doc_id"):
         d_6m = None
 
+    # ถ้าหา 3/6 เดือนไม่เจอ → ใช้เอกสารก่อนหน้าล่าสุด
     if not d_3m and not d_6m:
         d_3m = past_history[0] if past_history else None
         if not d_3m:
