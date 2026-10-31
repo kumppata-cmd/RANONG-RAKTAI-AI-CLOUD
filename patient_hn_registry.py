@@ -144,26 +144,52 @@ class HNRegistry:
             logger.error("HNRegistry: load failed: %s", e)
 
     def _save_patient(self, patient: PatientHN) -> tuple[bool, str]:
-        """บันทึก HN ผู้ป่วยลง GCS — คืน (success, error_detail)"""
+        """บันทึก HN ผู้ป่วยลง GCS — คืน (success, error_detail)
+
+        SA อาจมีแค่ storage.objects.create (Object Creator role)
+        ซึ่ง upload_from_string ปกติจะ "overwrite" → ต้อง objects.delete ด้วย
+        วิธีแก้: ใช้ if_generation_match=0 (create-only) เหมือน save()
+        ถ้า object มีอยู่แล้ว (412) → ลองลบก่อนแล้วสร้างใหม่
+        """
         if not self._storage:
             logger.warning("HNRegistry: no storage — cannot save")
             return False, "storage not configured"
         try:
             path = self._gcs_path(patient.owner_hash)
-            data = json.dumps(patient.to_dict(), ensure_ascii=False, indent=2)
+            data_bytes = json.dumps(
+                patient.to_dict(), ensure_ascii=False, indent=2
+            ).encode("utf-8")
 
-            # ใช้ storage wrapper .put() ถ้ามี (ใช้ code path เดียวกับ
-            # ระบบอื่น → ไม่ติด permission issue)
-            if hasattr(self._storage, 'put'):
-                self._storage.put(
-                    path,
-                    data.encode("utf-8"),
+            # หา bucket — รองรับทั้ง storage wrapper และ bucket โดยตรง
+            bucket = (self._storage._bucket
+                      if hasattr(self._storage, '_bucket')
+                      else self._storage)
+            if not bucket or not hasattr(bucket, 'blob'):
+                return False, "no bucket"
+
+            blob = bucket.blob(path)
+            try:
+                # create-only: ใช้แค่ objects.create permission
+                blob.upload_from_string(
+                    data_bytes,
                     content_type="application/json",
+                    if_generation_match=0,
                 )
-            else:
-                # fallback: ใช้ bucket โดยตรง
-                blob = self._storage.blob(path)
-                blob.upload_from_string(data, content_type="application/json")
+            except Exception as create_err:
+                err_code = getattr(create_err, "code", None)
+                if err_code == 412:
+                    # object มีอยู่แล้ว → ลบก่อนแล้วสร้างใหม่
+                    try:
+                        blob.delete()
+                    except Exception:
+                        pass  # ถ้าลบไม่ได้ ลองสร้างทับเลย
+                    blob.upload_from_string(
+                        data_bytes,
+                        content_type="application/json",
+                        if_generation_match=0,
+                    )
+                else:
+                    raise
 
             logger.info("HNRegistry: saved patient %s", patient.hn_pair)
             return True, ""
