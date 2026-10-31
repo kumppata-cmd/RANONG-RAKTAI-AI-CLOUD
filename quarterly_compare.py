@@ -1591,8 +1591,7 @@ _DIALYSIS_PATTERNS = {
         re.IGNORECASE,
     ),
     "access_site": re.compile(
-        r"(?:Arm|Leg|Lt|Rt|Left|Right|ซ้าย|ขวา|แขน|ขา)\s*"
-        r"(Arm|Leg|Lt|Rt|Left|Right|ซ้าย|ขวา|แขน|ขา)?",
+        r"((?:Lt|Rt|Left|Right|ซ้าย|ขวา)\s*(?:Arm|Leg|แขน|ขา)?)",
         re.IGNORECASE,
     ),
 
@@ -1679,7 +1678,7 @@ _DIALYSIS_PATTERNS = {
     # Section 8: Complication (ภาวะแทรกซ้อน)
     # ══════════════════════════════════════════════════════════
     "complication": re.compile(
-        r"(?:No\s*[Cc]omplication|No\s*complication|ไม่มีภาวะแทรกซ้อน|"
+        r"(No\s*[Cc]omplication|No\s*complication|ไม่มีภาวะแทรกซ้อน|"
         r"Hypotension|Hypertension|Muscle\s*cramp|Chest\s*pain|"
         r"Headache|Fever|Arrhythmia|Nausea|Vomiting|"
         r"Blood\s*leak|Clot|Air\s*embolism|DDS|"
@@ -1751,15 +1750,28 @@ def extract_dialysis_data_from_text(ocr_text: str) -> dict:
 
     data = {}
     for key, pattern in _DIALYSIS_PATTERNS.items():
-        match = pattern.search(ocr_text)
-        if match:
+        try:
+            match = pattern.search(ocr_text)
+            if not match:
+                continue
             if key in ("pre_bp", "post_bp"):
-                data[f"{key}_sys"] = _safe_float(match.group(1))
-                data[f"{key}_dia"] = _safe_float(match.group(2))
+                g1 = match.group(1)
+                g2 = match.group(2)
+                if g1:
+                    data[f"{key}_sys"] = _safe_float(g1)
+                if g2:
+                    data[f"{key}_dia"] = _safe_float(g2)
             elif key in _DIALYSIS_STRING_FIELDS:
-                data[key] = match.group(1).strip()
+                g1 = match.group(1)
+                if g1:
+                    data[key] = g1.strip()
             else:
-                data[key] = _safe_float(match.group(1))
+                g1 = match.group(1)
+                if g1:
+                    data[key] = _safe_float(g1)
+        except (IndexError, AttributeError):
+            # regex ไม่มี capture group หรือ group เป็น None → ข้าม
+            continue
 
     return data
 
