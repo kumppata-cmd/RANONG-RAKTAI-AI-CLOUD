@@ -59,6 +59,9 @@ COPY ckd_progression.py .
 COPY nephrology_drug_db.py .
 COPY liff_app.py .
 
+# V4.0: Structured Event Logger
+COPY event_logger.py .
+
 # Google Integration + Finance + Monitoring modules
 COPY google_drive_sync.py .
 COPY google_sheets_sync.py .

@@ -1333,6 +1333,9 @@ if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
     # เพื่อใช้ code path เดียวกับระบบอื่น → ไม่ติด permission issue
     hn_registry.set_storage(storage)
     logger.info("HNRegistry initialized with GCS storage wrapper")
+    # V4.0: Event Logger persistence
+    event_logger.set_storage(storage)
+    logger.info("EventLogger initialized with GCS persistence")
 
 # ─── Master Patient Registry: ทะเบียนผู้ป่วยกลาง ─────────
 master_registry = MasterPatientRegistry()
@@ -4939,6 +4942,33 @@ def api_gmail_send_summary():
     except Exception as e:
         logger.warning("Gmail summary error: %s", type(e).__name__)
         return jsonify({"error": type(e).__name__}), 500
+
+
+# ═══════════════════════════════════════════════════════════
+# V4.0: Event Logger API — ดู structured events
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/admin/api/v2/events/recent", methods=["GET"])
+def api_events_recent():
+    """ดู events ล่าสุด (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    limit = min(int(request.args.get("limit", 50)), 200)
+    event_type = request.args.get("type", "")
+    return jsonify({
+        "events": event_logger.get_recent(limit, event_type),
+    })
+
+
+@app.route("/admin/api/v2/events/stats", methods=["GET"])
+def api_events_stats():
+    """สถิติ events (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify(event_logger.get_stats())
 
 
 # ═══════════════════════════════════════════════════════════
@@ -8871,6 +8901,10 @@ state_store = StateStore(REDIS_URL)
 dedup_guard = DedupGuard(state_store)
 rate_limiter = RateLimiter(state_store)
 
+# ── Structured Event Logger (V4.0 Phase 1.2) ──
+from event_logger import EventLogger, generate_job_id, EventTimer
+event_logger = EventLogger(max_buffer=1000)
+
 # จำกัดงาน OCR ที่ทำพร้อมกันต่อ worker — ป้องกัน OOM บน instance เล็ก
 _ocr_semaphore = threading.Semaphore(max(1, OCR_MAX_CONCURRENT))
 
@@ -10991,9 +11025,16 @@ def process_file_async(
                 try:
                     doc_index.add(doc_meta)
                     index_saved = True
+                    event_logger.log("document_indexed", data={
+                        "category": category,
+                        "doc_id": _doc_id[:8],
+                    })
                 except RuntimeError as idx_err:
                     # Index เขียน GCS ไม่ได้ — ไฟล์ upload แล้ว แต่ metadata หาย
                     # ไม่ตอบว่าสำเร็จ — แจ้ง error กลับไป
+                    event_logger.log("document_indexed", data={
+                        "error": type(idx_err).__name__,
+                    }, success=False)
                     logger.error(
                         f"Document index write ล้มเหลว: {idx_err} "
                         f"(doc_id={_doc_id})"
@@ -13432,14 +13473,17 @@ def webhook():
         # ประมวลผล ซึ่งเคลื่อนได้จาก retry และการรวมเอกสารหลายหน้า
         event_ts_ms = event.get("timestamp", 0)
 
+        # V4.0: Generate job_id for every event
+        _job_id = generate_job_id()
+
         event_id = event.get("webhookEventId", "")
         is_redelivery = bool(
             event.get("deliveryContext", {}).get("isRedelivery", False)
         )
         if not dedup_guard.is_new_event(event_id):
-            logger.info(
-                f"ข้าม event ซ้ำ (id={event_id[:8]}…, redelivery={is_redelivery})"
-            )
+            event_logger.log("dedup_blocked", job_id=_job_id, data={
+                "reason": "event_id", "redelivery": is_redelivery,
+            })
             continue
         if is_redelivery:
             logger.info(f"event นี้เป็น redelivery (id={event_id[:8]}…)")
@@ -13463,10 +13507,15 @@ def webhook():
 
             if msg_type == "image":
                 logger.info(f"รับภาพ (id={msg_id})")
+                event_logger.log("document_received", job_id=_job_id, data={
+                    "type": "image", "msg_id": msg_id,
+                })
 
                 allowed, limit_msg = rate_limiter.check(user_hash)
                 if not allowed:
-                    logger.warning(f"เกิน rate limit (user={user_hash[:8]}…)")
+                    event_logger.log("rate_limited", job_id=_job_id, data={
+                        "user": user_hash[:8],
+                    }, success=False)
                     reply_message(reply_token, limit_msg)
                     continue
 

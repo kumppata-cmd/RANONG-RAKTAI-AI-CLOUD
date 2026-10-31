@@ -67,6 +67,11 @@ google-cloud-vision
 # Google APIs (Drive, Sheets, Gmail) — ใช้เมื่อเปิด GOOGLE_*_ENABLED
 google-api-python-client==2.147.0
 
+# Redis — shared state ข้าม Gunicorn workers
+# ใช้สำหรับ DedupGuard, RateLimiter, StateStore
+# ถ้า REDIS_URL ว่าง → fallback in-memory ต่อ worker อัตโนมัติ
+redis==5.0.8
+
 # Date utilities — ใช้ relativedelta ใน quarterly_compare
 python-dateutil
 
