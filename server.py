@@ -15661,11 +15661,10 @@ def liff_api_my_labs():
     # แพทย์สามารถระบุ HN เพื่อดูเอกสารของคนไข้รายอื่น
     # ถ้าไม่ระบุ HN → แสดงเอกสารทุกคน (physician browse mode)
     search_hn = ""
-    _physician_browse = False
     if _is_physician:
-        search_hn = str(body.get("search_hn", "")).strip()[:20]
-        if not search_hn:
-            _physician_browse = True
+        raw_hn = str(body.get("search_hn", "")).strip()[:20]
+        # strip "HN" prefix ที่ผู้ใช้อาจพิมพ์มา
+        search_hn = raw_hn.upper().replace("HN", "").replace(" ", "").strip()
 
     try:
         data = get_patient_labs_for_liff(
@@ -15675,6 +15674,7 @@ def liff_api_my_labs():
             hn_registry=hn_registry,
             generate_signed_url_fn=generate_signed_url,
             search_hn=search_hn,
+            is_physician=_is_physician,
         )
         data["is_physician"] = _is_physician
         return jsonify(data), 200, _liff_cors_headers()

@@ -155,6 +155,7 @@ def get_patient_labs_for_liff(
     hn_registry: Any = None,
     generate_signed_url_fn: Any = None,
     search_hn: str = "",
+    is_physician: bool = False,
 ) -> dict:
     """ดึงเอกสารของผู้ป่วยสำหรับ LIFF Patient Portal.
 
@@ -185,27 +186,21 @@ def get_patient_labs_for_liff(
         if not hasattr(storage, '_bucket') or not storage._bucket:
             return result
 
-        # ── Step 1: หา HN ──
+        # ── Step 1: กำหนดว่าจะแสดงเอกสารของใคร ──
         patient_hns: set[str] = set()
         patient_hn_display = ""
+        show_all = False  # physician browse mode — เห็นทุกคน
 
-        if search_hn:
-            # แพทย์ระบุ HN มาเอง — ค้นคนไข้รายอื่น
+        if is_physician and search_hn:
+            # แพทย์ search HN เฉพาะ
             patient_hns.add(search_hn.upper())
             patient_hn_display = search_hn.upper()
             result["patient_hn"] = patient_hn_display
-            # หาชื่อจาก hn_registry
-            if hn_registry and hasattr(hn_registry, 'get_by_clinic_hn'):
-                try:
-                    p = hn_registry.get_by_clinic_hn(search_hn)
-                    if p:
-                        result["patient_name"] = getattr(p, 'display_name', '') or ""
-                except Exception:
-                    pass
-        elif search_hn == "" and hn_registry is None:
-            # fallback — ไม่ทำอะไร
-            pass
+        elif is_physician and not search_hn:
+            # แพทย์เปิดโดยไม่ search → เห็นทุกคน
+            show_all = True
         elif hn_registry is not None:
+            # ผู้ป่วย → ดูเฉพาะ HN ที่ลงทะเบียน
             try:
                 patient = (hn_registry.get_by_owner(owner_hash)
                            if hasattr(hn_registry, 'get_by_owner') else None)
@@ -220,12 +215,7 @@ def get_patient_labs_for_liff(
             except Exception:
                 pass
 
-        # is_physician_mode ถูกตั้งใน server.py ก่อนเรียกฟังก์ชันนี้
-        _is_physician_mode = bool(search_hn) or bool(
-            search_hn == "" and not patient_hns
-        )
-
-        if not patient_hns and not _is_physician_mode:
+        if not patient_hns and not show_all:
             result["message"] = "กรุณาลงทะเบียน HN ก่อน โดยพิมพ์: ลงทะเบียนHN <เลข HN>"
             return result
 
@@ -240,17 +230,14 @@ def get_patient_labs_for_liff(
                     folder = (doc.get("patient_hn_folder") or "").upper()
                     if not folder:
                         continue
-                    if patient_hns:
-                        # กรองเฉพาะ HN ที่ระบุ
-                        matched = False
+                    if show_all:
+                        # แพทย์ browse mode → เอาทั้งหมด
+                        patient_docs.append(doc)
+                    elif patient_hns:
                         for hn in patient_hns:
                             if hn in folder:
-                                matched = True
+                                patient_docs.append(doc)
                                 break
-                        if not matched:
-                            continue
-                    # ถ้าไม่มี patient_hns (physician mode) → เอาทั้งหมด
-                    patient_docs.append(doc)
             except Exception:
                 pass
 
@@ -764,8 +751,8 @@ async function initApp() {
             const name = labData.patient_name || '';
             const hn = labData.patient_hn || '';
             pi.textContent = name
-                ? (name + (hn ? ' (HN ' + hn + ')' : ''))
-                : (hn ? 'HN ' + hn : 'ยังไม่มีข้อมูล');
+                ? (name + (hn ? ' (' + hn + ')' : ''))
+                : (hn ? hn : '');
         }
         // แสดง physician panel ถ้าเป็นแพทย์
         if (labData.is_physician) {
