@@ -15726,6 +15726,43 @@ def liff_api_save_note():
             "at": ts,
         }, ensure_ascii=False)
         storage.put(note_path, note_data.encode("utf-8"), "application/json")
+
+        # ── Feature 2: ส่ง LINE push แจ้งผู้ป่วย ──
+        try:
+            _patient_entry = hn_registry.get_by_clinic_hn(patient_hn)
+            if _patient_entry and LINE_CHANNEL_ACCESS_TOKEN:
+                _patient_hash = _patient_entry.owner_hash
+                # หา LINE userId จาก alert_recipients หรือ hn_registry
+                _line_id = None
+                try:
+                    from alert_delivery import get_line_user_id
+                    _line_id = get_line_user_id(_patient_hash)
+                except Exception:
+                    pass
+                if _line_id:
+                    import requests as _req
+                    _push_msg = (
+                        "📋 แพทย์มีคำแนะนำใหม่\n"
+                        "━━━━━━━━━━━━━━━━━━━━\n"
+                        f"{note_text[:200]}\n\n"
+                        "💡 กดปุ่ม 'ดูผลแล็บ' เพื่อดูรายละเอียด"
+                    )
+                    _req.post(
+                        "https://api.line.me/v2/bot/message/push",
+                        json={
+                            "to": _line_id,
+                            "messages": [{"type": "text", "text": _push_msg}],
+                        },
+                        headers={
+                            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                            "Content-Type": "application/json",
+                        },
+                        timeout=10,
+                    )
+                    logger.info("LIFF: pushed note to patient %s", patient_hn)
+        except Exception as _push_err:
+            logger.warning("LIFF push note failed: %s", type(_push_err).__name__)
+
         return jsonify({"success": True}), 200, _liff_cors_headers()
     except Exception as e:
         logger.error("Save note error: %s", type(e).__name__)

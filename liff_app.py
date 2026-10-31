@@ -271,20 +271,32 @@ def get_patient_labs_for_liff(
             "review": "📄 เอกสารอื่น",
         }
 
-        # โหลด doctor's notes 1 ครั้ง (ไม่โหลดซ้ำทุก doc)
+        # โหลด doctor's notes ทั้งหมด + ประวัติ
         doctor_note = ""
+        notes_history: list[dict] = []
         if patient_hn_display:
             try:
                 note_prefix = f"_treatment_notes/{patient_hn_display}/"
                 note_blobs = list(storage._bucket.list_blobs(
-                    prefix=note_prefix, max_results=5
+                    prefix=note_prefix, max_results=20
                 ))
                 if note_blobs:
                     note_blobs.sort(key=lambda b: b.name, reverse=True)
-                    note_data = json.loads(note_blobs[0].download_as_text())
-                    doctor_note = note_data.get("note", "")
+                    for nb in note_blobs:
+                        try:
+                            nd = json.loads(nb.download_as_text())
+                            notes_history.append({
+                                "note": nd.get("note", ""),
+                                "date": nd.get("at", "")[:10] if nd.get("at") else "",
+                                "by": nd.get("by", ""),
+                            })
+                        except Exception:
+                            continue
+                    if notes_history:
+                        doctor_note = notes_history[0].get("note", "")
             except Exception:
                 pass
+        result["notes_history"] = notes_history
 
         for doc in patient_docs:
             gcs_path = doc.get("gcs_object_path", "")
@@ -887,7 +899,36 @@ function renderDocuments() {
         return;
     }
 
-    let html = '';
+    // ── Feature 1: Filter ตามประเภท ──
+    var _allDocs = docs;
+    var _filterCat = '';
+    var cats = {};
+    for (const d of docs) cats[d.category] = (cats[d.category]||0) + 1;
+    let html = '<div id="filterBar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
+    html += '<button class="filter-btn active" onclick="filterDocs(this,\'\')" ' +
+        'style="padding:4px 14px;border-radius:16px;border:1px solid #00bcd4;background:#00bcd4;' +
+        'color:#fff;font-size:13px;cursor:pointer;">ทั้งหมด ' + docs.length + '</button>';
+    for (const [cat, cnt] of Object.entries(cats)) {
+        html += '<button class="filter-btn" onclick="filterDocs(this,\'' + cat.replace(/'/g,'') + '\')" ' +
+            'style="padding:4px 14px;border-radius:16px;border:1px solid #444;background:transparent;' +
+            'color:#94a3b8;font-size:13px;cursor:pointer;">' + cat + ' ' + cnt + '</button>';
+    }
+    html += '</div>';
+
+    // ── Feature 3: ประวัติคำแนะนำ ──
+    if (labData.notes_history && labData.notes_history.length > 0) {
+        html += '<div class="card" style="border:1px solid rgba(39,174,96,0.3);margin-bottom:12px;">';
+        html += '<div style="padding:12px 16px;font-weight:600;color:#27ae60;">📋 ประวัติคำแนะนำจากแพทย์</div>';
+        for (const n of labData.notes_history) {
+            html += '<div style="padding:8px 16px;border-top:1px solid rgba(255,255,255,0.05);">';
+            html += '<div style="font-size:12px;color:#64748b;">📅 ' + (n.date || '') + '</div>';
+            html += '<div style="font-size:14px;margin-top:4px;white-space:pre-wrap;">' + (n.note || '') + '</div>';
+            html += '</div>';
+        }
+        html += '</div>';
+    }
+
+    html += '<div id="docList">';
     for (const doc of docs) {
         html += '<div class="card" style="padding:0;overflow:hidden;">';
         // Header: category + date + patient folder
@@ -928,7 +969,30 @@ function renderDocuments() {
 
         html += '</div>';
     }
+    html += '</div>'; // close #docList
     container.innerHTML = html;
+}
+
+// ── Feature 1: Filter function ──
+function filterDocs(btn, cat) {
+    document.querySelectorAll('.filter-btn').forEach(function(b) {
+        b.style.background = 'transparent';
+        b.style.color = '#94a3b8';
+        b.style.borderColor = '#444';
+        b.classList.remove('active');
+    });
+    btn.style.background = '#00bcd4';
+    btn.style.color = '#fff';
+    btn.style.borderColor = '#00bcd4';
+    btn.classList.add('active');
+
+    var cards = document.querySelectorAll('#docList > .card');
+    cards.forEach(function(card) {
+        if (!cat) { card.style.display = ''; return; }
+        var catEl = card.querySelector('span[style*="font-weight:600"]');
+        var cardCat = catEl ? catEl.textContent : '';
+        card.style.display = cardCat.indexOf(cat) >= 0 ? '' : 'none';
+    });
 }
 
 // ── Render Trends ──
