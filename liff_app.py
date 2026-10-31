@@ -900,18 +900,15 @@ function renderDocuments() {
     }
 
     // ── Feature 1: Filter ตามประเภท ──
-    var _allDocs = docs;
-    var _filterCat = '';
     var cats = {};
     for (const d of docs) cats[d.category] = (cats[d.category]||0) + 1;
+    var _btnStyle = 'padding:4px 14px;border-radius:16px;font-size:13px;cursor:pointer;border:1px solid ';
     let html = '<div id="filterBar" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px;">';
-    html += '<button class="filter-btn active" onclick="filterDocs(this,\'\')" ' +
-        'style="padding:4px 14px;border-radius:16px;border:1px solid #00bcd4;background:#00bcd4;' +
-        'color:#fff;font-size:13px;cursor:pointer;">ทั้งหมด ' + docs.length + '</button>';
+    html += '<button class="filter-btn active" data-cat="" ' +
+        'style="' + _btnStyle + '#00bcd4;background:#00bcd4;color:#fff;">ทั้งหมด ' + docs.length + '</button>';
     for (const [cat, cnt] of Object.entries(cats)) {
-        html += '<button class="filter-btn" onclick="filterDocs(this,\'' + cat.replace(/'/g,'') + '\')" ' +
-            'style="padding:4px 14px;border-radius:16px;border:1px solid #444;background:transparent;' +
-            'color:#94a3b8;font-size:13px;cursor:pointer;">' + cat + ' ' + cnt + '</button>';
+        html += '<button class="filter-btn" data-cat="' + cat + '" ' +
+            'style="' + _btnStyle + '#444;background:transparent;color:#94a3b8;">' + cat + ' ' + cnt + '</button>';
     }
     html += '</div>';
 
@@ -971,27 +968,27 @@ function renderDocuments() {
     }
     html += '</div>'; // close #docList
     container.innerHTML = html;
-}
 
-// ── Feature 1: Filter function ──
-function filterDocs(btn, cat) {
-    document.querySelectorAll('.filter-btn').forEach(function(b) {
-        b.style.background = 'transparent';
-        b.style.color = '#94a3b8';
-        b.style.borderColor = '#444';
-        b.classList.remove('active');
-    });
-    btn.style.background = '#00bcd4';
-    btn.style.color = '#fff';
-    btn.style.borderColor = '#00bcd4';
-    btn.classList.add('active');
-
-    var cards = document.querySelectorAll('#docList > .card');
-    cards.forEach(function(card) {
-        if (!cat) { card.style.display = ''; return; }
-        var catEl = card.querySelector('span[style*="font-weight:600"]');
-        var cardCat = catEl ? catEl.textContent : '';
-        card.style.display = cardCat.indexOf(cat) >= 0 ? '' : 'none';
+    // ── Attach filter click handlers (no inline onclick) ──
+    document.querySelectorAll('.filter-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+            var cat = this.getAttribute('data-cat') || '';
+            document.querySelectorAll('.filter-btn').forEach(function(b) {
+                b.style.background = 'transparent';
+                b.style.color = '#94a3b8';
+                b.style.borderColor = '#444';
+            });
+            this.style.background = '#00bcd4';
+            this.style.color = '#fff';
+            this.style.borderColor = '#00bcd4';
+            var cards = document.querySelectorAll('#docList > .card');
+            cards.forEach(function(card) {
+                if (!cat) { card.style.display = ''; return; }
+                var catEl = card.querySelector('span');
+                var cardCat = catEl ? catEl.textContent : '';
+                card.style.display = cardCat.indexOf(cat) >= 0 ? '' : 'none';
+            });
+        });
     });
 }
 
