@@ -202,6 +202,9 @@ def get_patient_labs_for_liff(
                         result["patient_name"] = getattr(p, 'display_name', '') or ""
                 except Exception:
                     pass
+        elif search_hn == "" and hn_registry is None:
+            # fallback — ไม่ทำอะไร
+            pass
         elif hn_registry is not None:
             try:
                 patient = (hn_registry.get_by_owner(owner_hash)
@@ -217,7 +220,12 @@ def get_patient_labs_for_liff(
             except Exception:
                 pass
 
-        if not patient_hns:
+        # is_physician_mode ถูกตั้งใน server.py ก่อนเรียกฟังก์ชันนี้
+        _is_physician_mode = bool(search_hn) or bool(
+            search_hn == "" and not patient_hns
+        )
+
+        if not patient_hns and not _is_physician_mode:
             result["message"] = "กรุณาลงทะเบียน HN ก่อน โดยพิมพ์: ลงทะเบียนHN <เลข HN>"
             return result
 
@@ -232,10 +240,17 @@ def get_patient_labs_for_liff(
                     folder = (doc.get("patient_hn_folder") or "").upper()
                     if not folder:
                         continue
-                    for hn in patient_hns:
-                        if hn in folder:
-                            patient_docs.append(doc)
-                            break
+                    if patient_hns:
+                        # กรองเฉพาะ HN ที่ระบุ
+                        matched = False
+                        for hn in patient_hns:
+                            if hn in folder:
+                                matched = True
+                                break
+                        if not matched:
+                            continue
+                    # ถ้าไม่มี patient_hns (physician mode) → เอาทั้งหมด
+                    patient_docs.append(doc)
             except Exception:
                 pass
 
@@ -289,6 +304,7 @@ def get_patient_labs_for_liff(
                 "date": doc.get("upload_date", "ไม่ระบุวันที่"),
                 "image_url": image_url,
                 "doctor_note": doctor_note,
+                "patient_folder": doc.get("patient_hn_folder", ""),
             })
 
         # ใช้ patient_name จาก patient_hn_folder ถ้ายังไม่มี
@@ -757,6 +773,10 @@ async function initApp() {
             if (pp) pp.style.display = 'block';
             var np = document.getElementById('notePanel');
             if (np && labData.patient_hn) np.style.display = 'block';
+            // ถ้าไม่มี patient_hn → physician browse mode
+            if (!labData.patient_hn && pi) {
+                pi.textContent = 'เอกสารผู้ป่วยทั้งหมด (' + (labData.documents||[]).length + ' รายการ)';
+            }
         }
     } catch (e) {
         const msg = e.name === 'AbortError'
@@ -858,11 +878,15 @@ function renderDocuments() {
     let html = '';
     for (const doc of docs) {
         html += '<div class="card" style="padding:0;overflow:hidden;">';
-        // Header: category + date
-        html += '<div style="padding:12px 16px;background:rgba(0,200,200,0.08);'+
-            'display:flex;justify-content:space-between;align-items:center;">';
+        // Header: category + date + patient folder
+        html += '<div style="padding:12px 16px;background:rgba(0,200,200,0.08);">';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;">';
         html += '<span style="font-weight:600;">' + (doc.category || '📄 เอกสาร') + '</span>';
         html += '<span style="font-size:12px;color:#888;">📅 ' + (doc.date || '') + '</span>';
+        html += '</div>';
+        if (doc.patient_folder && labData.is_physician) {
+            html += '<div style="font-size:12px;color:#00bcd4;margin-top:4px;">🏥 ' + doc.patient_folder + '</div>';
+        }
         html += '</div>';
 
         // Document image

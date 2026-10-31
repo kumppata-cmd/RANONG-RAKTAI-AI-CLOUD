@@ -15659,9 +15659,13 @@ def liff_api_my_labs():
     _is_physician = (owner_hash in PHYSICIAN_USERS or owner_hash in ADMIN_USERS)
 
     # แพทย์สามารถระบุ HN เพื่อดูเอกสารของคนไข้รายอื่น
+    # ถ้าไม่ระบุ HN → แสดงเอกสารทุกคน (physician browse mode)
     search_hn = ""
+    _physician_browse = False
     if _is_physician:
         search_hn = str(body.get("search_hn", "")).strip()[:20]
+        if not search_hn:
+            _physician_browse = True
 
     try:
         data = get_patient_labs_for_liff(
