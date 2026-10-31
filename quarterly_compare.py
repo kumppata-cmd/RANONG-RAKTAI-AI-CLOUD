@@ -1772,6 +1772,13 @@ def get_patient_dialysis_history(
         else:
             all_docs = []
         dialysis_docs = [d for d in all_docs if d.get("category") == "dialysis"]
+        logger.info(
+            "get_patient_dialysis_history: found %d dialysis docs "
+            "(total %d docs, folder=%s, hash=%s)",
+            len(dialysis_docs), len(all_docs),
+            patient_folder[:20] if patient_folder else "-",
+            owner_hash[:8] if owner_hash else "-",
+        )
 
         results = []
         for doc in dialysis_docs:
@@ -1779,12 +1786,25 @@ def get_patient_dialysis_history(
             extracted_text = doc.get("extracted_text", "").strip()
 
             if not extracted_text:
+                logger.info(
+                    "dialysis doc %s: no extracted_text, skipping",
+                    doc_id[:8],
+                )
                 continue
 
             data = extract_dialysis_data_from_text(extracted_text)
             if not data:
+                logger.info(
+                    "dialysis doc %s: extract_dialysis_data returned empty "
+                    "(text_len=%d)",
+                    doc_id[:8], len(extracted_text),
+                )
                 continue
 
+            logger.info(
+                "dialysis doc %s: extracted %d params",
+                doc_id[:8], len(data),
+            )
             results.append({
                 "doc_id": doc_id,
                 "upload_date": doc.get("upload_date", ""),
