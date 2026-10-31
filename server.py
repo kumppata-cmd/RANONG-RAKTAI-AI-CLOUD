@@ -6074,6 +6074,91 @@ def handle_search_command(
             "💡 หลังลงทะเบียนแล้ว เอกสารที่ส่งจะเข้าแฟ้มของคุณอัตโนมัติ"
         )
 
+    # ── Admin: Deploy Rich Menu ──────────────────────────────
+    if text_stripped in ("ตั้งค่าเมนู", "deploy richmenu", "อัปเดตเมนู"):
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None  # ไม่เปิดเผยว่ามีคำสั่งนี้
+
+        if not LINE_CHANNEL_ACCESS_TOKEN:
+            return "❌ LINE_CHANNEL_ACCESS_TOKEN ยังไม่ได้ตั้งค่า"
+
+        import requests as _req
+
+        _liff_id = os.environ.get("LIFF_ID", "")
+        _liff_url = f"https://liff.line.me/{_liff_id}" if _liff_id else ""
+        _base_dir = os.path.dirname(os.path.abspath(__file__))
+        _img_path = os.path.join(_base_dir, "rich_menu_v2.png")
+
+        if not os.path.exists(_img_path):
+            return "❌ ไม่พบไฟล์ rich_menu_v2.png"
+
+        _headers = {
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            # Step 1: สร้าง Rich Menu
+            _rm_body = {
+                "size": {"width": 2500, "height": 843},
+                "selected": True,
+                "name": "ระนอง รักษ์ไต เมนูหลัก v2",
+                "chatBarText": "เมนู",
+                "areas": [
+                    {
+                        "bounds": {"x": 0, "y": 0, "width": 833, "height": 843},
+                        "action": {"type": "uri", "label": "ดูผลแล็บ",
+                                   "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff"},
+                    },
+                    {
+                        "bounds": {"x": 833, "y": 0, "width": 834, "height": 843},
+                        "action": {"type": "message", "label": "ส่งเอกสาร", "text": "ส่งเอกสาร"},
+                    },
+                    {
+                        "bounds": {"x": 1667, "y": 0, "width": 833, "height": 843},
+                        "action": {"type": "message", "label": "ลงทะเบียน", "text": "ลงทะเบียน"},
+                    },
+                ],
+            }
+
+            r1 = _req.post("https://api.line.me/v2/bot/richmenu",
+                           json=_rm_body, headers=_headers, timeout=15)
+            if r1.status_code != 200:
+                return f"❌ สร้าง Rich Menu ไม่สำเร็จ ({r1.status_code})"
+
+            _menu_id = r1.json().get("richMenuId", "")
+
+            # Step 2: อัปโหลดรูป
+            with open(_img_path, "rb") as _f:
+                _img = _f.read()
+            r2 = _req.post(
+                f"https://api-data.line.me/v2/bot/richmenu/{_menu_id}/content",
+                data=_img,
+                headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                         "Content-Type": "image/png"},
+                timeout=30,
+            )
+
+            # Step 3: ตั้งเป็น default
+            r3 = _req.post(
+                f"https://api.line.me/v2/bot/user/all/richmenu/{_menu_id}",
+                headers=_headers, timeout=15,
+            )
+
+            _img_ok = "✅" if r2.status_code == 200 else "❌"
+            _def_ok = "✅" if r3.status_code == 200 else "❌"
+
+            return (
+                f"🎨 Rich Menu Deploy\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"สร้าง: ✅ {_menu_id[:16]}...\n"
+                f"อัปโหลดรูป: {_img_ok}\n"
+                f"ตั้ง Default: {_def_ok}\n"
+                f"\n💡 ปิด-เปิดแชทเพื่อเห็นเมนูใหม่"
+            )
+        except Exception as _e:
+            return f"❌ {type(_e).__name__}: {str(_e)[:100]}"
+
     # ── ยืนยันตัวตน (One-Time Enrollment Token) ──────────────
     # คำสั่ง: "ยืนยัน [TOKEN]"
     # ผู้ดูแลได้รับ Token จาก POST /admin/enroll (ต้องยืนยัน ADMIN_SECRET)
