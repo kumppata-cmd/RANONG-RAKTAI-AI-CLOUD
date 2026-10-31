@@ -7107,11 +7107,9 @@ def handle_search_command(
                     return "\n".join(lines)
 
             if patient:
-                # พบใน hn_registry
-                # สำคัญ: ค้นด้วย patient_folder เป็นหลัก ไม่ใช่ owner_hash
-                # เพราะเอกสารส่งจาก LINE ของหมอ/เจ้าหน้าที่
-                # owner_hash ในเอกสาร = หมอ ≠ owner_hash ของคนไข้
-                target_hash = ""  # ไม่ใช้ owner_hash ของคนไข้
+                # พบใน hn_registry — ใช้ owner_hash + folder ทั้งคู่
+                # (เหมือนกับ สรุป HN ที่ใช้งานได้)
+                target_hash = patient.owner_hash
                 _hn_check = patient.clinic_hn or patient.hospital_hn or ""
                 _patient_folder = ""
                 if _hn_check and master_registry:
@@ -7119,7 +7117,7 @@ def handle_search_command(
                     if len(_mr) == 1:
                         _patient_folder = _mr[0].folder_name
                 if not _patient_folder and _hn_check:
-                    _patient_folder = _hn_check  # ใช้ HN ตรงๆ
+                    _patient_folder = _hn_check
                 patient_label = f" (HN {patient.clinic_hn or patient.hospital_hn})"
                 if patient.display_name:
                     patient_label = f" ({patient.display_name}, HN {patient.clinic_hn or patient.hospital_hn})"
@@ -7183,16 +7181,29 @@ def handle_search_command(
                 err_msg = "ขออภัย ไม่สามารถเปรียบเทียบข้อมูลฟอกเลือดย้อนหลังได้ในขณะนี้"
 
             # ── ใช้วิธีเดียวกับ "สรุป HN" ──
-            # _try_history_multi ลองหลาย folder + owner_hash fallback
-            _hist = _try_history_multi(
-                _cmp_fn.__wrapped__ if hasattr(_cmp_fn, '__wrapped__') else
-                # ส่ง get_history function ไม่ใช่ compare function
-                (get_patient_dialysis_history if cmd == CommandType.COMPARE_DIALYSIS_TIMELINE
-                 else get_patient_lab_history if cmd == CommandType.COMPARE_LAB_TIMELINE
-                 else get_patient_rx_history),
-                target_hash,
-                _cmp_folders,
+            # ลอง owner_hash ก่อน แล้ว folder ทีหลัง (เหมือน _try_history)
+            _get_fn = (
+                get_patient_dialysis_history if cmd == CommandType.COMPARE_DIALYSIS_TIMELINE
+                else get_patient_lab_history if cmd == CommandType.COMPARE_LAB_TIMELINE
+                else get_patient_rx_history
             )
+            _hist = []
+            # 1) ลอง owner_hash ก่อน
+            if target_hash:
+                try:
+                    _hist = _get_fn(storage, doc_index, target_hash, patient_folder="")
+                except Exception:
+                    pass
+            # 2) ลองแต่ละ folder
+            if not _hist:
+                for _cf in _cmp_folders:
+                    try:
+                        _r = _get_fn(storage, doc_index, "", patient_folder=_cf)
+                        if _r:
+                            _hist = _r
+                            break
+                    except Exception:
+                        pass
 
             # สร้าง result จาก history ที่ได้
             if not _hist:
