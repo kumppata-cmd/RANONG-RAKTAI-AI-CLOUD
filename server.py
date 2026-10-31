@@ -15657,6 +15657,7 @@ def liff_api_my_labs():
         data = get_patient_labs_for_liff(
             storage=storage,
             owner_hash=owner_hash,
+            doc_index=doc_index,
         )
         return jsonify(data), 200, _liff_cors_headers()
     except Exception as e:

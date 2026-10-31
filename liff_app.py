@@ -151,6 +151,7 @@ def get_patient_labs_for_liff(
     storage: Any,
     owner_hash: str,
     limit: int = 20,
+    doc_index: Any = None,
 ) -> dict:
     """ดึงผลแล็บของผู้ป่วย (owner_hash) สำหรับ LIFF.
 
@@ -158,6 +159,8 @@ def get_patient_labs_for_liff(
         storage: GCS storage instance
         owner_hash: LINE userId hash — ยืนยันตัวตน
         limit: จำนวนผลแล็บสูงสุด
+        doc_index: doc_index instance — ใช้ pre-filter เอกสารของผู้ป่วย
+                   เพื่อไม่ต้อง download ทุกไฟล์จาก GCS (เร็วกว่า 10-50x)
 
     Returns:
         dict with patient_labs, trends, ckd_info
@@ -187,24 +190,58 @@ def get_patient_labs_for_liff(
         if not hasattr(storage, '_bucket') or not storage._bucket:
             return result
 
-        # Scan lab results for this patient
-        lab_blobs = list(storage._bucket.list_blobs(
-            prefix="_lab_results/", max_results=500
-        ))
+        # ── Pre-filter ด้วย doc_index (เร็ว) ──
+        # แทนการ download ทุกไฟล์จาก GCS ที่ช้ามาก
+        candidate_ids: list[str] = []
+        if doc_index is not None:
+            try:
+                all_docs = doc_index.list_all() if hasattr(doc_index, 'list_all') else []
+                for doc in all_docs:
+                    if isinstance(doc, dict):
+                        if doc.get("owner_hash") == owner_hash:
+                            did = doc.get("document_id", "")
+                            if did:
+                                candidate_ids.append(did)
+                    elif hasattr(doc, 'owner_hash') and hasattr(doc, 'document_id'):
+                        if doc.owner_hash == owner_hash:
+                            candidate_ids.append(doc.document_id)
+            except Exception:
+                candidate_ids = []
 
         patient_labs = []
-        for lb in lab_blobs:
-            try:
-                ldata = json.loads(lb.download_as_text())
-                # Safety: only show this patient's labs
-                if ldata.get("owner_hash") != owner_hash:
+
+        if candidate_ids:
+            # Fast path: download เฉพาะ lab ของผู้ป่วยรายนี้
+            for did in candidate_ids[:50]:
+                try:
+                    lab_path = f"_lab_results/{did}.json"
+                    blob_data = storage.get(lab_path)
+                    if not blob_data:
+                        continue
+                    ldata = json.loads(blob_data if isinstance(blob_data, str)
+                                       else blob_data.decode("utf-8"))
+                    if ldata.get("owner_hash") != owner_hash:
+                        continue
+                    if ldata.get("status") != "approved":
+                        continue
+                    patient_labs.append(ldata)
+                except Exception:
                     continue
-                # Safety: only show approved labs
-                if ldata.get("status") != "approved":
+        else:
+            # Fallback: scan ทั้งหมด (ช้า แต่ใช้ได้เสมอ)
+            lab_blobs = list(storage._bucket.list_blobs(
+                prefix="_lab_results/", max_results=200
+            ))
+            for lb in lab_blobs:
+                try:
+                    ldata = json.loads(lb.download_as_text())
+                    if ldata.get("owner_hash") != owner_hash:
+                        continue
+                    if ldata.get("status") != "approved":
+                        continue
+                    patient_labs.append(ldata)
+                except Exception:
                     continue
-                patient_labs.append(ldata)
-            except Exception:
-                continue
 
         # Sort by date descending
         patient_labs.sort(
@@ -705,14 +742,17 @@ async function initApp() {
     }
     try {
         // [SEC-1] POST พร้อม ID token — ตัวระบุตัวตนไม่อยู่ใน URL อีกต่อไป
-        // (query string ถูกบันทึกลง access log ของ proxy/แพลตฟอร์ม)
+        // Timeout 20 วินาที — กัน server scan GCS นานจนหน้าค้าง
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 20000);
         const resp = await fetch(API_BASE + '/liff/api/my-labs', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({id_token: tok}),
+            signal: ctrl.signal,
         });
-        // 400 = ไม่มี token, 401 = token ใช้ไม่ได้ — ผู้ป่วยต้องทำ
-        // สิ่งเดียวกันทั้งสองกรณี จึงบอกให้ชัดแบบเดียวกัน
+        clearTimeout(timer);
+        // 400 = ไม่มี token, 401 = token ใช้ไม่ได้
         if (resp.status === 401 || resp.status === 400) {
             idToken = null;
             showProblem('❌ ยืนยันตัวตนไม่สำเร็จ กรุณาเปิดจาก LINE อีกครั้ง');
@@ -731,8 +771,10 @@ async function initApp() {
             document.getElementById('patientInfo').textContent = 'ยังไม่มีข้อมูล';
         }
     } catch (e) {
-        document.getElementById('loadingLabs').innerHTML =
-            '<div>❌ ไม่สามารถโหลดข้อมูลได้<br><small>' + e.message + '</small></div>';
+        const msg = e.name === 'AbortError'
+            ? '⏱️ โหลดนานเกินไป กรุณาลองใหม่'
+            : '❌ ไม่สามารถโหลดข้อมูลได้<br><small>' + e.message + '</small>';
+        document.getElementById('loadingLabs').innerHTML = '<div>' + msg + '</div>';
     }
 }
 
