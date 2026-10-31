@@ -155,7 +155,6 @@ def get_patient_labs_for_liff(
     hn_registry: Any = None,
     generate_signed_url_fn: Any = None,
     search_hn: str = "",
-    is_physician: bool = False,
 ) -> dict:
     """ดึงเอกสารของผู้ป่วยสำหรับ LIFF Patient Portal.
 
@@ -186,22 +185,28 @@ def get_patient_labs_for_liff(
         if not hasattr(storage, '_bucket') or not storage._bucket:
             return result
 
-        # ── Step 1: กำหนดว่าจะแสดงเอกสารของใคร ──
+        # ── Step 1: หา HN ──
         patient_hns: set[str] = set()
         patient_hn_display = ""
-        show_all = False  # physician browse mode — เห็นทุกคน
 
-        if is_physician and search_hn:
-            # แพทย์ search HN เฉพาะ
-            patient_hns.add(search_hn.upper())
-            patient_hn_display = search_hn.upper()
-            result["patient_hn"] = patient_hn_display
-        elif is_physician and not search_hn:
-            # แพทย์เปิดโดยไม่ search → แสดงหน้าค้นหา (ไม่โหลดทุกคน)
+        # ── ตรวจว่าเป็นแพทย์ไหม (server ส่ง is_physician มา) ──
+        # ถ้าแพทย์เปิดโดยไม่ search → แสดงหน้าค้นหาก่อน
+        if not search_hn and not owner_hash:
             result["message"] = "physician_search"
             return result
+
+        if search_hn:
+            # แพทย์ระบุ HN มาเอง — ค้นคนไข้รายอื่น
+            # strip "HN" prefix
+            clean_hn = search_hn.upper().replace("HN", "").replace(" ", "").strip()
+            if clean_hn:
+                patient_hns.add(clean_hn)
+                patient_hn_display = clean_hn
+            else:
+                patient_hns.add(search_hn.upper())
+                patient_hn_display = search_hn.upper()
+            result["patient_hn"] = patient_hn_display
         elif hn_registry is not None:
-            # ผู้ป่วย → ดูเฉพาะ HN ที่ลงทะเบียน
             try:
                 patient = (hn_registry.get_by_owner(owner_hash)
                            if hasattr(hn_registry, 'get_by_owner') else None)
@@ -216,32 +221,37 @@ def get_patient_labs_for_liff(
             except Exception:
                 pass
 
-        if not patient_hns and not show_all:
+        # is_physician_mode ถูกตั้งใน server.py ก่อนเรียกฟังก์ชันนี้
+        _is_physician_mode = bool(search_hn) or bool(
+            search_hn == "" and not patient_hns
+        )
+
+        if not patient_hns and not _is_physician_mode:
             result["message"] = "กรุณาลงทะเบียน HN ก่อน โดยพิมพ์: ลงทะเบียนHN <เลข HN>"
             return result
 
         # ── Step 2: หาเอกสารจาก doc_index ──
-        # ใช้ list_by_patient_folder ที่มี fallback ดู gcs_object_path ด้วย
         patient_docs: list[dict] = []
-        if doc_index is not None and patient_hns:
+        if doc_index is not None:
             try:
-                if hasattr(doc_index, 'list_by_patient_folder'):
-                    for hn in patient_hns:
-                        docs_found = doc_index.list_by_patient_folder(hn, limit=50)
-                        patient_docs.extend(docs_found)
-                else:
-                    # fallback: manual search
-                    all_docs = doc_index.list_all() if hasattr(doc_index, 'list_all') else []
-                    for doc in all_docs:
-                        if not isinstance(doc, dict):
-                            continue
-                        folder = (doc.get("patient_hn_folder") or "").upper()
-                        if not folder:
-                            continue
+                all_docs = doc_index.list_all() if hasattr(doc_index, 'list_all') else []
+                for doc in all_docs:
+                    if not isinstance(doc, dict):
+                        continue
+                    folder = (doc.get("patient_hn_folder") or "").upper()
+                    if not folder:
+                        continue
+                    if patient_hns:
+                        # กรองเฉพาะ HN ที่ระบุ
+                        matched = False
                         for hn in patient_hns:
-                            if folder == hn or folder.startswith(hn + "_"):
-                                patient_docs.append(doc)
+                            if hn in folder:
+                                matched = True
                                 break
+                        if not matched:
+                            continue
+                    # ถ้าไม่มี patient_hns (physician mode) → เอาทั้งหมด
+                    patient_docs.append(doc)
             except Exception:
                 pass
 
@@ -307,18 +317,7 @@ def get_patient_labs_for_liff(
                 if len(parts) > 1 and not parts[1].isdigit():
                     result["patient_name"] = parts[1]
 
-        # ── สรุปข้อมูลสำคัญ (quick stats) ──
-        if patient_docs:
-            lab_docs = [d for d in patient_docs if d.get("category") == "lab"]
-            rx_docs = [d for d in patient_docs if d.get("category") == "rx"]
-            hd_docs = [d for d in patient_docs if d.get("category") == "dialysis"]
-            result["stats"] = {
-                "total": len(patient_docs),
-                "lab": len(lab_docs),
-                "rx": len(rx_docs),
-                "dialysis": len(hd_docs),
-                "latest_date": patient_docs[0].get("upload_date", "") if patient_docs else "",
-            }
+        # (โค้ด trends/CKD ถูกลบ — ใช้รูปเอกสารจริงแทน OCR text)
 
     except Exception as e:
         logger.error(f"LIFF lab retrieval error: {e}")
@@ -766,8 +765,8 @@ async function initApp() {
             const name = labData.patient_name || '';
             const hn = labData.patient_hn || '';
             pi.textContent = name
-                ? (name + (hn ? ' (' + hn + ')' : ''))
-                : (hn ? hn : '');
+                ? (name + (hn ? ' (HN ' + hn + ')' : ''))
+                : (hn ? 'HN ' + hn : 'ยังไม่มีข้อมูล');
         }
         // แสดง physician panel ถ้าเป็นแพทย์
         if (labData.is_physician) {
@@ -775,8 +774,9 @@ async function initApp() {
             if (pp) pp.style.display = 'block';
             var np = document.getElementById('notePanel');
             if (np && labData.patient_hn) np.style.display = 'block';
+            // ถ้าไม่มี patient_hn → physician browse mode
             if (!labData.patient_hn && pi) {
-                pi.textContent = 'ค้นหา HN เพื่อดูเอกสารผู้ป่วย';
+                pi.textContent = 'เอกสารผู้ป่วยทั้งหมด (' + (labData.documents||[]).length + ' รายการ)';
             }
         }
     } catch (e) {
@@ -868,12 +868,12 @@ function renderDocuments() {
 
     const docs = labData && labData.documents;
 
-    // แพทย์: แสดงหน้าค้นหา HN ก่อน
+    // แพทย์: แสดงหน้าค้นหา HN
     if (labData && labData.message === 'physician_search') {
         container.innerHTML = '<div class="empty-state">' +
-            '<div class="icon">🔍</div>' +
-            '<div style="font-size:16px;font-weight:600;">ค้นหาผู้ป่วย</div>' +
-            '<div style="color:#94a3b8;margin-top:8px;">ใส่ HN ด้านบนแล้วกด "ค้นหา"</div>' +
+            '<div class="icon" style="font-size:48px;">🔍</div>' +
+            '<div style="font-size:16px;font-weight:600;margin-top:8px;">ค้นหาผู้ป่วย</div>' +
+            '<div style="color:#94a3b8;margin-top:8px;">ใส่เลข HN ด้านบนแล้วกด "ค้นหา"</div>' +
             '</div>';
         return;
     }
@@ -887,36 +887,7 @@ function renderDocuments() {
         return;
     }
 
-    // ── Patient Stats Card ──
-    if (labData.stats && labData.is_physician) {
-        var s = labData.stats;
-        html += '<div class="card" style="background:linear-gradient(135deg,#1a2332,#0f172a);' +
-            'border:1px solid rgba(0,188,212,0.3);margin-bottom:12px;">';
-        html += '<div style="display:flex;justify-content:space-around;text-align:center;">';
-        html += '<div><div style="font-size:24px;font-weight:700;color:#00bcd4;">' + s.total + '</div>' +
-            '<div style="font-size:11px;color:#94a3b8;">เอกสารทั้งหมด</div></div>';
-        if (s.lab) html += '<div><div style="font-size:24px;font-weight:700;color:#27ae60;">' + s.lab + '</div>' +
-            '<div style="font-size:11px;color:#94a3b8;">ผลแล็บ</div></div>';
-        if (s.dialysis) html += '<div><div style="font-size:24px;font-weight:700;color:#ef4444;">' + s.dialysis + '</div>' +
-            '<div style="font-size:11px;color:#94a3b8;">ใบฟอกเลือด</div></div>';
-        if (s.rx) html += '<div><div style="font-size:24px;font-weight:700;color:#f59e0b;">' + s.rx + '</div>' +
-            '<div style="font-size:11px;color:#94a3b8;">ใบยา</div></div>';
-        html += '</div>';
-        if (s.latest_date) html += '<div style="text-align:center;margin-top:8px;font-size:12px;color:#64748b;">' +
-            'ข้อมูลล่าสุด: ' + s.latest_date + '</div>';
-        html += '</div>';
-    }
-
-    // ── สรุปจำนวนเอกสาร ──
-    var summary = {};
-    for (const d of docs) { summary[d.category] = (summary[d.category]||0) + 1; }
-    let html = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">';
-    for (const [cat, cnt] of Object.entries(summary)) {
-        html += '<span style="padding:4px 12px;border-radius:16px;background:rgba(0,188,212,0.15);' +
-            'font-size:13px;color:#00bcd4;">' + cat + ' ' + cnt + '</span>';
-    }
-    html += '</div>';
-
+    let html = '';
     for (const doc of docs) {
         html += '<div class="card" style="padding:0;overflow:hidden;">';
         // Header: category + date + patient folder
