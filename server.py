@@ -16444,6 +16444,120 @@ def api_richmenu_upload_image(menu_id):
     return jsonify({"error": "upload_failed", "status": resp.status_code}), 500
 
 
+@app.route("/admin/api/v2/richmenu/deploy", methods=["POST"])
+def api_richmenu_deploy():
+    """สร้าง Rich Menu + อัปโหลดรูปจาก repo + ตั้ง default — ครบจบในขั้นตอนเดียว.
+
+    อ่าน rich_menu_v2.png จาก directory ที่ deploy ไว้ ไม่ต้องส่งไฟล์มา
+    """
+    err = _admin_api_auth()
+    if err:
+        return err
+
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        return jsonify({"error": "LINE_CHANNEL_ACCESS_TOKEN not set"}), 500
+
+    import requests as _req
+
+    # หารูป Rich Menu จาก repo
+    _base = os.path.dirname(os.path.abspath(__file__))
+    img_path = os.path.join(_base, "rich_menu_v2.png")
+    if not os.path.exists(img_path):
+        return jsonify({"error": "rich_menu_v2.png not found in repo"}), 404
+
+    _liff_id = os.environ.get("LIFF_ID", "")
+    _liff_url = f"https://liff.line.me/{_liff_id}" if _liff_id else ""
+
+    headers_json = {
+        "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        "Content-Type": "application/json",
+    }
+
+    # Step 1: สร้าง Rich Menu
+    rich_menu_body = {
+        "size": {"width": 2500, "height": 843},
+        "selected": True,
+        "name": "ระนอง รักษ์ไต เมนูหลัก v2",
+        "chatBarText": "เมนู",
+        "areas": [
+            {
+                "bounds": {"x": 0, "y": 0, "width": 833, "height": 843},
+                "action": {
+                    "type": "uri",
+                    "label": "ดูผลแล็บ",
+                    "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff",
+                },
+            },
+            {
+                "bounds": {"x": 833, "y": 0, "width": 834, "height": 843},
+                "action": {
+                    "type": "message",
+                    "label": "ส่งเอกสาร",
+                    "text": "ส่งเอกสาร",
+                },
+            },
+            {
+                "bounds": {"x": 1667, "y": 0, "width": 833, "height": 843},
+                "action": {
+                    "type": "message",
+                    "label": "ลงทะเบียน",
+                    "text": "ลงทะเบียน",
+                },
+            },
+        ],
+    }
+
+    try:
+        resp1 = _req.post(
+            "https://api.line.me/v2/bot/richmenu",
+            json=rich_menu_body,
+            headers=headers_json,
+            timeout=15,
+        )
+        if resp1.status_code != 200:
+            return jsonify({
+                "error": "create_failed",
+                "status": resp1.status_code,
+                "detail": resp1.text[:500],
+            }), 500
+
+        menu_id = resp1.json().get("richMenuId", "")
+
+        # Step 2: อัปโหลดรูป
+        with open(img_path, "rb") as f:
+            img_data = f.read()
+        resp2 = _req.post(
+            f"https://api-data.line.me/v2/bot/richmenu/{menu_id}/content",
+            data=img_data,
+            headers={
+                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                "Content-Type": "image/png",
+            },
+            timeout=30,
+        )
+        img_ok = resp2.status_code == 200
+
+        # Step 3: ตั้งเป็น default
+        resp3 = _req.post(
+            f"https://api.line.me/v2/bot/user/all/richmenu/{menu_id}",
+            headers=headers_json,
+            timeout=15,
+        )
+        default_ok = resp3.status_code == 200
+
+        return jsonify({
+            "success": True,
+            "richMenuId": menu_id,
+            "image_uploaded": img_ok,
+            "default_set": default_ok,
+            "liff_url": _liff_url,
+        }), 200
+
+    except Exception as e:
+        logger.warning("Rich Menu deploy failed: %s", type(e).__name__)
+        return jsonify({"error": type(e).__name__}), 500
+
+
 # ═══════════════════════════════════════════════════════════
 # Main (สำหรับทดสอบ local เท่านั้น — Render ใช้ Gunicorn)
 # ═══════════════════════════════════════════════════════════
