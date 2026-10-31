@@ -163,6 +163,9 @@ from quarterly_compare import (
     get_patient_lab_history,
     get_patient_rx_history,
     get_patient_dialysis_history,
+    _DIALYSIS_SECTIONS,
+    _dialysis_param_thai,
+    _format_timeline_value,
 )
 
 # ─── OCR (Tesseract) ────────────────────────────────────────
@@ -7179,45 +7182,94 @@ def handle_search_command(
                 log_type = "compare_dialysis_timeline"
                 err_msg = "ขออภัย ไม่สามารถเปรียบเทียบข้อมูลฟอกเลือดย้อนหลังได้ในขณะนี้"
 
-            # ลองค้นหลาย folder — เก็บ error จริงไว้แสดง
-            result = None
-            _last_error = ""
-            _tried = []
+            # ── ใช้วิธีเดียวกับ "สรุป HN" ──
+            # _try_history_multi ลองหลาย folder + owner_hash fallback
+            _hist = _try_history_multi(
+                _cmp_fn.__wrapped__ if hasattr(_cmp_fn, '__wrapped__') else
+                # ส่ง get_history function ไม่ใช่ compare function
+                (get_patient_dialysis_history if cmd == CommandType.COMPARE_DIALYSIS_TIMELINE
+                 else get_patient_lab_history if cmd == CommandType.COMPARE_LAB_TIMELINE
+                 else get_patient_rx_history),
+                target_hash,
+                _cmp_folders,
+            )
 
-            if target_hash:
-                result = _cmp_fn(
-                    storage, doc_index, target_hash,
-                    patient_folder=_patient_folder,
+            # สร้าง result จาก history ที่ได้
+            if not _hist:
+                return "ไม่พบข้อมูลในระบบ กรุณาส่งเอกสารก่อน"
+
+            if len(_hist) < 2:
+                cur = _hist[0]
+                items = "\n".join(
+                    f"  • {_dialysis_param_thai(k)}: {_format_timeline_value(v)}"
+                    for k, v in sorted(cur.get("data", {}).items())
                 )
-                _tried.append(f"hash={target_hash[:8]}")
-                if result and "error" in result:
-                    _last_error = result["error"]
-                    if result.get("available", -1) >= 1:
-                        # มีข้อมูล 1 ครั้ง → แสดงผลเลย
-                        return result["error"]
-
-            if (not result or "error" in result) and _cmp_folders:
-                for _cf in _cmp_folders:
-                    _r = _cmp_fn(
-                        storage, doc_index, "",
-                        patient_folder=_cf,
-                    )
-                    _tried.append(f"folder={_cf}")
-                    if _r and "error" not in _r:
-                        result = _r
-                        break
-                    elif _r and "error" in _r:
-                        _last_error = _r["error"]
-                        if _r.get("available", -1) >= 1:
-                            return _r["error"]
-
-            if not result or "error" in result:
-                if _last_error:
-                    return _last_error
                 return (
-                    f"{err_msg}\n\n"
-                    f"🔧 ค้นหาแล้ว: {', '.join(_tried)}"
+                    f"📋 พบข้อมูล 1 ครั้ง ({cur.get('upload_date', '?')})\n"
+                    f"{items}\n\n"
+                    "ส่งเอกสารอีก 1 ครั้งเพื่อเปรียบเทียบ"
                 )
+
+            # มี ≥ 2 ครั้ง → เปรียบเทียบ 2 ครั้งล่าสุด
+            current = _hist[0]
+            previous = _hist[1]
+            current_data = current.get("data", {})
+            prev_data = previous.get("data", {})
+            cur_date = current.get("upload_date", "?")
+            prev_date = previous.get("upload_date", "?")
+
+            lines = [
+                "🩸 เปรียบเทียบฟอกเลือด",
+                "━━━━━━━━━━━━━━━━━━",
+                f"📅 ครั้งก่อน: {prev_date}",
+                f"📅 ครั้งนี้: {cur_date}",
+                "",
+            ]
+
+            changed_count = 0
+            same_count = 0
+            for section_name, section_keys in _DIALYSIS_SECTIONS:
+                section_items = []
+                for key in section_keys:
+                    cv = current_data.get(key)
+                    pv = prev_data.get(key)
+                    if cv is not None or pv is not None:
+                        section_items.append((key, cv, pv))
+                if not section_items:
+                    continue
+                lines.append(f"\n{section_name}")
+                for key, cv, pv in section_items:
+                    label = _dialysis_param_thai(key)
+                    cs = _format_timeline_value(cv) if cv is not None else "-"
+                    ps = _format_timeline_value(pv) if pv is not None else "-"
+                    if cv is not None and pv is not None:
+                        if isinstance(cv, (int, float)) and isinstance(pv, (int, float)):
+                            d = cv - pv
+                            if abs(d) < 0.01:
+                                m = "="
+                                same_count += 1
+                            else:
+                                m = f"↑{abs(d):.1f}" if d > 0 else f"↓{abs(d):.1f}"
+                                changed_count += 1
+                        else:
+                            if str(cv).strip() == str(pv).strip():
+                                m = "="
+                                same_count += 1
+                            else:
+                                m = "🔄"
+                                changed_count += 1
+                        lines.append(f"  {label}: {ps} → {cs} {m}")
+                    elif cv is not None:
+                        lines.append(f"  {label}: {cs}")
+                    else:
+                        lines.append(f"  {label}: {ps} → -")
+
+            lines.append("")
+            lines.append(f"📊 เปลี่ยน {changed_count} | คงเดิม {same_count}")
+            if len(_hist) > 2:
+                lines.append(f"📋 มีข้อมูลทั้งหมด {len(_hist)} ครั้ง")
+
+            result = {"text_th": "\n".join(lines), "current_date": cur_date}
 
             audit_logger.log(log_type, user_hash, {
                 "target": target_hash[:8] if target_hash != user_hash else "self",
