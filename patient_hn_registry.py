@@ -178,16 +178,24 @@ class HNRegistry:
             except Exception as create_err:
                 err_code = getattr(create_err, "code", None)
                 if err_code == 412:
-                    # object มีอยู่แล้ว → ลบก่อนแล้วสร้างใหม่
+                    # 412 = object มีอยู่แล้ว (ลงทะเบียนไปแล้วก่อนหน้า)
+                    # SA ไม่มี objects.delete → ไม่สามารถ overwrite ได้
+                    # อ่านข้อมูลเดิมแล้ว return สำเร็จ
                     try:
-                        blob.delete()
+                        existing = json.loads(blob.download_as_text())
+                        patient_from_gcs = PatientHN.from_dict(existing)
+                        # อัปเดต cache ให้ตรงกับ GCS
+                        self._cache[patient.owner_hash] = patient_from_gcs
+                        if patient_from_gcs.clinic_hn:
+                            self._hn_index[patient_from_gcs.clinic_hn] = patient.owner_hash
+                        logger.info("HNRegistry: patient already registered %s",
+                                    patient_from_gcs.hn_pair)
+                        return True, ""
                     except Exception:
-                        pass  # ถ้าลบไม่ได้ ลองสร้างทับเลย
-                    blob.upload_from_string(
-                        data_bytes,
-                        content_type="application/json",
-                        if_generation_match=0,
-                    )
+                        pass
+                    # ถ้าอ่านไม่ได้ ก็ถือว่าลงทะเบียนไว้แล้ว
+                    logger.info("HNRegistry: patient exists (412), cannot read back")
+                    return True, ""
                 else:
                     raise
 
