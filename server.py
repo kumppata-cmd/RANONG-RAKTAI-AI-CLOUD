@@ -1329,8 +1329,10 @@ _system_monitor = None  # initialized after _alert_recipients
 # ─── HN Registry: จัดการรหัส HN คลินิก + HN โรงพยาบาล ────
 hn_registry = HNRegistry()
 if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
-    hn_registry.set_storage(storage._bucket)
-    logger.info("HNRegistry initialized with GCS bucket")
+    # ส่ง storage wrapper (มี .put() method) แทน _bucket โดยตรง
+    # เพื่อใช้ code path เดียวกับระบบอื่น → ไม่ติด permission issue
+    hn_registry.set_storage(storage)
+    logger.info("HNRegistry initialized with GCS storage wrapper")
 
 # ─── Master Patient Registry: ทะเบียนผู้ป่วยกลาง ─────────
 master_registry = MasterPatientRegistry()

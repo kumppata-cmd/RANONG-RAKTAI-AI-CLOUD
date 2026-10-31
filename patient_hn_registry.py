@@ -118,7 +118,14 @@ class HNRegistry:
         if self._loaded or not self._storage:
             return
         try:
-            blobs = self._storage.list_blobs(prefix=f"{self.GCS_PREFIX}/")
+            # รองรับทั้ง storage wrapper และ bucket โดยตรง
+            bucket = (self._storage._bucket
+                      if hasattr(self._storage, '_bucket')
+                      else self._storage)
+            if not bucket or not hasattr(bucket, 'list_blobs'):
+                logger.warning("HNRegistry: bucket not available for listing")
+                return
+            blobs = bucket.list_blobs(prefix=f"{self.GCS_PREFIX}/")
             for blob in blobs:
                 try:
                     data = json.loads(blob.download_as_text())
@@ -144,9 +151,20 @@ class HNRegistry:
         try:
             path = self._gcs_path(patient.owner_hash)
             data = json.dumps(patient.to_dict(), ensure_ascii=False, indent=2)
-            bucket = self._storage
-            blob = bucket.blob(path)
-            blob.upload_from_string(data, content_type="application/json")
+
+            # ใช้ storage wrapper .put() ถ้ามี (ใช้ code path เดียวกับ
+            # ระบบอื่น → ไม่ติด permission issue)
+            if hasattr(self._storage, 'put'):
+                self._storage.put(
+                    path,
+                    data.encode("utf-8"),
+                    content_type="application/json",
+                )
+            else:
+                # fallback: ใช้ bucket โดยตรง
+                blob = self._storage.blob(path)
+                blob.upload_from_string(data, content_type="application/json")
+
             logger.info("HNRegistry: saved patient %s", patient.hn_pair)
             return True, ""
         except Exception as e:
