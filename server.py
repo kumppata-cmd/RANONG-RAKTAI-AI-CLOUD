@@ -7104,15 +7104,19 @@ def handle_search_command(
                     return "\n".join(lines)
 
             if patient:
-                # พบใน hn_registry → ใช้ owner_hash + patient_folder
-                target_hash = patient.owner_hash
-                # ค้น patient_folder จาก master_registry ด้วย
-                _patient_folder = ""
+                # พบใน hn_registry
+                # สำคัญ: ค้นด้วย patient_folder เป็นหลัก ไม่ใช่ owner_hash
+                # เพราะเอกสารส่งจาก LINE ของหมอ/เจ้าหน้าที่
+                # owner_hash ในเอกสาร = หมอ ≠ owner_hash ของคนไข้
+                target_hash = ""  # ไม่ใช้ owner_hash ของคนไข้
                 _hn_check = patient.clinic_hn or patient.hospital_hn or ""
+                _patient_folder = ""
                 if _hn_check and master_registry:
                     _mr = master_registry.search(_hn_check)
                     if len(_mr) == 1:
                         _patient_folder = _mr[0].folder_name
+                if not _patient_folder and _hn_check:
+                    _patient_folder = _hn_check  # ใช้ HN ตรงๆ
                 patient_label = f" (HN {patient.clinic_hn or patient.hospital_hn})"
                 if patient.display_name:
                     patient_label = f" ({patient.display_name}, HN {patient.clinic_hn or patient.hospital_hn})"
