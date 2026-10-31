@@ -59,9 +59,11 @@ COPY ckd_progression.py .
 COPY nephrology_drug_db.py .
 COPY liff_app.py .
 
-# V4.0: Structured Event Logger + Task Queue
+# V4.0: Structured Event Logger + Task Queue + Backup + Approval
 COPY event_logger.py .
 COPY task_queue.py .
+COPY backup_manager.py .
+COPY approval_workflow.py .
 
 # Google Integration + Finance + Monitoring modules
 COPY google_drive_sync.py .

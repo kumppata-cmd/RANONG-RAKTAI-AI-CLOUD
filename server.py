@@ -1333,9 +1333,11 @@ if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
     # เพื่อใช้ code path เดียวกับระบบอื่น → ไม่ติด permission issue
     hn_registry.set_storage(storage)
     logger.info("HNRegistry initialized with GCS storage wrapper")
-    # V4.0: Event Logger persistence
+    # V4.0: Event Logger + Backup Manager + Approval Engine persistence
     event_logger.set_storage(storage)
-    logger.info("EventLogger initialized with GCS persistence")
+    backup_manager.set_storage(storage)
+    approval_engine.set_storage(storage)
+    logger.info("V4.0 modules initialized with GCS persistence")
 
 # ─── Master Patient Registry: ทะเบียนผู้ป่วยกลาง ─────────
 master_registry = MasterPatientRegistry()
@@ -5050,6 +5052,78 @@ def api_queue_dlq_retry():
     return jsonify({"error": "ไม่พบ task ใน dead-letter queue"}), 404
 
 
+@app.route("/admin/api/v2/approvals/pending", methods=["GET"])
+def api_approvals_pending():
+    """ดูคำขอที่รออนุมัติ (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify({"pending": approval_engine.get_pending()})
+
+
+@app.route("/admin/api/v2/approvals/<approval_id>", methods=["GET"])
+def api_approval_get(approval_id):
+    """ดูคำขอเดียว (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    req = approval_engine.get_request(approval_id)
+    if not req:
+        return jsonify({"error": "ไม่พบคำขออนุมัติ"}), 404
+    return jsonify(req)
+
+
+@app.route("/admin/api/v2/approvals/<approval_id>/approve", methods=["POST"])
+def api_approval_approve(approval_id):
+    """อนุมัติคำขอ (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    reason = str(body.get("reason", "")).strip()[:200]
+    # ใช้ admin hash จาก header
+    ok, msg = approval_engine.approve(
+        approval_id, approver_hash="admin_api", reason=reason,
+    )
+    if ok:
+        return jsonify({"success": True, "message": msg})
+    return jsonify({"error": msg}), 400
+
+
+@app.route("/admin/api/v2/approvals/<approval_id>/reject", methods=["POST"])
+def api_approval_reject(approval_id):
+    """ปฏิเสธคำขอ (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    reason = str(body.get("reason", "")).strip()[:200]
+    ok, msg = approval_engine.reject(
+        approval_id, approver_hash="admin_api", reason=reason,
+    )
+    if ok:
+        return jsonify({"success": True, "message": msg})
+    return jsonify({"error": msg}), 400
+
+
+@app.route("/admin/api/v2/backup/status", methods=["GET"])
+def api_backup_status():
+    """สถานะ backup ทุกช่องทาง (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify(backup_manager.get_backup_status())
+
+
+@app.route("/admin/api/v2/backup/dr-plan", methods=["GET"])
+def api_dr_plan():
+    """Disaster Recovery Plan (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify(backup_manager.get_dr_plan())
+
+
 @app.route("/admin/dead-letter", methods=["GET"])
 def admin_dead_letter_ui():
     """หน้าเว็บ Dead-letter Queue — ดู/จัดการเอกสารที่จำแนกไม่ได้."""
@@ -6576,6 +6650,45 @@ def handle_search_command(
                 )
             except Exception as _e:
                 return f"❌ ส่ง email ไม่สำเร็จ: {type(_e).__name__}"
+
+    # ── V4.0: Approval Workflow Commands (Admin/Physician) ────
+    # "อนุมัติ APR-xxx", "ปฏิเสธ APR-xxx", "รออนุมัติ"
+    if text_stripped.startswith("อนุมัติ APR-") or text_stripped.startswith("อนุมัติAPR-"):
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None
+        _apr_id = text_stripped.replace("อนุมัติ ", "").replace("อนุมัติ", "").strip()
+        _ok, _msg = approval_engine.approve(_apr_id, approver_hash=user_hash)
+        if _ok:
+            return f"✅ อนุมัติ {_apr_id} สำเร็จ"
+        return f"❌ {_msg}"
+
+    if text_stripped.startswith("ปฏิเสธ APR-") or text_stripped.startswith("ปฏิเสธAPR-"):
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None
+        _apr_id = text_stripped.replace("ปฏิเสธ ", "").replace("ปฏิเสธ", "").strip()
+        _reason = ""
+        if " " in _apr_id:
+            _apr_id, _reason = _apr_id.split(" ", 1)
+        _ok, _msg = approval_engine.reject(_apr_id, approver_hash=user_hash, reason=_reason)
+        if _ok:
+            return f"❌ ปฏิเสธ {_apr_id} แล้ว"
+        return f"⚠️ {_msg}"
+
+    if text_stripped in ("รออนุมัติ", "pending approvals", "คำขออนุมัติ"):
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None
+        _pending = approval_engine.get_pending()
+        if not _pending:
+            return "✅ ไม่มีคำขอที่รออนุมัติ"
+        _lines = ["📋 คำขอที่รออนุมัติ\n━━━━━━━━━━━━━━━━━━━━"]
+        for _p in _pending[:10]:
+            _lines.append(
+                f"\n🔔 {_p['approval_id']}\n"
+                f"   {_p.get('description', '')}\n"
+                f"   สร้าง: {_p.get('created_at', '')[:16]}\n"
+                f"   พิมพ์: อนุมัติ {_p['approval_id']}"
+            )
+        return "".join(_lines)
 
     # ── ยืนยันตัวตน (One-Time Enrollment Token) ──────────────
     # คำสั่ง: "ยืนยัน [TOKEN]"
@@ -9089,6 +9202,14 @@ event_logger = EventLogger(max_buffer=1000)
 # ── Task Queue (V4.0 Phase 2.1) ──
 from task_queue import TaskQueue
 task_queue = TaskQueue(redis_url=REDIS_URL)
+
+# ── Backup Manager (V4.0 Phase 2.4) ──
+from backup_manager import BackupManager
+backup_manager = BackupManager()
+
+# ── Approval Workflow (V4.0 Phase 3.1) ──
+from approval_workflow import ApprovalEngine
+approval_engine = ApprovalEngine()
 
 # จำกัดงาน OCR ที่ทำพร้อมกันต่อ worker — ป้องกัน OOM บน instance เล็ก
 _ocr_semaphore = threading.Semaphore(max(1, OCR_MAX_CONCURRENT))
