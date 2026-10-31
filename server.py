@@ -15655,6 +15655,14 @@ def liff_api_my_labs():
     # owner_hash มาจาก sub ที่ยืนยันแล้ว ใช้ salt เดียวกับทั้งระบบ
     owner_hash = hash_user_id(line_user_id)
 
+    # ตรวจว่าเป็นแพทย์/admin ไหม — ถ้าใช่ สามารถค้น HN อื่นได้
+    _is_physician = (owner_hash in PHYSICIAN_USERS or owner_hash in ADMIN_USERS)
+
+    # แพทย์สามารถระบุ HN เพื่อดูเอกสารของคนไข้รายอื่น
+    search_hn = ""
+    if _is_physician:
+        search_hn = str(body.get("search_hn", "")).strip()[:20]
+
     try:
         data = get_patient_labs_for_liff(
             storage=storage,
@@ -15662,11 +15670,55 @@ def liff_api_my_labs():
             doc_index=doc_index,
             hn_registry=hn_registry,
             generate_signed_url_fn=generate_signed_url,
+            search_hn=search_hn,
         )
+        data["is_physician"] = _is_physician
         return jsonify(data), 200, _liff_cors_headers()
     except Exception as e:
         logger.error("LIFF API error: %s", type(e).__name__)
         return jsonify({"error": "internal error"}), 500, _liff_cors_headers()
+
+
+@app.route("/liff/api/save-note", methods=["POST", "OPTIONS"])
+def liff_api_save_note():
+    """บันทึกคำแนะนำจากแพทย์สำหรับผู้ป่วย — เฉพาะ physician/admin."""
+    if request.method == "OPTIONS":
+        return "", 204, _liff_cors_headers()
+
+    body = request.get_json(silent=True) or {}
+    id_token = body.get("id_token", "")
+    if not id_token:
+        return jsonify({"error": "id_token required"}), 400, _liff_cors_headers()
+
+    try:
+        line_user_id = verify_liff_id_token(id_token)
+    except Exception:
+        return jsonify({"error": "unauthorized"}), 401, _liff_cors_headers()
+
+    owner_hash = hash_user_id(line_user_id)
+    if owner_hash not in PHYSICIAN_USERS and owner_hash not in ADMIN_USERS:
+        return jsonify({"error": "physician only"}), 403, _liff_cors_headers()
+
+    patient_hn = str(body.get("patient_hn", "")).strip()[:20]
+    note_text = str(body.get("note", "")).strip()[:2000]
+    if not patient_hn or not note_text:
+        return jsonify({"error": "patient_hn and note required"}), 400, _liff_cors_headers()
+
+    try:
+        from datetime import timezone
+        ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        note_path = f"_treatment_notes/{patient_hn}/{ts}.json"
+        note_data = json.dumps({
+            "hn": patient_hn,
+            "note": note_text,
+            "by": owner_hash[:8],
+            "at": ts,
+        }, ensure_ascii=False)
+        storage.put(note_path, note_data.encode("utf-8"), "application/json")
+        return jsonify({"success": True}), 200, _liff_cors_headers()
+    except Exception as e:
+        logger.error("Save note error: %s", type(e).__name__)
+        return jsonify({"error": "save failed"}), 500, _liff_cors_headers()
 
 
 @app.route("/admin/dashboard", methods=["GET"])

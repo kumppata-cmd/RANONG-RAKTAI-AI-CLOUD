@@ -154,6 +154,7 @@ def get_patient_labs_for_liff(
     doc_index: Any = None,
     hn_registry: Any = None,
     generate_signed_url_fn: Any = None,
+    search_hn: str = "",
 ) -> dict:
     """ดึงเอกสารของผู้ป่วยสำหรับ LIFF Patient Portal.
 
@@ -184,10 +185,24 @@ def get_patient_labs_for_liff(
         if not hasattr(storage, '_bucket') or not storage._bucket:
             return result
 
-        # ── Step 1: หา HN + ชื่อผู้ป่วย ──
+        # ── Step 1: หา HN ──
         patient_hns: set[str] = set()
         patient_hn_display = ""
-        if hn_registry is not None:
+
+        if search_hn:
+            # แพทย์ระบุ HN มาเอง — ค้นคนไข้รายอื่น
+            patient_hns.add(search_hn.upper())
+            patient_hn_display = search_hn.upper()
+            result["patient_hn"] = patient_hn_display
+            # หาชื่อจาก hn_registry
+            if hn_registry and hasattr(hn_registry, 'get_by_clinic_hn'):
+                try:
+                    p = hn_registry.get_by_clinic_hn(search_hn)
+                    if p:
+                        result["patient_name"] = getattr(p, 'display_name', '') or ""
+                except Exception:
+                    pass
+        elif hn_registry is not None:
             try:
                 patient = (hn_registry.get_by_owner(owner_hash)
                            if hasattr(hn_registry, 'get_by_owner') else None)
@@ -525,6 +540,18 @@ body {
     <div class="subtitle" id="patientInfo">กำลังโหลด...</div>
 </div>
 
+<!-- ช่องค้น HN สำหรับแพทย์ -->
+<div id="physicianPanel" style="display:none;padding:8px 16px;">
+    <div style="display:flex;gap:8px;">
+        <input type="text" id="searchHN" placeholder="ใส่ HN ผู้ป่วย"
+            style="flex:1;padding:10px 14px;border-radius:8px;border:1px solid #444;
+            background:#1a1a2e;color:#e2e8f0;font-size:16px;">
+        <button onclick="searchPatient()" style="padding:10px 18px;border-radius:8px;
+            background:#00bcd4;color:#fff;border:none;font-size:14px;font-weight:600;
+            cursor:pointer;">ค้นหา</button>
+    </div>
+</div>
+
 <!-- เอกสารผู้ป่วย -->
 <div style="padding:0 12px;">
     <div class="loading" id="loadingLabs">
@@ -533,10 +560,36 @@ body {
     <div id="labList"></div>
 </div>
 
+<!-- ช่องคำแนะนำจากแพทย์ -->
+<div id="notePanel" style="display:none;padding:12px 16px;">
+    <div style="background:#1a2332;border-radius:12px;padding:16px;border:1px solid #27ae60;">
+        <div style="font-size:14px;font-weight:600;color:#27ae60;margin-bottom:8px;">
+            👨‍⚕️ เขียนคำแนะนำสำหรับผู้ป่วย</div>
+        <textarea id="noteText" rows="4" placeholder="เขียนคำแนะนำ ผลการตรวจ หรือสิ่งที่ผู้ป่วยควรทราบ..."
+            style="width:100%;padding:10px;border-radius:8px;border:1px solid #444;
+            background:#0f172a;color:#e2e8f0;font-size:14px;resize:vertical;
+            box-sizing:border-box;"></textarea>
+        <button onclick="saveNote()" id="saveNoteBtn"
+            style="margin-top:8px;padding:10px 24px;border-radius:8px;
+            background:#27ae60;color:#fff;border:none;font-size:14px;font-weight:600;
+            cursor:pointer;width:100%;">💾 บันทึกคำแนะนำ</button>
+        <div id="noteStatus" style="margin-top:6px;font-size:12px;text-align:center;"></div>
+    </div>
+</div>
+
 <div class="disclaimer">
     ⚠️ ข้อมูลนี้เป็นข้อมูลประกอบเท่านั้น — กรุณาปรึกษาแพทย์สำหรับการรักษา<br>
     ระบบ Read-Only — ไม่สามารถแก้ไขข้อมูลได้<br>
-    กดที่รูปเพื่อขยาย/ย่อ
+    กดที่รูปเพื่อขยายเต็มจอ
+</div>
+
+<!-- Full-screen image overlay -->
+<div id="imgOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);
+    z-index:1000;overflow:auto;-webkit-overflow-scrolling:touch;"
+    onclick="this.style.display='none'">
+    <div style="position:fixed;top:12px;right:16px;color:#fff;font-size:28px;z-index:1001;
+        cursor:pointer;">✕</div>
+    <img id="imgFull" src="" style="width:100%;min-height:100vh;object-fit:contain;">
 </div>
 </div>
 
@@ -671,10 +724,12 @@ async function initApp() {
         // Timeout 20 วินาที — กัน server scan GCS นานจนหน้าค้าง
         const ctrl = new AbortController();
         const timer = setTimeout(() => ctrl.abort(), 20000);
+        var fetchBody = {id_token: tok};
+        if (_currentSearchHN) fetchBody.search_hn = _currentSearchHN;
         const resp = await fetch(API_BASE + '/liff/api/my-labs', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({id_token: tok}),
+            body: JSON.stringify(fetchBody),
             signal: ctrl.signal,
         });
         clearTimeout(timer);
@@ -695,6 +750,13 @@ async function initApp() {
             pi.textContent = name
                 ? (name + (hn ? ' (HN ' + hn + ')' : ''))
                 : (hn ? 'HN ' + hn : 'ยังไม่มีข้อมูล');
+        }
+        // แสดง physician panel ถ้าเป็นแพทย์
+        if (labData.is_physician) {
+            var pp = document.getElementById('physicianPanel');
+            if (pp) pp.style.display = 'block';
+            var np = document.getElementById('notePanel');
+            if (np && labData.patient_hn) np.style.display = 'block';
         }
     } catch (e) {
         const msg = e.name === 'AbortError'
@@ -731,7 +793,52 @@ function renderCkdCard() {
 
 // ── Render Labs ──
 function toggleImg(el) {
-    el.style.maxHeight = el.style.maxHeight === 'none' ? '400px' : 'none';
+    // เปิด overlay เต็มจอ
+    var ov = document.getElementById('imgOverlay');
+    var full = document.getElementById('imgFull');
+    if (ov && full) {
+        full.src = el.src;
+        ov.style.display = 'block';
+    }
+}
+
+function searchPatient() {
+    var hn = (document.getElementById('searchHN') || {}).value || '';
+    if (!hn.trim()) return;
+    document.getElementById('loadingLabs').style.display = '';
+    document.getElementById('loadingLabs').innerHTML = '<div>⏳ กำลังค้นหา HN ' + hn + '...</div>';
+    document.getElementById('labList').innerHTML = '';
+    _currentSearchHN = hn.trim();
+    initApp();
+}
+var _currentSearchHN = '';
+
+async function saveNote() {
+    var hn = labData && labData.patient_hn;
+    var note = (document.getElementById('noteText') || {}).value || '';
+    if (!hn || !note.trim()) { alert('กรุณาใส่คำแนะนำ'); return; }
+    var btn = document.getElementById('saveNoteBtn');
+    var status = document.getElementById('noteStatus');
+    btn.disabled = true;
+    btn.textContent = '💾 กำลังบันทึก...';
+    try {
+        var tok = idToken;
+        var resp = await fetch(API_BASE + '/liff/api/save-note', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({id_token: tok, patient_hn: hn, note: note.trim()}),
+        });
+        if (resp.ok) {
+            status.innerHTML = '<span style="color:#27ae60;">✅ บันทึกสำเร็จ</span>';
+            document.getElementById('noteText').value = '';
+        } else {
+            status.innerHTML = '<span style="color:#ef4444;">❌ บันทึกไม่สำเร็จ</span>';
+        }
+    } catch(e) {
+        status.innerHTML = '<span style="color:#ef4444;">❌ ' + e.message + '</span>';
+    }
+    btn.disabled = false;
+    btn.textContent = '💾 บันทึกคำแนะนำ';
 }
 
 function renderDocuments() {
