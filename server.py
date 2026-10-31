@@ -7179,28 +7179,45 @@ def handle_search_command(
                 log_type = "compare_dialysis_timeline"
                 err_msg = "ขออภัย ไม่สามารถเปรียบเทียบข้อมูลฟอกเลือดย้อนหลังได้ในขณะนี้"
 
-            # ลองค้น: target_hash แล้ว fallback หลาย folder
+            # ลองค้นหลาย folder — เก็บ error จริงไว้แสดง
             result = None
+            _last_error = ""
+            _tried = []
+
             if target_hash:
                 result = _cmp_fn(
                     storage, doc_index, target_hash,
                     patient_folder=_patient_folder,
                 )
+                _tried.append(f"hash={target_hash[:8]}")
+                if result and "error" in result:
+                    _last_error = result["error"]
+                    if result.get("available", -1) >= 1:
+                        # มีข้อมูล 1 ครั้ง → แสดงผลเลย
+                        return result["error"]
+
             if (not result or "error" in result) and _cmp_folders:
                 for _cf in _cmp_folders:
                     _r = _cmp_fn(
                         storage, doc_index, "",
                         patient_folder=_cf,
                     )
+                    _tried.append(f"folder={_cf}")
                     if _r and "error" not in _r:
                         result = _r
                         break
+                    elif _r and "error" in _r:
+                        _last_error = _r["error"]
+                        if _r.get("available", -1) >= 1:
+                            return _r["error"]
 
-            if not result:
-                result = {"error": err_msg}
-
-            if "error" in result:
-                return result["error"]
+            if not result or "error" in result:
+                if _last_error:
+                    return _last_error
+                return (
+                    f"{err_msg}\n\n"
+                    f"🔧 ค้นหาแล้ว: {', '.join(_tried)}"
+                )
 
             audit_logger.log(log_type, user_hash, {
                 "target": target_hash[:8] if target_hash != user_hash else "self",
