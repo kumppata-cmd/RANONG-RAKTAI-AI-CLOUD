@@ -3796,8 +3796,8 @@ def generate_signed_url(gcs_object_path: str, expiry_seconds: int = SIGNED_URL_E
         return None
     try:
         blob = storage._bucket.blob(gcs_object_path)
-        if not blob.exists():
-            return None
+        # ไม่เรียก blob.exists() — SA อาจไม่มี objects.get permission
+        # ถ้า blob ไม่มีจริง signed URL จะ return 404 เอง (ปลอดภัย)
         url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(seconds=expiry_seconds),

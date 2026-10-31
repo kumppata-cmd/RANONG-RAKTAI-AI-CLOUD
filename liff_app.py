@@ -240,6 +240,21 @@ def get_patient_labs_for_liff(
             "review": "📄 เอกสารอื่น",
         }
 
+        # โหลด doctor's notes 1 ครั้ง (ไม่โหลดซ้ำทุก doc)
+        doctor_note = ""
+        if patient_hn_display:
+            try:
+                note_prefix = f"_treatment_notes/{patient_hn_display}/"
+                note_blobs = list(storage._bucket.list_blobs(
+                    prefix=note_prefix, max_results=5
+                ))
+                if note_blobs:
+                    note_blobs.sort(key=lambda b: b.name, reverse=True)
+                    note_data = json.loads(note_blobs[0].download_as_text())
+                    doctor_note = note_data.get("note", "")
+            except Exception:
+                pass
+
         for doc in patient_docs:
             gcs_path = doc.get("gcs_object_path", "")
             doc_id = doc.get("document_id", "")
@@ -252,21 +267,6 @@ def get_patient_labs_for_liff(
                     image_url = generate_signed_url_fn(gcs_path, 3600) or ""
                 except Exception:
                     image_url = ""
-
-            # โหลด doctor's notes (treatment notes)
-            doctor_note = ""
-            try:
-                note_prefix = f"_treatment_notes/{patient_hn_display}/"
-                note_blobs = list(storage._bucket.list_blobs(
-                    prefix=note_prefix, max_results=5
-                ))
-                # เอาล่าสุด
-                if note_blobs:
-                    note_blobs.sort(key=lambda b: b.name, reverse=True)
-                    note_data = json.loads(note_blobs[0].download_as_text())
-                    doctor_note = note_data.get("note", "")
-            except Exception:
-                pass
 
             result["documents"].append({
                 "doc_id": doc_id[:12],
@@ -593,16 +593,15 @@ body {
 <div class="consent-overlay" id="consentOverlay">
 <div class="consent-card">
     <h2>🔒 ข้อมูลส่วนบุคคล</h2>
-    <p>แอปนี้จะแสดงผลตรวจแล็บของคุณจากคลินิกโรคไต รพ.ระนอง</p>
+    <p>แอปนี้จะแสดงเอกสารทางการแพทย์ของคุณจากคลินิกโรคไต รพ.ระนอง</p>
     <p><strong>ข้อมูลที่เข้าถึง:</strong></p>
     <ul>
-        <li>ผลตรวจแล็บที่แพทย์อนุมัติแล้ว</li>
-        <li>แนวโน้มค่าไต (eGFR, Creatinine)</li>
-        <li>สถานะ CKD Stage</li>
+        <li>เอกสารผลแล็บ ใบยา ใบฟอกเลือด (รูปภาพ)</li>
+        <li>คำแนะนำจากแพทย์ (ถ้ามี)</li>
     </ul>
     <p>ข้อมูลเป็นแบบ <strong>อ่านอย่างเดียว</strong> และแสดงเฉพาะข้อมูลของคุณเท่านั้น
     ตามพระราชบัญญัติคุ้มครองข้อมูลส่วนบุคคล พ.ศ. 2562 (PDPA)</p>
-    <button class="btn-consent" onclick="acceptConsent()">ยอมรับและดูผลแล็บ</button>
+    <button class="btn-consent" onclick="acceptConsent()">ยอมรับและดูเอกสาร</button>
     <button class="btn-decline" onclick="declineConsent()">ไม่ยอมรับ</button>
 </div>
 </div>
@@ -746,6 +745,8 @@ function checkConsent() {
 async function initApp() {
     // ห้ามยิง API โดยไม่มี token — server จะตอบ 400 และผู้ป่วยเห็นแต่
     // รหัส HTTP ซึ่งไม่บอกว่าต้องทำอะไรต่อ
+    // Refresh token — อาจหมดอายุระหว่างอ่าน PDPA consent
+    try { idToken = liff.getIDToken(); } catch(e) {}
     const tok = await ensureIdToken();
     if (!tok) {
         showProblem('🔑 กรุณาเปิดหน้านี้จากแอป LINE' +
