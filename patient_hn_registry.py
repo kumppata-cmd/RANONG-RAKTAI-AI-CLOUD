@@ -136,11 +136,11 @@ class HNRegistry:
         except Exception as e:
             logger.error("HNRegistry: load failed: %s", e)
 
-    def _save_patient(self, patient: PatientHN) -> bool:
-        """บันทึก HN ผู้ป่วยลง GCS"""
+    def _save_patient(self, patient: PatientHN) -> tuple[bool, str]:
+        """บันทึก HN ผู้ป่วยลง GCS — คืน (success, error_detail)"""
         if not self._storage:
             logger.warning("HNRegistry: no storage — cannot save")
-            return False
+            return False, "storage not configured"
         try:
             path = self._gcs_path(patient.owner_hash)
             data = json.dumps(patient.to_dict(), ensure_ascii=False, indent=2)
@@ -148,11 +148,11 @@ class HNRegistry:
             blob = bucket.blob(path)
             blob.upload_from_string(data, content_type="application/json")
             logger.info("HNRegistry: saved patient %s", patient.hn_pair)
-            return True
+            return True, ""
         except Exception as e:
             logger.error("HNRegistry: save failed for %s: %s",
                          patient.owner_hash[:6], e)
-            return False
+            return False, type(e).__name__
 
     # ── Public API ──────────────────────────────────────────
 
@@ -219,14 +219,15 @@ class HNRegistry:
             action = "ลงทะเบียน"
 
         # บันทึก
-        if self._save_patient(patient):
+        saved, err_detail = self._save_patient(patient)
+        if saved:
             self._cache[owner_hash] = patient
             if patient.clinic_hn:
                 self._hn_index[patient.clinic_hn] = owner_hash
             if patient.hospital_hn:
                 self._hospital_index[patient.hospital_hn] = owner_hash
             return True, f"✅ {action}สำเร็จ: {patient.hn_pair}"
-        return False, "❌ บันทึกไม่สำเร็จ — กรุณาลองใหม่"
+        return False, f"❌ บันทึกไม่สำเร็จ ({err_detail}) — กรุณาลองใหม่"
 
     def get_by_owner(self, owner_hash: str) -> Optional[PatientHN]:
         """ค้นหาด้วย owner_hash"""
