@@ -197,8 +197,9 @@ def get_patient_labs_for_liff(
             patient_hn_display = search_hn.upper()
             result["patient_hn"] = patient_hn_display
         elif is_physician and not search_hn:
-            # แพทย์เปิดโดยไม่ search → เห็นทุกคน
-            show_all = True
+            # แพทย์เปิดโดยไม่ search → แสดงหน้าค้นหา (ไม่โหลดทุกคน)
+            result["message"] = "physician_search"
+            return result
         elif hn_registry is not None:
             # ผู้ป่วย → ดูเฉพาะ HN ที่ลงทะเบียน
             try:
@@ -303,7 +304,18 @@ def get_patient_labs_for_liff(
                 if len(parts) > 1 and not parts[1].isdigit():
                     result["patient_name"] = parts[1]
 
-        # (โค้ด trends/CKD ถูกลบ — ใช้รูปเอกสารจริงแทน OCR text)
+        # ── สรุปข้อมูลสำคัญ (quick stats) ──
+        if patient_docs:
+            lab_docs = [d for d in patient_docs if d.get("category") == "lab"]
+            rx_docs = [d for d in patient_docs if d.get("category") == "rx"]
+            hd_docs = [d for d in patient_docs if d.get("category") == "dialysis"]
+            result["stats"] = {
+                "total": len(patient_docs),
+                "lab": len(lab_docs),
+                "rx": len(rx_docs),
+                "dialysis": len(hd_docs),
+                "latest_date": patient_docs[0].get("upload_date", "") if patient_docs else "",
+            }
 
     except Exception as e:
         logger.error(f"LIFF lab retrieval error: {e}")
@@ -760,9 +772,8 @@ async function initApp() {
             if (pp) pp.style.display = 'block';
             var np = document.getElementById('notePanel');
             if (np && labData.patient_hn) np.style.display = 'block';
-            // ถ้าไม่มี patient_hn → physician browse mode
             if (!labData.patient_hn && pi) {
-                pi.textContent = 'เอกสารผู้ป่วยทั้งหมด (' + (labData.documents||[]).length + ' รายการ)';
+                pi.textContent = 'ค้นหา HN เพื่อดูเอกสารผู้ป่วย';
             }
         }
     } catch (e) {
@@ -853,16 +864,56 @@ function renderDocuments() {
     document.getElementById('loadingLabs').style.display = 'none';
 
     const docs = labData && labData.documents;
+
+    // แพทย์: แสดงหน้าค้นหา HN ก่อน
+    if (labData && labData.message === 'physician_search') {
+        container.innerHTML = '<div class="empty-state">' +
+            '<div class="icon">🔍</div>' +
+            '<div style="font-size:16px;font-weight:600;">ค้นหาผู้ป่วย</div>' +
+            '<div style="color:#94a3b8;margin-top:8px;">ใส่ HN ด้านบนแล้วกด "ค้นหา"</div>' +
+            '</div>';
+        return;
+    }
+
     if (!docs || docs.length === 0) {
         const msg = labData && labData.message
             ? labData.message
-            : 'ยังไม่มีเอกสารในระบบ';
+            : 'ไม่พบเอกสารของ HN นี้';
         container.innerHTML = '<div class="empty-state"><div class="icon">📋</div>'+
             '<div>' + msg + '</div></div>';
         return;
     }
 
-    let html = '';
+    // ── Patient Stats Card ──
+    if (labData.stats && labData.is_physician) {
+        var s = labData.stats;
+        html += '<div class="card" style="background:linear-gradient(135deg,#1a2332,#0f172a);' +
+            'border:1px solid rgba(0,188,212,0.3);margin-bottom:12px;">';
+        html += '<div style="display:flex;justify-content:space-around;text-align:center;">';
+        html += '<div><div style="font-size:24px;font-weight:700;color:#00bcd4;">' + s.total + '</div>' +
+            '<div style="font-size:11px;color:#94a3b8;">เอกสารทั้งหมด</div></div>';
+        if (s.lab) html += '<div><div style="font-size:24px;font-weight:700;color:#27ae60;">' + s.lab + '</div>' +
+            '<div style="font-size:11px;color:#94a3b8;">ผลแล็บ</div></div>';
+        if (s.dialysis) html += '<div><div style="font-size:24px;font-weight:700;color:#ef4444;">' + s.dialysis + '</div>' +
+            '<div style="font-size:11px;color:#94a3b8;">ใบฟอกเลือด</div></div>';
+        if (s.rx) html += '<div><div style="font-size:24px;font-weight:700;color:#f59e0b;">' + s.rx + '</div>' +
+            '<div style="font-size:11px;color:#94a3b8;">ใบยา</div></div>';
+        html += '</div>';
+        if (s.latest_date) html += '<div style="text-align:center;margin-top:8px;font-size:12px;color:#64748b;">' +
+            'ข้อมูลล่าสุด: ' + s.latest_date + '</div>';
+        html += '</div>';
+    }
+
+    // ── สรุปจำนวนเอกสาร ──
+    var summary = {};
+    for (const d of docs) { summary[d.category] = (summary[d.category]||0) + 1; }
+    let html = '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:12px;">';
+    for (const [cat, cnt] of Object.entries(summary)) {
+        html += '<span style="padding:4px 12px;border-radius:16px;background:rgba(0,188,212,0.15);' +
+            'font-size:13px;color:#00bcd4;">' + cat + ' ' + cnt + '</span>';
+    }
+    html += '</div>';
+
     for (const doc of docs) {
         html += '<div class="card" style="padding:0;overflow:hidden;">';
         // Header: category + date + patient folder
