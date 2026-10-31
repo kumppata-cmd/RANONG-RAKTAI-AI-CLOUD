@@ -221,22 +221,25 @@ def get_patient_labs_for_liff(
             return result
 
         # ── Step 2: หาเอกสารจาก doc_index ──
+        # ใช้ list_by_patient_folder ที่มี fallback ดู gcs_object_path ด้วย
         patient_docs: list[dict] = []
-        if doc_index is not None:
+        if doc_index is not None and patient_hns:
             try:
-                all_docs = doc_index.list_all() if hasattr(doc_index, 'list_all') else []
-                for doc in all_docs:
-                    if not isinstance(doc, dict):
-                        continue
-                    folder = (doc.get("patient_hn_folder") or "").upper()
-                    if not folder:
-                        continue
-                    if show_all:
-                        # แพทย์ browse mode → เอาทั้งหมด
-                        patient_docs.append(doc)
-                    elif patient_hns:
+                if hasattr(doc_index, 'list_by_patient_folder'):
+                    for hn in patient_hns:
+                        docs_found = doc_index.list_by_patient_folder(hn, limit=50)
+                        patient_docs.extend(docs_found)
+                else:
+                    # fallback: manual search
+                    all_docs = doc_index.list_all() if hasattr(doc_index, 'list_all') else []
+                    for doc in all_docs:
+                        if not isinstance(doc, dict):
+                            continue
+                        folder = (doc.get("patient_hn_folder") or "").upper()
+                        if not folder:
+                            continue
                         for hn in patient_hns:
-                            if hn in folder:
+                            if folder == hn or folder.startswith(hn + "_"):
                                 patient_docs.append(doc)
                                 break
             except Exception:
