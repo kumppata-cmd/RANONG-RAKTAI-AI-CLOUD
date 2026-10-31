@@ -1,0 +1,45 @@
+# RANONG-RAKTAI-AI V4.0 — Staging Environment Blueprint
+# ใช้สร้าง staging service บน Render
+# สร้าง: Render Dashboard → Blueprints → New Blueprint Instance → เลือก repo นี้
+
+services:
+  - type: web
+    name: RANONG-RAKTAI-AI-STAGING
+    runtime: docker
+    region: singapore
+    plan: starter
+    branch: staging  # deploy จาก branch staging (ไม่ใช่ main)
+    healthCheckPath: /health
+    envVars:
+      - key: APP_ENV
+        value: staging
+      - key: STORAGE_BACKEND
+        value: gcs
+      - key: GCS_BUCKET_NAME
+        sync: false  # ต้องตั้งเป็น staging bucket แยก
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        sync: false
+      - key: LINE_CHANNEL_ACCESS_TOKEN
+        sync: false  # ใช้ LINE test channel
+      - key: LINE_CHANNEL_SECRET
+        sync: false
+      - key: ADMIN_SECRET
+        sync: false
+      - key: AUTHORIZED_USERS
+        sync: false
+      - key: PHYSICIAN_USERS
+        sync: false
+      - key: ADMIN_USERS
+        sync: false
+      - key: USER_ID_SALT
+        sync: false
+      # V4.0
+      - key: REDIS_URL
+        sync: false  # staging Redis instance
+      # Google (optional for staging)
+      - key: GOOGLE_DRIVE_ENABLED
+        value: "false"
+      - key: GOOGLE_SHEETS_ENABLED
+        value: "false"
+      - key: GMAIL_ENABLED
+        value: "false"
