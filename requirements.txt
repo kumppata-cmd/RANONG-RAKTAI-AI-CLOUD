@@ -59,6 +59,10 @@ Pillow==13.0.0
 google-cloud-storage==2.18.2
 google-auth==2.35.0
 
+# Google Cloud Vision API — OCR ที่อ่านลายมือได้ดี (แทน Tesseract)
+# ใช้ ADC ตัวเดียวกับ GCS — ข้อมูลไม่ออกนอก Google Cloud
+google-cloud-vision==3.7.2
+
 # Google APIs (Drive, Sheets, Gmail) — ใช้เมื่อเปิด GOOGLE_*_ENABLED
 google-api-python-client==2.147.0
 

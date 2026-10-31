@@ -8275,24 +8275,135 @@ def is_scanned_pdf(filepath: str) -> bool:
 MAX_OCR_PAGES = int(os.getenv("MAX_OCR_PAGES", "5"))
 
 
-def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
-    """ดึงข้อความด้วย Tesseract OCR (tha+eng).
+def _ocr_with_google_vision(filepath: str) -> str:
+    """ดึงข้อความด้วย Google Cloud Vision API.
 
-    v3 — ออกแบบสำหรับ Render 512MB:
-      - ลดขนาดภาพเป็น max 1200px width (ลด memory ~75%)
-      - ใช้ 1 pass หลัก + 1 fallback (แทน 6 passes)
-      - ใช้ --oem 1 (LSTM only, เร็วกว่า legacy+LSTM)
-      - timeout 45 วินาทีรวม (อยู่ใน Gunicorn 120s budget)
-      - คืน memory ทันทีหลัง OCR
+    ข้อดี:
+      - อ่านลายมือได้ดีกว่า Tesseract มาก (ทั้ง Thai + English)
+      - รองรับรูปถ่ายมือถือ (เงา/เอียง/ไม่ชัด)
+      - ไม่ใช้ memory/CPU ของ Render (ประมวลผลบน Google Cloud)
+      - ข้อมูลอยู่ใน Google Cloud เดิม (ใช้ GCS อยู่แล้ว)
+
+    ใช้ ADC (Application Default Credentials) ตัวเดียวกับ GCS
     """
+    try:
+        from google.cloud import vision
+
+        client = vision.ImageAnnotatorClient()
+
+        with open(filepath, "rb") as f:
+            content = f.read()
+
+        image = vision.Image(content=content)
+
+        # ใช้ document_text_detection — ดีกว่า text_detection
+        # สำหรับเอกสาร/ฟอร์มที่มี layout ซับซ้อน
+        response = client.document_text_detection(
+            image=image,
+            image_context=vision.ImageContext(
+                language_hints=["th", "en"],
+            ),
+        )
+
+        if response.error.message:
+            logger.error(
+                "[Vision API] Error: %s", response.error.message
+            )
+            return ""
+
+        text = response.full_text_annotation.text if response.full_text_annotation else ""
+        logger.info("[Vision API] Extracted %d chars", len(text))
+        return text.strip()
+
+    except ImportError:
+        logger.warning(
+            "[Vision API] google-cloud-vision not installed — "
+            "falling back to Tesseract"
+        )
+        return ""
+    except Exception as e:
+        logger.warning(
+            "[Vision API] Failed: %s — falling back to Tesseract",
+            type(e).__name__,
+        )
+        return ""
+
+
+def _ocr_with_google_vision_pdf(filepath: str) -> str:
+    """OCR PDF ด้วย Google Vision API — แปลง PDF → images → Vision."""
+    try:
+        from google.cloud import vision
+
+        if not HAS_PYMUPDF or not HAS_PIL:
+            return ""
+
+        client = vision.ImageAnnotatorClient()
+        doc = pymupdf.open(filepath)
+        try:
+            num_pages = min(len(doc), MAX_OCR_PAGES)
+            texts = []
+            for i in range(num_pages):
+                try:
+                    page = doc[i]
+                    # Render page at 200 DPI (Vision API handles large images well)
+                    mat = pymupdf.Matrix(200 / 72, 200 / 72)
+                    pix = page.get_pixmap(matrix=mat)
+                    img = Image.frombytes(
+                        "RGB", [pix.width, pix.height], pix.samples
+                    )
+                    pix = None
+
+                    # Convert to JPEG bytes for Vision API
+                    import io
+                    buf = io.BytesIO()
+                    img.save(buf, format="JPEG", quality=85)
+                    img.close()
+                    content = buf.getvalue()
+                    buf.close()
+
+                    image = vision.Image(content=content)
+                    response = client.document_text_detection(
+                        image=image,
+                        image_context=vision.ImageContext(
+                            language_hints=["th", "en"],
+                        ),
+                    )
+                    if response.full_text_annotation:
+                        page_text = response.full_text_annotation.text.strip()
+                        if page_text:
+                            texts.append(page_text)
+                            logger.info(
+                                "[Vision API] PDF page %d: %d chars",
+                                i, len(page_text),
+                            )
+                except Exception as pg_err:
+                    logger.warning(
+                        "[Vision API] PDF page %d error: %s",
+                        i, type(pg_err).__name__,
+                    )
+        finally:
+            doc.close()
+
+        full_text = "\n\n".join(texts)
+        logger.info(
+            "[Vision API] PDF total: %d pages, %d chars",
+            num_pages, len(full_text),
+        )
+        return full_text
+
+    except ImportError:
+        return ""
+    except Exception as e:
+        logger.warning("[Vision API] PDF failed: %s", type(e).__name__)
+        return ""
+
+
+def _ocr_with_tesseract(filepath: str, timeout_sec: int = 45) -> str:
+    """Fallback OCR ด้วย Tesseract (v3)."""
     if not HAS_TESSERACT or not HAS_PIL:
-        logger.warning("OCR ไม่พร้อม — ขาด pytesseract หรือ Pillow")
         return ""
 
     ext = os.path.splitext(filepath)[1].lower()
-    # ── ขีดจำกัดขนาดภาพสำหรับ 512MB ──
-    # 1200px width → ~3.5MB per grayscale buffer
-    # ใหญ่พอสำหรับ OCR อ่านเอกสารทางการแพทย์ได้
     MAX_OCR_WIDTH = 1200
     ocr_per_page_timeout = min(timeout_sec, 40)
 
@@ -8302,17 +8413,9 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
                 gray = None
                 try:
                     img = Image.open(filepath, formats=SAFE_IMAGE_FORMATS)
-                    orig_w, orig_h = img.size
-                    logger.info(
-                        "[OCR] Original: %dx%d mode=%s",
-                        orig_w, orig_h, img.mode,
-                    )
-
-                    # 1. Grayscale — ลด memory 3x (RGB→L)
                     gray = img.convert("L")
                     img.close()
 
-                    # 2. Resize ให้ไม่เกิน MAX_OCR_WIDTH
                     w, h = gray.size
                     if w > MAX_OCR_WIDTH:
                         sf = MAX_OCR_WIDTH / w
@@ -8320,30 +8423,17 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
                             (int(w * sf), int(h * sf)),
                             Image.Resampling.LANCZOS,
                         )
-                        logger.info(
-                            "[OCR] Resized → %dx%d",
-                            gray.size[0], gray.size[1],
-                        )
                     elif w < 800:
-                        # ภาพเล็กเกินไป → upscale เล็กน้อย
                         sf = 1000 / w
                         gray = gray.resize(
                             (int(w * sf), int(h * sf)),
                             Image.Resampling.LANCZOS,
                         )
-                        logger.info(
-                            "[OCR] Upscaled small → %dx%d",
-                            gray.size[0], gray.size[1],
-                        )
 
-                    # 3. Preprocess: sharpen + autocontrast
                     processed = ImageOps.autocontrast(
                         gray.filter(ImageFilter.SHARPEN), cutoff=2
                     )
 
-                    # 4. OCR Pass 1: Thai+English, PSM 6 (block of text)
-                    # PSM 6 เร็วกว่า PSM 3 มาก เพราะไม่ต้อง detect layout
-                    # --oem 1 = LSTM only (เร็วกว่า default oem 3)
                     text = ""
                     try:
                         text = pytesseract.image_to_string(
@@ -8351,12 +8441,9 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
                             timeout=ocr_per_page_timeout,
                             config="--psm 6 --oem 1",
                         ).strip()
-                        logger.info("[OCR] Pass1 tha+eng: %d chars", len(text))
-                    except Exception as e1:
-                        logger.warning("[OCR] Pass1 tha+eng error: %s", type(e1).__name__)
+                    except Exception:
+                        pass
 
-                    # 5. Fallback: English-only (ถ้า pass 1 ได้ < 10 ตัวอักษร)
-                    # eng-only เร็วกว่ามากและอ่านชื่อยา/ค่าแล็บได้ดี
                     if len(text) < 10:
                         try:
                             text_eng = pytesseract.image_to_string(
@@ -8364,14 +8451,11 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
                                 timeout=ocr_per_page_timeout,
                                 config="--psm 6 --oem 1",
                             ).strip()
-                            logger.info("[OCR] Fallback eng: %d chars", len(text_eng))
                             if len(text_eng) > len(text):
                                 text = text_eng
-                        except Exception as e2:
-                            logger.warning("[OCR] Fallback eng error: %s", type(e2).__name__)
+                        except Exception:
+                            pass
 
-                    # 6. เสริม: รัน eng-only แล้วรวมข้อความ (ถ้ายังไม่ได้ทำ)
-                    # เอกสารแพทย์มีทั้งภาษาไทยและอังกฤษ
                     if len(text) >= 10:
                         try:
                             text_eng2 = pytesseract.image_to_string(
@@ -8381,17 +8465,13 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
                             ).strip()
                             if text_eng2 and len(text_eng2) >= 10:
                                 text = text + "\n" + text_eng2
-                                logger.info(
-                                    "[OCR] Combined tha+eng: %d chars", len(text)
-                                )
                         except Exception:
-                            pass  # eng supplement ไม่สำคัญ
+                            pass
 
                     processed.close()
                     gray.close()
                     gray = None
-
-                    logger.info("[OCR] Final: %d chars", len(text))
+                    logger.info("[Tesseract] Final: %d chars", len(text))
                     return text
 
                 finally:
@@ -8403,11 +8483,9 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
 
             if ext == ".pdf":
                 if not HAS_PYMUPDF:
-                    logger.warning("PyMuPDF ไม่ได้ติดตั้ง — ไม่สามารถ OCR PDF")
                     return ""
 
-                # PDF: ใช้ DPI ต่ำ (150) เพื่อลด memory
-                pdf_scale = 150 / 72  # 150 DPI
+                pdf_scale = 150 / 72
                 doc = pymupdf.open(filepath)
                 try:
                     num_pages = min(len(doc), MAX_OCR_PAGES)
@@ -8422,12 +8500,10 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
                             page_img = Image.frombytes(
                                 "RGB", [pix.width, pix.height], pix.samples
                             )
-                            # Convert to grayscale to save memory
                             page_gray = page_img.convert("L")
                             page_img.close()
                             page_img = None
                             pix = None
-
                             page_text = pytesseract.image_to_string(
                                 page_gray, lang="tha+eng",
                                 timeout=ocr_per_page_timeout,
@@ -8438,7 +8514,7 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
                                 texts.append(page_text.strip())
                         except Exception as pg_err:
                             logger.warning(
-                                "[OCR] PDF page %d error: %s",
+                                "[Tesseract] PDF page %d error: %s",
                                 i, type(pg_err).__name__,
                             )
                         finally:
@@ -8453,16 +8529,50 @@ def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
 
                 full_text = "\n\n".join(texts)
                 logger.info(
-                    "OCR PDF: %d pages, %d chars", num_pages, len(full_text)
+                    "[Tesseract] PDF: %d pages, %d chars",
+                    num_pages, len(full_text),
                 )
                 return full_text
 
         except RuntimeError as e:
-            logger.error("OCR timeout: %s", type(e).__name__)
+            logger.error("Tesseract timeout: %s", type(e).__name__)
         except Exception as e:
-            logger.error("OCR failed: %s", type(e).__name__)
+            logger.error("Tesseract failed: %s", type(e).__name__)
 
     return ""
+
+
+def extract_text_with_ocr(filepath: str, timeout_sec: int = 45) -> str:
+    """ดึงข้อความจากรูปภาพ/PDF — ลำดับ:
+      1. Google Cloud Vision API (แม่นยำ, อ่านลายมือได้)
+      2. Tesseract OCR (fallback ฟรี)
+
+    v4 — Vision API + Tesseract fallback:
+      - ลอง Vision API ก่อน (อ่านลายมือไทย+อังกฤษได้ดีมาก)
+      - ถ้า Vision API ไม่พร้อม/ล้มเหลว → fallback Tesseract v3
+      - ไม่ส่งข้อมูลนอก Google Cloud (ใช้ GCS อยู่แล้ว)
+    """
+    ext = os.path.splitext(filepath)[1].lower()
+
+    # ── ลอง Google Cloud Vision API ก่อน ──
+    vision_text = ""
+    try:
+        if ext in (".jpg", ".jpeg", ".png"):
+            vision_text = _ocr_with_google_vision(filepath)
+        elif ext == ".pdf":
+            vision_text = _ocr_with_google_vision_pdf(filepath)
+
+        if vision_text and len(vision_text) >= 5:
+            logger.info(
+                "[OCR] Using Vision API result: %d chars", len(vision_text)
+            )
+            return vision_text
+    except Exception as ve:
+        logger.warning("[OCR] Vision API attempt failed: %s", type(ve).__name__)
+
+    # ── Fallback: Tesseract OCR ──
+    logger.info("[OCR] Falling back to Tesseract")
+    return _ocr_with_tesseract(filepath, timeout_sec)
 
 
 # ═══════════════════════════════════════════════════════════
