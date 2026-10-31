@@ -213,6 +213,8 @@ COMMAND_ALIASES: list[tuple[str, CommandType, int | None]] = [
     (r"^lab\s*timeline$", CommandType.COMPARE_LAB_TIMELINE, None),
     (r"^compare\s*lab\s*timeline$", CommandType.COMPARE_LAB_TIMELINE, None),
     (r"^เทียบแล็บย้อนหลัง\s+(.+)$", CommandType.COMPARE_LAB_TIMELINE, 1),
+    (r"^เปรียบเทียบแล็บย้อนหลัง\s+(.+)$", CommandType.COMPARE_LAB_TIMELINE, 1),
+    (r"^เปรียบเทียบผลแล็บย้อนหลัง\s+(.+)$", CommandType.COMPARE_LAB_TIMELINE, 1),
     (r"^แล็บย้อนหลัง\s+(.+)$", CommandType.COMPARE_LAB_TIMELINE, 1),
     (r"^lab\s*timeline\s+(.+)$", CommandType.COMPARE_LAB_TIMELINE, 1),
 
@@ -223,6 +225,8 @@ COMMAND_ALIASES: list[tuple[str, CommandType, int | None]] = [
     (r"^rx\s*timeline$", CommandType.COMPARE_RX_TIMELINE, None),
     (r"^compare\s*rx\s*timeline$", CommandType.COMPARE_RX_TIMELINE, None),
     (r"^เทียบยาย้อนหลัง\s+(.+)$", CommandType.COMPARE_RX_TIMELINE, 1),
+    (r"^เปรียบเทียบยาย้อนหลัง\s+(.+)$", CommandType.COMPARE_RX_TIMELINE, 1),
+    (r"^เปรียบเทียบใบยาย้อนหลัง\s+(.+)$", CommandType.COMPARE_RX_TIMELINE, 1),
     (r"^ใบยาย้อนหลัง\s+(.+)$", CommandType.COMPARE_RX_TIMELINE, 1),
     (r"^rx\s*timeline\s+(.+)$", CommandType.COMPARE_RX_TIMELINE, 1),
 
@@ -233,6 +237,8 @@ COMMAND_ALIASES: list[tuple[str, CommandType, int | None]] = [
     (r"^dialysis\s*timeline$", CommandType.COMPARE_DIALYSIS_TIMELINE, None),
     (r"^compare\s*dialysis\s*timeline$", CommandType.COMPARE_DIALYSIS_TIMELINE, None),
     (r"^เทียบฟอกเลือดย้อนหลัง\s+(.+)$", CommandType.COMPARE_DIALYSIS_TIMELINE, 1),
+    (r"^เปรียบเทียบฟอกเลือดย้อนหลัง\s+(.+)$", CommandType.COMPARE_DIALYSIS_TIMELINE, 1),
+    (r"^เปรียบเทียบใบฟอกเลือดย้อนหลัง\s+(.+)$", CommandType.COMPARE_DIALYSIS_TIMELINE, 1),
     (r"^ฟอกเลือดย้อนหลัง\s+(.+)$", CommandType.COMPARE_DIALYSIS_TIMELINE, 1),
     (r"^dialysis\s*timeline\s+(.+)$", CommandType.COMPARE_DIALYSIS_TIMELINE, 1),
 
