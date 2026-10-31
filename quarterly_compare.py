@@ -1837,94 +1837,59 @@ def compare_dialysis_timeline(
     owner_hash: str,
     patient_folder: str = "",
 ) -> dict:
-    """เปรียบเทียบข้อมูลฟอกเลือดย้อนหลัง: ปัจจุบัน vs 3 เดือน vs 6 เดือน"""
-    history = get_patient_dialysis_history(storage, doc_index, owner_hash, patient_folder=patient_folder)
+    """เปรียบเทียบฟอกเลือด: ครั้งล่าสุด vs ครั้งก่อนหน้า
 
-    if len(history) < 2:
-        if len(history) == 1:
-            current = history[0]
-            data_text = "\n".join(
-                f"  • {_dialysis_param_thai(k)}: {_format_timeline_value(v)}"
-                for k, v in sorted(current["data"].items())
-            )
-            return {
-                "error": (
-                    f"🩸 ข้อมูลฟอกเลือดปัจจุบัน ({current['upload_date']})\n"
-                    f"พบ {current['param_count']} รายการ:\n"
-                    f"{data_text}\n\n"
-                    "ต้องมีข้อมูลฟอกเลือดอย่างน้อย 2 ครั้งจึงจะเปรียบเทียบได้"
-                ),
-                "available": 1,
-            }
+    v2 — เรียบง่าย ไม่พึ่ง dateutil:
+      - เปรียบเทียบ 2 ครั้งล่าสุดตรงๆ (ไม่ต้องหา 3/6 เดือน)
+      - แสดงผลแยก 10 section
+    """
+    history = get_patient_dialysis_history(
+        storage, doc_index, owner_hash,
+        patient_folder=patient_folder,
+    )
+
+    if not history:
         return {
             "error": "ไม่พบข้อมูลฟอกเลือดในระบบ กรุณาส่งรูปใบฟอกเลือดก่อน",
             "available": 0,
         }
 
+    if len(history) == 1:
+        cur = history[0]
+        items = "\n".join(
+            f"  • {_dialysis_param_thai(k)}: {_format_timeline_value(v)}"
+            for k, v in sorted(cur["data"].items())
+        )
+        return {
+            "error": (
+                f"🩸 ฟอกเลือดล่าสุด ({cur['upload_date']})\n"
+                f"พบ {cur['param_count']} รายการ:\n{items}\n\n"
+                "ส่งใบฟอกเลือดอีก 1 ครั้งเพื่อเปรียบเทียบ"
+            ),
+            "available": 1,
+        }
+
+    # ── เปรียบเทียบ 2 ครั้งล่าสุด ──
     current = history[0]
-    current_date_str = current.get("upload_date", "")
-    try:
-        current_date = datetime.strptime(current_date_str, "%Y-%m-%d")
-    except (ValueError, TypeError):
-        current_date = datetime.now()
-
-    try:
-        from dateutil.relativedelta import relativedelta
-        target_3m = current_date - relativedelta(months=3)
-        target_6m = current_date - relativedelta(months=6)
-    except ImportError:
-        # fallback: ใช้ timedelta แทน relativedelta
-        from datetime import timedelta
-        target_3m = current_date - timedelta(days=90)
-        target_6m = current_date - timedelta(days=180)
-
-    past_history = history[1:]
-
-    # ถ้ามี ≥ 2 เอกสาร → เปรียบเทียบครั้งล่าสุด vs ก่อนหน้า
-    # (ไม่ต้องหา 3 เดือน/6 เดือน เพราะเอกสารอาจไม่ได้ส่งทุกเดือน)
-    d_3m = None
-    d_6m = None
-    if past_history:
-        d_3m = _find_closest_to_target(past_history, target_3m, window_days=60)
-        d_6m = _find_closest_to_target(past_history, target_6m, window_days=60)
-
-    if d_3m and d_6m and d_3m.get("doc_id") == d_6m.get("doc_id"):
-        d_6m = None
-
-    # ถ้าหา 3/6 เดือนไม่เจอ → ใช้เอกสารก่อนหน้าล่าสุด
-    if not d_3m and not d_6m:
-        d_3m = past_history[0] if past_history else None
-        if not d_3m:
-            return {"error": "ไม่พบข้อมูลฟอกเลือดย้อนหลังสำหรับเปรียบเทียบ"}
-
-    # รวบรวมค่าทั้งหมด
+    previous = history[1]
     current_data = current.get("data", {})
-    data_3m = d_3m.get("data", {}) if d_3m else {}
-    data_6m = d_6m.get("data", {}) if d_6m else {}
+    prev_data = previous.get("data", {})
+    cur_date = current.get("upload_date", "?")
+    prev_date = previous.get("upload_date", "?")
 
-    all_params = sorted(set(
-        list(current_data.keys()) + list(data_3m.keys()) + list(data_6m.keys())
-    ))
-
-    lines = []
-    lines.append("🩸 เปรียบเทียบฟอกเลือด 10 หัวข้อ")
-    lines.append("━━━━━━━━━━━━━━━━━━")
-    _prev_label = d_3m.get("upload_date", "?") if d_3m else (
-        d_6m.get("upload_date", "?") if d_6m else "?"
-    )
-    lines.append(f"📅 ครั้งก่อน: {_prev_label}")
-    lines.append(f"📅 ครั้งนี้: {current_date_str}")
-    lines.append("")
-
-    # ใช้ previous = d_3m ก่อน ถ้าไม่มีใช้ d_6m
-    prev_data = data_3m if d_3m else data_6m
+    lines = [
+        "🩸 เปรียบเทียบฟอกเลือด 10 หัวข้อ",
+        "━━━━━━━━━━━━━━━━━━",
+        f"📅 ครั้งก่อน: {prev_date}",
+        f"📅 ครั้งนี้: {cur_date}",
+        "",
+    ]
 
     changed_count = 0
     same_count = 0
     new_count = 0
 
     for section_name, section_keys in _DIALYSIS_SECTIONS:
-        # กรองเฉพาะ keys ที่มีข้อมูลในครั้งนี้หรือครั้งก่อน
         section_items = []
         for key in section_keys:
             cur_val = current_data.get(key)
@@ -1978,11 +1943,14 @@ def compare_dialysis_timeline(
         f"ใหม่ {new_count}"
     )
 
+    if len(history) > 2:
+        lines.append(f"\n📋 มีข้อมูลฟอกเลือดทั้งหมด {len(history)} ครั้ง")
+
     return {
         "text_th": "\n".join(lines),
-        "current_date": current_date_str,
-        "date_3m": d_3m.get("upload_date", "") if d_3m else "",
-        "date_6m": d_6m.get("upload_date", "") if d_6m else "",
+        "current_date": cur_date,
+        "date_3m": prev_date,
+        "date_6m": "",
     }
 
 
