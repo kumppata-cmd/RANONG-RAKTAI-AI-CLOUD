@@ -1058,13 +1058,18 @@ def _find_closest_to_target(
     return best
 
 
-def _format_timeline_value(val: float | None) -> str:
-    """จัดรูปแบบค่าตัวเลขสำหรับแสดงผล"""
+def _format_timeline_value(val) -> str:
+    """จัดรูปแบบค่าสำหรับแสดงผล — รองรับทั้ง float, int, string"""
     if val is None:
         return "-"
-    if val == int(val):
-        return str(int(val))
-    return f"{val:.1f}"
+    if isinstance(val, str):
+        return val
+    try:
+        if isinstance(val, (int, float)) and val == int(val):
+            return str(int(val))
+        return f"{val:.1f}"
+    except (ValueError, TypeError, OverflowError):
+        return str(val)
 
 
 def compare_lab_timeline(
