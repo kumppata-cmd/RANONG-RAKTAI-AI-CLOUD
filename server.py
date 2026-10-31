@@ -10718,11 +10718,8 @@ def process_file_async(
                         _reply_lines.append(
                             "🔍 จับคู่จากชื่อในเอกสาร (ตรวจสอบว่าถูกคนหรือไม่)"
                         )
-                    if _ctx_conflict:
-                        _reply_lines.append(
-                            f"🔄 เปลี่ยนผู้ป่วยอัตโนมัติจากเอกสาร\n"
-                            f"(ก่อนหน้า: {_ctx_conflict})"
-                        )
+                    # _ctx_conflict: OCR เปลี่ยนผู้ป่วยจาก context
+                    # ไม่แสดงข้อความ — ทำงานถูกต้องอยู่แล้ว ไม่ต้องแจ้ง
                 else:
                     _reply_lines.append(
                         "👤 ยังไม่ระบุผู้ป่วย — เก็บไว้ที่ระดับไตรมาส/เดือน\n"
