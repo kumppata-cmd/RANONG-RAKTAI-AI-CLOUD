@@ -15508,7 +15508,23 @@ def liff_page():
     return get_liff_html(api_base), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
-@app.route("/liff/api/my-labs", methods=["POST"])
+def _liff_cors_headers():
+    """CORS headers สำหรับ LIFF API.
+
+    LIFF v2 concatenation mode เปิดหน้าเว็บที่ origin https://liff.line.me
+    แต่ API อยู่ที่ ranong-raktai-ai-cloud.onrender.com → cross-origin
+    ต้องมี CORS headers ไม่งั้น browser block fetch → "Failed to fetch"
+    (ยืนยันจาก production 31 ต.ค. 2026)
+    """
+    return {
+        "Access-Control-Allow-Origin": "https://liff.line.me",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type",
+        "Access-Control-Max-Age": "86400",
+    }
+
+
+@app.route("/liff/api/my-labs", methods=["POST", "OPTIONS"])
 def liff_api_my_labs():
     """API ดึงผลแล็บสำหรับ LIFF — Phase F.
 
@@ -15525,13 +15541,17 @@ def liff_api_my_labs():
     - ใช้ POST เพื่อให้ตัวระบุตัวตนไม่อยู่ใน query string
     - ไม่คืนรายละเอียด exception กลับไปให้ client
     """
+    # CORS preflight (OPTIONS) — browser ส่งก่อน POST จริง
+    if request.method == "OPTIONS":
+        return "", 204, _liff_cors_headers()
+
     if get_patient_labs_for_liff is None or verify_liff_id_token is None:
-        return jsonify({"error": "LIFF module not available"}), 500
+        return jsonify({"error": "LIFF module not available"}), 500, _liff_cors_headers()
 
     body = request.get_json(silent=True) or {}
     id_token = body.get("id_token", "")
     if not id_token:
-        return jsonify({"error": "id_token required"}), 400
+        return jsonify({"error": "id_token required"}), 400, _liff_cors_headers()
 
     # ── ยืนยันตัวตนกับ LINE ──
     try:
@@ -15540,10 +15560,10 @@ def liff_api_my_labs():
         # เหตุผลละเอียดลง log ฝั่ง server เท่านั้น
         logger.warning("LIFF auth failed: %s", auth_err)
         audit_logger.log("liff_auth_failed", "", {})
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "unauthorized"}), 401, _liff_cors_headers()
     except Exception as e:
         logger.error("LIFF auth error: %s", type(e).__name__)
-        return jsonify({"error": "unauthorized"}), 401
+        return jsonify({"error": "unauthorized"}), 401, _liff_cors_headers()
 
     # owner_hash มาจาก sub ที่ยืนยันแล้ว ใช้ salt เดียวกับทั้งระบบ
     owner_hash = hash_user_id(line_user_id)
@@ -15553,10 +15573,10 @@ def liff_api_my_labs():
             storage=storage,
             owner_hash=owner_hash,
         )
-        return jsonify(data), 200
+        return jsonify(data), 200, _liff_cors_headers()
     except Exception as e:
         logger.error("LIFF API error: %s", type(e).__name__)
-        return jsonify({"error": "internal error"}), 500
+        return jsonify({"error": "internal error"}), 500, _liff_cors_headers()
 
 
 @app.route("/admin/dashboard", methods=["GET"])
