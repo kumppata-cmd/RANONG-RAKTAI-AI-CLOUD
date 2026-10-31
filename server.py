@@ -15497,7 +15497,14 @@ def liff_page():
     """
     if get_liff_html is None:
         return "<html><body><h1>LIFF module not available</h1></body></html>", 500
+    # Render proxy ส่ง X-Forwarded-Proto: https แต่ Flask ไม่ดูค่านี้โดย
+    # อัตโนมัติ request.host_url จึงคืน http:// ทำให้ fetch จากหน้า HTTPS
+    # ไปยัง API_BASE ที่เป็น http:// ถูก browser บล็อกเป็น mixed-content
+    # → "Failed to fetch" (ยืนยันจาก production 31 ต.ค. 2026)
     api_base = request.host_url.rstrip("/")
+    forwarded_proto = request.headers.get("X-Forwarded-Proto", "")
+    if forwarded_proto == "https" and api_base.startswith("http://"):
+        api_base = "https://" + api_base[len("http://"):]
     return get_liff_html(api_base), 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
