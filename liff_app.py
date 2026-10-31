@@ -730,6 +730,10 @@ function renderCkdCard() {
 }
 
 // ── Render Labs ──
+function toggleImg(el) {
+    el.style.maxHeight = el.style.maxHeight === 'none' ? '400px' : 'none';
+}
+
 function renderDocuments() {
     const container = document.getElementById('labList');
     document.getElementById('loadingLabs').style.display = 'none';
@@ -759,7 +763,7 @@ function renderDocuments() {
             html += '<div style="padding:8px;text-align:center;background:#111;">';
             html += '<img src="' + doc.image_url + '" ' +
                 'style="max-width:100%;max-height:400px;border-radius:4px;cursor:pointer;" ' +
-                'onclick="this.style.maxHeight=this.style.maxHeight===\'none\'?\'400px\':\'none\'" ' +
+                'onclick="toggleImg(this)" ' +
                 'alt="เอกสาร" loading="lazy">';
             html += '</div>';
         } else {
