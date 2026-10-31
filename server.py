@@ -1333,13 +1333,8 @@ if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
     # เพื่อใช้ code path เดียวกับระบบอื่น → ไม่ติด permission issue
     hn_registry.set_storage(storage)
     logger.info("HNRegistry initialized with GCS storage wrapper")
-    # V4.0: All modules persistence
-    event_logger.set_storage(storage)
-    backup_manager.set_storage(storage)
-    approval_engine.set_storage(storage)
-    search_service.set_storage(storage)
-    search_service.set_index(doc_index)
-    logger.info("V4.0 modules initialized with GCS persistence")
+    # V4.0: set_storage ย้ายไปท้ายไฟล์ (หลัง modules ถูก define)
+    logger.info("HNRegistry initialized — V4.0 modules will init later")
 
 # ─── Master Patient Registry: ทะเบียนผู้ป่วยกลาง ─────────
 master_registry = MasterPatientRegistry()
@@ -9371,6 +9366,18 @@ policy_engine = PolicyEngine()
 # ── Scheduled Jobs (V4.0 Phase 5.1) ──
 from scheduled_jobs import ScheduledJobManager
 job_manager = ScheduledJobManager()
+
+# ── V4.0: Initialize all modules with GCS storage ──
+if STORAGE_BACKEND == "gcs" and 'storage' in dir():
+    try:
+        event_logger.set_storage(storage)
+        backup_manager.set_storage(storage)
+        approval_engine.set_storage(storage)
+        search_service.set_storage(storage)
+        search_service.set_index(doc_index)
+        logger.info("V4.0 modules initialized with GCS persistence")
+    except Exception as _v4_err:
+        logger.warning("V4.0 module init: %s", type(_v4_err).__name__)
 
 # จำกัดงาน OCR ที่ทำพร้อมกันต่อ worker — ป้องกัน OOM บน instance เล็ก
 _ocr_semaphore = threading.Semaphore(max(1, OCR_MAX_CONCURRENT))
