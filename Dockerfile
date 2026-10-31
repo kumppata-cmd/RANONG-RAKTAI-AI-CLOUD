@@ -75,6 +75,9 @@ COPY epo_response_tracker.py .
 COPY hd_schedule_reminder.py .
 COPY ckd_staging.py .
 
+# Rich Menu icon
+COPY rich_menu_v2.png .
+
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \
     useradd -r -g appuser -d /app -s /sbin/nologin appuser
