@@ -152,23 +152,30 @@ def get_patient_labs_for_liff(
     owner_hash: str,
     limit: int = 20,
     doc_index: Any = None,
+    hn_registry: Any = None,
 ) -> dict:
-    """ดึงผลแล็บของผู้ป่วย (owner_hash) สำหรับ LIFF.
+    """ดึงผลแล็บของผู้ป่วยสำหรับ LIFF.
+
+    Flow (แนวทาง A):
+    1. ผู้ป่วยลงทะเบียน HN กับ LINE (ลงทะเบียนHN 1234)
+    2. หมอ/เจ้าหน้าที่ส่งเอกสารเข้าระบบ → ระบบ OCR อ่าน HN → เก็บ
+       ใน patient_hn_folder ของ doc_index
+    3. ผู้ป่วยกด "ดูผลแล็บ" → LIFF ยืนยันตัวตนกับ LINE → ได้ owner_hash
+    4. ค้นหา HN จาก hn_registry (owner_hash → clinic_hn)
+    5. ค้นหาเอกสารจาก doc_index ที่ patient_hn_folder ตรงกับ HN
+    6. Download เฉพาะ lab results ของผู้ป่วยรายนั้น
 
     Args:
         storage: GCS storage instance
-        owner_hash: LINE userId hash — ยืนยันตัวตน
+        owner_hash: LINE userId hash ของผู้ป่วยที่เปิด LIFF
         limit: จำนวนผลแล็บสูงสุด
-        doc_index: doc_index instance — ใช้ pre-filter เอกสารของผู้ป่วย
-                   เพื่อไม่ต้อง download ทุกไฟล์จาก GCS (เร็วกว่า 10-50x)
-
-    Returns:
-        dict with patient_labs, trends, ckd_info
+        doc_index: DocumentIndex instance
+        hn_registry: PatientHNRegistry instance — ใช้หา HN จาก owner_hash
 
     Safety:
         - Read-Only — ไม่มีการแก้ไข
-        - กรองเฉพาะ owner_hash ของผู้ป่วยเจ้าของ
-        - ส่งเฉพาะ approved labs
+        - ยืนยันตัวตนผ่าน LINE ID token ก่อนถึงจุดนี้
+        - ผู้ป่วยเห็นเฉพาะผลแล็บที่ตรงกับ HN ที่ลงทะเบียนไว้
     """
     result = {
         "owner_hash_prefix": owner_hash[:8] if owner_hash else "",
@@ -190,21 +197,44 @@ def get_patient_labs_for_liff(
         if not hasattr(storage, '_bucket') or not storage._bucket:
             return result
 
-        # ── Pre-filter ด้วย doc_index (เร็ว) ──
-        # แทนการ download ทุกไฟล์จาก GCS ที่ช้ามาก
+        # ── Step 1: หา HN ของผู้ป่วยจาก hn_registry ──
+        patient_hns: set[str] = set()
+        if hn_registry is not None:
+            try:
+                patient = (hn_registry.get_by_owner(owner_hash)
+                           if hasattr(hn_registry, 'get_by_owner') else None)
+                if patient:
+                    if getattr(patient, 'clinic_hn', ''):
+                        patient_hns.add(patient.clinic_hn.upper())
+                    if getattr(patient, 'hospital_hn', ''):
+                        patient_hns.add(patient.hospital_hn.upper())
+            except Exception:
+                pass
+
+        if not patient_hns:
+            # ผู้ป่วยยังไม่ลงทะเบียน HN — ไม่สามารถหาผลแล็บได้
+            result["message"] = "กรุณาลงทะเบียน HN ก่อน โดยพิมพ์: ลงทะเบียนHN <เลข HN>"
+            return result
+
+        # ── Step 2: หาเอกสารจาก doc_index ที่ patient_hn_folder ตรงกับ HN ──
         candidate_ids: list[str] = []
         if doc_index is not None:
             try:
                 all_docs = doc_index.list_all() if hasattr(doc_index, 'list_all') else []
                 for doc in all_docs:
-                    if isinstance(doc, dict):
-                        if doc.get("owner_hash") == owner_hash:
+                    if not isinstance(doc, dict):
+                        continue
+                    folder = (doc.get("patient_hn_folder") or "").upper()
+                    if not folder:
+                        continue
+                    # match: folder อาจเป็น "1234", "1234_56789",
+                    # "นายXX HN1234" ฯลฯ → ตรวจว่ามี HN อยู่ในชื่อ folder
+                    for hn in patient_hns:
+                        if hn in folder:
                             did = doc.get("document_id", "")
                             if did:
                                 candidate_ids.append(did)
-                    elif hasattr(doc, 'owner_hash') and hasattr(doc, 'document_id'):
-                        if doc.owner_hash == owner_hash:
-                            candidate_ids.append(doc.document_id)
+                            break
             except Exception:
                 candidate_ids = []
 
@@ -220,28 +250,14 @@ def get_patient_labs_for_liff(
                         continue
                     ldata = json.loads(blob_data if isinstance(blob_data, str)
                                        else blob_data.decode("utf-8"))
-                    if ldata.get("owner_hash") != owner_hash:
-                        continue
-                    if ldata.get("status") != "approved":
-                        continue
+                    # ไม่ต้อง filter owner_hash แล้ว — ใช้ HN match แทน
+                    # (เอกสารอาจถูกส่งจากบัญชีหมอ/เจ้าหน้าที่)
                     patient_labs.append(ldata)
                 except Exception:
                     continue
         else:
-            # Fallback: scan ทั้งหมด (ช้า แต่ใช้ได้เสมอ)
-            lab_blobs = list(storage._bucket.list_blobs(
-                prefix="_lab_results/", max_results=200
-            ))
-            for lb in lab_blobs:
-                try:
-                    ldata = json.loads(lb.download_as_text())
-                    if ldata.get("owner_hash") != owner_hash:
-                        continue
-                    if ldata.get("status") != "approved":
-                        continue
-                    patient_labs.append(ldata)
-                except Exception:
-                    continue
+            # ไม่พบเอกสารที่ตรงกับ HN ของผู้ป่วย
+            pass
 
         # Sort by date descending
         patient_labs.sort(
@@ -812,8 +828,11 @@ function renderLabs() {
     renderCkdCard();
 
     if (!labData || !labData.labs || labData.labs.length === 0) {
+        const msg = labData && labData.message
+            ? labData.message
+            : 'ยังไม่มีผลแล็บในระบบ';
         container.innerHTML = '<div class="empty-state"><div class="icon">📋</div>'+
-            '<div>ยังไม่มีผลแล็บที่อนุมัติแล้ว</div></div>';
+            '<div>' + msg + '</div></div>';
         return;
     }
 
