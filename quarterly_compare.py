@@ -1464,34 +1464,186 @@ def compare_rx_timeline(
 
 # ── Regex สำหรับจับข้อมูลฟอกเลือดจาก OCR text ──
 _DIALYSIS_PATTERNS = {
-    "pre_weight": re.compile(
-        r"(?:pre[- ]?(?:hd|dialysis)?[- ]?weight|น้ำหนักก่อน(?:ฟอก)?)\s*[:\s]*"
+    # ══════════════════════════════════════════════════════════
+    # Section 1: Pre-dialysis Assessment (น้ำหนัก/ของเหลว)
+    # ══════════════════════════════════════════════════════════
+    "pre_bw": re.compile(
+        r"(?:pre[- ]?(?:hd[- ]?)?(?:BW|weight)|Pre\s*BW|น้ำหนักก่อน(?:ฟอก)?|Last\s*wt)\s*[:\s]*"
         r"(\d+\.?\d*)\s*(?:kg)?",
         re.IGNORECASE,
     ),
-    "post_weight": re.compile(
-        r"(?:post[- ]?(?:hd|dialysis)?[- ]?weight|น้ำหนักหลัง(?:ฟอก)?)\s*[:\s]*"
+    "dry_bw": re.compile(
+        r"(?:dry[- ]?(?:BW|weight)|Dry\s*BW|น้ำหนักแห้ง|DW)\s*[:\s]*"
         r"(\d+\.?\d*)\s*(?:kg)?",
         re.IGNORECASE,
     ),
-    "dry_weight": re.compile(
-        r"(?:dry[- ]?weight|น้ำหนักแห้ง|DW)\s*[:\s]*"
+    "wt_gain": re.compile(
+        r"(?:Wt\s*[Gg]ain|weight\s*gain|น้ำหนักที่เพิ่ม)\s*[:\s]*"
         r"(\d+\.?\d*)\s*(?:kg)?",
         re.IGNORECASE,
     ),
-    "uf_volume": re.compile(
-        r"(?:UF|ultra\s*filtration|ปริมาณน้ำที่ดึง)\s*[:\s]*"
-        r"(\d+\.?\d*)\s*(?:ml|cc|L|ลิตร)?",
+    "target_uf": re.compile(
+        r"(?:Target\s*UF|เป้าหมาย\s*UF)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:kg|ml|L)?",
         re.IGNORECASE,
     ),
-    "blood_flow": re.compile(
-        r"(?:QB|Qb|blood\s*flow|อัตราการไหลเลือด)\s*[:\s]*"
-        r"(\d+\.?\d*)\s*(?:ml/?min)?",
+    "post_bw": re.compile(
+        r"(?:post[- ]?(?:hd[- ]?)?(?:BW|weight)|Post\s*BW|น้ำหนักหลัง(?:ฟอก)?)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:kg)?",
         re.IGNORECASE,
     ),
+    "wt_loss": re.compile(
+        r"(?:Wt\s*los[se]|weight\s*loss|น้ำหนักที่ลด|Wt\s*lose)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:kg)?",
+        re.IGNORECASE,
+    ),
+    "meal_drink": re.compile(
+        r"(?:Meal/?drink|meal\s*and\s*drink|อาหาร/?น้ำ)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:kg)?",
+        re.IGNORECASE,
+    ),
+
+    # ══════════════════════════════════════════════════════════
+    # Section 2: Hemodialysis Prescription (เครื่อง/ตัวกรอง)
+    # ══════════════════════════════════════════════════════════
+    "machine": re.compile(
+        r"(?:Machine|เครื่อง)\s*[:\s]*([A-Za-z0-9][A-Za-z0-9 \-\.]{1,20})",
+        re.IGNORECASE,
+    ),
+    "dialyzer": re.compile(
+        r"(?:Dialyzer|Filter|ตัวกรอง)\s*[:\s]*"
+        r"([A-Za-z][A-Za-z0-9 \-\.]{1,20})",
+        re.IGNORECASE,
+    ),
+    "surface_area": re.compile(
+        r"(?:Surface\s*area|พื้นที่)\s*[:\s]*(\d+\.?\d*)\s*(?:m2|m²)?",
+        re.IGNORECASE,
+    ),
+    "use_no": re.compile(
+        r"(?:Use\s*No\.?|ใช้ครั้งที่)\s*[:\s]*(\d+)",
+        re.IGNORECASE,
+    ),
+    "last_tcv": re.compile(
+        r"(?:Last\s*TCV|TCV)\s*[:\s]*([A-Za-z0-9/\-\.]+)",
+        re.IGNORECASE,
+    ),
+    "hd_no": re.compile(
+        r"(?:HD\s*(?:No\.?|no\.?|number)|ครั้งที่|H\.?D\.?\s*#?)\s*[:\s]*(\d+)",
+        re.IGNORECASE,
+    ),
+
+    # ══════════════════════════════════════════════════════════
+    # Section 3: Anticoagulant (ยากันเลือดแข็ง)
+    # ══════════════════════════════════════════════════════════
     "duration": re.compile(
-        r"(?:duration|ระยะเวลา(?:ฟอก)?|เวลาฟอก)\s*[:\s]*"
+        r"(?:Duration|ระยะเวลา(?:ฟอก)?|เวลาฟอก)\s*[:\s]*"
         r"(\d+\.?\d*)\s*(?:hr|hrs|hours?|ชม\.?|ชั่วโมง)?",
+        re.IGNORECASE,
+    ),
+    "anticoagulant_type": re.compile(
+        r"(?:Heparin|LMWH|Anticoagulant|ยากันเลือดแข็ง)\s*[:\s]*"
+        r"(Heparin|LMWH|Enoxaparin|None|ไม่ใช้|free)",
+        re.IGNORECASE,
+    ),
+    "heparin_loading": re.compile(
+        r"(?:Loading|โหลด)\s*[:\s]*(\d+)\s*(?:unit|u|IU)?",
+        re.IGNORECASE,
+    ),
+    "heparin_maintenance": re.compile(
+        r"(?:Maintenance|คงไว้)\s*[:\s]*(\d+)\s*(?:unit|u|IU)?",
+        re.IGNORECASE,
+    ),
+    "o2_sat": re.compile(
+        r"(?:O2\s*sat|SpO2|O2sat)\s*[:\s]*(\d+\.?\d*)\s*%?",
+        re.IGNORECASE,
+    ),
+    "bt": re.compile(
+        r"(?:BT|Body\s*temp|อุณหภูมิ)\s*[:\s]*(\d+\.?\d*)\s*(?:°?C)?",
+        re.IGNORECASE,
+    ),
+    "hct": re.compile(
+        r"(?:Hct|hematocrit)\s*[=:\s]*(\d+\.?\d*)\s*%?",
+        re.IGNORECASE,
+    ),
+    "hb": re.compile(
+        r"(?:Hb|hemoglobin|Hgb)\s*[=:\s]*(\d+\.?\d*)\s*(?:g/?d[lL])?",
+        re.IGNORECASE,
+    ),
+
+    # ══════════════════════════════════════════════════════════
+    # Section 4: Vascular Access (ทางเข้าหลอดเลือด)
+    # ══════════════════════════════════════════════════════════
+    "access_type": re.compile(
+        r"(?:Access|Vascular\s*access|ทางเข้าหลอดเลือด)\s*[:\s]*"
+        r"(AVF|AVG|AV\s*fistula|AV\s*graft|Perm\s*[Cc]ath|Temp\s*[Cc]ath|"
+        r"permanent|temporary|DLC|TDC|Jugular|Subclavian|Femoral|"
+        r"เอวีเอฟ|เอวีจี)",
+        re.IGNORECASE,
+    ),
+    "access_site": re.compile(
+        r"(?:Arm|Leg|Lt|Rt|Left|Right|ซ้าย|ขวา|แขน|ขา)\s*"
+        r"(Arm|Leg|Lt|Rt|Left|Right|ซ้าย|ขวา|แขน|ขา)?",
+        re.IGNORECASE,
+    ),
+
+    # ══════════════════════════════════════════════════════════
+    # Section 5: Dialysate (น้ำยาล้างไต)
+    # ══════════════════════════════════════════════════════════
+    "dialysate_k": re.compile(
+        r"(?:K\+?|Potassium)\s*[:\s]*(\d+\.?\d*)\s*(?:mEq/?L)?",
+        re.IGNORECASE,
+    ),
+    "dialysate_ca": re.compile(
+        r"(?:Ca|Calcium)\s*[:\s]*(\d+\.?\d*)\s*(?:mEq/?L)?",
+        re.IGNORECASE,
+    ),
+    "dialysate_hco3": re.compile(
+        r"(?:Hco3|HCO3|Bicarbonate)\s*[:\s]*(\d+\.?\d*)\s*(?:mEq/?L)?",
+        re.IGNORECASE,
+    ),
+    "dialysate_temp": re.compile(
+        r"(?:Dialysate\s*[Tt]emp|temp\.?\s*dialysate|อุณหภูมิน้ำยา)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:°?C)?",
+        re.IGNORECASE,
+    ),
+    "dialysate_flow": re.compile(
+        r"(?:QD|Qd|[Dd]ialysate\s*[Ff]low)\s*[:\s]*(\d+)\s*(?:ml/?min|cc/?min)?",
+        re.IGNORECASE,
+    ),
+    "na_start": re.compile(
+        r"(?:Na\s*start|โซเดียมเริ่ม)\s*[:\s]*(\d+\.?\d*)\s*(?:mEq/?L)?",
+        re.IGNORECASE,
+    ),
+    "na_conc_off": re.compile(
+        r"(?:Na\s*conc\s*off|โซเดียมปิด)\s*[:\s]*(\d+\.?\d*)\s*(?:mEq/?L)?",
+        re.IGNORECASE,
+    ),
+
+    # ══════════════════════════════════════════════════════════
+    # Section 6: Medication (ยาที่ให้ระหว่างฟอก)
+    # ══════════════════════════════════════════════════════════
+    "epo_dose": re.compile(
+        r"(?:EPO|Erythropoietin|อีพีโอ)\s*[:\s]*"
+        r"(?:Eprex|Epiao|Recormon|NeoRecormon)?\s*"
+        r"(?:\(?\s*(?:Vial)?\s*\)?\s*)?"
+        r"(\d+)\s*(?:unit|u|IU)?",
+        re.IGNORECASE,
+    ),
+    "epo_route": re.compile(
+        r"(?:EPO|Erythropoietin).*?(IV|SC|IM|SubQ|Subcutaneous|Intravenous)",
+        re.IGNORECASE,
+    ),
+    "iron_dose": re.compile(
+        r"(?:Iron|Venofer|Ferric|เหล็ก)\s*[:\s]*(\d+)\s*(?:mg)?",
+        re.IGNORECASE,
+    ),
+
+    # ══════════════════════════════════════════════════════════
+    # Section 7: Vital Signs during HD (TIME table)
+    # ══════════════════════════════════════════════════════════
+    "blood_flow": re.compile(
+        r"(?:QB|Qb|BFR|blood\s*flow|อัตราการไหลเลือด)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:ml/?min)?",
         re.IGNORECASE,
     ),
     "pre_bp": re.compile(
@@ -1499,67 +1651,102 @@ _DIALYSIS_PATTERNS = {
         r"(\d{2,3})\s*/\s*(\d{2,3})",
         re.IGNORECASE,
     ),
-    "post_bp": re.compile(
-        r"(?:post[- ]?(?:hd[- ]?)?BP|ความดันหลัง(?:ฟอก)?)\s*[:\s]*"
-        r"(\d{2,3})\s*/\s*(\d{2,3})",
+    "uf_volume": re.compile(
+        r"(?:Total\s*UF|UF\s*total|UF|ultra\s*filtration|ปริมาณน้ำที่ดึง)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:ml|cc|L|ลิตร)?",
+        re.IGNORECASE,
+    ),
+    "conductivity": re.compile(
+        r"(?:Conduct(?:ivity)?|cond\.?)\s*[:\s]*(\d+\.?\d*)\s*(?:mS/?cm)?",
         re.IGNORECASE,
     ),
     "kt_v": re.compile(
         r"(?:Kt/?V|KT/?V)\s*[:\s]*(\d+\.?\d*)",
         re.IGNORECASE,
     ),
-    # ── เพิ่มเติม Phase 2B ──
-    "hd_no": re.compile(
-        r"(?:HD\s*(?:No\.?|no\.?|number)|ครั้งที่|H\.?D\.?\s*#?)\s*[:\s]*(\d+)",
+
+    # ══════════════════════════════════════════════════════════
+    # Section 8: Complication (ภาวะแทรกซ้อน)
+    # ══════════════════════════════════════════════════════════
+    "complication": re.compile(
+        r"(?:No\s*[Cc]omplication|No\s*complication|ไม่มีภาวะแทรกซ้อน|"
+        r"Hypotension|Hypertension|Muscle\s*cramp|Chest\s*pain|"
+        r"Headache|Fever|Arrhythmia|Nausea|Vomiting|"
+        r"Blood\s*leak|Clot|Air\s*embolism|DDS|"
+        r"ความดันต่ำ|ตะคริว|ปวดศีรษะ|คลื่นไส้|"
+        r"เลือดรั่ว|ลิ่มเลือด)",
         re.IGNORECASE,
     ),
-    "dialyzer": re.compile(
-        r"(?:Dialyzer|Filter|ตัวกรอง)\s*[:\s]*"
-        r"((?:FX|F|Polyflux|Elisio|Revaclear|Xevonta|Toray|Nipro)"
-        r"[- ]?\d*[A-Za-z]*)",
+
+    # ══════════════════════════════════════════════════════════
+    # Section 9: Doctor Note (บันทึกแพทย์)
+    # ══════════════════════════════════════════════════════════
+    "doctor_note": re.compile(
+        r"(?:Doctor\s*note|Docter\s*note|บันทึกแพทย์|Pre\s*HD\s*[Nn]ote)\s*[:\s]*"
+        r"(.{5,200}?)(?:\n|$)",
         re.IGNORECASE,
     ),
-    "heparin_dose": re.compile(
-        r"(?:Heparin|เฮปาริน|hep)\s*[:\s]*(\d+)\s*(?:unit|u|ยูนิต|IU)?",
+    "nephrologist": re.compile(
+        r"(?:Nephrologist|แพทย์โรคไต)\s*[:\s]*([^\n]{3,50})",
         re.IGNORECASE,
     ),
-    "access_type": re.compile(
-        r"(?:Access|Vascular\s*access|ทางเข้าหลอดเลือด)\s*[:\s]*"
-        r"(AVF|AVG|AV\s*fistula|AV\s*graft|Perm\s*cath|Temp\s*cath|"
-        r"permanent\s*catheter|temporary\s*catheter|DLC|TDC|"
-        r"เอวีเอฟ|เอวีจี)",
+
+    # ══════════════════════════════════════════════════════════
+    # Section 10: Post HD / Discharge (หลังฟอก/จำหน่าย)
+    # ══════════════════════════════════════════════════════════
+    "post_bp": re.compile(
+        r"(?:post[- ]?(?:hd[- ]?)?BP|BP\s*(?:กลับบ้าน|ก่อนกลับ|หลังฟอก)|ความดันหลัง(?:ฟอก)?)\s*[:\s]*"
+        r"(\d{2,3})\s*/?\s*(\d{2,3})",
         re.IGNORECASE,
     ),
-    "dialysate_flow": re.compile(
-        r"(?:QD|Qd|dialysate\s*flow)\s*[:\s]*(\d+)\s*(?:ml/?min)?",
+    "post_hd_note": re.compile(
+        r"(?:Post\s*HD\s*note|หลังฟอกเลือด)\s*[:\s]*(.{3,200}?)(?:\n|$)",
         re.IGNORECASE,
     ),
-    "conductivity": re.compile(
-        r"(?:conductivity|cond\.?)\s*[:\s]*(\d+\.?\d*)\s*(?:mS/?cm)?",
+    "discharge_by": re.compile(
+        r"(?:Discharge\s*by|จำหน่าย(?:โดย)?)\s*[:\s]*"
+        r"(Home|Admit|เดินกลับ|รถเข็น|กลับบ้าน|นอนต่อ|Wheelchair)",
+        re.IGNORECASE,
+    ),
+    "net_uf_balance": re.compile(
+        r"(?:Net\s*UF\s*balance|UF\s*balance|สมดุลน้ำ)\s*[:\s]*"
+        r"(-?\d+\.?\d*)\s*(?:ml|cc)?",
+        re.IGNORECASE,
+    ),
+    "total_repletement": re.compile(
+        r"(?:Total\s*reple(?:te|ce)ment|น้ำเกลือทดแทน)\s*[:\s]*"
+        r"(\d+\.?\d*)\s*(?:ml|cc)?",
         re.IGNORECASE,
     ),
 }
 
+# ── String fields (ไม่แปลงเป็น float) ──
+_DIALYSIS_STRING_FIELDS = {
+    "dialyzer", "access_type", "access_site", "machine",
+    "last_tcv", "anticoagulant_type", "epo_route",
+    "complication", "doctor_note", "nephrologist",
+    "post_hd_note", "discharge_by",
+}
+
 
 def extract_dialysis_data_from_text(ocr_text: str) -> dict:
-    """ดึงข้อมูลฟอกเลือดจาก OCR text
+    """ดึงข้อมูลฟอกเลือดจาก OCR text — ครบ 10 หัวข้อ
 
     Returns: dict ของค่าที่ดึงได้ เช่น
-    {"pre_weight": 65.0, "post_weight": 62.5, "uf_volume": 2500, ...}
+    {"pre_bw": 65.0, "post_bw": 62.5, "uf_volume": 2500,
+     "dialyzer": "SADL", "complication": "No Complication", ...}
     """
     if not ocr_text or len(ocr_text.strip()) < 10:
         return {}
 
     data = {}
-    # Fields ที่เป็น string ไม่ใช่ตัวเลข
-    _string_fields = {"dialyzer", "access_type"}
     for key, pattern in _DIALYSIS_PATTERNS.items():
         match = pattern.search(ocr_text)
         if match:
             if key in ("pre_bp", "post_bp"):
                 data[f"{key}_sys"] = _safe_float(match.group(1))
                 data[f"{key}_dia"] = _safe_float(match.group(2))
-            elif key in _string_fields:
+            elif key in _DIALYSIS_STRING_FIELDS:
                 data[key] = match.group(1).strip()
             else:
                 data[key] = _safe_float(match.group(1))
@@ -1677,48 +1864,76 @@ def compare_dialysis_timeline(
     ))
 
     lines = []
-    lines.append("🩸 เปรียบเทียบข้อมูลฟอกเลือดย้อนหลัง")
-    lines.append(f"📅 ปัจจุบัน: {current_date_str}")
-    if d_3m:
-        lines.append(f"📅 ~3 เดือนก่อน: {d_3m.get('upload_date', '?')}")
-    if d_6m:
-        lines.append(f"📅 ~6 เดือนก่อน: {d_6m.get('upload_date', '?')}")
+    lines.append("🩸 เปรียบเทียบฟอกเลือด 10 หัวข้อ")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    _prev_label = d_3m.get("upload_date", "?") if d_3m else (
+        d_6m.get("upload_date", "?") if d_6m else "?"
+    )
+    lines.append(f"📅 ครั้งก่อน: {_prev_label}")
+    lines.append(f"📅 ครั้งนี้: {current_date_str}")
     lines.append("")
 
-    for param in all_params:
-        label = _dialysis_param_thai(param)
-        cur_val = current_data.get(param)
-        m3_val = data_3m.get(param)
-        m6_val = data_6m.get(param)
+    # ใช้ previous = d_3m ก่อน ถ้าไม่มีใช้ d_6m
+    prev_data = data_3m if d_3m else data_6m
 
-        vals = []
-        if d_6m and m6_val is not None:
-            vals.append(_format_timeline_value(m6_val))
-        if d_3m and m3_val is not None:
-            vals.append(_format_timeline_value(m3_val))
-        if cur_val is not None:
-            vals.append(_format_timeline_value(cur_val))
+    changed_count = 0
+    same_count = 0
+    new_count = 0
 
-        if len(vals) >= 2:
-            # มีค่าให้เปรียบเทียบ
-            # หาแนวโน้ม
-            prev_val = m3_val if m3_val is not None else m6_val
+    for section_name, section_keys in _DIALYSIS_SECTIONS:
+        # กรองเฉพาะ keys ที่มีข้อมูลในครั้งนี้หรือครั้งก่อน
+        section_items = []
+        for key in section_keys:
+            cur_val = current_data.get(key)
+            prev_val = prev_data.get(key)
+            if cur_val is not None or prev_val is not None:
+                section_items.append((key, cur_val, prev_val))
+
+        if not section_items:
+            continue
+
+        lines.append(f"\n{section_name}")
+
+        for key, cur_val, prev_val in section_items:
+            label = _dialysis_param_thai(key)
+            cur_str = _format_timeline_value(cur_val) if cur_val is not None else "-"
+            prev_str = _format_timeline_value(prev_val) if prev_val is not None else "-"
+
             if cur_val is not None and prev_val is not None:
-                diff = cur_val - prev_val
-                if abs(diff) < 0.01:
-                    arrow = "→"
-                elif diff > 0:
-                    arrow = "↑"
+                # มีทั้ง 2 ค่า → เปรียบเทียบ
+                if isinstance(cur_val, (int, float)) and isinstance(prev_val, (int, float)):
+                    diff = cur_val - prev_val
+                    if abs(diff) < 0.01:
+                        mark = "="
+                        same_count += 1
+                    elif diff > 0:
+                        mark = f"↑+{abs(diff):.1f}" if abs(diff) >= 0.1 else "↑"
+                        changed_count += 1
+                    else:
+                        mark = f"↓-{abs(diff):.1f}" if abs(diff) >= 0.1 else "↓"
+                        changed_count += 1
                 else:
-                    arrow = "↓"
+                    # String compare
+                    if str(cur_val).strip() == str(prev_val).strip():
+                        mark = "="
+                        same_count += 1
+                    else:
+                        mark = "🔄"
+                        changed_count += 1
+                lines.append(f"  {label}: {prev_str} → {cur_str} {mark}")
+            elif cur_val is not None:
+                lines.append(f"  {label}: {cur_str} (ใหม่)")
+                new_count += 1
             else:
-                arrow = "?"
-            lines.append(f"  {label}: {' → '.join(vals)} {arrow}")
-        elif len(vals) == 1:
-            lines.append(f"  {label}: {vals[0]}")
+                lines.append(f"  {label}: {prev_str} → - (ไม่มี)")
 
     lines.append("")
-    lines.append(f"📋 ตรวจทั้งหมด {len(all_params)} รายการ")
+    lines.append("━━━━━━━━━━━━━━━━━━")
+    lines.append(
+        f"📊 สรุป: เปลี่ยน {changed_count} | "
+        f"คงเดิม {same_count} | "
+        f"ใหม่ {new_count}"
+    )
 
     return {
         "text_th": "\n".join(lines),
@@ -1731,15 +1946,113 @@ def compare_dialysis_timeline(
 def _dialysis_param_thai(param: str) -> str:
     """แปลชื่อ parameter ฟอกเลือดเป็นไทย"""
     return {
-        "pre_weight": "น้ำหนักก่อนฟอก (kg)",
-        "post_weight": "น้ำหนักหลังฟอก (kg)",
+        # Section 1: Pre-dialysis
+        "pre_bw": "น้ำหนักก่อน (kg)",
+        "dry_bw": "น้ำหนักแห้ง (kg)",
+        "wt_gain": "น้ำหนักเพิ่ม (kg)",
+        "target_uf": "เป้า UF (kg)",
+        "post_bw": "น้ำหนักหลัง (kg)",
+        "wt_loss": "น้ำหนักลด (kg)",
+        "meal_drink": "อาหาร/น้ำ (kg)",
+        # legacy names
+        "pre_weight": "น้ำหนักก่อน (kg)",
+        "post_weight": "น้ำหนักหลัง (kg)",
         "dry_weight": "น้ำหนักแห้ง (kg)",
-        "uf_volume": "ปริมาณน้ำที่ดึง (ml)",
-        "blood_flow": "อัตราไหลเลือด (ml/min)",
-        "duration": "ระยะเวลาฟอก (ชม.)",
-        "pre_bp_sys": "ความดันก่อนฟอก (ตัวบน)",
-        "pre_bp_dia": "ความดันก่อนฟอก (ตัวล่าง)",
-        "post_bp_sys": "ความดันหลังฟอก (ตัวบน)",
-        "post_bp_dia": "ความดันหลังฟอก (ตัวล่าง)",
+        # Section 2: Prescription
+        "machine": "เครื่อง",
+        "dialyzer": "ตัวกรอง",
+        "surface_area": "พื้นที่ (m²)",
+        "use_no": "ใช้ครั้งที่",
+        "last_tcv": "Last TCV",
+        "hd_no": "HD ครั้งที่",
+        # Section 3: Anticoagulant
+        "duration": "เวลาฟอก (ชม.)",
+        "anticoagulant_type": "ยากันเลือดแข็ง",
+        "heparin_loading": "Heparin Loading (u)",
+        "heparin_maintenance": "Heparin Maintenance (u)",
+        "heparin_dose": "Heparin (u)",
+        "o2_sat": "O2 sat (%)",
+        "bt": "อุณหภูมิ (°C)",
+        "hct": "Hct (%)",
+        "hb": "Hb (g/dL)",
+        # Section 4: Vascular Access
+        "access_type": "ทางเข้าหลอดเลือด",
+        "access_site": "ตำแหน่ง",
+        # Section 5: Dialysate
+        "dialysate_k": "K+ (mEq/L)",
+        "dialysate_ca": "Ca (mEq/L)",
+        "dialysate_hco3": "HCO3 (mEq/L)",
+        "dialysate_temp": "อุณหภูมิน้ำยา (°C)",
+        "dialysate_flow": "Dialysate flow (ml/min)",
+        "na_start": "Na start (mEq/L)",
+        "na_conc_off": "Na conc off (mEq/L)",
+        # Section 6: Medication
+        "epo_dose": "EPO (unit)",
+        "epo_route": "EPO route",
+        "iron_dose": "Iron (mg)",
+        # Section 7: Vital Signs
+        "blood_flow": "Blood flow QB (ml/min)",
+        "pre_bp_sys": "BP ก่อนฟอก (ตัวบน)",
+        "pre_bp_dia": "BP ก่อนฟอก (ตัวล่าง)",
+        "uf_volume": "Total UF (ml)",
+        "conductivity": "Conductivity (mS/cm)",
         "kt_v": "Kt/V",
+        # Section 8: Complication
+        "complication": "ภาวะแทรกซ้อน",
+        # Section 9: Doctor Note
+        "doctor_note": "บันทึกแพทย์",
+        "nephrologist": "แพทย์โรคไต",
+        # Section 10: Post HD / Discharge
+        "post_bp_sys": "BP หลังฟอก (ตัวบน)",
+        "post_bp_dia": "BP หลังฟอก (ตัวล่าง)",
+        "post_hd_note": "Post HD note",
+        "discharge_by": "จำหน่ายโดย",
+        "net_uf_balance": "Net UF balance (ml)",
+        "total_repletement": "น้ำเกลือทดแทน (ml)",
     }.get(param, param)
+
+
+# ── Section grouping สำหรับแสดงผลเปรียบเทียบ ──
+_DIALYSIS_SECTIONS = [
+    ("1️⃣ Pre-dialysis", [
+        "pre_bw", "dry_bw", "wt_gain", "target_uf",
+        "post_bw", "wt_loss", "meal_drink",
+        # legacy
+        "pre_weight", "post_weight", "dry_weight",
+    ]),
+    ("2️⃣ Prescription", [
+        "machine", "dialyzer", "surface_area", "use_no",
+        "last_tcv", "hd_no",
+    ]),
+    ("3️⃣ Anticoagulant", [
+        "duration", "anticoagulant_type",
+        "heparin_loading", "heparin_maintenance", "heparin_dose",
+        "o2_sat", "bt", "hct", "hb",
+    ]),
+    ("4️⃣ Vascular Access", [
+        "access_type", "access_site",
+    ]),
+    ("5️⃣ Dialysate", [
+        "dialysate_k", "dialysate_ca", "dialysate_hco3",
+        "dialysate_temp", "dialysate_flow",
+        "na_start", "na_conc_off",
+    ]),
+    ("6️⃣ Medication", [
+        "epo_dose", "epo_route", "iron_dose",
+    ]),
+    ("7️⃣ Vital Signs", [
+        "blood_flow", "pre_bp_sys", "pre_bp_dia",
+        "uf_volume", "conductivity", "kt_v",
+    ]),
+    ("8️⃣ Complication", [
+        "complication",
+    ]),
+    ("9️⃣ Doctor Note", [
+        "doctor_note", "nephrologist",
+    ]),
+    ("🔟 Post HD / Discharge", [
+        "post_bp_sys", "post_bp_dia",
+        "post_hd_note", "discharge_by",
+        "net_uf_balance", "total_repletement",
+    ]),
+]
