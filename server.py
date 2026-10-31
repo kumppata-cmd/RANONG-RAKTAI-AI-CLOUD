@@ -6161,6 +6161,211 @@ def handle_search_command(
         except Exception as _e:
             return f"❌ {type(_e).__name__}: {str(_e)[:100]}"
 
+    # ── Google Integration Commands (Admin/Physician only) ────
+    # คำสั่ง: "สถานะgoogle", "syncแล็บ", "syncทะเบียน",
+    #         "backupไดรฟ์", "ส่งรายงานemail"
+    _google_cmds = {
+        "สถานะgoogle", "สถานะ google", "google status",
+        "syncแล็บ", "sync แล็บ", "ซิงค์แล็บ",
+        "syncทะเบียน", "sync ทะเบียน", "ซิงค์ทะเบียน",
+        "backupไดรฟ์", "backup ไดรฟ์", "สำรองไดรฟ์", "backup drive",
+        "ส่งรายงานemail", "ส่งรายงาน email", "ส่งสรุปemail",
+    }
+    _text_lower = text_stripped.lower().replace(" ", "")
+    _matched_google = any(
+        text_stripped in _google_cmds
+        or _text_lower == c.lower().replace(" ", "")
+        for c in _google_cmds
+    )
+    if _matched_google:
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None  # ไม่เปิดเผยว่ามีคำสั่งนี้
+
+        _norm = _text_lower
+
+        # ── สถานะ Google ──
+        if "สถานะ" in _norm or "status" in _norm:
+            _lines = ["📊 สถานะ Google Integration\n━━━━━━━━━━━━━━━━━━━━"]
+            try:
+                import google_drive_sync
+                _ds = google_drive_sync.get_status()
+                _d_icon = "✅" if _ds.get("connected") else ("⏳" if _ds.get("enabled") else "❌")
+                _lines.append(
+                    f"\n📁 Google Drive: {_d_icon}\n"
+                    f"   Enabled: {_ds.get('enabled', False)}\n"
+                    f"   Connected: {_ds.get('connected', False)}"
+                )
+                if _ds.get("folder_name"):
+                    _lines.append(f"   Folder: {_ds['folder_name']}")
+            except Exception as _e:
+                _lines.append(f"\n📁 Google Drive: ❌ {type(_e).__name__}")
+            try:
+                import google_sheets_sync
+                _ss = google_sheets_sync.get_status()
+                _s_icon = "✅" if _ss.get("connected") else ("⏳" if _ss.get("enabled") else "❌")
+                _lines.append(
+                    f"\n📊 Google Sheets: {_s_icon}\n"
+                    f"   Enabled: {_ss.get('enabled', False)}\n"
+                    f"   Connected: {_ss.get('connected', False)}"
+                )
+                if _ss.get("title"):
+                    _lines.append(f"   Sheet: {_ss['title']}")
+            except Exception as _e:
+                _lines.append(f"\n📊 Google Sheets: ❌ {type(_e).__name__}")
+            try:
+                import gmail_report
+                _gs = gmail_report.get_status()
+                _g_icon = "✅" if _gs.get("connected") else ("⏳" if _gs.get("enabled") else "❌")
+                _lines.append(
+                    f"\n📧 Gmail: {_g_icon}\n"
+                    f"   Enabled: {_gs.get('enabled', False)}\n"
+                    f"   Method: {_gs.get('method', 'N/A')}"
+                )
+            except Exception as _e:
+                _lines.append(f"\n📧 Gmail: ❌ {type(_e).__name__}")
+            _lines.append(
+                "\n\n💡 คำสั่ง Google:\n"
+                "• syncแล็บ — ส่งสรุปผลแล็บไป Sheets\n"
+                "• syncทะเบียน — ส่งทะเบียนผู้ป่วยไป Sheets\n"
+                "• backupไดรฟ์ — สำรองเอกสารไป Drive\n"
+                "• ส่งรายงานemail — ส่งสรุปทาง email"
+            )
+            return "".join(_lines)
+
+        # ── Sync แล็บ → Sheets ──
+        if "แล็บ" in _norm or "lab" in _norm:
+            try:
+                import google_sheets_sync
+                if not google_sheets_sync.is_available():
+                    return (
+                        "❌ Google Sheets ยังไม่พร้อม\n"
+                        "ต้องตั้ง GOOGLE_SHEETS_ENABLED=true\n"
+                        "และ GOOGLE_SHEETS_ID บน Render"
+                    )
+                _result = google_sheets_sync.sync_lab_summary(
+                    doc_index, storage
+                )
+                if _result.get("error"):
+                    return f"❌ {_result['error']}"
+                return (
+                    f"✅ Sync ผลแล็บ → Google Sheets สำเร็จ\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 Sheet: {_result.get('sheet', 'สรุปผลแล็บ')}\n"
+                    f"👥 ผู้ป่วย: {_result.get('patient_count', 0)} คน\n"
+                    f"📝 อัปเดต: {_result.get('updated_cells', 0)} cells"
+                )
+            except Exception as _e:
+                return f"❌ Sync แล็บไม่สำเร็จ: {type(_e).__name__}"
+
+        # ── Sync ทะเบียน → Sheets ──
+        if "ทะเบียน" in _norm or "registry" in _norm:
+            try:
+                import google_sheets_sync
+                if not google_sheets_sync.is_available():
+                    return (
+                        "❌ Google Sheets ยังไม่พร้อม\n"
+                        "ต้องตั้ง GOOGLE_SHEETS_ENABLED=true\n"
+                        "และ GOOGLE_SHEETS_ID บน Render"
+                    )
+                _result = google_sheets_sync.sync_patient_registry(
+                    master_registry
+                )
+                if _result.get("error"):
+                    return f"❌ {_result['error']}"
+                return (
+                    f"✅ Sync ทะเบียนผู้ป่วย → Google Sheets สำเร็จ\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📊 Sheet: {_result.get('sheet', 'ทะเบียนผู้ป่วย')}\n"
+                    f"👥 ผู้ป่วย: {_result.get('patient_count', 0)} คน"
+                )
+            except Exception as _e:
+                return f"❌ Sync ทะเบียนไม่สำเร็จ: {type(_e).__name__}"
+
+        # ── Backup → Drive ──
+        if "backup" in _norm or "ไดรฟ" in _norm or "สำรอง" in _norm or "drive" in _norm:
+            try:
+                import google_drive_sync
+                if not google_drive_sync.is_available():
+                    return (
+                        "❌ Google Drive ยังไม่พร้อม\n"
+                        "ต้องตั้ง GOOGLE_DRIVE_ENABLED=true\n"
+                        "และ GOOGLE_DRIVE_FOLDER_ID บน Render"
+                    )
+                # Backup เอกสารล่าสุด 10 รายการ
+                _recent = []
+                if doc_index and hasattr(doc_index, "_docs"):
+                    _sorted = sorted(
+                        doc_index._docs,
+                        key=lambda d: d.get("upload_date", ""),
+                        reverse=True,
+                    )
+                    _recent = _sorted[:10]
+                if not _recent:
+                    return "⚠️ ยังไม่มีเอกสารในระบบ"
+                _ok = 0
+                _fail = 0
+                for _doc in _recent:
+                    _gcs = _doc.get("gcs_object_path", "")
+                    if not _gcs:
+                        continue
+                    _cat = _doc.get("category", "other")
+                    _r = google_drive_sync.backup_document_from_gcs(
+                        storage, _gcs, subfolder=_cat
+                    )
+                    if _r.get("error"):
+                        _fail += 1
+                    else:
+                        _ok += 1
+                return (
+                    f"✅ Backup → Google Drive\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📁 สำเร็จ: {_ok} ไฟล์\n"
+                    f"{'❌ ไม่สำเร็จ: ' + str(_fail) + ' ไฟล์' if _fail else ''}\n"
+                    f"\n💡 เอกสารใหม่จะถูก backup อัตโนมัติ"
+                )
+            except Exception as _e:
+                return f"❌ Backup ไม่สำเร็จ: {type(_e).__name__}"
+
+        # ── ส่งรายงาน Email ──
+        if "email" in _norm or "อีเมล" in _norm or "รายงาน" in _norm:
+            try:
+                import gmail_report
+                if not gmail_report.is_available():
+                    return (
+                        "❌ Gmail ยังไม่พร้อม\n"
+                        "ต้องตั้ง GMAIL_ENABLED=true\n"
+                        "GMAIL_SENDER, GMAIL_RECIPIENT\n"
+                        "และ SMTP_HOST/SMTP_USER/SMTP_PASS บน Render"
+                    )
+                _total = len(doc_index._docs) if doc_index else 0
+                _cats: dict = {}
+                _today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                _new = 0
+                for _d in (doc_index._docs if doc_index else []):
+                    _c = _d.get("category", "other")
+                    _cats[_c] = _cats.get(_c, 0) + 1
+                    if _d.get("upload_date", "").startswith(_today):
+                        _new += 1
+                _stats = {
+                    "date": _today,
+                    "total_docs": _total,
+                    "new_today": _new,
+                    "by_category": _cats,
+                    "alerts": 0,
+                }
+                _result = gmail_report.send_daily_summary(_stats)
+                if _result.get("error"):
+                    return f"❌ {_result['error']}"
+                return (
+                    f"✅ ส่งรายงานสรุปทาง Email สำเร็จ\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📧 Method: {_result.get('method', 'N/A')}\n"
+                    f"📄 เอกสารทั้งหมด: {_total}\n"
+                    f"📋 เอกสารใหม่วันนี้: {_new}"
+                )
+            except Exception as _e:
+                return f"❌ ส่ง email ไม่สำเร็จ: {type(_e).__name__}"
+
     # ── ยืนยันตัวตน (One-Time Enrollment Token) ──────────────
     # คำสั่ง: "ยืนยัน [TOKEN]"
     # ผู้ดูแลได้รับ Token จาก POST /admin/enroll (ต้องยืนยัน ADMIN_SECRET)
@@ -6345,6 +6550,13 @@ def handle_search_command(
             "🧾 ค่าใช้จ่าย\n"
             "• สรุปค่าใช้จ่าย — สรุปค่าใช้จ่ายเดือนนี้\n"
             "• สรุปค่าใช้จ่าย [เดือน/ปี] — สรุปเดือนที่ระบุ\n"
+            "\n"
+            "🔗 Google Integration (แพทย์/admin)\n"
+            "• สถานะgoogle — ดูสถานะเชื่อมต่อ\n"
+            "• syncแล็บ — ส่งสรุปแล็บไป Sheets\n"
+            "• syncทะเบียน — ส่งทะเบียนผู้ป่วยไป Sheets\n"
+            "• backupไดรฟ์ — สำรองเอกสารไป Drive\n"
+            "• ส่งรายงานemail — ส่งสรุปทาง email\n"
             "\n"
             "💡 พิมพ์คำสั่งตามตัวอย่างด้านบน\n"
             "หรือส่งเอกสาร (รูป/PDF) เพื่อบันทึกอัตโนมัติ"
