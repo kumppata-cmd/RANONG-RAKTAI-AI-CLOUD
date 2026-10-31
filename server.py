@@ -10027,6 +10027,32 @@ def process_file_async(
                         type(ctx_err).__name__,
                     )
 
+            # ── Auto-set patient context: เมื่อ match ผู้ป่วยได้ ──
+            # ตั้ง context อัตโนมัติเพื่อให้เอกสารถัดไปใช้คนเดิม
+            # (ไม่ต้องพิมพ์ "ผู้ป่วย <HN>" ทุกครั้ง)
+            _final_folder = metadata.get("patient_hn_folder", "")
+            if (
+                _final_folder
+                and not _final_folder.startswith("HN")
+                and owner_hash
+                and category in CLINICAL_CATEGORIES
+            ):
+                try:
+                    # ดึง HN + ชื่อจาก folder name (format: 66298_นายสุชีพ_อินสุทน)
+                    _ff_parts = _final_folder.split("_", 1)
+                    _ff_hn = _ff_parts[0] if _ff_parts else ""
+                    _ff_name = _ff_parts[1].replace("_", " ") if len(_ff_parts) > 1 else ""
+                    if _ff_hn:
+                        _set_patient_context(
+                            owner_hash, _final_folder, _ff_hn, _ff_name
+                        )
+                        logger.info(
+                            "Auto-set patient context from OCR match: %s",
+                            _ff_hn,
+                        )
+                except Exception:
+                    pass
+
             # บิลที่ยังไม่รู้บริษัท — ระบุจากข้อความ OCR ที่ได้มาแล้ว
             # เป็นจุดเดียวที่ตัดสินแฟ้มบริษัทของเส้นทางอัตโนมัติ
             if category == "bills" and not bill_company:
@@ -10583,61 +10609,10 @@ def process_file_async(
                             f"'ผู้ป่วย <HN>' ให้ถูกแล้วส่งเอกสารใหม่"
                         )
                 else:
-                    # ── แสดงรายชื่อผู้ป่วยให้เลือก ──
-                    _patient_list_shown = False
-                    if (
-                        master_registry
-                        and category in CLINICAL_CATEGORIES
-                        and owner_hash
-                        and gcs_object_path
-                    ):
-                        try:
-                            _all_patients = master_registry.list_all()
-                            if _all_patients:
-                                # แสดง 5 คนล่าสุด (หรือทั้งหมดถ้า ≤ 5)
-                                _show = _all_patients[:9]
-                                _choices = []
-                                _choice_lines = []
-                                for _idx, _p in enumerate(_show, 1):
-                                    _choices.append({
-                                        "folder": _p.folder_name,
-                                        "hn": getattr(_p, "clinic_hn", "")
-                                            or getattr(_p, "hospital_hn", ""),
-                                        "name": _p.patient_name,
-                                    })
-                                    _hn_show = (
-                                        getattr(_p, "clinic_hn", "")
-                                        or getattr(_p, "hospital_hn", "")
-                                    )
-                                    _choice_lines.append(
-                                        f"  {_idx}. {_hn_show} {_p.patient_name}"
-                                    )
-                                # Save pending
-                                _set_pending_patient_assign(
-                                    owner_hash,
-                                    _doc_id,
-                                    gcs_object_path,
-                                    category,
-                                    _choices,
-                                )
-                                _reply_lines.append(
-                                    "👤 ยังไม่ระบุผู้ป่วย\n"
-                                    "📋 ตอบเลขเพื่อเลือกผู้ป่วย:\n"
-                                    + "\n".join(_choice_lines)
-                                )
-                                _patient_list_shown = True
-                        except Exception as _pex:
-                            logger.warning(
-                                "Patient list failed: %s",
-                                type(_pex).__name__,
-                            )
-                    if not _patient_list_shown:
-                        _reply_lines.append(
-                            "👤 ยังไม่ระบุผู้ป่วย — "
-                            "เก็บไว้ที่ระดับไตรมาส/เดือน\n"
-                            "พิมพ์ 'ผู้ป่วย <HN>' ก่อนส่ง "
-                            "เพื่อเข้าแฟ้มรายคน"
-                        )
+                    _reply_lines.append(
+                        "👤 ยังไม่ระบุผู้ป่วย — เก็บไว้ที่ระดับไตรมาส/เดือน\n"
+                        "พิมพ์ 'ผู้ป่วย <HN>' ก่อนส่ง เพื่อเข้าแฟ้มรายคน"
+                    )
                 # แสดงชื่อคนไข้ที่อ่านได้จากเอกสาร (ถ้ามี)
                 if metadata.get("ocr_patient_name"):
                     _reply_lines.append(
@@ -12735,44 +12710,6 @@ def webhook():
                             "พิมพ์ 'ลงทะเบียนรายชื่อ' เพื่อลองใหม่",
                         )
                     continue
-
-                # ── Pending Patient Assignment: ตอบเลขเลือกผู้ป่วย ──
-                _pending_patient = _get_pending_patient_assign(user_hash)
-                if _pending_patient and text.strip().isdigit():
-                    _pick_num = int(text.strip())
-                    _choices = _pending_patient.get("choices", [])
-                    if 1 <= _pick_num <= len(_choices):
-                        _picked = _choices[_pick_num - 1]
-                        _clear_pending_patient_assign(user_hash)
-                        _pd_id = _pending_patient["doc_id"]
-                        _pd_gcs = _pending_patient["gcs_path"]
-                        _pd_cat = _pending_patient["category"]
-                        _pd_folder = _picked["folder"]
-                        _pd_name = _picked["name"]
-                        _pd_hn = _picked["hn"]
-                        # ย้ายเอกสาร
-                        _ok, _msg = _relocate_document_to_patient(
-                            _pd_id, _pd_gcs, _pd_cat, _pd_folder,
-                        )
-                        if _ok:
-                            reply_message(
-                                reply_token,
-                                f"✅ ย้ายเอกสารเข้าแฟ้มเรียบร้อย\n"
-                                f"👤 {_pd_hn} {_pd_name}\n"
-                                f"📁 {_pd_folder}",
-                            )
-                            # ตั้ง patient context ด้วย
-                            _set_patient_context(
-                                user_hash, _pd_folder,
-                                _pd_hn, _pd_name,
-                            )
-                        else:
-                            reply_message(
-                                reply_token,
-                                f"❌ ย้ายไม่สำเร็จ: {_msg}\n"
-                                f"ลองพิมพ์ 'ผู้ป่วย {_pd_hn}' แล้วส่งเอกสารใหม่",
-                            )
-                        continue
 
                 # ── Pending Classification: ตรวจว่าผู้ใช้ตอบเลข 1-4 ──
                 _pending = _get_pending_classification(user_hash)

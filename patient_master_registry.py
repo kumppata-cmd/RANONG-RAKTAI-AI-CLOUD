@@ -567,6 +567,52 @@ class MasterPatientRegistry:
             if len(matches) == 1:
                 return matches[0]
 
+        # ─── Pass 5: partial token match (ชื่อตัวตรง ≥ 1 token) ───
+        # OCR ลายมืออาจอ่านได้แค่ชื่อตัวหรือนามสกุล
+        if len(name_tokens) >= 1 and len(name_no_prefix) >= 4:
+            matches = []
+            for p in self._patients:
+                p_tokens = set(_strip_prefix(p.patient_name).upper().split())
+                # ต้องมี token ตรงกันอย่างน้อย 1 ตัว
+                # และ token ที่ตรงต้องยาว ≥ 3 ตัวอักษร
+                common = name_tokens & p_tokens
+                long_common = [t for t in common if len(t) >= 3]
+                if long_common:
+                    matches.append(p)
+            if len(matches) == 1:
+                return matches[0]
+
+        # ─── Pass 6: fuzzy character similarity ───
+        # ใช้เปรียบเทียบ character overlap สำหรับ OCR ที่อ่านผิด 1-2 ตัว
+        if len(name_no_prefix) >= 5:
+            best_score = 0.0
+            best_match = None
+            best_count = 0
+            for p in self._patients:
+                p_name = _strip_prefix(p.patient_name)
+                if len(p_name) < 3:
+                    continue
+                # Jaccard similarity on character bigrams
+                def _bigrams(s):
+                    s = s.upper()
+                    return set(s[i:i+2] for i in range(len(s)-1)) if len(s) >= 2 else set()
+                bg1 = _bigrams(name_no_prefix)
+                bg2 = _bigrams(p_name)
+                if not bg1 or not bg2:
+                    continue
+                intersection = len(bg1 & bg2)
+                union = len(bg1 | bg2)
+                score = intersection / union if union else 0
+                if score > best_score:
+                    best_score = score
+                    best_match = p
+                    best_count = 1
+                elif score == best_score and best_match:
+                    best_count += 1
+            # ต้อง similarity ≥ 0.5 และพบคนเดียวเท่านั้น
+            if best_match and best_score >= 0.5 and best_count == 1:
+                return best_match
+
         return None
 
     def list_all(self) -> list[MasterPatient]:
@@ -1002,6 +1048,12 @@ _HN_PATTERNS = [
     re.compile(r'(?<![a-zA-Zก-๙])(?:VN|V\.N\.)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
     # OCR อาจอ่าน separator เป็น "I" หรือ "|" — เช่น "HN I 00290382"
     re.compile(r'(?:H\.?N\.?)\s*[I|l]\s*(\d{2,10})', re.IGNORECASE),
+    # "HD No" หรือ "HD No." — Hemodialysis work sheet ใช้ HN ในช่อง HD No
+    re.compile(r'(?:HD\s*No\.?|H\.?D\.?\s*No\.?)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
+    # ตัวเลข 5-8 หลักหลัง "Age" line — form ที่มี HN ใกล้ Age
+    re.compile(r'(?:Age|อายุ)\s*\d+\s*(?:yr|ปี|y)?\s*.*?(?:H\.?N\.?|HN)\s*[:=\-]?\s*(\d{2,10})', re.IGNORECASE),
+    # "No." ตามด้วยตัวเลข 5+ หลัก (common in hospital forms)
+    re.compile(r'(?<![a-zA-Z])No\.?\s*[:=]?\s*(\d{5,8})(?!\d)', re.IGNORECASE),
 ]
 
 
