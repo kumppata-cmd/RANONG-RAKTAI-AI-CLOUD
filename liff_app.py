@@ -153,41 +153,28 @@ def get_patient_labs_for_liff(
     limit: int = 20,
     doc_index: Any = None,
     hn_registry: Any = None,
+    generate_signed_url_fn: Any = None,
 ) -> dict:
-    """ดึงผลแล็บของผู้ป่วยสำหรับ LIFF.
+    """ดึงเอกสารของผู้ป่วยสำหรับ LIFF Patient Portal.
 
-    Flow (แนวทาง A):
-    1. ผู้ป่วยลงทะเบียน HN กับ LINE (ลงทะเบียนHN 1234)
-    2. หมอ/เจ้าหน้าที่ส่งเอกสารเข้าระบบ → ระบบ OCR อ่าน HN → เก็บ
-       ใน patient_hn_folder ของ doc_index
-    3. ผู้ป่วยกด "ดูผลแล็บ" → LIFF ยืนยันตัวตนกับ LINE → ได้ owner_hash
-    4. ค้นหา HN จาก hn_registry (owner_hash → clinic_hn)
-    5. ค้นหาเอกสารจาก doc_index ที่ patient_hn_folder ตรงกับ HN
-    6. Download เฉพาะ lab results ของผู้ป่วยรายนั้น
+    แสดง:
+    - ข้อมูลผู้ป่วย (ชื่อ, HN)
+    - รูปเอกสารจริง (GCS signed URL) — ไม่ใช่ OCR text
+    - คำวินิจฉัย/คำแนะนำจากแพทย์ (ถ้ามี)
+    - ประเภทเอกสาร + วันที่
 
-    Args:
-        storage: GCS storage instance
-        owner_hash: LINE userId hash ของผู้ป่วยที่เปิด LIFF
-        limit: จำนวนผลแล็บสูงสุด
-        doc_index: DocumentIndex instance
-        hn_registry: PatientHNRegistry instance — ใช้หา HN จาก owner_hash
-
-    Safety:
-        - Read-Only — ไม่มีการแก้ไข
-        - ยืนยันตัวตนผ่าน LINE ID token ก่อนถึงจุดนี้
-        - ผู้ป่วยเห็นเฉพาะผลแล็บที่ตรงกับ HN ที่ลงทะเบียนไว้
+    Flow:
+    1. ผู้ป่วยลงทะเบียน HN → กด "ดูผลแล็บ"
+    2. ระบบหา HN จาก hn_registry
+    3. ค้นเอกสารจาก doc_index ที่ patient_hn_folder ตรงกับ HN
+    4. สร้าง signed URL สำหรับรูปเอกสาร
+    5. โหลด doctor's notes ถ้ามี
     """
     result = {
-        "owner_hash_prefix": owner_hash[:8] if owner_hash else "",
-        "labs": [],
-        "trends": {
-            "egfr": [],
-            "creatinine": [],
-            "hemoglobin": [],
-            "potassium": [],
-        },
-        "ckd_info": None,
-        "last_visit": None,
+        "patient_name": "",
+        "patient_hn": "",
+        "documents": [],
+        "message": None,
     }
 
     if not owner_hash or not storage:
@@ -197,8 +184,9 @@ def get_patient_labs_for_liff(
         if not hasattr(storage, '_bucket') or not storage._bucket:
             return result
 
-        # ── Step 1: หา HN ของผู้ป่วยจาก hn_registry ──
+        # ── Step 1: หา HN + ชื่อผู้ป่วย ──
         patient_hns: set[str] = set()
+        patient_hn_display = ""
         if hn_registry is not None:
             try:
                 patient = (hn_registry.get_by_owner(owner_hash)
@@ -206,18 +194,20 @@ def get_patient_labs_for_liff(
                 if patient:
                     if getattr(patient, 'clinic_hn', ''):
                         patient_hns.add(patient.clinic_hn.upper())
+                        patient_hn_display = patient.clinic_hn
                     if getattr(patient, 'hospital_hn', ''):
                         patient_hns.add(patient.hospital_hn.upper())
+                    result["patient_name"] = getattr(patient, 'display_name', '') or ""
+                    result["patient_hn"] = patient_hn_display
             except Exception:
                 pass
 
         if not patient_hns:
-            # ผู้ป่วยยังไม่ลงทะเบียน HN — ไม่สามารถหาผลแล็บได้
             result["message"] = "กรุณาลงทะเบียน HN ก่อน โดยพิมพ์: ลงทะเบียนHN <เลข HN>"
             return result
 
-        # ── Step 2: หาเอกสารจาก doc_index ที่ patient_hn_folder ตรงกับ HN ──
-        candidate_ids: list[str] = []
+        # ── Step 2: หาเอกสารจาก doc_index ──
+        patient_docs: list[dict] = []
         if doc_index is not None:
             try:
                 all_docs = doc_index.list_all() if hasattr(doc_index, 'list_all') else []
@@ -227,37 +217,73 @@ def get_patient_labs_for_liff(
                     folder = (doc.get("patient_hn_folder") or "").upper()
                     if not folder:
                         continue
-                    # match: folder อาจเป็น "1234", "1234_56789",
-                    # "นายXX HN1234" ฯลฯ → ตรวจว่ามี HN อยู่ในชื่อ folder
                     for hn in patient_hns:
                         if hn in folder:
-                            did = doc.get("document_id", "")
-                            if did:
-                                candidate_ids.append(did)
+                            patient_docs.append(doc)
                             break
             except Exception:
-                candidate_ids = []
+                pass
 
-        patient_labs = []
+        # เรียงตามวันที่ล่าสุดก่อน
+        patient_docs.sort(
+            key=lambda x: x.get("upload_date", ""),
+            reverse=True,
+        )
+        patient_docs = patient_docs[:limit]
 
-        if candidate_ids:
-            # Fast path: download เฉพาะ lab ของผู้ป่วยรายนี้
-            for did in candidate_ids[:50]:
+        # ── Step 3: สร้าง signed URL + โหลด doctor's notes ──
+        _CATEGORY_NAMES = {
+            "lab": "📋 ผลแล็บ",
+            "rx": "💊 ใบยา",
+            "dialysis": "🩸 ใบฟอกเลือด",
+            "bill": "🧾 บิล",
+            "review": "📄 เอกสารอื่น",
+        }
+
+        for doc in patient_docs:
+            gcs_path = doc.get("gcs_object_path", "")
+            doc_id = doc.get("document_id", "")
+            category = doc.get("category", "review")
+
+            # สร้าง signed URL สำหรับรูปเอกสาร (1 ชั่วโมง)
+            image_url = ""
+            if generate_signed_url_fn and gcs_path:
                 try:
-                    lab_path = f"_lab_results/{did}.json"
-                    blob_data = storage.get(lab_path)
-                    if not blob_data:
-                        continue
-                    ldata = json.loads(blob_data if isinstance(blob_data, str)
-                                       else blob_data.decode("utf-8"))
-                    # ไม่ต้อง filter owner_hash แล้ว — ใช้ HN match แทน
-                    # (เอกสารอาจถูกส่งจากบัญชีหมอ/เจ้าหน้าที่)
-                    patient_labs.append(ldata)
+                    image_url = generate_signed_url_fn(gcs_path, 3600) or ""
                 except Exception:
-                    continue
-        else:
-            # ไม่พบเอกสารที่ตรงกับ HN ของผู้ป่วย
-            pass
+                    image_url = ""
+
+            # โหลด doctor's notes (treatment notes)
+            doctor_note = ""
+            try:
+                note_prefix = f"_treatment_notes/{patient_hn_display}/"
+                note_blobs = list(storage._bucket.list_blobs(
+                    prefix=note_prefix, max_results=5
+                ))
+                # เอาล่าสุด
+                if note_blobs:
+                    note_blobs.sort(key=lambda b: b.name, reverse=True)
+                    note_data = json.loads(note_blobs[0].download_as_text())
+                    doctor_note = note_data.get("note", "")
+            except Exception:
+                pass
+
+            result["documents"].append({
+                "doc_id": doc_id[:12],
+                "category": _CATEGORY_NAMES.get(category, "📄 เอกสาร"),
+                "date": doc.get("upload_date", "ไม่ระบุวันที่"),
+                "image_url": image_url,
+                "doctor_note": doctor_note,
+            })
+
+        # ใช้ patient_name จาก patient_hn_folder ถ้ายังไม่มี
+        if not result["patient_name"] and patient_docs:
+            folder = patient_docs[0].get("patient_hn_folder", "")
+            if "_" in folder:
+                # format: HN_ชื่อ → ดึงชื่อ
+                parts = folder.split("_", 1)
+                if len(parts) > 1 and not parts[1].isdigit():
+                    result["patient_name"] = parts[1]
 
         # Sort by date descending
         patient_labs.sort(
@@ -583,52 +609,22 @@ body {
 
 <div id="mainApp" style="display:none;">
 <div class="header">
-    <h1>🏥 คลินิกโรคไต — ผลแล็บของฉัน</h1>
+    <h1>🏥 คลินิกโรคไต — เอกสารของฉัน</h1>
     <div class="subtitle" id="patientInfo">กำลังโหลด...</div>
 </div>
 
-<!-- Tab Bar -->
-<div class="tab-bar">
-    <button class="tab-btn active" onclick="switchTab('results')">📋 ผลแล็บ</button>
-    <button class="tab-btn" onclick="switchTab('trends')">📈 แนวโน้ม</button>
-    <button class="tab-btn" onclick="switchTab('ckd')">🏥 CKD</button>
-</div>
-
-<!-- Tab: ผลแล็บล่าสุด -->
-<div class="tab-content active" id="tab-results">
-    <div id="ckdCard" style="display:none;margin-bottom:12px"></div>
+<!-- เอกสารผู้ป่วย -->
+<div style="padding:0 12px;">
     <div class="loading" id="loadingLabs">
-        <div>⏳ กำลังโหลดผลแล็บ...</div>
+        <div>⏳ กำลังโหลดเอกสาร...</div>
     </div>
     <div id="labList"></div>
 </div>
 
-<!-- Tab: แนวโน้ม -->
-<div class="tab-content" id="tab-trends">
-    <div class="card">
-        <div class="card-title">📈 แนวโน้ม eGFR</div>
-        <div class="chart-container"><canvas id="chartEgfr"></canvas></div>
-    </div>
-    <div class="card">
-        <div class="card-title">📈 แนวโน้ม Creatinine</div>
-        <div class="chart-container"><canvas id="chartCr"></canvas></div>
-    </div>
-    <div class="card">
-        <div class="card-title">📈 แนวโน้ม Hemoglobin</div>
-        <div class="chart-container"><canvas id="chartHb"></canvas></div>
-    </div>
-</div>
-
-<!-- Tab: CKD Info -->
-<div class="tab-content" id="tab-ckd">
-    <div id="ckdInfo">
-        <div class="loading">⏳ กำลังโหลด...</div>
-    </div>
-</div>
-
 <div class="disclaimer">
     ⚠️ ข้อมูลนี้เป็นข้อมูลประกอบเท่านั้น — กรุณาปรึกษาแพทย์สำหรับการรักษา<br>
-    ระบบ Read-Only — ไม่สามารถแก้ไขข้อมูลได้
+    ระบบ Read-Only — ไม่สามารถแก้ไขข้อมูลได้<br>
+    กดที่รูปเพื่อขยาย/ย่อ
 </div>
 </div>
 
@@ -776,15 +772,15 @@ async function initApp() {
         }
         if (!resp.ok) throw new Error('HTTP ' + resp.status);
         labData = await resp.json();
-        renderLabs();
-        renderTrends();
-        renderCkd();
+        renderDocuments();
         // Patient info
-        if (labData.last_visit) {
-            document.getElementById('patientInfo').textContent =
-                'ข้อมูลล่าสุด: ' + labData.last_visit;
-        } else {
-            document.getElementById('patientInfo').textContent = 'ยังไม่มีข้อมูล';
+        const pi = document.getElementById('patientInfo');
+        if (pi) {
+            const name = labData.patient_name || '';
+            const hn = labData.patient_hn || '';
+            pi.textContent = name
+                ? (name + (hn ? ' (HN ' + hn + ')' : ''))
+                : (hn ? 'HN ' + hn : 'ยังไม่มีข้อมูล');
         }
     } catch (e) {
         const msg = e.name === 'AbortError'
@@ -820,34 +816,55 @@ function renderCkdCard() {
 }
 
 // ── Render Labs ──
-function renderLabs() {
+function renderDocuments() {
     const container = document.getElementById('labList');
     document.getElementById('loadingLabs').style.display = 'none';
 
-    // Show CKD card above labs
-    renderCkdCard();
-
-    if (!labData || !labData.labs || labData.labs.length === 0) {
+    const docs = labData && labData.documents;
+    if (!docs || docs.length === 0) {
         const msg = labData && labData.message
             ? labData.message
-            : 'ยังไม่มีผลแล็บในระบบ';
+            : 'ยังไม่มีเอกสารในระบบ';
         container.innerHTML = '<div class="empty-state"><div class="icon">📋</div>'+
             '<div>' + msg + '</div></div>';
         return;
     }
 
     let html = '';
-    for (const lab of labData.labs) {
-        html += '<div class="card">';
-        html += '<div class="lab-date">📅 ' + (lab.date || 'ไม่ระบุวันที่') + '</div>';
-        for (const a of lab.analytes) {
-            const flagClass = a.flag === 'H' ? 'high' : a.flag === 'L' ? 'low' : 'normal';
-            html += '<div class="lab-row">';
-            html += '<span class="lab-name">' + a.name + '</span>';
-            html += '<span class="lab-value ' + flagClass + '">' + (a.value ?? '-') + '</span>';
-            html += '<span class="lab-unit">' + (a.unit || '') + '</span>';
+    for (const doc of docs) {
+        html += '<div class="card" style="padding:0;overflow:hidden;">';
+        // Header: category + date
+        html += '<div style="padding:12px 16px;background:rgba(0,200,200,0.08);'+
+            'display:flex;justify-content:space-between;align-items:center;">';
+        html += '<span style="font-weight:600;">' + (doc.category || '📄 เอกสาร') + '</span>';
+        html += '<span style="font-size:12px;color:#888;">📅 ' + (doc.date || '') + '</span>';
+        html += '</div>';
+
+        // Document image
+        if (doc.image_url) {
+            html += '<div style="padding:8px;text-align:center;background:#111;">';
+            html += '<img src="' + doc.image_url + '" ' +
+                'style="max-width:100%;max-height:400px;border-radius:4px;cursor:pointer;" ' +
+                'onclick="this.style.maxHeight=this.style.maxHeight===\'none\'?\'400px\':\'none\'" ' +
+                'alt="เอกสาร" loading="lazy">';
+            html += '</div>';
+        } else {
+            html += '<div style="padding:24px;text-align:center;color:#666;">';
+            html += '🖼️ ไม่สามารถแสดงรูปได้';
             html += '</div>';
         }
+
+        // Doctor's note
+        if (doc.doctor_note) {
+            html += '<div style="padding:12px 16px;background:rgba(39,174,96,0.08);'+
+                'border-top:1px solid rgba(39,174,96,0.2);">';
+            html += '<div style="font-size:12px;color:#27ae60;font-weight:600;margin-bottom:4px;">'+
+                '👨‍⚕️ คำแนะนำจากแพทย์</div>';
+            html += '<div style="font-size:14px;white-space:pre-wrap;">' +
+                doc.doctor_note + '</div>';
+            html += '</div>';
+        }
+
         html += '</div>';
     }
     container.innerHTML = html;
