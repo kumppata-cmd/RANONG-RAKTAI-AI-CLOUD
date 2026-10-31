@@ -1333,10 +1333,12 @@ if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
     # เพื่อใช้ code path เดียวกับระบบอื่น → ไม่ติด permission issue
     hn_registry.set_storage(storage)
     logger.info("HNRegistry initialized with GCS storage wrapper")
-    # V4.0: Event Logger + Backup Manager + Approval Engine persistence
+    # V4.0: All modules persistence
     event_logger.set_storage(storage)
     backup_manager.set_storage(storage)
     approval_engine.set_storage(storage)
+    search_service.set_storage(storage)
+    search_service.set_index(doc_index)
     logger.info("V4.0 modules initialized with GCS persistence")
 
 # ─── Master Patient Registry: ทะเบียนผู้ป่วยกลาง ─────────
@@ -5050,6 +5052,141 @@ def api_queue_dlq_retry():
     if ok:
         return jsonify({"success": True, "message": f"Re-enqueued {task_id}"})
     return jsonify({"error": "ไม่พบ task ใน dead-letter queue"}), 404
+
+
+# ═══════════════════════════════════════════════════════════
+# V4.0 Phase 3.2: RBAC API
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/admin/api/v2/rbac/user/<user_hash>", methods=["GET"])
+def api_rbac_user(user_hash):
+    """ดู RBAC info ของผู้ใช้ (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify(rbac_engine.get_user_info(user_hash))
+
+
+# ═══════════════════════════════════════════════════════════
+# V4.0 Phase 3.4: Encryption Status
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/admin/api/v2/encryption/status", methods=["GET"])
+def api_encryption_status():
+    """สถานะ encryption (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify(field_encryptor.get_status())
+
+
+# ═══════════════════════════════════════════════════════════
+# V4.0 Phase 4.1: AI Search API
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/admin/api/v2/search", methods=["GET"])
+def api_search():
+    """ค้นหาเอกสาร (authorized users)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    query = request.args.get("q", "").strip()
+    category = request.args.get("category", "")
+    date_from = request.args.get("from", "")
+    date_to = request.args.get("to", "")
+    limit = min(int(request.args.get("limit", 20)), 50)
+    return jsonify(search_service.search(
+        query, category=category,
+        date_from=date_from, date_to=date_to, limit=limit,
+    ))
+
+
+@app.route("/admin/api/v2/search/categories", methods=["GET"])
+def api_search_categories():
+    """ดูประเภทเอกสาร + จำนวน."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify({"categories": search_service.get_categories()})
+
+
+# ═══════════════════════════════════════════════════════════
+# V4.0 Phase 4.3: Policy Engine API
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/admin/api/v2/policies", methods=["GET"])
+def api_policies():
+    """ดู policies ทั้งหมด (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify({"policies": policy_engine.get_policies()})
+
+
+@app.route("/admin/api/v2/policies/check", methods=["POST"])
+def api_policy_check():
+    """ตรวจ policy สำหรับ action (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    body = request.get_json(silent=True) or {}
+    action = str(body.get("action", "")).strip()
+    if not action:
+        return jsonify({"error": "กรุณาระบุ action"}), 400
+    result = policy_engine.check(action, body.get("context", {}))
+    return jsonify(result.to_dict())
+
+
+@app.route("/admin/api/v2/policies/audit", methods=["GET"])
+def api_policy_audit():
+    """ดู policy audit log (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    limit = min(int(request.args.get("limit", 50)), 200)
+    return jsonify({"audit": policy_engine.get_audit_log(limit)})
+
+
+# ═══════════════════════════════════════════════════════════
+# V4.0 Phase 5.1: Scheduled Jobs API
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/cron/<job_name>", methods=["POST"])
+def run_cron_job(job_name):
+    """รัน scheduled job (Render Cron Jobs endpoint)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    result = job_manager.run(job_name)
+    status_code = 200 if result.success else 500
+    return jsonify(result.to_dict()), status_code
+
+
+@app.route("/admin/api/v2/jobs", methods=["GET"])
+def api_jobs():
+    """ดู registered jobs (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify({
+        "jobs": job_manager.get_jobs(),
+        "stats": job_manager.get_stats(),
+    })
+
+
+@app.route("/admin/api/v2/jobs/history", methods=["GET"])
+def api_jobs_history():
+    """ดูประวัติ job runs (admin only)."""
+    err = _admin_api_auth()
+    if err:
+        return err
+    limit = min(int(request.args.get("limit", 20)), 100)
+    return jsonify({"history": job_manager.get_history(limit)})
 
 
 @app.route("/admin/api/v2/approvals/pending", methods=["GET"])
@@ -9210,6 +9347,30 @@ backup_manager = BackupManager()
 # ── Approval Workflow (V4.0 Phase 3.1) ──
 from approval_workflow import ApprovalEngine
 approval_engine = ApprovalEngine()
+
+# ── RBAC v2 (V4.0 Phase 3.2) ──
+from rbac import RBACEngine, Permission, Role
+rbac_engine = RBACEngine(
+    authorized_users=AUTHORIZED_USERS,
+    physician_users=PHYSICIAN_USERS,
+    admin_users=ADMIN_USERS,
+)
+
+# ── Field Encryption (V4.0 Phase 3.4) ──
+from field_encryption import FieldEncryptor
+field_encryptor = FieldEncryptor()
+
+# ── AI Search (V4.0 Phase 4.1) ──
+from ai_search import SearchService
+search_service = SearchService()
+
+# ── Policy Engine (V4.0 Phase 4.3) ──
+from policy_engine import PolicyEngine
+policy_engine = PolicyEngine()
+
+# ── Scheduled Jobs (V4.0 Phase 5.1) ──
+from scheduled_jobs import ScheduledJobManager
+job_manager = ScheduledJobManager()
 
 # จำกัดงาน OCR ที่ทำพร้อมกันต่อ worker — ป้องกัน OOM บน instance เล็ก
 _ocr_semaphore = threading.Semaphore(max(1, OCR_MAX_CONCURRENT))
