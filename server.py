@@ -1637,6 +1637,25 @@ class DocumentIndex:
         self._ensure_fresh()
         return list(reversed(self._docs[-n:]))
 
+    def find_by_content_sha(self, owner_hash: str, sha256_hex: str) -> dict | None:
+        """หาเอกสารของผู้ส่งคนเดียวกันที่มีเนื้อหา (sha256) ตรงกัน 100%.
+
+        ใช้กันเอกสารซ้ำแบบถาวร (เสริม DedupGuard ที่มี TTL 10 นาที)
+        ตรวจทั้ง content_sha256 ของเอกสาร และ page_sha256s ของเอกสาร
+        ที่รวมจากหลายหน้า — ถ่ายใหม่จะได้ sha ใหม่ จึงไม่กันกรณีตั้งใจส่งคนละรอบ
+        """
+        if not owner_hash or not sha256_hex:
+            return None
+        self._ensure_fresh()
+        for d in reversed(self._docs):
+            if d.get("owner_hash") != owner_hash:
+                continue
+            if d.get("content_sha256") == sha256_hex:
+                return d
+            if sha256_hex in (d.get("page_sha256s") or ()):
+                return d
+        return None
+
     def search(self, query: str, max_results: int = SEARCH_MAX_RESULTS) -> list[dict]:
         """ค้นหาเอกสาร — substring match ใน category, extracted_text, upload_date.
 
@@ -11010,8 +11029,13 @@ def process_file_async(
     merged_ocr_text: str | None = None,
     merged_page_count: int = 0,
     submitted_at_ms: int = 0,
+    batch_id: str | None = None,
+    page_sha256s: list[str] | None = None,
 ):
     """ประมวลผลไฟล์ในเธรดแยก.
+
+    batch_id: รหัสชุดที่ส่งมาพร้อมกัน (multi-image แยกไฟล์) — เก็บใน metadata
+    page_sha256s: sha256 ของแต่ละหน้าที่ถูกรวมเป็น PDF — ใช้กันซ้ำถาวร
 
     doc_id และ sha256_hex มาจากตอนรับไฟล์ ถ้าไม่ส่งมาจะอนุมานจากชื่อไฟล์
     (ชื่อไฟล์เป็น UUID อยู่แล้ว) เพื่อให้เรียกใช้แบบเดิมได้
@@ -11039,14 +11063,15 @@ def process_file_async(
                         _doc_id, "validation_failed",
                         reason[:100],
                     )
+            elif merged_ocr_text:
+                # มีข้อความ OCR มาแล้ว (multi-image batch) → จำแนกจากข้อความนั้น
+                # โดยตรง ไม่ OCR ซ้ำ — classify_with_claude ไม่รับ override และ
+                # External AI ถูกล็อกที่ระดับโค้ดอยู่แล้ว ผลลัพธ์จึงเท่ากัน
+                result = classify_with_keywords(filepath, override_text=merged_ocr_text)
             elif ENABLE_AI_CLASSIFY:
                 result = classify_with_claude(filepath)
             else:
-                # ถ้ามี merged_ocr_text จาก multi-page → ใช้ข้อความรวมสำหรับ classify
-                if merged_ocr_text:
-                    result = classify_with_keywords(filepath, override_text=merged_ocr_text)
-                else:
-                    result = classify_with_keywords(filepath)
+                result = classify_with_keywords(filepath)
 
             category = result.get("category", "review")
 
@@ -11142,7 +11167,11 @@ def process_file_async(
             # ถ้ามี merged_ocr_text จาก multi-page buffer → ใช้ข้อความรวมเลย
             if merged_ocr_text:
                 extracted_text = merged_ocr_text
-                ocr_status = f"ocr_merged_{merged_page_count}pages"
+                ocr_status = (
+                    f"ocr_merged_{merged_page_count}pages"
+                    if merged_page_count > 1
+                    else "ocr_prepass"  # OCR มาแล้วจาก batch (รูปเดียว)
+                )
                 logger.info(
                     f"ใช้ merged OCR text: {merged_page_count} หน้า, "
                     f"{len(extracted_text)} chars"
@@ -11519,6 +11548,12 @@ def process_file_async(
                         result.get("reason", "")[:200]
                     ),
                 }
+                # ── multi-image batch / merged pages (กันซ้ำถาวร + จัดกลุ่ม) ──
+                if batch_id:
+                    doc_meta["batch_id"] = batch_id
+                if page_sha256s:
+                    doc_meta["page_sha256s"] = list(page_sha256s)
+                    doc_meta["page_count"] = len(page_sha256s)
                 # ── patient_hn_folder: ให้ค้นเอกสารจาก HN ผู้ป่วยได้ ──
                 _hn_folder = metadata.get("patient_hn_folder", "")
                 if _hn_folder:
@@ -12004,7 +12039,12 @@ def process_file_async(
                     "พิมพ์ 'สรุปค่าใช้จ่าย' เพื่อดูสรุปรายเดือน"
                 )
             if merged_page_count > 1:
-                _reply_lines.insert(0, f"📄 รวมผลแล็บ {merged_page_count} หน้าสำเร็จ")
+                _reply_lines.insert(
+                    0,
+                    f"📄 รวม{cat_name} {merged_page_count} หน้าเป็น {file_type_name} เดียวสำเร็จ",
+                )
+            elif batch_id:
+                _reply_lines.insert(0, f"📄 {cat_name} (ส่งมาพร้อมกันเป็นชุด)")
             if lab_extracted:
                 _reply_lines.append(
                     f"📋 พบผลตรวจ {len(lab_report.results)} รายการ"
@@ -13381,34 +13421,26 @@ def _multipage_flush(user_hash: str):
         )
         return
 
-    # หลายรูป — รวมเป็นเอกสารเดียว
+    # ══ หลายรูปในหน้าต่างเดียว ══════════════════════════════════
+    # เดิม: เก็บเฉพาะรูปหน้าแรก (หน้า 2+ เหลือแต่ข้อความ OCR → รูปหาย)
+    # ใหม่: จัดประเภทจากหน้าแรกก่อน แล้วเลือกโหมดอัตโนมัติ
+    #   A) lab        → รวมทุกหน้าเป็น PDF เดียว (ครบทุกรูป)
+    #   B) อื่น ๆ      → แยกเป็นเอกสารคนละไฟล์ ผูก batch_id เดียวกัน
+    #      (ใบฟอกเลือด/ใบยา/บิล แต่ละใบคือเอกสารคนละชุด)
+    # ถ้าสร้าง PDF ไม่ได้ (ไม่มี PyMuPDF/ผิดพลาด) → fallback โหมด B เสมอ
+    # เพื่อไม่ให้รูปหาย
     logger.info(
-        f"Multi-page merge: user={user_hash[:8]}…, pages={actual_count}"
+        f"Multi-image batch: user={user_hash[:8]}…, images={actual_count}"
     )
 
-    # แจ้งผู้ใช้ว่าเริ่มประมวลผลรวม
     if line_user_id:
         push_message(
             line_user_id,
-            f"📄 กำลังรวมผลแล็บ {actual_count} หน้าเป็นเอกสารเดียว…",
+            f"📄 ได้รับ {actual_count} หน้า กำลังตรวจประเภทเอกสาร…",
         )
 
-    # ใช้ doc_id ของหน้าแรกเป็นตัวแทนเอกสารรวม
-    primary_doc_id = pages_data[0][3]
-
-    # รวม SHA256 ของทุกหน้าเป็น combined hash
-    combined_sha_input = "|".join(p[2] for p in pages_data)
-    combined_sha256 = hashlib.sha256(
-        combined_sha_input.encode("utf-8")
-    ).hexdigest()
-
-    # บันทึกหน้าแรกลง inbox เป็นไฟล์หลัก
-    primary_data = pages_data[0][0]
-    primary_filename = pages_data[0][4]
-    primary_filepath = save_to_inbox(primary_data, primary_filename)
-
-    # OCR ทุกหน้าและรวมข้อความ
-    combined_texts = []
+    # OCR ทุกหน้า (ใช้ทั้งจัดประเภทและข้อความรวม)
+    page_texts: list[str] = []
     for i, (page_data, page_ext, _, _, _) in enumerate(pages_data, 1):
         page_text = ""
         if HAS_TESSERACT and HAS_PIL:
@@ -13416,32 +13448,107 @@ def _multipage_flush(user_hash: str):
                 page_text = _ocr_from_bytes(page_data, "image")
             except Exception as ocr_err:
                 logger.warning(
-                    f"Multi-page OCR ล้มเหลว หน้า {i}: "
+                    f"Multi-image OCR ล้มเหลว หน้า {i}: "
                     f"{type(ocr_err).__name__}"
                 )
-        if page_text.strip():
-            combined_texts.append(f"[หน้า {i}/{actual_count}]\n{page_text.strip()}")
-        else:
-            combined_texts.append(f"[หน้า {i}/{actual_count}]\n(ไม่สามารถอ่านข้อความได้)")
+        page_texts.append(page_text.strip())
 
-    merged_text = "\n\n".join(combined_texts)
-    logger.info(
-        f"Multi-page OCR สำเร็จ: pages={actual_count}, "
-        f"total_chars={len(merged_text)}"
-    )
+    # จัดประเภทจากหน้าแรก (ไม่ใช้ External AI — keyword classifier เดิม)
+    first_category = "review"
+    try:
+        _first_tmp = save_to_inbox(pages_data[0][0], pages_data[0][4])
+        try:
+            _cls = classify_with_keywords(_first_tmp, override_text=page_texts[0] or None)
+            first_category = (_cls or {}).get("category", "review") or "review"
+        finally:
+            try:
+                os.remove(_first_tmp)
+            except OSError:
+                pass
+    except Exception as cls_err:
+        logger.warning(
+            f"Multi-image classify ล้มเหลว: {type(cls_err).__name__} — ใช้โหมดแยกไฟล์"
+        )
 
-    # ประมวลผลด้วยข้อความรวม — เรียก process_file_async
-    process_file_async(
-        primary_filepath,
-        None,  # reply_token หมดอายุแล้ว — ใช้ push_message แทน
-        doc_id=primary_doc_id,
-        sha256_hex=combined_sha256,
-        owner_hash=user_hash,
-        line_user_id=line_user_id,
-        merged_ocr_text=merged_text,
-        merged_page_count=actual_count,
-        submitted_at_ms=submitted_at_ms,
-    )
+    _cat_label = _CAT_NAMES.get(first_category, first_category)
+    merge_mode = "pdf" if first_category == "lab" else "separate"
+
+    # ── โหมด A: ผลแล็บ → รวมทุกหน้าเป็น PDF เดียว ──
+    if merge_mode == "pdf":
+        pdf_bytes = None
+        if HAS_PYMUPDF:
+            try:
+                _pdf = pymupdf.open()
+                for page_data, page_ext, _, _, _ in pages_data:
+                    _img = pymupdf.open(stream=page_data, filetype=page_ext.lstrip("."))
+                    _rect = _img[0].rect
+                    _pg = _pdf.new_page(width=_rect.width, height=_rect.height)
+                    _pg.insert_image(_rect, stream=page_data)
+                    _img.close()
+                pdf_bytes = _pdf.tobytes(garbage=3, deflate=True)
+                _pdf.close()
+            except Exception as pdf_err:
+                logger.warning(
+                    f"Multi-image PDF merge ล้มเหลว: {type(pdf_err).__name__} "
+                    f"— fallback แยกไฟล์"
+                )
+                pdf_bytes = None
+        if pdf_bytes:
+            primary_doc_id = pages_data[0][3]
+            pdf_filename = f"{primary_doc_id}.pdf"
+            pdf_filepath = save_to_inbox(pdf_bytes, pdf_filename)
+            page_shas = [p[2] for p in pages_data]
+            combined_sha256 = hashlib.sha256(
+                "|".join(page_shas).encode("utf-8")
+            ).hexdigest()
+            merged_text = "\n\n".join(
+                f"[หน้า {i}/{actual_count}]\n{t or '(ไม่สามารถอ่านข้อความได้)'}"
+                for i, t in enumerate(page_texts, 1)
+            )
+            if line_user_id:
+                push_message(
+                    line_user_id,
+                    f"📄 {_cat_label} {actual_count} หน้า → รวมเป็น PDF เดียว…",
+                )
+            logger.info(
+                f"Multi-image → PDF: pages={actual_count}, "
+                f"bytes={len(pdf_bytes)}, chars={len(merged_text)}"
+            )
+            process_file_async(
+                pdf_filepath,
+                None,  # reply_token หมดอายุแล้ว — ใช้ push_message แทน
+                doc_id=primary_doc_id,
+                sha256_hex=combined_sha256,
+                owner_hash=user_hash,
+                line_user_id=line_user_id,
+                merged_ocr_text=merged_text,
+                merged_page_count=actual_count,
+                submitted_at_ms=submitted_at_ms,
+                page_sha256s=page_shas,
+            )
+            return
+        merge_mode = "separate"  # fallback
+
+    # ── โหมด B: แยกเป็นเอกสารคนละไฟล์ (ผูก batch_id) ──
+    batch_id = f"BATCH-{pages_data[0][3][:8]}-{actual_count}"
+    if line_user_id:
+        push_message(
+            line_user_id,
+            f"📄 {_cat_label} {actual_count} ใบ → แยกเก็บเป็น {actual_count} เอกสาร "
+            f"(แต่ละใบประมวลผลแยกกัน)…",
+        )
+    logger.info(f"Multi-image → separate: n={actual_count}, batch={batch_id}")
+    for idx, (data, ext, sha256_hex, doc_id, filename) in enumerate(pages_data):
+        filepath = save_to_inbox(data, filename)
+        process_file_async(
+            filepath, None, doc_id=doc_id, sha256_hex=sha256_hex,
+            owner_hash=user_hash, line_user_id=line_user_id,
+            # ใช้ข้อความ OCR ที่อ่านแล้ว — ไม่ OCR ซ้ำ (ประหยัด CPU บน 512MB)
+            merged_ocr_text=(page_texts[idx] or None),
+            merged_page_count=0,
+            submitted_at_ms=submitted_at_ms,
+            batch_id=batch_id,
+        )
 
 
 def _process_registration_image(
@@ -13653,6 +13760,40 @@ def _handle_incoming_document(
         )
         return
 
+    # ── ชั้นที่ 4: กันซ้ำถาวร — เนื้อหาตรงกับเอกสารที่ผู้ส่งคนนี้เคยส่งแล้ว ──
+    # (DedupGuard ด้านบนมี TTL 10 นาที; ชั้นนี้ตรวจ doc_index ซึ่งถาวร)
+    # ตรงกันเฉพาะ sha256 100% เท่านั้น — ถ่ายใหม่ = ไฟล์ใหม่ = ไม่ถูกกัน
+    try:
+        _dup_doc = doc_index.find_by_content_sha(user_hash, sha256_hex)
+    except Exception as _dup_err:
+        logger.warning(f"ตรวจเอกสารซ้ำถาวรล้มเหลว: {type(_dup_err).__name__}")
+        _dup_doc = None
+    if _dup_doc:
+        _dup_cat = _CAT_NAMES.get(_dup_doc.get("category", ""), "เอกสาร")
+        _dup_date = _dup_doc.get("upload_date", "")
+        _dup_folder = _dup_doc.get("patient_hn_folder", "")
+        logger.info(
+            f"ข้ามเอกสารซ้ำถาวร (sha={sha256_hex[:8]}… "
+            f"doc={_dup_doc.get('document_id', '')[:8]})"
+        )
+        try:
+            audit_logger.log("duplicate_document_blocked", user_hash, {
+                "existing_doc": _dup_doc.get("document_id", "")[:8],
+            })
+        except Exception:
+            pass
+        _dup_lines = [
+            "📎 เอกสารนี้อยู่ในระบบแล้ว — ไม่บันทึกซ้ำ",
+            f"📁 ประเภท: {_dup_cat}",
+        ]
+        if _dup_date:
+            _dup_lines.append(f"📅 รับเมื่อ: {_dup_date}")
+        if _dup_folder:
+            _dup_lines.append(f"👤 แฟ้มผู้ป่วย: {_dup_folder}")
+        _dup_lines.append("💡 ถ้าเป็นเอกสารใหม่ กรุณาถ่ายภาพใหม่แล้วส่งอีกครั้ง")
+        _safe_reply(reply_token, line_user_id, "\n".join(_dup_lines))
+        return
+
     doc_id, filename = build_storage_filename(ext)
 
     # ── Multi-page buffer: เฉพาะภาพเท่านั้น ──
@@ -13680,7 +13821,7 @@ def _handle_incoming_document(
                     _safe_reply(
                         reply_token, line_user_id,
                         f"⚠️ รองรับสูงสุด {_MULTIPAGE_MAX_PAGES} หน้าต่อครั้ง\n"
-                        "กรุณาส่งผลแล็บชุดใหม่หลังจากชุดนี้ประมวลผลเสร็จ",
+                        "กรุณาส่งเอกสารชุดใหม่หลังจากชุดนี้ประมวลผลเสร็จ",
                     )
                     # อัปเดต timestamp เพื่อให้ timer defer ได้
                     meta["last_image_ts"] = time.time()
