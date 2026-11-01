@@ -5750,8 +5750,17 @@ populateSelects();
 @app.route("/admin/api/v2/treatment-note", methods=["POST"])
 def api_treatment_note():
     """บันทึกคำสั่งการรักษา/แก้ไข จากหน้าเปรียบเทียบ"""
-    _check_admin_secret()
-    data = request.get_json(force=True)
+    data = request.get_json(force=True) or {}
+    # หน้าเปรียบเทียบส่ง secret มาใน JSON body — ตรวจกับ ADMIN_SECRET
+    # (เดิมเรียก _check_admin_secret() ซึ่งไม่มีใน server.py → NameError 500
+    #  ทุกครั้งที่กดบันทึก; CI จับได้ตั้งแต่ 9381ca4 แต่ deploy ไปก่อน)
+    _admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    _body_secret = str(data.get("secret", "") or "")
+    if not _admin_secret or not _body_secret or not hmac.compare_digest(
+        _body_secret.encode("utf-8", "surrogateescape"),
+        _admin_secret.encode("utf-8"),
+    ):
+        return jsonify({"error": "Unauthorized"}), 401
     hn = data.get("hn", "")
     doc_id = data.get("doc_id", "")
     action = data.get("action", "")
@@ -9213,7 +9222,7 @@ try:
         rbac=rbac_engine,
         policy_engine=policy_engine,
         event_logger=event_logger,
-        push_message=push_message if 'push_message' in dir() else None,
+        push_message=None,  # นิยามทีหลัง — wire ใน block หลัง def push_message
     )
 except Exception as _v5_err:
     logger.warning("V5.0 init: %s: %s", type(_v5_err).__name__, _v5_err)
