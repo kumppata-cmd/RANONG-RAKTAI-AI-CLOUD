@@ -1217,6 +1217,62 @@ def extract_patient_name_from_document(text: str) -> str:
     return ""
 
 
+# คำหัวตาราง/field label ที่มักอยู่ถัดจากช่องชื่อในแบบฟอร์ม (HD flow sheet,
+# ใบสั่งยา, ใบแล็บ) — OCR อ่านรวมบรรทัดจึงติดท้ายชื่อมา  ตรวจแบบ whole-word,
+# ไม่ case-sensitive, ตัดซ้ำจนกว่าท้ายชื่อจะไม่เหลือ label
+_TRAILING_FIELD_LABELS = (
+    # ข้อมูลพื้นฐาน
+    r"age", r"sex", r"gender", r"dob", r"birth", r"birthdate", r"date", r"time",
+    r"ward", r"bed", r"room", r"dept", r"department", r"unit", r"clinic",
+    r"wt", r"weight", r"ht", r"height", r"bw", r"dw", r"dry\s*weight", r"bmi",
+    r"tel", r"phone", r"mobile", r"address", r"id", r"no", r"vn", r"an", r"hn",
+    r"dr", r"doctor", r"physician", r"nurse", r"rn", r"md",
+    r"diagnosis", r"dx", r"allergy", r"allergies", r"remark", r"note",
+    # HD flow sheet
+    r"shift", r"machine", r"dialyzer", r"access", r"av\s*fistula", r"avf", r"avg",
+    r"catheter", r"blood\s*flow", r"bfr", r"dfr", r"uf", r"pre\s*hd", r"post\s*hd",
+    # ไทย
+    r"อายุ", r"เพศ", r"ชาย", r"หญิง", r"วันเกิด", r"ว/ด/ป", r"เตียง", r"หอ", r"แผนก",
+    r"น้ำหนัก", r"ส่วนสูง", r"โทร", r"ที่อยู่", r"แพทย์", r"พยาบาล", r"หมายเหตุ",
+    r"ปี", r"กก", r"ซม", r"kg", r"kgs", r"cm", r"yr", r"yrs", r"y/o",
+)
+# หนึ่ง "หน่วย" = [ช่องว่าง/ตัวคั่น] label [ตัวคั่น] [ค่าสั้นๆ เช่น M, F, 52, 60.5]
+# - label ต้องนำหน้าด้วยช่องว่าง/ตัวคั่น/ต้นสตริง (ไม่ใช่กลางคำ เช่น P-age, Ja-id-ee)
+# - label ละตินต้องจบที่ขอบคำ (ไม่ตัด "Anne" เพราะ "an")
+_TRAILING_LABEL_UNIT = (
+    r"(?:^|(?<=[\s:：\-–—/|(\[]))"                      # ขอบซ้าย
+    r"\s*[:：\-–—/|(\[]?\s*"
+    r"(?:" + "|".join(_TRAILING_FIELD_LABELS) + r")"
+    r"(?![A-Za-z฀-๿])"                        # ขอบขวาของ label
+    r"\s*[:：.\-–—/|)\]]*\s*"
+    r"(?:(?<![A-Za-z])[A-Za-z]{1,2}(?![A-Za-z])|\d+(?:[.,]\d+)?)?"  # ค่าสั้นๆ (M/F, 52)
+    r"\s*"
+)
+_TRAILING_LABEL_RE = re.compile(r"(?:" + _TRAILING_LABEL_UNIT + r")+$", flags=re.IGNORECASE)
+
+
+def _strip_trailing_field_labels(name: str) -> str:
+    """ตัด field label (age/sex/DOB/อายุ ฯลฯ) และค่าสั้นๆ ที่ตามมา ออกจากท้ายชื่อ
+
+    ตัดเฉพาะท้ายชื่อเท่านั้น — ไม่แตะคำที่อยู่กลางชื่อ เพื่อไม่ทำลายชื่อจริง
+    ตัวอย่าง:
+      "นาวี คำแสนโคตร age"        → "นาวี คำแสนโคตร"
+      "สมชาย ใจดี Sex M Age 52"   → "สมชาย ใจดี"
+      "มานี มีนา อายุ 60 ปี"       → "มานี มีนา"
+      "Somchai Jaidee DOB"         → "Somchai Jaidee"
+    """
+    if not name:
+        return name
+    out = name
+    for _ in range(5):  # วนซ้ำกัน label ซ้อนกันหลายชั้น
+        new = _TRAILING_LABEL_RE.sub("", out).strip()
+        if new == out:
+            break
+        out = new
+    # กันกรณีตัดจนเหลือสั้นผิดปกติ (ชื่อจริงบังเอิญเป็นคำใน list) → คืนค่าเดิม
+    return out if len(out) >= 2 else name
+
+
 def _clean_patient_name(raw: str) -> str:
     """ทำความสะอาดชื่อ — ตัดคำนำหน้า, whitespace, ตัวเลข, HN/VN ฯลฯ"""
     if not raw:
@@ -1231,6 +1287,9 @@ def _clean_patient_name(raw: str) -> str:
     )
     # ตัด "H N" (OCR อ่านผิด) ที่ติดมาท้ายชื่อ
     cleaned = re.sub(r'\s+H\s+N\s*$', '', cleaned)
+    # ตัดคำหัวตาราง (field labels) ที่ OCR อ่านติดมาท้ายชื่อ เช่น
+    # "นาวี คำแสนโคตร age" / "... Sex M" / "... DOB" / "... อายุ 52 ปี"
+    cleaned = _strip_trailing_field_labels(cleaned)
     # ตัด title prefix ก่อน clean (เก็บชื่อจริง)
     title_stripped = re.sub(
         r'^(?:นาย|นาง(?:สาว)?|เด็กชาย|เด็กหญิง|ด\.ช\.|ด\.ญ\.|Mr\.?\s*|Mrs\.?\s*|Ms\.?\s*|Miss\s+)',
