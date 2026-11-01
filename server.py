@@ -13611,8 +13611,9 @@ def _multipage_flush(user_hash: str):
     if line_user_id:
         push_message(
             line_user_id,
-            f"📄 {_cat_label} {actual_count} ใบ → แยกเก็บเป็น {actual_count} เอกสาร "
-            f"(แต่ละใบประมวลผลแยกกัน)…",
+            f"📄 ได้รับ {actual_count} รูป → แยกเก็บเป็น {actual_count} เอกสาร "
+            f"(แต่ละใบตรวจประเภทและประมวลผลแยกกัน "
+            f"— จะแจ้งผลทีละใบ)…",
         )
     logger.info(f"Multi-image → separate: n={actual_count}, batch={batch_id}")
     for idx, (data, ext, sha256_hex, doc_id, filename) in enumerate(pages_data):
