@@ -2000,6 +2000,48 @@ class DocumentIndex:
                 return False
         return True
 
+    def update_fields(self, doc_id: str, fields: dict) -> bool:
+        """อัปเดต field ของเอกสารแบบ versioned (create-only) — ใช้แทนการ
+        เขียนทับ {doc_id}.json ซึ่ง SA ทำไม่ได้ (403)"""
+        self._ensure_fresh()
+        doc = self._doc_map.get(doc_id)
+        if doc is None:
+            return False
+        for k, v in (fields or {}).items():
+            doc[k] = v
+        if not self._storage.is_ready:
+            return False
+        try:
+            _ts = int(time.time() * 1000)
+            blob = self._storage._bucket.blob(
+                f"{INDEX_DOC_PREFIX}{doc_id}_v{_ts}.json"
+            )
+            blob.upload_from_string(
+                json.dumps(doc, ensure_ascii=False),
+                content_type="application/json",
+                if_generation_match=0,
+            )
+            return True
+        except Exception as e:
+            logger.warning("Document index update_fields failed: %s", type(e).__name__)
+            return False
+
+    @staticmethod
+    def derive_patient_folder(doc: dict) -> str:
+        """แฟ้มผู้ป่วยของเอกสาร: field patient_hn_folder หรือเดาจาก path
+        (folder/YYYY-QN/YYYY-MM/<HN>_<ชื่อ>/file) — เอกสารเก่าที่ถูกย้ายเข้า
+        แฟ้มผู้ป่วยย้อนหลัง ไม่มี field นี้"""
+        f = (doc.get("patient_hn_folder") or "").strip()
+        if f:
+            return f
+        p = doc.get("gcs_object_path", "") or ""
+        if p.startswith("gs://"):
+            p = p.split("/", 3)[3] if p.count("/") >= 3 else ""
+        parts = p.split("/")
+        if len(parts) >= 5 and re.match(r"^[A-Za-z0-9-]{3,20}(_|$)", parts[3]):
+            return parts[3]
+        return ""
+
     def assign_owner(self, doc_id: str, owner_hash: str) -> bool:
         """กำหนด owner_hash ให้เอกสาร — สำหรับ admin เท่านั้น.
 
@@ -7085,6 +7127,19 @@ def handle_search_command(
             f"🏥 HN คลินิก: {_clinic_hn}\n\n"
             "กดเมนู \"ดูผลแล็บ\" เพื่อดูเอกสารของคุณ\n"
             "(เห็นเฉพาะของตัวเองเท่านั้น)"
+        )
+
+    if text_stripped in ("ซ่อมดัชนีแฟ้ม", "ซ่อมดัชนี", "reconcile index"):
+        if not is_admin_user(user_hash):
+            return None
+        _r = _reconcile_patient_folder_index()
+        audit_logger.log("index_reconcile", user_hash, _r)
+        return (
+            "🛠 ซ่อมดัชนีแฟ้มผู้ป่วยแล้ว\n"
+            f"ไฟล์ในแฟ้มผู้ป่วย: {_r.get('scanned_files', 0)}\n"
+            f"แก้ index: {_r.get('fixed', 0)} · ถูกอยู่แล้ว: {_r.get('already_ok', 0)}\n"
+            f"ไม่พบไฟล์ในแฟ้มผู้ป่วย: {_r.get('no_index', 0)} · ผิดพลาด: {_r.get('errors', 0)}\n"
+            "(ผลมีผลทันทีใน LIFF/ค้นหา ภายใน 5 วินาที)"
         )
 
     if text_stripped in ("ส่งเตือนนัดตอนนี้", "รันเตือนนัด", "run reminders"):
@@ -13751,6 +13806,57 @@ def _move_document_to_patient(
         return {"error": f"ย้ายเอกสารไม่สำเร็จ ({type(e).__name__})"}
 
 
+def _reconcile_patient_folder_index() -> dict:
+    """ซ่อม index ให้ตรงกับไฟล์จริงในแฟ้มผู้ป่วยบน GCS
+
+    ที่มา: การย้ายเอกสารเข้าแฟ้มผู้ป่วยย้อนหลัง (retroactive routing /
+    ย้ายเอกสาร) คัดลอกไฟล์สำเร็จ แต่การเขียน index ล้มเหลวเงียบ ๆ (403)
+    → ไฟล์อยู่ในแฟ้มผู้ป่วย (คอมเห็น) แต่ index ไม่รู้ว่าเป็นของ HN ไหน
+    (LIFF/ค้นหาไม่เห็น)  วิธีซ่อม: ไล่ไฟล์จริงใน 03/04/05 ที่อยู่ในแฟ้ม
+    <HN>_<ชื่อ> แล้วอัปเดต index (versioned) ให้ชี้ path นั้น + patient_hn_folder
+    """
+    out = {"scanned_files": 0, "fixed": 0, "already_ok": 0, "no_index": 0, "errors": 0}
+    if not storage.is_ready:
+        out["error"] = "storage not ready"
+        return out
+    doc_index._ensure_fresh()
+    by_file: dict[str, tuple[str, str]] = {}
+    for cat in ("lab", "rx", "dialysis"):
+        prefix = FOLDERS.get(cat, "") + "/"
+        try:
+            for b in storage._bucket.list_blobs(prefix=prefix):
+                parts = b.name.split("/")
+                if len(parts) != 5:
+                    continue  # ไม่ได้อยู่ในแฟ้มผู้ป่วย
+                out["scanned_files"] += 1
+                by_file[parts[4]] = (b.name, parts[3])
+        except Exception as e:
+            logger.warning("reconcile list failed (%s): %s", cat, type(e).__name__)
+            out["errors"] += 1
+    for doc in list(doc_index._doc_map.values()):
+        if doc.get("category") not in ("lab", "rx", "dialysis"):
+            continue
+        p = doc.get("gcs_object_path", "") or ""
+        fname = p.rsplit("/", 1)[-1]
+        hit = by_file.get(fname)
+        if not hit:
+            out["no_index"] += 1
+            continue
+        new_path, folder = hit
+        cur = p.split("/", 3)[3] if p.startswith("gs://") and p.count("/") >= 3 else p
+        if cur == new_path and doc.get("patient_hn_folder") == folder:
+            out["already_ok"] += 1
+            continue
+        if doc_index.update_fields(doc.get("document_id", ""), {
+            "gcs_object_path": new_path, "patient_hn_folder": folder,
+        }):
+            out["fixed"] += 1
+        else:
+            out["errors"] += 1
+    logger.info("reconcile patient folder index: %s", out)
+    return out
+
+
 def _parse_move_bill(text: str):
     """คำสั่งย้ายบิลไปแฟ้มบริษัท: "ย้ายบิล <รหัสเอกสาร> <ชื่อแฟ้มบริษัท>"
 
@@ -16497,17 +16603,13 @@ def admin_retroactive_route():
             if dest_blob.exists():
                 # อัปเดต doc index ให้ชี้ path ใหม่ (ถ้ายังไม่ได้อัปเดต)
                 new_gcs_uri = f"gs://{storage.bucket_name}/{new_blob_path}"
-                if doc.get("gcs_object_path") != new_gcs_uri:
-                    doc["gcs_object_path"] = new_gcs_uri
-                    idx_path = f"_index/docs/{doc_id}.json"
-                    try:
-                        idx_blob = storage._bucket.blob(idx_path)
-                        idx_blob.upload_from_string(
-                            json.dumps(doc, ensure_ascii=False),
-                            content_type="application/json",
-                        )
-                    except Exception:
-                        pass
+                if doc.get("gcs_object_path") != new_gcs_uri or (
+                    matched_folder and doc.get("patient_hn_folder") != matched_folder
+                ):
+                    doc_index.update_fields(doc_id, {
+                        "gcs_object_path": new_gcs_uri,
+                        "patient_hn_folder": matched_folder or doc.get("patient_hn_folder", ""),
+                    })
                 entry["action"] = "already_copied"
                 already_in_folder += 1
                 continue
@@ -16526,20 +16628,15 @@ def admin_retroactive_route():
 
             # อัปเดต doc index — เขียน per-doc JSON ใหม่ ด้วย gcs_object_path ใหม่
             new_gcs_uri = f"gs://{storage.bucket_name}/{new_blob_path}"
-            doc["gcs_object_path"] = new_gcs_uri
-
-            # เขียน per-doc index file ใหม่
-            idx_path = f"_index/docs/{doc_id}.json"
-            try:
-                idx_blob = storage._bucket.blob(idx_path)
-                idx_blob.upload_from_string(
-                    json.dumps(doc, ensure_ascii=False),
-                    content_type="application/json",
-                )
-            except Exception as idx_err:
+            # เขียน index แบบ versioned — เดิมเขียนทับ {doc_id}.json ได้ 403
+            # เงียบ ๆ ทำให้ไฟล์ถูกคัดลอกเข้าแฟ้มผู้ป่วยแล้ว แต่ index ยังชี้ที่เก่า
+            # และไม่มี patient_hn_folder → LIFF/ค้นหาไม่เห็น
+            if not doc_index.update_fields(doc_id, {
+                "gcs_object_path": new_gcs_uri,
+                "patient_hn_folder": matched_folder or doc.get("patient_hn_folder", ""),
+            }):
                 logger.warning(
-                    "Retroactive route: index update failed for %s: %s",
-                    doc_id_short, type(idx_err).__name__,
+                    "Retroactive route: index update failed for %s", doc_id_short,
                 )
 
             entry["action"] = "copied"

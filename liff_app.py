@@ -247,6 +247,15 @@ def get_patient_labs_for_liff(
                         continue
                     folder = (doc.get("patient_hn_folder") or "").upper()
                     if not folder:
+                        # เอกสารเก่าที่ถูกย้ายเข้าแฟ้มผู้ป่วยย้อนหลัง ไม่มี field นี้
+                        # → เดาจาก path: folder/YYYY-QN/YYYY-MM/<HN>_<ชื่อ>/file
+                        _p = doc.get("gcs_object_path", "") or ""
+                        if _p.startswith("gs://"):
+                            _p = _p.split("/", 3)[3] if _p.count("/") >= 3 else ""
+                        _parts = _p.split("/")
+                        if len(_parts) >= 5:
+                            folder = _parts[3].upper()
+                    if not folder:
                         continue
                     # [SEC-3] เทียบ HN แบบตรงตัวเท่านั้น: แฟ้มชื่อ "<HN>_<ชื่อ>"
                     # หรือ "<HN>"  เดิมใช้ substring (hn in folder) ทำให้
