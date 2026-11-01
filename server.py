@@ -17753,6 +17753,14 @@ def _reconcile_on_boot_worker():
     import time as _t
     _t.sleep(45)  # รอ index โหลดและ Redis/GCS พร้อม
     global _last_reconcile
+    # ให้ worker เดียวทำ — 2 workers ทำพร้อมกันจะชนกันตอน copy ไฟล์เดียวกัน
+    # (SA เขียนทับไม่ได้ → อีกฝั่งได้ 403 ถูกนับเป็น error ทั้งที่งานสำเร็จแล้ว)
+    try:
+        if not state_store.set_if_absent("boot_maintenance_lock", 600):
+            _last_reconcile = {"skipped": "another worker is running maintenance"}
+            return
+    except Exception:
+        pass
     try:
         _last_reconcile = _reconcile_patient_folder_index()
         _last_reconcile["at"] = datetime.now(timezone.utc).isoformat()
