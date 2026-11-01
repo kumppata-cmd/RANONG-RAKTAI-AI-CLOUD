@@ -19,6 +19,27 @@ from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
+import threading
+
+# ── Thread-safety guard ──────────────────────────────────────
+# googleapiclient/httplib2 ไม่ thread-safe: เมื่อเอกสารหลายฉบับถูก
+# ประมวลผลพร้อมกัน (multi-image batch) แล้วเรียก API ผ่าน service
+# object เดียวกัน จะเกิด SSLError และ worker ถูก abort (exit 134)
+# → ทุกการเรียก API ของโมดูลนี้ต้องผ่าน lock เดียวกัน (serialize)
+_api_lock = threading.RLock()
+
+
+def _serialized(fn):
+    """เรียก fn ทีละ thread เท่านั้น — กัน SSL abort ของ httplib2."""
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        with _api_lock:
+            return fn(*args, **kwargs)
+
+    return _wrapper
+
 DRIVE_ENABLED = os.getenv("GOOGLE_DRIVE_ENABLED", "").strip().lower() == "true"
 DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
 
@@ -52,6 +73,7 @@ def is_available() -> bool:
     return DRIVE_ENABLED and bool(DRIVE_FOLDER_ID)
 
 
+@_serialized
 def get_status() -> dict:
     """สถานะการเชื่อมต่อ Drive."""
     status: dict = {
@@ -123,6 +145,7 @@ def _find_or_create_folder(
 # ─── Upload ──────────────────────────────────────────────────
 
 
+@_serialized
 def upload_document(
     file_content: bytes,
     filename: str,
@@ -181,6 +204,7 @@ def upload_document(
 # ─── List / Query ────────────────────────────────────────────
 
 
+@_serialized
 def list_backups(subfolder: str = "", limit: int = 50) -> list[dict]:
     """แสดงรายการ backup ใน Drive."""
     if not is_available():
@@ -208,6 +232,7 @@ def list_backups(subfolder: str = "", limit: int = 50) -> list[dict]:
         return []
 
 
+@_serialized
 def count_backups() -> int:
     """นับจำนวนไฟล์ทั้งหมดใน backup folder."""
     if not is_available():
@@ -229,6 +254,7 @@ def count_backups() -> int:
 # ─── Backup from GCS ─────────────────────────────────────────
 
 
+@_serialized
 def backup_document_from_gcs(
     gcs_storage, gcs_path: str, subfolder: str = ""
 ) -> dict:

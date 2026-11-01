@@ -20,6 +20,27 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+import threading
+
+# ── Thread-safety guard ──────────────────────────────────────
+# googleapiclient/httplib2 ไม่ thread-safe: เมื่อเอกสารหลายฉบับถูก
+# ประมวลผลพร้อมกัน (multi-image batch) แล้วเรียก API ผ่าน service
+# object เดียวกัน จะเกิด SSLError และ worker ถูก abort (exit 134)
+# → ทุกการเรียก API ของโมดูลนี้ต้องผ่าน lock เดียวกัน (serialize)
+_api_lock = threading.RLock()
+
+
+def _serialized(fn):
+    """เรียก fn ทีละ thread เท่านั้น — กัน SSL abort ของ httplib2."""
+    import functools
+
+    @functools.wraps(fn)
+    def _wrapper(*args, **kwargs):
+        with _api_lock:
+            return fn(*args, **kwargs)
+
+    return _wrapper
+
 SHEETS_ENABLED = os.getenv("GOOGLE_SHEETS_ENABLED", "").strip().lower() == "true"
 SHEETS_ID = os.getenv("GOOGLE_SHEETS_ID", "").strip()
 
@@ -53,6 +74,7 @@ def is_available() -> bool:
     return SHEETS_ENABLED and bool(SHEETS_ID)
 
 
+@_serialized
 def get_status() -> dict:
     """สถานะการเชื่อมต่อ Sheets."""
     status: dict = {
@@ -186,6 +208,7 @@ def _append_rows(
 # ─── Sync functions ──────────────────────────────────────────
 
 
+@_serialized
 def sync_patient_registry(master_registry) -> dict:
     """Sync รายชื่อผู้ป่วยทั้งหมดไป Sheets.
 
@@ -232,6 +255,7 @@ def sync_patient_registry(master_registry) -> dict:
         return {"error": f"sync ไม่สำเร็จ: {type(e).__name__}"}
 
 
+@_serialized
 def sync_lab_summary(doc_index, storage) -> dict:
     """Sync สรุปผลแล็บล่าสุดของทุกคนไป Sheets.
 
@@ -345,6 +369,7 @@ def sync_lab_summary(doc_index, storage) -> dict:
         return {"error": f"sync ไม่สำเร็จ: {type(e).__name__}"}
 
 
+@_serialized
 def sync_kpi_data(kpi_data: dict) -> dict:
     """Sync KPI data ไป Sheets.
 
@@ -384,6 +409,7 @@ def sync_kpi_data(kpi_data: dict) -> dict:
         return {"error": f"sync ไม่สำเร็จ: {type(e).__name__}"}
 
 
+@_serialized
 def append_document_log(doc_meta: dict) -> dict:
     """เพิ่ม row เมื่อมีเอกสารใหม่.
 

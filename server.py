@@ -11039,6 +11039,11 @@ def copy_to_category(
     return cloud_path if cloud_path and cloud_path.startswith("gs://") else dest_path
 
 
+# จำนวนเอกสารที่ประมวลผล (OCR/จำแนก/อัปโหลด) พร้อมกันได้ต่อ worker
+_PROCESS_MAX_CONCURRENT = max(1, int(os.getenv("PROCESS_MAX_CONCURRENT", "2")))
+_PROCESS_SEMAPHORE = threading.BoundedSemaphore(_PROCESS_MAX_CONCURRENT)
+
+
 def process_file_async(
     filepath: str,
     reply_token: str | None = None,
@@ -11072,6 +11077,13 @@ def process_file_async(
     _doc_id = doc_id or os.path.splitext(os.path.basename(filepath))[0]
 
     def _run():
+        # จำกัดจำนวนเอกสารที่ OCR/ประมวลผลพร้อมกันต่อ worker — ส่งหลายรูป
+        # พร้อมกันเคยทำให้หน่วยความจำพุ่งเกิน 512MB แล้ว instance ถูกฆ่า
+        # (exit 137) ก่อนตอบกลับ; รายการที่เกินจะรอคิว ไม่ถูกทิ้ง
+        with _PROCESS_SEMAPHORE:
+            _run_inner()
+
+    def _run_inner():
         try:
             is_valid, reason = validate_file(filepath)
             if not is_valid:
@@ -12795,6 +12807,42 @@ def _relocate_document_to_patient(
         return False, f"ย้ายไม่สำเร็จ: {type(e).__name__}"
 
 
+
+def _patient_ctx_write(user_hash: str, data: dict) -> None:
+    """เขียนสถานะผู้ป่วยปัจจุบันแบบ versioned (create-only)
+
+    Service Account มีสิทธิ์สร้าง object เท่านั้น — การเขียนทับไฟล์เดิม
+    `<hash>.json` ได้ 403 Forbidden ตั้งแต่ครั้งที่ 2 ทำให้โหมด
+    "ผู้ป่วย <HN>" ใช้ได้แค่ครั้งแรกต่อคน จึงเขียนเป็นไฟล์ใหม่ทุกครั้ง
+    `<hash>/v<timestamp>.json` แล้วอ่านตัวล่าสุด
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
+    blob = storage._bucket.blob(
+        f"{_PATIENT_CTX_GCS_PREFIX}{user_hash}/v{ts}.json"
+    )
+    blob.upload_from_string(
+        json.dumps(data, ensure_ascii=False),
+        content_type="application/json",
+        if_generation_match=0,
+    )
+
+
+def _patient_ctx_read(user_hash: str) -> dict | None:
+    """อ่านสถานะผู้ป่วยปัจจุบันตัวล่าสุด (fallback ไฟล์เดี่ยวแบบเก่า)"""
+    prefix = f"{_PATIENT_CTX_GCS_PREFIX}{user_hash}/v"
+    latest = None
+    for b in storage._bucket.list_blobs(prefix=prefix):
+        if latest is None or b.name > latest.name:
+            latest = b
+    if latest is None:
+        legacy = storage._bucket.blob(
+            f"{_PATIENT_CTX_GCS_PREFIX}{user_hash}.json"
+        )
+        if not legacy.exists():
+            return None
+        latest = legacy
+    return json.loads(latest.download_as_text())
+
 def _set_patient_context(
     user_hash: str, patient_folder: str, hn_display: str, patient_name: str,
 ) -> bool:
@@ -12803,18 +12851,12 @@ def _set_patient_context(
         if not storage.is_ready or not hasattr(storage, "_bucket"):
             logger.warning("Storage not ready for patient context")
             return False
-        blob = storage._bucket.blob(
-            f"{_PATIENT_CTX_GCS_PREFIX}{user_hash}.json"
-        )
-        blob.upload_from_string(
-            json.dumps({
-                "timestamp": time.time(),
-                "patient_folder": patient_folder,
-                "hn_display": hn_display,
-                "patient_name": patient_name,
-            }, ensure_ascii=False),
-            content_type="application/json",
-        )
+        _patient_ctx_write(user_hash, {
+            "timestamp": time.time(),
+            "patient_folder": patient_folder,
+            "hn_display": hn_display,
+            "patient_name": patient_name,
+        })
         return True
     except Exception as e:
         logger.warning(f"Failed to set patient context: {type(e).__name__}")
@@ -12826,12 +12868,9 @@ def _get_patient_context(user_hash: str) -> dict | None:
     try:
         if not storage.is_ready or not hasattr(storage, "_bucket"):
             return None
-        blob = storage._bucket.blob(
-            f"{_PATIENT_CTX_GCS_PREFIX}{user_hash}.json"
-        )
-        if not blob.exists():
+        data = _patient_ctx_read(user_hash)
+        if data is None:
             return None
-        data = json.loads(blob.download_as_text())
         if data.get("cleared") or not data.get("patient_folder"):
             return None
         if (time.time() - data.get("timestamp", 0)) >= _PATIENT_CTX_TIMEOUT:
@@ -12846,13 +12885,7 @@ def _clear_patient_context(user_hash: str):
     try:
         if not storage.is_ready or not hasattr(storage, "_bucket"):
             return
-        blob = storage._bucket.blob(
-            f"{_PATIENT_CTX_GCS_PREFIX}{user_hash}.json"
-        )
-        blob.upload_from_string(
-            json.dumps({"cleared": True, "timestamp": 0}),
-            content_type="application/json",
-        )
+        _patient_ctx_write(user_hash, {"cleared": True, "timestamp": 0})
     except Exception:
         pass
 
