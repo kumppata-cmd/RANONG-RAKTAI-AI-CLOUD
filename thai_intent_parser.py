@@ -363,11 +363,6 @@ RULES: list[IntentRule] = [
         priority=54, base_confidence=0.8,
     ),
     IntentRule(
-        name="encryption", intent="encryption_status",
-        patterns=[r"encrypt", r"เข้ารหัส", r"ความปลอดภัย"],
-        priority=53, base_confidence=0.8,
-    ),
-    IntentRule(
         name="health", intent="system_health",
         patterns=[
             r"สถานะระบบ", r"ระบบ.*(?:เป็นยังไง|เป็นอย่างไร|โอเค|ok|ปกติ|พร้อม)",

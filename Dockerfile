@@ -61,12 +61,9 @@ COPY liff_app.py .
 
 # V4.0: Platform modules
 COPY event_logger.py .
-COPY task_queue.py .
 COPY backup_manager.py .
 COPY approval_workflow.py .
 COPY rbac.py .
-COPY field_encryption.py .
-COPY ai_search.py .
 COPY policy_engine.py .
 COPY scheduled_jobs.py .
 

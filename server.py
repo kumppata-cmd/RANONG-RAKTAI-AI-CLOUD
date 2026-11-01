@@ -314,6 +314,15 @@ MAX_INDEX_TEXT_LENGTH = 5000
 # GCS paths for index/audit data
 INDEX_OBJECT_PATH = "_index/documents.jsonl"  # legacy — อ่านอย่างเดียว (backward compat)
 INDEX_DOC_PREFIX = "_index/docs/"  # per-document JSON files (ใช้แทน JSONL)
+
+# ชื่อประเภทเอกสารภาษาไทย — ใช้ที่เดียวทั้งไฟล์ (ข้อความ LINE, Flex, dashboard)
+_CAT_NAMES = {
+    "bills": "ใบเสร็จ/บิล",
+    "rx": "ใบสั่งยา",
+    "lab": "ผลตรวจแล็บ",
+    "dialysis": "เอกสารฟอกเลือด",
+    "review": "รอตรวจสอบ",
+}
 AUDIT_PREFIX = "_audit/"
 INDEX_CACHE_TTL = 5  # วินาที — reload index จาก GCS ทุก 5 วินาที (multi-worker safe)
 
@@ -3782,11 +3791,7 @@ def format_document_text_for_line(text: str, doc_meta: dict) -> str:
 
     ตัดข้อความถ้ายาวเกิน LINE limit
     """
-    cat_names = {
-        "bills": "ใบเสร็จ/บิล", "rx": "ใบสั่งยา",
-        "lab": "ผลตรวจแล็บ", "dialysis": "เอกสารฟอกเลือด",
-        "review": "รอตรวจสอบ",
-    }
+    cat_names = _CAT_NAMES  # ตารางชื่อประเภทรวมที่เดียว
     cat = cat_names.get(doc_meta.get("category", ""), doc_meta.get("category", ""))
     header = (
         f"📄 เอกสาร: [{cat}]\n"
@@ -3896,13 +3901,6 @@ def get_download_url(gcs_path: str) -> str | None:
 # แทนที่การส่ง URL เป็นข้อความยาว → ส่ง Flex Message พร้อมปุ่ม
 # ─────────────────────────────────────────────────────────────
 
-_CAT_NAMES = {
-    "bills": "ใบเสร็จ/บิล",
-    "rx": "ใบสั่งยา",
-    "lab": "ผลตรวจแล็บ",
-    "dialysis": "เอกสารฟอกเลือด",
-    "review": "รอตรวจสอบ",
-}
 
 
 def build_file_flex_message(doc: dict, download_url: str) -> dict:
@@ -5013,7 +5011,6 @@ def api_metrics():
             "by_category": cat_counts,
         },
         "events": event_logger.get_stats(),
-        "queue": task_queue.get_stats(),
         "state_store": {
             "status": state_store.status,
             "shared": state_store.is_shared,
@@ -5024,48 +5021,6 @@ def api_metrics():
             "workers": 2,
         },
     })
-
-
-# ═══════════════════════════════════════════════════════════
-# V4.0 Phase 2.3: Dead-letter Queue API + Task Queue API
-# ═══════════════════════════════════════════════════════════
-
-
-@app.route("/admin/api/v2/queue/stats", methods=["GET"])
-def api_queue_stats():
-    """สถิติ task queue (admin only)."""
-    err = _admin_api_auth()
-    if err:
-        return err
-    return jsonify(task_queue.get_stats())
-
-
-@app.route("/admin/api/v2/queue/dlq", methods=["GET"])
-def api_queue_dlq():
-    """ดู dead-letter items (admin only)."""
-    err = _admin_api_auth()
-    if err:
-        return err
-    limit = min(int(request.args.get("limit", 20)), 100)
-    return jsonify({
-        "items": task_queue.get_dlq_items(limit),
-    })
-
-
-@app.route("/admin/api/v2/queue/dlq/retry", methods=["POST"])
-def api_queue_dlq_retry():
-    """Retry task จาก dead-letter queue (admin only)."""
-    err = _admin_api_auth()
-    if err:
-        return err
-    body = request.get_json(silent=True) or {}
-    task_id = str(body.get("task_id", "")).strip()
-    if not task_id:
-        return jsonify({"error": "กรุณาระบุ task_id"}), 400
-    ok = task_queue.retry_dlq_item(task_id)
-    if ok:
-        return jsonify({"success": True, "message": f"Re-enqueued {task_id}"})
-    return jsonify({"error": "ไม่พบ task ใน dead-letter queue"}), 404
 
 
 # ═══════════════════════════════════════════════════════════
@@ -5080,51 +5035,6 @@ def api_rbac_user(user_hash):
     if err:
         return err
     return jsonify(rbac_engine.get_user_info(user_hash))
-
-
-# ═══════════════════════════════════════════════════════════
-# V4.0 Phase 3.4: Encryption Status
-# ═══════════════════════════════════════════════════════════
-
-
-@app.route("/admin/api/v2/encryption/status", methods=["GET"])
-def api_encryption_status():
-    """สถานะ encryption (admin only)."""
-    err = _admin_api_auth()
-    if err:
-        return err
-    return jsonify(field_encryptor.get_status())
-
-
-# ═══════════════════════════════════════════════════════════
-# V4.0 Phase 4.1: AI Search API
-# ═══════════════════════════════════════════════════════════
-
-
-@app.route("/admin/api/v2/search", methods=["GET"])
-def api_search():
-    """ค้นหาเอกสาร (authorized users)."""
-    err = _admin_api_auth()
-    if err:
-        return err
-    query = request.args.get("q", "").strip()
-    category = request.args.get("category", "")
-    date_from = request.args.get("from", "")
-    date_to = request.args.get("to", "")
-    limit = min(int(request.args.get("limit", 20)), 50)
-    return jsonify(search_service.search(
-        query, category=category,
-        date_from=date_from, date_to=date_to, limit=limit,
-    ))
-
-
-@app.route("/admin/api/v2/search/categories", methods=["GET"])
-def api_search_categories():
-    """ดูประเภทเอกสาร + จำนวน."""
-    err = _admin_api_auth()
-    if err:
-        return err
-    return jsonify({"categories": search_service.get_categories()})
 
 
 # ═══════════════════════════════════════════════════════════
@@ -5274,107 +5184,6 @@ def api_dr_plan():
         return err
     return jsonify(backup_manager.get_dr_plan())
 
-
-@app.route("/admin/dead-letter", methods=["GET"])
-def admin_dead_letter_ui():
-    """หน้าเว็บ Dead-letter Queue — ดู/จัดการเอกสารที่จำแนกไม่ได้."""
-    err = _admin_api_auth()
-    if err:
-        # ลอง cookie-based auth สำหรับ browser
-        admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-        if not admin_secret:
-            return "ADMIN_SECRET not configured", 500
-        cookie_secret = request.cookies.get("admin_secret", "")
-        if not cookie_secret or not hmac.compare_digest(
-            cookie_secret.encode(), admin_secret.encode()
-        ):
-            return "Unauthorized", 401
-
-    return f"""<!DOCTYPE html>
-<html lang="th">
-<head>
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Dead-letter Queue — RANONG RAKTAI AI</title>
-<style>
-body {{ font-family: -apple-system, sans-serif; margin: 0; padding: 20px; background: #1a1a2e; color: #e0e0e0; }}
-h1 {{ color: #ff6b6b; font-size: 1.4rem; }}
-.card {{ background: #16213e; border-radius: 8px; padding: 16px; margin: 12px 0; border-left: 4px solid #ff6b6b; }}
-.card.pending {{ border-left-color: #ffd93d; }}
-.task-id {{ font-family: monospace; color: #4fc3f7; font-size: 0.85rem; }}
-.type {{ background: #0f3460; padding: 2px 8px; border-radius: 4px; font-size: 0.85rem; }}
-.error {{ color: #ff6b6b; font-size: 0.85rem; margin-top: 4px; }}
-.btn {{ background: #e94560; color: white; border: none; padding: 6px 14px; border-radius: 4px; cursor: pointer; font-size: 0.85rem; }}
-.btn:hover {{ background: #c81d4e; }}
-.stats {{ display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }}
-.stat {{ background: #16213e; padding: 12px 20px; border-radius: 8px; text-align: center; }}
-.stat .num {{ font-size: 1.5rem; font-weight: bold; color: #4fc3f7; }}
-.stat .label {{ font-size: 0.75rem; color: #888; }}
-.empty {{ text-align: center; padding: 40px; color: #666; }}
-#items {{ min-height: 100px; }}
-</style>
-</head>
-<body>
-<h1>📋 Dead-letter Queue</h1>
-<div class="stats" id="stats"></div>
-<div id="items"><div class="empty">กำลังโหลด...</div></div>
-<script>
-const SECRET = document.cookie.split('admin_secret=')[1]?.split(';')[0] || '';
-const headers = {{'X-Admin-Secret': SECRET}};
-
-async function load() {{
-  try {{
-    const [statsR, dlqR] = await Promise.all([
-      fetch('/admin/api/v2/queue/stats', {{headers}}),
-      fetch('/admin/api/v2/queue/dlq', {{headers}}),
-    ]);
-    const stats = await statsR.json();
-    const dlq = await dlqR.json();
-    renderStats(stats);
-    renderItems(dlq.items || []);
-  }} catch(e) {{
-    document.getElementById('items').innerHTML = '<div class="empty">❌ ' + e.message + '</div>';
-  }}
-}}
-
-function renderStats(s) {{
-  document.getElementById('stats').innerHTML = `
-    <div class="stat"><div class="num">${{s.enqueued||0}}</div><div class="label">Enqueued</div></div>
-    <div class="stat"><div class="num">${{s.completed||0}}</div><div class="label">Completed</div></div>
-    <div class="stat"><div class="num">${{s.failed||0}}</div><div class="label">Failed</div></div>
-    <div class="stat"><div class="num">${{s.dead||0}}</div><div class="label">Dead</div></div>
-    <div class="stat"><div class="num">${{s.mode||'?'}}</div><div class="label">Mode</div></div>
-  `;
-}}
-
-function renderItems(items) {{
-  if (!items.length) {{
-    document.getElementById('items').innerHTML = '<div class="empty">✅ ไม่มีรายการใน Dead-letter Queue</div>';
-    return;
-  }}
-  document.getElementById('items').innerHTML = items.map(t => `
-    <div class="card">
-      <div><span class="task-id">${{t.task_id}}</span> <span class="type">${{t.task_type}}</span></div>
-      <div style="margin-top:4px;font-size:0.85rem;color:#888">Attempts: ${{t.attempts}} | ${{t.created_at?.slice(0,19)||''}}</div>
-      <div class="error">${{t.error||''}}</div>
-      <button class="btn" onclick="retryTask('${{t.task_id}}')" style="margin-top:8px">🔄 Retry</button>
-    </div>
-  `).join('');
-}}
-
-async function retryTask(id) {{
-  const r = await fetch('/admin/api/v2/queue/dlq/retry', {{
-    method: 'POST', headers: {{'Content-Type':'application/json', ...headers}},
-    body: JSON.stringify({{task_id: id}})
-  }});
-  const d = await r.json();
-  alert(d.message || d.error);
-  load();
-}}
-
-load();
-setInterval(load, 30000);
-</script>
-</body></html>"""
 
 
 # ═══════════════════════════════════════════════════════════
@@ -6368,13 +6177,7 @@ def format_search_results(results: list[dict]) -> str:
     if not results:
         return "ไม่พบเอกสารที่ตรงกับคำค้น"
 
-    cat_names = {
-        "bills": "ใบเสร็จ/บิล",
-        "rx": "ใบสั่งยา",
-        "lab": "ผลตรวจแล็บ",
-        "dialysis": "เอกสารฟอกเลือด",
-        "review": "รอตรวจสอบ",
-    }
+    cat_names = _CAT_NAMES  # ตารางชื่อประเภทรวมที่เดียว
     lines = [f"พบ {len(results)} เอกสาร:\n"]
     for i, doc in enumerate(results, 1):
         cat = cat_names.get(doc.get("category", ""), doc.get("category", ""))
@@ -9362,10 +9165,6 @@ rate_limiter = RateLimiter(state_store)
 from event_logger import EventLogger, generate_job_id, EventTimer
 event_logger = EventLogger(max_buffer=1000)
 
-# ── Task Queue (V4.0 Phase 2.1) ──
-from task_queue import TaskQueue
-task_queue = TaskQueue(redis_url=REDIS_URL)
-
 # ── Backup Manager (V4.0 Phase 2.4) ──
 from backup_manager import BackupManager
 backup_manager = BackupManager()
@@ -9382,14 +9181,6 @@ rbac_engine = RBACEngine(
     admin_users=ADMIN_USERS,
 )
 
-# ── Field Encryption (V4.0 Phase 3.4) ──
-from field_encryption import FieldEncryptor
-field_encryptor = FieldEncryptor()
-
-# ── AI Search (V4.0 Phase 4.1) ──
-from ai_search import SearchService
-search_service = SearchService()
-
 # ── Policy Engine (V4.0 Phase 4.3) ──
 from policy_engine import PolicyEngine
 policy_engine = PolicyEngine()
@@ -9404,8 +9195,6 @@ if STORAGE_BACKEND == "gcs" and 'storage' in dir():
         event_logger.set_storage(storage)
         backup_manager.set_storage(storage)
         approval_engine.set_storage(storage)
-        search_service.set_storage(storage)
-        search_service.set_index(doc_index)
         logger.info("V4.0 modules initialized with GCS persistence")
     except Exception as _v4_err:
         logger.warning("V4.0 module init: %s", type(_v4_err).__name__)
@@ -9421,7 +9210,6 @@ try:
         state_store=state_store if 'state_store' in dir() else None,
         backup_manager=backup_manager,
         approval_engine=approval_engine,
-        field_encryption=field_encryptor,
         rbac=rbac_engine,
         policy_engine=policy_engine,
         event_logger=event_logger,
@@ -12000,13 +11788,7 @@ def process_file_async(
                     logger.warning("ข้ามการลบ — ไฟล์อยู่นอก BASE_DIR")
 
             # ตอบกลับ LINE
-            cat_names = {
-                "bills": "ใบเสร็จ/บิล",
-                "rx": "ใบสั่งยา",
-                "lab": "ผลตรวจแล็บ",
-                "dialysis": "เอกสารฟอกเลือด",
-                "review": "รอตรวจสอบ",
-            }
+            cat_names = _CAT_NAMES  # ตารางชื่อประเภทรวมที่เดียว
             cat_name = cat_names.get(category, "ไม่ทราบ")
             ext = os.path.splitext(filepath)[1].lower()
             file_type_name = {
@@ -12997,11 +12779,7 @@ def _change_document_category(
             doc_id[:8], old_category, new_category,
         )
 
-        cat_names = {
-            "bills": "ใบเสร็จ/บิล", "rx": "ใบสั่งยา",
-            "lab": "ผลตรวจแล็บ", "dialysis": "เอกสารฟอกเลือด",
-            "review": "รอตรวจสอบ",
-        }
+        cat_names = _CAT_NAMES  # ตารางชื่อประเภทรวมที่เดียว
         lines = [
             "✅ เปลี่ยนประเภทเอกสารเรียบร้อย",
             f"📄 รหัส: {doc_id[:8]}",
@@ -13169,12 +12947,7 @@ def _reclassify_document(
         except Exception:
             pass  # Index update ล้มเหลว — ไม่ร้ายแรง
 
-        cat_names = {
-            "bills": "ใบเสร็จ/บิล",
-            "rx": "ใบสั่งยา",
-            "lab": "ผลตรวจแล็บ",
-            "dialysis": "เอกสารฟอกเลือด",
-        }
+        cat_names = _CAT_NAMES  # ตารางชื่อประเภทรวมที่เดียว
         cat_name = cat_names.get(new_category, new_category)
         push_message(
             line_user_id,

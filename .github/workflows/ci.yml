@@ -406,3 +406,39 @@ jobs:
 
           docker rm -f ranong-ci >/dev/null 2>&1 || true
           echo "OK: image boot ได้และ /health ตอบ 200 พร้อม control ครบ"
+
+  # ---------------------------------------------------------------------------
+  # Job 5: Deploy — ยิง Render Deploy Hook เฉพาะเมื่อทุกด่านผ่านบน main
+  #
+  # เหตุผล: Render auto-deploy ทันทีที่ push โดยไม่รอ CI → NameError ตอน boot
+  # หลุดขึ้น production มาแล้ว (28854e5, และ 31 ต.ค.) ทั้งที่ CI แดง
+  # เปลี่ยนเป็น: ปิด Auto-Deploy บน Render แล้วให้ job นี้สั่ง deploy แทน
+  #
+  # ตั้งค่าครั้งเดียว (ทำมือ — ค่า hook เป็น secret ไม่ใส่ใน repo):
+  #   1. Render → Service → Settings → Deploy Hook → Copy URL
+  #   2. GitHub → Settings → Secrets and variables → Actions →
+  #      New secret: RENDER_DEPLOY_HOOK = <URL จากข้อ 1>
+  #   3. Render → Settings → Build & Deploy → Auto-Deploy = Off
+  # ถ้ายังไม่ตั้ง secret job นี้จะข้าม (skip) และ Render ยัง auto-deploy ตามเดิม
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: "Deploy to Render (after all gates)"
+    runs-on: ubuntu-latest
+    needs: [lint, test, security, docker-boot]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: production
+    steps:
+      - name: "Trigger Render Deploy Hook"
+        env:
+          HOOK: ${{ secrets.RENDER_DEPLOY_HOOK }}
+        run: |
+          if [ -z "$HOOK" ]; then
+            echo "::warning::RENDER_DEPLOY_HOOK ยังไม่ได้ตั้ง — ข้าม (Render auto-deploy ยังทำงานตามเดิม)"
+            exit 0
+          fi
+          echo "=== ทุกด่านผ่าน — สั่ง Render deploy commit ${GITHUB_SHA::7} ==="
+          code=$(curl -sS -o /tmp/hook.out -w '%{http_code}' -X POST "$HOOK")
+          echo "Render response: HTTP $code"
+          if [ "$code" != "200" ] && [ "$code" != "201" ]; then
+            echo "::error::Deploy hook ล้มเหลว (HTTP $code)"; cat /tmp/hook.out; exit 1
+          fi

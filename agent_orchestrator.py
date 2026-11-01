@@ -430,12 +430,11 @@ class SecurityAgent(BaseAgent):
 
     agent_type = AgentType.SECURITY
     name = "SecurityAgent"
-    description = "ตรวจสิทธิ์ ตรวจ audit log ตรวจ policy ตรวจ encryption"
+    description = "ตรวจสิทธิ์ ตรวจ audit log ตรวจ policy"
     capabilities = [
         "check_permission",
         "audit_log",
         "policy_check",
-        "encryption_status",
         "approval_pending",
         "approve_request",
         "reject_request",
@@ -463,8 +462,6 @@ class SecurityAgent(BaseAgent):
                 data={"passthrough": True, "intent": intent, "entities": entities},
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
-        elif intent == "encryption_status":
-            return self._encryption_status(start)
 
         return AgentResult(
             agent=self.agent_type, success=True, intent=intent,
@@ -502,24 +499,6 @@ class SecurityAgent(BaseAgent):
                 data={"passthrough": True, "intent": "approval_pending"},
                 duration_ms=int((time.monotonic() - start) * 1000),
             )
-
-    def _encryption_status(self, start: float) -> AgentResult:
-        field_encryption = self._dependencies.get("field_encryption")
-        if field_encryption and hasattr(field_encryption, "get_status"):
-            st = field_encryption.get_status()
-            active = bool(st.get("available"))
-            msg = (
-                f"🔐 Encryption: {'✅ เปิดใช้งาน' if active else '⚠️ ปิดอยู่ (passthrough mode)'}\n"
-                f"  วิธี: {st.get('method', '-')}\n"
-                f"  Key: {'✅ ตั้งค่าแล้ว' if st.get('key_configured') else '❌ ยังไม่ตั้ง'}\n"
-                f"  Fields: {', '.join(st.get('sensitive_fields', []))}"
-            )
-        else:
-            msg = "🔐 Encryption: ⚠️ ไม่พบ module"
-        return AgentResult(
-            agent=self.agent_type, success=True, intent="encryption_status",
-            message=msg, duration_ms=int((time.monotonic() - start) * 1000),
-        )
 
 
 # ─── System Agent ───────────────────────────────────────
@@ -827,16 +806,11 @@ def _run_tests():
     assert stats["total_requests"] == 2, stats  # unknown intent ไม่ถูกบันทึก
     print(f"  ✅ Stats: {stats['total_requests']} requests tracked")
 
-    # Test 6: Encryption status
-    result = orch.route("encryption_status", {}, "test_user")
-    assert result.success
-    print(f"  ✅ encryption_status → SecurityAgent")
-
     # Test 7: Failed docs
     result = orch.route("failed_documents", {}, "test_user")
     print(f"  ✅ failed_documents → DocumentAgent")
 
-    print(f"\n✅ All {7} tests PASSED")
+    print(f"\n✅ All {6} tests PASSED")
 
 
 if __name__ == "__main__":

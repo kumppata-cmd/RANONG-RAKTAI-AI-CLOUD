@@ -93,7 +93,7 @@ def init(**deps) -> V5:
     """สร้าง V5 + wire dependencies + register action handlers.
 
     deps ที่รองรับ: storage, doc_index, state_store, backup_manager, approval_engine,
-                    field_encryption, rbac, policy_engine, expense_tracker,
+                    rbac, policy_engine, expense_tracker,
                     push_message (fn(user_id, text)->bool), line_token (str),
                     event_logger, master_registry
     """
