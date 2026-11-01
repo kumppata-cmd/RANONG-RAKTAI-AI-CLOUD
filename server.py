@@ -17743,6 +17743,12 @@ def _reminder_scheduler_worker():
 _last_reconcile: dict = {}
 
 
+# งานครั้งเดียวที่แพทย์อนุมัติ 2026-11-01 ("ให้ดำเนินการได้เลย"): ย้ายสลิป
+# เซ็นทรัลโพลี 2 ใบที่เข้า _UNIDENTIFIED ก่อนมีการจับคู่ด้วยเลขบัญชี
+# ทำซ้ำได้: ถ้าย้ายแล้วจะได้ status=unchanged และไม่ทำอะไร
+_BOOT_BILL_MOVES = (("46515c44", "CENTRAL_POLY"), ("d3efd377", "CENTRAL_POLY"))
+
+
 def _reconcile_on_boot_worker():
     import time as _t
     _t.sleep(45)  # รอ index โหลดและ Redis/GCS พร้อม
@@ -17752,6 +17758,28 @@ def _reconcile_on_boot_worker():
         _last_reconcile["at"] = datetime.now(timezone.utc).isoformat()
     except Exception as _e:
         _last_reconcile = {"error": type(_e).__name__}
+    # จัดเอกสารเก่าเข้าแฟ้มผู้ป่วยย้อนหลัง (แพทย์อนุมัติ 2026-11-01) — idempotent:
+    # เอกสารที่อยู่ในแฟ้มแล้วถูกนับเป็น already_in_folder ไม่ถูกย้ายซ้ำ
+    try:
+        _r = _retroactive_route_run(dry_run=False, cat_filter="all")
+        _last_reconcile["retroactive"] = {
+            k: _r.get(k, 0) for k in (
+                "already_in_folder", "routed_to_patient_folder",
+                "routed_quarter_month_only", "skipped_count", "error_count",
+            )
+        }
+        if _r.get("error"):
+            _last_reconcile["retroactive"]["error"] = _r["error"]
+    except Exception as _e:
+        _last_reconcile["retroactive"] = {"error": type(_e).__name__}
+    try:
+        _mv = {}
+        for _doc8, _vendor in _BOOT_BILL_MOVES:
+            _res = _move_bill_to_vendor(_doc8, _vendor, "boot")
+            _mv[_doc8] = _res.get("status") or ("error:" + str(_res.get("error", ""))[:40])
+        _last_reconcile["bill_moves"] = _mv
+    except Exception as _e:
+        _last_reconcile["bill_moves"] = {"error": type(_e).__name__}
 
 
 if IS_PRODUCTION and not IS_TESTING:
