@@ -665,6 +665,29 @@ SEED_VENDORS: tuple[dict, ...] = (
         "keywords": ["0103510000"],
         "bank_accounts": ["XXX-X-XX130-7"],  # กรุงไทย (จากสลิปโอนจริง)
     },
+    # เพิ่ม 2026-11-01 ตามคำสั่งแพทย์ (จากใบกำกับภาษี/ใบเสร็จจริง)
+    {
+        "canonical_name": "DKSH",
+        "display_name": "บริษัท ดีเคเอสเอช (ประเทศไทย) จำกัด",
+        "tax_id": "0105523002118",
+        "aliases": [
+            "dksh", "dksh (thailand)", "dksh thailand", "dksh (thailand) limited",
+            "ดีเคเอสเอช", "ดีเคเอสเอช (ประเทศไทย)", "บริษัท ดีเคเอสเอช (ประเทศไทย) จำกัด",
+        ],
+        "keywords": ["connect.dksh.com", "lgcth-pharma"],
+    },
+    {
+        "canonical_name": "N_HEALTH_LAB",
+        "display_name": "N-Health-LAB (บริษัท เนชั่นแนล เฮลท์แคร์ ซิสเท็มส์ จำกัด)",
+        "tax_id": "0105544070503",
+        "aliases": [
+            "n health", "nhealth", "n-health", "n-health-lab", "n health lab",
+            "national healthcare systems", "national healthcare systems co., ltd.",
+            "เนชั่นแนล เฮลท์แคร์ ซิสเท็มส์", "เนชั่นแนลเฮลท์แคร์ซิสเท็มส์",
+            "บริษัท เนชั่นแนล เฮลท์แคร์ ซิสเท็มส์ จำกัด",
+        ],
+        "keywords": ["national healthcare", "receipt number"],
+    },
 )
 
 # เลขบัญชีตั้งต้นจะถูก "เติม" ให้บริษัทที่มีในทะเบียน GCS อยู่แล้วด้วย
