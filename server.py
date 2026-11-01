@@ -6991,12 +6991,20 @@ def handle_search_command(
             if _upd is None:
                 return "❌ บันทึกไม่สำเร็จ กรุณาลองใหม่"
             audit_logger.log("appointment_status", user_hash, {"id": _aid, "status": _new_status})
+            _nm = _patient_name_for_hn(_upd["clinic_hn"])
             if _act == "confirm":
+                # แจ้งเจ้าหน้าที่ว่าผู้ป่วยยืนยันแล้ว (ไม่แจ้งเมื่อเจ้าหน้าที่ยืนยันเอง)
+                if not _is_staff:
+                    for _sid in _staff_line_ids():
+                        push_message(
+                            _sid,
+                            f"✅ ผู้ป่วยยืนยันนัดแล้ว\n👤 HN {_upd['clinic_hn']} {_nm}\n"
+                            f"{_apr.appointment_line(_upd)}",
+                        )
                 return f"✅ ยืนยันนัดแล้ว\n{_apr.appointment_line(_upd)}"
             if _new_status == "cancelled":
                 return f"🗑 ยกเลิกนัดแล้ว\n{_apr.appointment_line(_upd)}"
             # ขอเลื่อน → แจ้งเจ้าหน้าที่
-            _nm = _patient_name_for_hn(_upd["clinic_hn"])
             for _sid in _staff_line_ids():
                 push_message(
                     _sid,
