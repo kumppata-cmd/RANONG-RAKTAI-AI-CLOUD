@@ -1941,6 +1941,7 @@ class DocumentIndex:
 
     def update_category(
         self, doc_id: str, new_category: str, new_gcs_path: str,
+        extra_fields: dict | None = None,
     ) -> bool:
         """อัปเดต category และ gcs_object_path ของเอกสาร.
 
@@ -1964,21 +1965,28 @@ class DocumentIndex:
                 doc["gcs_object_path"] = parts[3] if len(parts) > 3 else ""
             else:
                 doc["gcs_object_path"] = new_gcs_path
-        # เขียน GCS — overwrite per-doc JSON
+        for k, v in (extra_fields or {}).items():
+            doc[k] = v
+        # เขียน GCS เป็นไฟล์เวอร์ชันใหม่ (create-only) — ไม่เขียนทับ
+        #
+        # เดิมเขียนทับ {doc_id}.json ซึ่ง Service Account ทำไม่ได้ (403:
+        # มีสิทธิ์ create เท่านั้น) ผลคือการย้ายแฟ้ม/เปลี่ยนประเภท
+        # เปลี่ยนแค่ใน memory ของ worker เดียว แล้วหายเมื่อ reload —
+        # ผู้ใช้เห็น "ย้ายสำเร็จ" แต่ของจริงไม่ย้าย  ใช้แบบเดียวกับ
+        # set_hidden: {doc_id}_v<ts>.json ซึ่ง loader เลือกตัวล่าสุดเอง
         #
         # ต้องใช้ document_id จริงของเอกสารที่หาเจอ ไม่ใช่ค่าที่ส่งเข้ามา
-        # เพราะเมธอดนี้ยอมให้ค้นด้วยคำนำหน้า (startswith) ถ้าใช้ค่าที่
-        # ส่งเข้ามาตรง ๆ แล้วมีคนเรียกด้วยคำนำหน้า จะเขียน index ไปที่
-        # path ผิด กลายเป็นไฟล์ index ปลอมและของจริงไม่ถูกอัปเดต
-        # (ปัจจุบันผู้เรียกส่ง id เต็มเสมอ จึงยังไม่เกิดจริง — แก้กันไว้)
+        # เพราะเมธอดนี้ยอมให้ค้นด้วยคำนำหน้า (startswith)
         _real_doc_id = doc.get("document_id", "") or doc_id
         if self._storage.is_ready:
             try:
-                blob_path = f"{INDEX_DOC_PREFIX}{_real_doc_id}.json"
+                _ts = int(time.time())
+                blob_path = f"{INDEX_DOC_PREFIX}{_real_doc_id}_v{_ts}.json"
                 doc_json = json.dumps(doc, ensure_ascii=False)
                 blob = self._storage._bucket.blob(blob_path)
                 blob.upload_from_string(
                     doc_json, content_type="application/json",
+                    if_generation_match=0,
                 )
                 logger.info(
                     f"Document index: updated category "
@@ -1989,6 +1997,7 @@ class DocumentIndex:
                     f"Document index update GCS write failed: "
                     f"{type(e).__name__}"
                 )
+                return False
         return True
 
     def assign_owner(self, doc_id: str, owner_hash: str) -> bool:
@@ -13421,6 +13430,100 @@ def _move_document_to_patient(
         return {"error": f"ย้ายเอกสารไม่สำเร็จ ({type(e).__name__})"}
 
 
+def _parse_move_bill(text: str):
+    """คำสั่งย้ายบิลไปแฟ้มบริษัท: "ย้ายบิล <รหัสเอกสาร> <ชื่อแฟ้มบริษัท>"
+
+    รองรับ: ย้ายบิล a1b2c3d4 CENTRAL_POLY / ย้ายใบเสร็จ … / move bill …
+    คืน (doc_id_prefix, canonical) หรือ None
+    """
+    m = re.match(
+        r"^\s*(?:ย้ายบิล|ย้ายใบเสร็จ|move\s*bill)\s+([0-9a-fA-F-]{6,36})"
+        r"\s+([A-Za-z0-9_]{2,40})\s*$",
+        (text or "").strip(),
+    )
+    if not m:
+        return None
+    return m.group(1), m.group(2).upper()
+
+
+def _move_bill_to_vendor(
+    doc_id_prefix: str, canonical: str, actor_hash: str,
+) -> dict:
+    """ย้ายบิล/ใบเสร็จไปแฟ้มบริษัทที่ถูกต้อง (เช่น จาก _UNIDENTIFIED)
+
+    เหตุผล: OCR อ่านชื่อบริษัทบนสลิปโอนเงินไม่ได้ → เข้า _UNIDENTIFIED
+    เดิมไม่มีทางแก้ (ส่งซ้ำก็ถูกกันซ้ำ)  ใช้ GCS server-side copy เหมือน
+    การย้ายเอกสารผู้ป่วย: ไม่ลบต้นฉบับ, index ชี้ไปที่ใหม่, ลง audit
+    """
+    if not storage.is_ready:
+        return {"error": "ระบบจัดเก็บยังไม่พร้อม"}
+    doc, err = _find_doc_by_prefix(doc_id_prefix)
+    if doc is None:
+        return {"error": err}
+    if doc.get("category") != "bills":
+        return {"error": (
+            f"เอกสารนี้เป็นประเภท '{doc.get('category', '')}' "
+            "ไม่ใช่บิล/ใบเสร็จ"
+        )}
+    vendor = vendor_registry.get(canonical) if vendor_registry else None
+    if vendor is None or not vendor.active:
+        return {"error": (
+            f"ไม่พบบริษัท {canonical} ในทะเบียน "
+            "(ใช้ชื่อแฟ้ม เช่น CENTRAL_POLY, PINYO_PHARMACY)"
+        )}
+    gcs_path = doc.get("gcs_object_path", "")
+    blob_path = (
+        gcs_path.split("/", 3)[3]
+        if gcs_path.startswith("gs://") and gcs_path.count("/") >= 3
+        else gcs_path
+    )
+    if not blob_path:
+        return {"error": "เอกสารนี้ไม่มีไฟล์ใน cloud storage"}
+    doc_dt = _doc_submitted_date(doc)
+    filename = blob_path.rsplit("/", 1)[-1]
+    new_blob_path = build_document_path(
+        FOLDERS.get("bills", FOLDERS["review"]), filename, "bills",
+        subfolder=vendor.canonical_name, date=doc_dt,
+    )
+    if new_blob_path == blob_path:
+        return {"status": "unchanged",
+                "message": f"บิลนี้อยู่ในแฟ้ม {vendor.canonical_name} อยู่แล้ว"}
+    try:
+        src = storage._bucket.blob(blob_path)
+        if not src.exists():
+            return {"error": "ไม่พบไฟล์ต้นฉบับใน cloud storage"}
+        dest = storage._bucket.blob(new_blob_path)
+        if not dest.exists():
+            storage._bucket.copy_blob(src, storage._bucket, new_blob_path)
+        ok = doc_index.update_category(
+            doc.get("document_id", ""), "bills", new_blob_path,
+            extra_fields={
+                "bill_company": vendor.canonical_name,
+                "vendor_method": "manual",
+                "vendor_needs_review": False,
+            },
+        )
+        if not ok:
+            return {"error": "คัดลอกไฟล์แล้ว แต่บันทึก index ไม่สำเร็จ"}
+        audit_logger.log("bill_refiled", actor_hash, {
+            "doc_id": doc.get("document_id", "")[:8],
+            "to_vendor": vendor.canonical_name,
+        })
+        return {
+            "status": "moved",
+            "message": (
+                f"✅ ย้ายบิลเรียบร้อย\n"
+                f"📄 รหัส: {doc.get('document_id', '')[:8]}\n"
+                f"🏢 แฟ้มใหม่: 02_BILLS_RECEIPTS/{vendor.canonical_name}\n\n"
+                "หมายเหตุ: ไฟล์เดิมใน _UNIDENTIFIED ยังอยู่ "
+                "ระบบชี้ไปที่แฟ้มใหม่แล้ว"
+            ),
+        }
+    except Exception as e:
+        logger.error("Bill re-file failed: %s", type(e).__name__)
+        return {"error": f"ย้ายบิลไม่สำเร็จ ({type(e).__name__})"}
+
+
 # /tmp metadata structure (per user_hash):
 # {
 #   "pages": [{"ext": ".jpg", "sha256": "...", "doc_id": "...", "filename": "..."}, ...],
@@ -14560,6 +14663,16 @@ def webhook():
                 # workflow จริงใช้เจ้าหน้าที่เลือกผู้ป่วยก่อนส่ง ถ้าลืม
                 # เปลี่ยนผู้ป่วย เอกสารชุดถัดไปเข้าแฟ้มคนก่อนทั้งชุด
                 # ก่อนหน้านี้ไม่มีวิธีแก้เลย ต้องส่งใหม่อย่างเดียว
+                elif _parse_move_bill(text) is not None:
+                    _mb_doc, _mb_vendor = _parse_move_bill(text)
+                    if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+                        reply_message(reply_token, "⚠️ เฉพาะแพทย์หรือผู้ดูแลระบบเท่านั้น")
+                    else:
+                        _mb = _move_bill_to_vendor(_mb_doc, _mb_vendor, user_hash)
+                        reply_message(
+                            reply_token,
+                            _mb.get("message") or f"❌ {_mb.get('error', 'ย้ายไม่สำเร็จ')}",
+                        )
                 elif _parse_move_document(text) is not None:
                     _mv_doc, _mv_hn = _parse_move_document(text)
                     if (user_hash not in PHYSICIAN_USERS
