@@ -7129,6 +7129,33 @@ def handle_search_command(
             "(เห็นเฉพาะของตัวเองเท่านั้น)"
         )
 
+    if text_stripped in ("ตรวจแฟ้มย้อนหลัง", "จัดแฟ้มย้อนหลัง"):
+        if not is_admin_user(user_hash):
+            return None
+        _dry = text_stripped == "ตรวจแฟ้มย้อนหลัง"
+        _r = _retroactive_route_run(dry_run=_dry, cat_filter="all")
+        if _r.get("error"):
+            return f"❌ {_r['error']}"
+        audit_logger.log("retroactive_route", user_hash, {"dry_run": _dry, "routed": _r.get("routed_count", 0)})
+        _skips = {}
+        for _e in _r.get("skipped", []) + [e for e in _r.get("routed", []) if e.get("routed_to") == "quarter_month_only"]:
+            _k = _e.get("hn_note") or _e.get("reason") or "อื่น ๆ"
+            _skips[_k] = _skips.get(_k, 0) + 1
+        _lines = [
+            ("🔍 ตรวจ (ยังไม่ย้าย)" if _dry else "📂 จัดแฟ้มย้อนหลังแล้ว"),
+            f"อยู่ในแฟ้มผู้ป่วยแล้ว: {_r.get('already_in_folder', 0)}",
+            f"{'จะย้าย' if _dry else 'ย้าย'}เข้าแฟ้มผู้ป่วย: {_r.get('routed_to_patient_folder', 0)}",
+            f"หา HN ไม่ได้ (คงอยู่ระดับเดือน): {_r.get('routed_quarter_month_only', 0) + _r.get('skipped_count', 0)}",
+            f"ผิดพลาด: {_r.get('error_count', 0)}",
+        ]
+        if _skips:
+            _lines.append("เหตุผล: " + ", ".join(f"{k} {v}" for k, v in _skips.items()))
+        if _dry:
+            _lines.append("\nพิมพ์ 'จัดแฟ้มย้อนหลัง' เพื่อย้ายจริง (ไฟล์เดิมไม่ถูกลบ)")
+        else:
+            _lines.append("\nที่หา HN ไม่ได้ ใช้ 'ย้ายเอกสาร <รหัส> <HN>' ทีละใบ")
+        return "\n".join(_lines)
+
     if text_stripped in ("ซ่อมดัชนีแฟ้ม", "ซ่อมดัชนี", "reconcile index"):
         if not is_admin_user(user_hash):
             return None
@@ -16466,38 +16493,18 @@ function resolve(docId) {{
 
 # ─── Admin Dashboard: Stats API ──────────────────────────
 
-@app.route("/admin/api/v2/retroactive-route", methods=["POST"])
-def admin_retroactive_route():
-    """จัดเอกสารเก่าเข้า folder ผู้ป่วยย้อนหลัง (retroactive routing).
-
-    Scan เอกสาร lab/rx/dialysis ที่ยังไม่ได้จัดเข้า patient folder
-    → ดึง HN จาก OCR text → จับคู่กับ master registry
-    → copy blob ไป path ใหม่ใน patient folder
-    → อัปเดต doc index ให้ชี้ไปที่ path ใหม่
-
-    ไม่ลบไฟล์เดิม (ไม่มี delete permission)
-
-    Query params:
-      secret: ADMIN_SECRET
-      dry_run: "true" เพื่อดู preview ก่อน (ไม่ copy จริง)
-      category: "all" (default) หรือ "lab", "rx", "dialysis"
-    """
-    auth_param = request.args.get("secret", "")
-    if not ADMIN_SECRET or auth_param != ADMIN_SECRET:
-        return jsonify({"error": "Unauthorized"}), 401
-
-    dry_run = request.args.get("dry_run", "true").lower() == "true"
-    cat_filter = request.args.get("category", "all")
+def _retroactive_route_run(dry_run: bool = True, cat_filter: str = "all") -> dict:
+    """จัดเอกสารเก่าเข้าแฟ้มผู้ป่วยย้อนหลัง — แกนกลางที่ admin API และ LINE ใช้ร่วมกัน"""
 
     if not storage.is_ready:
-        return jsonify({"error": "GCS not ready"}), 500
+        return {"error": "GCS not ready"}
 
     # Force reload doc index + registry
     doc_index._reload_from_gcs()
     reg_count = master_registry.count()
 
     if reg_count == 0:
-        return jsonify({"error": "Registry empty — ไม่มีผู้ป่วยลงทะเบียน"}), 400
+        return {"error": "Registry empty — ไม่มีผู้ป่วยลงทะเบียน"}
 
     categories = ["lab", "rx", "dialysis"] if cat_filter == "all" else [cat_filter]
     routed = []
@@ -16656,7 +16663,7 @@ def admin_retroactive_route():
                 doc_id_short, type(copy_err).__name__,
             )
 
-    return jsonify({
+    return {
         "dry_run": dry_run,
         "registry_count": reg_count,
         "categories": categories,
@@ -16673,7 +16680,35 @@ def admin_retroactive_route():
         "routed": routed,
         "skipped": skipped,
         "errors": errors,
-    }), 200
+    }
+
+
+@app.route("/admin/api/v2/retroactive-route", methods=["POST"])
+def admin_retroactive_route():
+    """จัดเอกสารเก่าเข้า folder ผู้ป่วยย้อนหลัง (retroactive routing).
+
+    Scan เอกสาร lab/rx/dialysis ที่ยังไม่ได้จัดเข้า patient folder
+    → ดึง HN จาก OCR text → จับคู่กับ master registry
+    → copy blob ไป path ใหม่ใน patient folder
+    → อัปเดต doc index ให้ชี้ไปที่ path ใหม่
+
+    ไม่ลบไฟล์เดิม (ไม่มี delete permission)
+
+    Query params:
+      secret: ADMIN_SECRET
+      dry_run: "true" เพื่อดู preview ก่อน (ไม่ copy จริง)
+      category: "all" (default) หรือ "lab", "rx", "dialysis"
+    """
+    auth_param = request.args.get("secret", "")
+    if not ADMIN_SECRET or auth_param != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    dry_run = request.args.get("dry_run", "true").lower() == "true"
+    cat_filter = request.args.get("category", "all")
+    _r = _retroactive_route_run(dry_run, cat_filter)
+    if _r.get("error"):
+        return jsonify(_r), (500 if "GCS" in _r["error"] else 400)
+    return jsonify(_r), 200
 
 
 @app.route("/admin/api/stats", methods=["GET"])
