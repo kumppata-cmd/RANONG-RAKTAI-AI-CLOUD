@@ -15573,6 +15573,7 @@ def health():
             health_info["status"] = "misconfigured"
             health_info["accepting_documents"] = False
             health_info["critical_error"] = "USER_ID_SALT ไม่ได้ตั้งค่า"
+        health_info["patient_folder_index"] = globals().get("_last_reconcile", {})
         health_info["document_search"] = {
             "indexed_documents": doc_index.count(),
             "authorized_users": len(AUTHORIZED_USERS),
@@ -17694,6 +17695,26 @@ def _reminder_scheduler_worker():
             logger.warning("reminder scheduler: %s", type(_e).__name__)
         _t.sleep(60)
 
+
+# ── ซ่อมดัชนีแฟ้มผู้ป่วยอัตโนมัติหลังบูต (idempotent — รันซ้ำไม่มีผลข้างเคียง) ──
+_last_reconcile: dict = {}
+
+
+def _reconcile_on_boot_worker():
+    import time as _t
+    _t.sleep(45)  # รอ index โหลดและ Redis/GCS พร้อม
+    global _last_reconcile
+    try:
+        _last_reconcile = _reconcile_patient_folder_index()
+        _last_reconcile["at"] = datetime.now(timezone.utc).isoformat()
+    except Exception as _e:
+        _last_reconcile = {"error": type(_e).__name__}
+
+
+if IS_PRODUCTION and not IS_TESTING:
+    threading.Thread(
+        target=_reconcile_on_boot_worker, daemon=True, name="index-reconcile",
+    ).start()
 
 if _REMINDER_ENABLED and not IS_TESTING:
     threading.Thread(
