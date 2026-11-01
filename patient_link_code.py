@@ -102,7 +102,31 @@ class LinkCodeStore:
             return False
 
     # ── ผู้ป่วยใช้รหัส ───────────────────────────────────────
+    def check(self, code: str, user_hash: str) -> tuple[str, str]:
+        """ตรวจรหัสโดยไม่ทำเครื่องหมายว่าใช้แล้ว — ใช้ก่อนผูกบัญชี
+        เพื่อไม่ให้รหัสถูกเผาทิ้งถ้าการผูกล้มเหลว"""
+        return self._consume(code, user_hash, commit=False)
+
+    def mark_used(self, code: str, user_hash: str) -> bool:
+        bucket = self._bucket()
+        if bucket is None:
+            return False
+        try:
+            bucket.blob(self._path(code, used=True)).upload_from_string(
+                json.dumps({"used_by": (user_hash or "")[:16],
+                            "at": datetime.now(timezone.utc).isoformat()}),
+                content_type="application/json",
+                if_generation_match=0,
+            )
+            return True
+        except Exception:
+            return False
+
     def consume(self, code: str, user_hash: str) -> tuple[str, str]:
+        """ตรวจและทำเครื่องหมายใช้แล้วในขั้นเดียว"""
+        return self._consume(code, user_hash, commit=True)
+
+    def _consume(self, code: str, user_hash: str, commit: bool) -> tuple[str, str]:
         """คืน (status, hn)
 
         status: VALID / INVALID / EXPIRED / USED / RATE_LIMITED / UNAVAILABLE
@@ -130,15 +154,8 @@ class LinkCodeStore:
                 return "USED", ""
             if time.time() > float(data.get("expires_at", 0)):
                 return "EXPIRED", ""
-            # ทำเครื่องหมายว่าใช้แล้ว (create-only → ใช้ซ้ำไม่ได้แม้แข่งกัน)
-            try:
-                bucket.blob(self._path(code, used=True)).upload_from_string(
-                    json.dumps({"used_by": (user_hash or "")[:16],
-                                "at": datetime.now(timezone.utc).isoformat()}),
-                    content_type="application/json",
-                    if_generation_match=0,
-                )
-            except Exception:
+            if commit and not self.mark_used(code, user_hash):
+                # create-only → ใช้ซ้ำไม่ได้แม้แข่งกัน
                 return "USED", ""
             return "VALID", str(data.get("hn", "")).upper()
         except Exception as e:

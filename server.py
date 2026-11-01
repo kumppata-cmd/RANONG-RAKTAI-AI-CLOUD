@@ -7030,7 +7030,7 @@ def handle_search_command(
     # ── รหัสผูกบัญชีผู้ป่วย ──────────────────────────────────
     _link_code = parse_link_command(text_stripped)
     if _link_code is not None and link_code_store is not None:
-        status, _hn = link_code_store.consume(_link_code, user_hash)
+        status, _hn = link_code_store.check(_link_code, user_hash)
         if status == "RATE_LIMITED":
             audit_logger.log("link_code_rate_limited", user_hash, {})
             return "⚠️ พิมพ์รหัสผิดหลายครั้ง กรุณารอ 1 ชั่วโมงแล้วลองใหม่"
@@ -7046,12 +7046,24 @@ def handle_search_command(
         _pt = master_registry.match_hn(_hn) if master_registry else None
         _clinic_hn = _pt.clinic_hn if _pt and _pt.clinic_hn else _hn
         _hosp_hn = _pt.hospital_hn if _pt else ""
+        # รหัสออกโดยเจ้าหน้าที่ที่ยืนยันตัวผู้ป่วยแล้ว → ผูกทับการผูกเดิมได้
+        # (ผู้ป่วยเปลี่ยนเครื่อง / HN เคยถูกผูกกับบัญชีทดสอบหรือผิดคน)
+        _prev_owner = None
+        try:
+            _prev = hn_registry.get_by_clinic_hn(_clinic_hn)
+            _prev_owner = _prev.owner_hash if _prev else None
+        except Exception:
+            pass
         ok, msg = hn_registry.register(
             owner_hash=user_hash, clinic_hn=_clinic_hn,
-            hospital_hn=_hosp_hn, registered_by="link_code",
+            hospital_hn=_hosp_hn, registered_by="link_code", force=True,
         )
+        if ok:
+            # ทำเครื่องหมายรหัสใช้แล้วเฉพาะเมื่อผูกสำเร็จ — ล้มเหลว = รหัสยังใช้ได้
+            link_code_store.mark_used(_link_code, user_hash)
         audit_logger.log("link_code_consumed", user_hash, {
             "success": ok, "hn": _clinic_hn,
+            "relinked_from_other": bool(_prev_owner and _prev_owner != user_hash),
         })
         if ok and line_user_id:
             # เก็บ LINE userId ไว้ส่งแจ้งเตือนนัด/ค่าวิกฤตถึงผู้ป่วยคนนี้

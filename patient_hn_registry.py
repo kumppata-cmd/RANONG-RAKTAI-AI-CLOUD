@@ -9,6 +9,8 @@
 # =============================================================================
 
 import json
+import secrets
+import time
 import logging
 import re
 from datetime import datetime, timezone
@@ -125,11 +127,26 @@ class HNRegistry:
             if not bucket or not hasattr(bucket, 'list_blobs'):
                 logger.warning("HNRegistry: bucket not available for listing")
                 return
-            blobs = bucket.list_blobs(prefix=f"{self.GCS_PREFIX}/")
+            # เรียงตามชื่อ: "<owner>.json" (ไฟล์เดิม) มาก่อน "<owner>/v<ns>.json"
+            # (ไฟล์เวอร์ชัน) และเวอร์ชันหลังทับเวอร์ชันก่อน → ค่าล่าสุดชนะ
+            # (ผูก HN ใหม่ / ยกเลิกการผูก) ไฟล์ไม่เคยถูกเขียนทับ (SA create-only)
+            blobs = sorted(
+                bucket.list_blobs(prefix=f"{self.GCS_PREFIX}/"),
+                key=lambda b: b.name,
+            )
+            self._cache = {}
+            self._hn_index = {}
+            self._hospital_index = {}
             for blob in blobs:
                 try:
                     data = json.loads(blob.download_as_text())
                     patient = PatientHN.from_dict(data)
+                    prev = self._cache.get(patient.owner_hash)
+                    if prev is not None:
+                        if prev.clinic_hn:
+                            self._hn_index.pop(prev.clinic_hn, None)
+                        if prev.hospital_hn:
+                            self._hospital_index.pop(prev.hospital_hn, None)
                     self._cache[patient.owner_hash] = patient
                     if patient.clinic_hn:
                         self._hn_index[patient.clinic_hn] = patient.owner_hash
@@ -155,7 +172,11 @@ class HNRegistry:
             logger.warning("HNRegistry: no storage — cannot save")
             return False, "storage not configured"
         try:
-            path = self._gcs_path(patient.owner_hash)
+            # ไฟล์เวอร์ชันใหม่ทุกครั้ง — เดิมเขียน <owner>.json แล้วพอมีอยู่
+            # (412) ก็ "ถือว่าสำเร็จ" โดยคืนค่าเก่าจาก GCS → เปลี่ยน HN /
+            # ยกเลิกการผูก ไม่เคยติดจริง
+            _ts = f"{time.time_ns()}{secrets.token_hex(2)}"
+            path = f"{self.GCS_PREFIX}/{patient.owner_hash}/v{_ts}.json"
             data_bytes = json.dumps(
                 patient.to_dict(), ensure_ascii=False, indent=2
             ).encode("utf-8")
@@ -177,7 +198,7 @@ class HNRegistry:
                 )
             except Exception as create_err:
                 err_code = getattr(create_err, "code", None)
-                if err_code == 412:
+                if err_code == 412 and False:  # ไม่เกิดแล้ว — ชื่อไฟล์ไม่ซ้ำ
                     # 412 = object มีอยู่แล้ว (ลงทะเบียนไปแล้วก่อนหน้า)
                     # SA ไม่มี objects.delete → ไม่สามารถ overwrite ได้
                     # อ่านข้อมูลเดิมแล้ว return สำเร็จ
@@ -216,12 +237,24 @@ class HNRegistry:
         display_name: str = "",
         registered_by: str = "patient",
         notes: str = "",
+        force: bool = False,
     ) -> tuple[bool, str]:
         """ลงทะเบียน HN ใหม่หรืออัปเดต HN เดิม
+
+        force=True: HN นี้ถูกผูกกับ LINE อื่นอยู่ → ยกเลิกการผูกเดิมแล้วผูกใหม่
+        (ใช้เมื่อเจ้าหน้าที่ยืนยันตัวผู้ป่วยแล้วออกรหัสผูกบัญชี — ผู้ป่วย
+        เปลี่ยนโทรศัพท์ หรือ HN ถูกผูกไว้ผิดคน/บัญชีทดสอบ)
 
         Returns: (success, message)
         """
         self._load_all()
+        if force:
+            for hn, index in ((clinic_hn, self._hn_index),
+                              (hospital_hn, self._hospital_index)):
+                key = (hn or "").strip().upper()
+                prev_owner = index.get(key) if key else None
+                if prev_owner and prev_owner != owner_hash:
+                    self.unlink_owner(prev_owner, reason="relinked_by_code")
 
         # ตรวจสอบรูปแบบ HN
         if clinic_hn and not _validate_hn(clinic_hn):
@@ -280,6 +313,29 @@ class HNRegistry:
                 self._hospital_index[patient.hospital_hn] = owner_hash
             return True, f"✅ {action}สำเร็จ: {patient.hn_pair}"
         return False, f"❌ บันทึกไม่สำเร็จ ({err_detail}) — กรุณาลองใหม่"
+
+    def unlink_owner(self, owner_hash: str, reason: str = "") -> bool:
+        """ยกเลิกการผูก HN ของบัญชี LINE นี้ (เขียนเวอร์ชันใหม่ที่ไม่มี HN)"""
+        self._load_all()
+        prev = self._cache.get(owner_hash)
+        if prev is None:
+            return False
+        cleared = PatientHN(
+            owner_hash=owner_hash, clinic_hn="", hospital_hn="",
+            display_name=prev.display_name, registered_at=prev.registered_at,
+            registered_by=prev.registered_by,
+            notes=f"unlinked:{reason}"[:120],
+        )
+        saved, _err = self._save_patient(cleared)
+        if not saved:
+            return False
+        if prev.clinic_hn:
+            self._hn_index.pop(prev.clinic_hn, None)
+        if prev.hospital_hn:
+            self._hospital_index.pop(prev.hospital_hn, None)
+        self._cache[owner_hash] = cleared
+        logger.info("HNRegistry: unlinked owner %s (%s)", owner_hash[:6], reason)
+        return True
 
     def get_by_owner(self, owner_hash: str) -> Optional[PatientHN]:
         """ค้นหาด้วย owner_hash"""
