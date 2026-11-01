@@ -134,27 +134,30 @@ class HNRegistry:
                 bucket.list_blobs(prefix=f"{self.GCS_PREFIX}/"),
                 key=lambda b: b.name,
             )
-            self._cache = {}
-            self._hn_index = {}
-            self._hospital_index = {}
+            # ขั้น 1: หาเรคอร์ดล่าสุดของแต่ละบัญชี (ไฟล์เวอร์ชันหลังทับก่อน)
+            latest: dict[str, PatientHN] = {}
             for blob in blobs:
                 try:
                     data = json.loads(blob.download_as_text())
                     patient = PatientHN.from_dict(data)
-                    prev = self._cache.get(patient.owner_hash)
-                    if prev is not None:
-                        if prev.clinic_hn:
-                            self._hn_index.pop(prev.clinic_hn, None)
-                        if prev.hospital_hn:
-                            self._hospital_index.pop(prev.hospital_hn, None)
-                    self._cache[patient.owner_hash] = patient
-                    if patient.clinic_hn:
-                        self._hn_index[patient.clinic_hn] = patient.owner_hash
-                    if patient.hospital_hn:
-                        self._hospital_index[patient.hospital_hn] = patient.owner_hash
+                    latest[patient.owner_hash] = patient
                 except Exception as e:
                     logger.warning("HNRegistry: skip corrupt blob %s: %s",
                                    blob.name, e)
+            # ขั้น 2: สร้าง index จากเรคอร์ดสุดท้ายเท่านั้น
+            #
+            # บั๊กเดิม (2026-11-01): สร้าง index ระหว่างไล่ไฟล์ ทำให้ไฟล์เดิม
+            # ของบัญชี A (ยังถือ 56001) ที่เรียงมาทีหลังบัญชี B เขียนทับ
+            # 56001→B แล้วไฟล์ "ยกเลิก" ของ A ก็ลบ 56001 ทิ้ง → ไม่มีใครถือ
+            # 56001 ทั้งที่ผู้ป่วย B ผูกสำเร็จ → แจ้งเตือนนัดหาผู้ป่วยไม่เจอ
+            self._cache = dict(latest)
+            self._hn_index = {}
+            self._hospital_index = {}
+            for owner, patient in latest.items():
+                if patient.clinic_hn:
+                    self._hn_index[patient.clinic_hn] = owner
+                if patient.hospital_hn:
+                    self._hospital_index[patient.hospital_hn] = owner
             self._loaded = True
             logger.info("HNRegistry: loaded %d patients", len(self._cache))
         except Exception as e:
