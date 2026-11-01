@@ -2762,6 +2762,7 @@ def api_vendors_register():
             created_by="admin_api",
             notes=(data.get("notes") or "").strip(),
             allow_similar=bool(data.get("allow_similar", False)),
+            bank_accounts=data.get("bank_accounts") or [],
         )
     except Exception as e:
         logger.error("vendors/register ล้มเหลว: %s", type(e).__name__)
@@ -2788,7 +2789,7 @@ def api_vendors_update():
     for key in ("display_name", "notes"):
         if key in data:
             kwargs[key] = (data.get(key) or "").strip()
-    for key in ("add_aliases", "remove_aliases", "keywords"):
+    for key in ("add_aliases", "remove_aliases", "keywords", "add_bank_accounts"):
         if key in data:
             if not isinstance(data[key], list):
                 return jsonify({"error": f"{key} ต้องเป็น list"}), 400

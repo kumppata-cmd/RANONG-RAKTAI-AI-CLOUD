@@ -279,6 +279,40 @@ def _is_buyer_self(normalized: str) -> bool:
     )
 
 
+# ─────────────────────────────────────────────────────────────
+# เลขบัญชีธนาคารบนสลิปโอนเงิน
+# ─────────────────────────────────────────────────────────────
+# สลิปของธนาคาร (กรุงไทย ฯลฯ) พิมพ์เลขบัญชีผู้รับแบบปิดบางหลัก เช่น
+# "XXX-X-XX870-5" ตัวเลขเหล่านี้ OCR อ่านได้แม่นกว่าชื่อบริษัทภาษาไทยมาก
+# (ฟอนต์เล็ก+ลายน้ำ ทำให้ชื่อไทยอ่านเป็นตัวอักษรขยะ) จึงใช้เป็นตัวระบุ
+# บริษัทที่เชื่อถือได้ในระดับเดียวกับเลขผู้เสียภาษี เมื่อผู้ดูแลลงทะเบียน
+# เลขบัญชีของบริษัทไว้
+_BANK_MASK_RE = re.compile(
+    r"[Xx\u0e2d๐0*]{2,3}\s*-\s*[Xx\u0e2d๐0*]\s*-\s*[Xx*]{0,2}\s*(\d{3})\s*-\s*(\d)"
+)
+
+
+def normalize_bank_account_mask(raw: str) -> str:
+    """"XXX-X-XX870-5" → "8705"; ถ้าเป็นตัวเลขล้วน ≥4 หลัก → 4 หลักท้าย"""
+    if not isinstance(raw, str):
+        return ""
+    m = _BANK_MASK_RE.search(raw)
+    if m:
+        return m.group(1) + m.group(2)
+    digits = re.sub(r"[^0-9]", "", raw)
+    return digits[-4:] if len(digits) >= 4 else ""
+
+
+def extract_bank_account_masks(text: str) -> list[str]:
+    """ดึงเลขบัญชี (4 หลักท้ายที่มองเห็น) ทุกตัวจากสลิป เรียงตามที่พบ"""
+    out: list[str] = []
+    for m in _BANK_MASK_RE.finditer(text or ""):
+        key = m.group(1) + m.group(2)
+        if key not in out:
+            out.append(key)
+    return out
+
+
 def split_supplier_section(text: str) -> tuple[str, str]:
     """แบ่งข้อความเป็น (ส่วนผู้ขาย, ส่วนผู้ซื้อ)
 
@@ -326,8 +360,16 @@ class VendorRecord:
         updated_by: str = "",
         notes: str = "",
         active: bool = True,
+        bank_accounts: Optional[list] = None,
     ):
         self.canonical_name = (canonical_name or "").strip().upper()
+        # เลขบัญชีรับโอนของบริษัท ในรูปที่สลิปธนาคารพิมพ์ (ปิดบางหลัก)
+        # เช่น "XXX-X-XX870-5" — เก็บเฉพาะตัวเลขท้ายที่มองเห็น ("8705")
+        self.bank_accounts = sorted({
+            k for k in (
+                normalize_bank_account_mask(b) for b in (bank_accounts or [])
+            ) if k
+        })
         self.vendor_id = (vendor_id or "").strip() or (
             f"v_{self.canonical_name.lower()}" if self.canonical_name else ""
         )
@@ -392,6 +434,7 @@ class VendorRecord:
             "created_by": self.created_by,
             "updated_by": self.updated_by,
             "notes": self.notes,
+            "bank_accounts": self.bank_accounts,
         }
 
     @classmethod
@@ -399,7 +442,7 @@ class VendorRecord:
         allowed = {
             "vendor_id", "canonical_name", "display_name", "aliases",
             "tax_id", "verified", "active", "created_at", "updated_at",
-            "created_by", "updated_by", "notes",
+            "created_by", "updated_by", "notes", "bank_accounts",
         }
         return cls(**{k: v for k, v in data.items() if k in allowed})
 
@@ -413,6 +456,7 @@ class VendorRecord:
 
 # วิธีจับคู่ เรียงตามลำดับความน่าเชื่อถือในโจทย์
 MATCH_TAX_ID = "tax_id"            # 1. เลขผู้เสียภาษีที่ยืนยันแล้ว
+MATCH_BANK_ACCOUNT = "bank_account"  # 1b. เลขบัญชีรับโอนบนสลิปตรงทะเบียน
 MATCH_ALIAS_EXACT = "alias_exact"  # 2. ตรง alias ที่อนุมัติไว้
 MATCH_NAME_NORM = "name_normalized"  # 3. ชื่อไทย/อังกฤษหลัง normalize
 MATCH_FUZZY = "fuzzy"              # 4. คล้าย — เสนอให้คนยืนยัน ไม่จัดเก็บเอง
@@ -420,7 +464,7 @@ MATCH_NONE = "none"                # 5/6. ไม่พบ → เข้าคิ
 
 # วิธีที่เชื่อถือได้พอจะจัดเก็บอัตโนมัติ
 _AUTO_ROUTE_METHODS = frozenset({
-    MATCH_TAX_ID, MATCH_ALIAS_EXACT, MATCH_NAME_NORM,
+    MATCH_TAX_ID, MATCH_BANK_ACCOUNT, MATCH_ALIAS_EXACT, MATCH_NAME_NORM,
 })
 
 # เกณฑ์ความคล้ายขั้นต่ำที่จะ "เสนอ" เป็นตัวเลือกให้คนดู
@@ -604,6 +648,7 @@ SEED_VENDORS: tuple[dict, ...] = (
             "centralpolytrading", "เซ็นทรัลโพลีเทรดดิ้ง", "เซ็นทรัลโพลี",
         ],
         "keywords": ["pharmasinlaboratories"],
+        "bank_accounts": ["XXX-X-XX870-5"],  # กรุงไทย (จากสลิปโอนจริง)
     },
     {
         "canonical_name": "PINYO_PHARMACY",
@@ -618,8 +663,17 @@ SEED_VENDORS: tuple[dict, ...] = (
         # จากตารางเดิม ใส่ไว้เป็นสัญญาณประกอบ ไม่ใส่ในช่อง tax_id เพราะ
         # เลขไม่ครบใช้จับคู่เองไม่ได้ — บริษัทอื่นอาจมีเลขขึ้นต้นเหมือนกัน
         "keywords": ["0103510000"],
+        "bank_accounts": ["XXX-X-XX130-7"],  # กรุงไทย (จากสลิปโอนจริง)
     },
 )
+
+# เลขบัญชีตั้งต้นจะถูก "เติม" ให้บริษัทที่มีในทะเบียน GCS อยู่แล้วด้วย
+# (ต่างจาก alias ที่ seed ไม่เขียนทับ) เพราะเป็นข้อมูลใหม่ที่ทะเบียนเดิม
+# ยังไม่มีช่องเก็บ — ผู้ดูแลเพิ่มเองได้ผ่าน API ด้วย field bank_accounts
+SEED_BANK_ACCOUNTS: dict[str, list[str]] = {
+    e["canonical_name"]: list(e.get("bank_accounts", []))
+    for e in SEED_VENDORS if e.get("bank_accounts")
+}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -738,9 +792,21 @@ class VendorRegistry:
                 verified=True,
                 created_by="seed",
                 notes="ข้อมูลตั้งต้นจาก BILL_COMPANY_REGISTRY",
+                bank_accounts=entry.get("bank_accounts", []),
             )
             self._vendors.append(record)
             self._keywords[canonical] = list(entry.get("keywords", []))
+        # เติมเลขบัญชีตั้งต้นให้บริษัทที่มีอยู่แล้ว (union ไม่ลบของเดิม)
+        for canonical, masks in SEED_BANK_ACCOUNTS.items():
+            idx = self._by_canonical.get(canonical)
+            if idx is None:
+                continue
+            v = self._vendors[idx]
+            merged = set(v.bank_accounts)
+            merged.update(
+                k for k in (normalize_bank_account_mask(m) for m in masks) if k
+            )
+            v.bank_accounts = sorted(merged)
         self._rebuild_index()
 
     # ── Load / Save ──────────────────────────────────────────
@@ -862,12 +928,19 @@ class VendorRegistry:
     def _rebuild_index(self) -> None:
         self._by_canonical = {}
         self._by_tax_id = {}
+        self._by_bank_account = {}
         for i, v in enumerate(self._vendors):
             if v.canonical_name:
                 self._by_canonical[v.canonical_name] = i
             # เลขผู้เสียภาษีต้องครบ 13 หลักจึงใช้เป็นกุญแจได้
             if is_valid_tax_id(v.tax_id):
                 self._by_tax_id[v.tax_id] = i
+            for acct in getattr(v, "bank_accounts", []) or []:
+                # เลขซ้ำกันสองบริษัท → ไม่ใช้เป็นกุญแจ (ห้ามเดา)
+                if acct in self._by_bank_account and self._by_bank_account[acct] != i:
+                    self._by_bank_account[acct] = None
+                else:
+                    self._by_bank_account[acct] = i
 
     # ── อ่าน ─────────────────────────────────────────────────
 
@@ -915,6 +988,14 @@ class VendorRegistry:
             idx = self._by_tax_id.get(tax_id)
             if idx is not None:
                 return self._vendors[idx], tax_id
+        return None
+
+    def _match_by_bank_account(self, text: str) -> Optional[tuple]:
+        """หาบริษัทจากเลขบัญชีผู้รับโอนบนสลิป (4 หลักท้ายที่มองเห็น)"""
+        for key in extract_bank_account_masks(text):
+            idx = self._by_bank_account.get(key)
+            if idx is not None:
+                return self._vendors[idx], key
         return None
 
     def _alias_entries(self) -> list[tuple]:
@@ -1088,6 +1169,19 @@ class VendorRegistry:
                     reason=f"เลขผู้เสียภาษีตรงทะเบียน ({tax_id[:4]}…)",
                 )
 
+        # ── 1b. เลขบัญชีรับโอนบนสลิป (ทั้งข้อความ — สลิปไม่มีส่วนผู้ขาย) ──
+        acct_hit = self._match_by_bank_account(text)
+        if acct_hit:
+            vendor, key = acct_hit
+            if vendor.active:
+                return VendorMatch(
+                    vendor=vendor,
+                    method=MATCH_BANK_ACCOUNT,
+                    confidence=0.97,
+                    extracted_name=vendor.display_name,
+                    reason=f"เลขบัญชีรับโอนตรงทะเบียน (…{key[:3]}-{key[3]})",
+                )
+
         # ── 2–3. ชื่อบริษัท ──
         hits, method, extracted = self._match_by_name(supplier_text or text)
 
@@ -1246,6 +1340,7 @@ class VendorRegistry:
         created_by: str = "admin",
         notes: str = "",
         allow_similar: bool = False,
+        bank_accounts: Optional[list] = None,
     ) -> tuple:
         """ลงทะเบียนบริษัทใหม่
 
@@ -1300,6 +1395,7 @@ class VendorRegistry:
             created_by=created_by,
             updated_by=created_by,
             notes=notes,
+            bank_accounts=bank_accounts or [],
         )
         self._vendors.append(record)
         if keywords:
@@ -1329,6 +1425,7 @@ class VendorRegistry:
         active: Optional[bool] = None,
         updated_by: str = "admin",
         notes: Optional[str] = None,
+        add_bank_accounts: Optional[list] = None,
     ) -> tuple:
         """แก้ไขบริษัทที่มีอยู่ — ชื่อแฟ้ม (canonical_name) เปลี่ยนไม่ได้
 
@@ -1357,6 +1454,14 @@ class VendorRegistry:
             v.tax_id = clean_tax
         if display_name is not None:
             v.display_name = display_name.strip()
+        if add_bank_accounts:
+            merged = set(v.bank_accounts)
+            merged.update(
+                k for k in (
+                    normalize_bank_account_mask(b) for b in add_bank_accounts
+                ) if k
+            )
+            v.bank_accounts = sorted(merged)
         if add_aliases:
             v.aliases = VendorRecord._clean_aliases(
                 list(v.aliases) + list(add_aliases)
