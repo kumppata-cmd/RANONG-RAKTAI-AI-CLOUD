@@ -897,3 +897,61 @@ class TestWindowsSyncCompatibility(unittest.TestCase):
         self.assertEqual(parts[0], "04_LAB_RESULTS")
         self.assertEqual(parts[1], "2026-Q4")
         self.assertEqual(parts[2], "2026-10")
+
+
+class TestColumnOrderedOCR(VendorFixture):
+    """OCR แบบ Vision API เรียงข้อความตามคอลัมน์ — "ชื่อผู้ซื้อ" อาจมาก่อน
+    หัวกระดาษผู้ขาย (เหตุการณ์จริง: ใบเสร็จ NIKKISO 2026-11-01 21:41
+    → _UNIDENTIFIED method=none ทั้งที่ชื่อ+เลขภาษีอยู่บนใบ)"""
+
+    BUYER_FIRST = (
+        "ใบเสร็จรับเงิน RECEIPT\nต้นฉบับ-ORIGINAL\n"
+        "เลขที่ No. IV2604000969 วันที่ 30/04/2026\n"
+        "ชื่อผู้ซื้อ Buyer Name บริษัท ระนอง รักษ์ไต จำกัด\n"
+        "ที่อยู่ 3/5 หมู่ที่ 3 ต.บางนอน อ.เมืองระนอง จ.ระนอง 85000\n"
+    )
+    NIKKISO_HEAD = (
+        "บริษัท นิคคิโซ เมดิคัล (ประเทศไทย) จำกัด\n"
+        "NIKKISO MEDICAL (THAILAND) CO., LTD.\n"
+        "689 ถนนอ่อนนุช กรุงเทพฯ 10250\n"
+    )
+
+    def test_tax_id_found_even_when_buyer_block_comes_first(self):
+        text = self.BUYER_FIRST + self.NIKKISO_HEAD + \
+            "เลขประจำตัวผู้เสียภาษีอากร 0105537100222\nKirenal Citraid-A1 50 GAL"
+        m = self.registry.match_document(text)
+        self.assertEqual(m.folder, "NIKKISO")
+        self.assertEqual(m.method, vr.MATCH_TAX_ID)
+        self.assertTrue(m.auto_route)
+
+    def test_name_found_when_tax_id_misread_and_buyer_first(self):
+        text = self.BUYER_FIRST + self.NIKKISO_HEAD + \
+            "เลขประจำตัวผู้เสียภาษีอากร 0108597100222\n"  # OCR อ่านเลขผิด
+        m = self.registry.match_document(text)
+        self.assertEqual(m.folder, "NIKKISO")
+        self.assertTrue(m.auto_route)
+
+    def test_unknown_vendor_after_buyer_still_unidentified(self):
+        # ห้ามรวมบริษัทผิด: THAI WATER SUPPLY ≠ THAI_WATER_GENERATION
+        text = self.BUYER_FIRST + \
+            "บริษัท ไทย วอเตอร์ ซัพพลาย จำกัด\nTHAI WATER SUPPLY CO., LTD.\n" \
+            "เลขประจำตัวผู้เสียภาษี 0999999999999\n"
+        m = self.registry.match_document(text)
+        self.assertIsNone(m.vendor)
+        self.assertFalse(m.auto_route)
+
+    def test_clinic_own_name_never_becomes_vendor(self):
+        text = (
+            "ชื่อผู้ซื้อ บริษัท ระนอง รักษ์ไต จำกัด\nคลินิกระนองรักษ์ไต\n"
+            "RANONG RAKTAI CO., LTD.\nรวม 3,750.00"
+        )
+        m = self.registry.match_document(text)
+        self.assertIsNone(m.vendor)
+        self.assertEqual(m.folder, "_UNIDENTIFIED")
+
+    def test_normal_order_unchanged(self):
+        text = self.NIKKISO_HEAD + \
+            "เลขประจำตัวผู้เสียภาษีอากร 0105537100222\n" + self.BUYER_FIRST
+        m = self.registry.match_document(text)
+        self.assertEqual(m.folder, "NIKKISO")
+        self.assertEqual(m.method, vr.MATCH_TAX_ID)

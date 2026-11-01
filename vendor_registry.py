@@ -1178,9 +1178,18 @@ class VendorRegistry:
         keyword_hits = self._keyword_hits(supplier_text or text)
 
         # ── 1. เลขผู้เสียภาษี ──
-        # ดูเฉพาะส่วนผู้ขาย เพื่อไม่ให้เลขผู้เสียภาษีของคลินิก (ผู้ซื้อ)
-        # ไปจับเป็นบริษัทคู่ค้า
+        # ดูส่วนผู้ขายก่อน; ถ้าไม่พบ ค่อยดูทั้งเอกสาร
+        #
+        # เหตุผล (2026-11-01, ใบเสร็จ NIKKISO): OCR แบบ Vision API เรียง
+        # บล็อกข้อความตามคอลัมน์ ทำให้ "ชื่อผู้ซื้อ" โผล่ก่อนหัวกระดาษ
+        # ส่วนผู้ขายที่ตัดได้จึงเหลือแค่ "ใบเสร็จรับเงิน / เลขที่ / วันที่"
+        # และชื่อ+เลขภาษีผู้ขายตกไปอยู่ "ฝั่งผู้ซื้อ" → _UNIDENTIFIED
+        #
+        # การดูทั้งเอกสารปลอดภัยเพราะทะเบียนมีเฉพาะบริษัทคู่ค้า ไม่มี
+        # เลขภาษีของคลินิก — เลขที่ตรงทะเบียน 13 หลักจึงเป็นผู้ขายเสมอ
         tax_hit = self._match_by_tax_id(supplier_text or text)
+        if tax_hit is None and _buyer_text:
+            tax_hit = self._match_by_tax_id(text)
         if tax_hit:
             vendor, tax_id = tax_hit
             if vendor.active:
@@ -1207,6 +1216,17 @@ class VendorRegistry:
 
         # ── 2–3. ชื่อบริษัท ──
         hits, method, extracted = self._match_by_name(supplier_text or text)
+
+        # ส่วนผู้ขายที่ตัดได้ "ไม่มีชื่อนิติบุคคลเลย" (OCR เรียงคอลัมน์
+        # — ดูข้อ 1) → ลองทั้งเอกสาร ชื่อคลินิกเองถูกกันด้วย
+        # _is_buyer_self อยู่แล้ว จึงไม่กลายเป็นผู้ขาย
+        # ไม่ทำเมื่อดึงชื่อได้แต่ไม่ตรงทะเบียน (กันรวมบริษัทผิด)
+        name_scope = supplier_text or text
+        if not hits and not extracted and _buyer_text:
+            hits, method, extracted = self._match_by_name(text)
+            name_scope = text
+            if hits:
+                keyword_hits = self._keyword_hits(text)
 
         if len(hits) == 1:
             vendor, score, used = hits[0]
@@ -1248,7 +1268,7 @@ class VendorRegistry:
             )
 
         # ── 4. ความคล้าย → เสนอให้คนยืนยัน ──
-        fuzzy = self._fuzzy_candidates(supplier_text or text)
+        fuzzy = self._fuzzy_candidates(name_scope)
         if fuzzy:
             return VendorMatch(
                 vendor=None, method=MATCH_FUZZY,
