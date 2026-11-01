@@ -6924,6 +6924,109 @@ def handle_search_command(
     # ─ ไม่แสดง LINE userId จริง
     # ─ ไม่บันทึก Token หรือ userId ลง log
     # ─ ป้องกัน replay attack และ rate limiting
+    # ── นัดหมาย: เจ้าหน้าที่ตั้ง / ผู้ป่วยยืนยัน-เลื่อน ──────────────
+    if _apr is not None and appointment_store is not None:
+        _is_staff = is_admin_user(user_hash) or is_physician_user(user_hash)
+
+        _pa = _apr.parse_patient_action(text_stripped)
+        if _pa is not None:
+            _act, _aid, _anote = _pa
+            _rec = appointment_store.get(_aid)
+            if _rec is None:
+                return "❌ ไม่พบนัดหมายรหัสนี้"
+            # ผู้ป่วยทำได้เฉพาะนัดของ HN ที่ผูกกับ LINE ตัวเอง
+            if not _is_staff:
+                _mine = hn_registry.get_by_owner(user_hash)
+                if not _mine or (_mine.clinic_hn or "").upper() != _rec.get("clinic_hn", ""):
+                    audit_logger.log("appointment_action_denied", user_hash, {"id": _aid})
+                    return "❌ ไม่พบนัดหมายรหัสนี้"
+            _new_status = {"confirm": "confirmed", "reschedule": "reschedule_requested",
+                           "cancel": "cancelled"}[_act]
+            if _act == "cancel" and not _is_staff:
+                _new_status = "reschedule_requested"
+                _anote = _anote or "ผู้ป่วยขอยกเลิก"
+            _upd = appointment_store.set_status(_aid, _new_status, by=user_hash, note=_anote)
+            if _upd is None:
+                return "❌ บันทึกไม่สำเร็จ กรุณาลองใหม่"
+            audit_logger.log("appointment_status", user_hash, {"id": _aid, "status": _new_status})
+            if _act == "confirm":
+                return f"✅ ยืนยันนัดแล้ว\n{_apr.appointment_line(_upd)}"
+            if _new_status == "cancelled":
+                return f"🗑 ยกเลิกนัดแล้ว\n{_apr.appointment_line(_upd)}"
+            # ขอเลื่อน → แจ้งเจ้าหน้าที่
+            _nm = _patient_name_for_hn(_upd["clinic_hn"])
+            for _sid in _staff_line_ids():
+                push_message(
+                    _sid,
+                    f"📣 ผู้ป่วยขอเลื่อนนัด\n👤 HN {_upd['clinic_hn']} {_nm}\n"
+                    f"{_apr.appointment_line(_upd)}"
+                    + (f"\n💬 {_anote}" if _anote else "")
+                    + f"\n\nตั้งนัดใหม่: นัด {_upd['clinic_hn']} {_apr.APPT_TYPES[_upd['type']]} <วันที่>",
+                )
+            return "📨 แจ้งเจ้าหน้าที่แล้ว ทางคลินิกจะติดต่อกลับเพื่อนัดวันใหม่"
+
+        _view = _apr.parse_view(text_stripped)
+        if _view is not None:
+            if _view and not _is_staff:
+                return None
+            if not _view:
+                _mine = hn_registry.get_by_owner(user_hash)
+                _view = (_mine.clinic_hn if _mine else "") or ""
+                if not _view:
+                    return "ยังไม่ได้ผูก HN กับ LINE นี้ — ขอรหัสผูกบัญชีจากเจ้าหน้าที่ แล้วพิมพ์: ผูก <รหัส>"
+            _rows = appointment_store.list_for_hn(_view)
+            _rule = appointment_store.get_rule(_view) or {}
+            _lines = [f"📅 นัดหมาย HN {_view}" + (f" {_patient_name_for_hn(_view)}" if _is_staff else "")]
+            _lines += [_apr.appointment_line(r) for r in _rows] or ["(ไม่มีนัดที่กำลังจะถึง)"]
+            if _rule.get("rx_next"):
+                _lines.append(f"🔁 รับยาทุก {_rule.get('rx_every_days', 30)} วัน — ครั้งถัดไป {_rule['rx_next']}")
+            if _rule.get("lab_next"):
+                _lines.append(f"🔁 เจาะเลือดทุก {_rule.get('lab_every_months', 3)} เดือน — ครั้งถัดไป {_rule['lab_next']}")
+            return "\n".join(_lines)
+
+        if _is_staff:
+            _rule_cmd = _apr.parse_staff_rule(text_stripped)
+            if _rule_cmd is not None:
+                if not (master_registry and master_registry.match_hn(_rule_cmd["hn"])):
+                    return f"❌ ไม่พบ HN {_rule_cmd['hn']} ในทะเบียนผู้ป่วย"
+                _k = _rule_cmd["type"]
+                _upd = {f"{_k}_next": _rule_cmd["start"].isoformat(), f"{_k}_time": _rule_cmd["time"]}
+                if _k == "rx":
+                    _upd["rx_every_days"] = _rule_cmd["every"] * (30 if _rule_cmd["unit"] == "เดือน" else 1)
+                else:
+                    _upd["lab_every_months"] = _rule_cmd["every"] if _rule_cmd["unit"] == "เดือน" else max(1, _rule_cmd["every"] // 30)
+                if appointment_store.set_rule(_rule_cmd["hn"], _upd, by=user_hash) is None:
+                    return "❌ บันทึกนัดประจำไม่สำเร็จ"
+                audit_logger.log("appointment_rule_set", user_hash, {"hn": _rule_cmd["hn"], "type": _k})
+                _linked = "✅ ผู้ป่วยผูก LINE แล้ว จะได้รับแจ้งเตือน" if _patient_line_id_for_hn(_rule_cmd["hn"]) else "⚠️ ผู้ป่วยยังไม่ผูก LINE — จะไม่ได้รับแจ้งเตือนจนกว่าจะผูก (ออกรหัส <HN>)"
+                return (
+                    f"🔁 ตั้งนัดประจำแล้ว\n👤 HN {_rule_cmd['hn']} {_patient_name_for_hn(_rule_cmd['hn'])}\n"
+                    f"{_apr.APPT_TYPES[_k]} ทุก {_rule_cmd['every']} {_rule_cmd['unit']} เริ่ม {_apr.fmt_thai_date(_rule_cmd['start'])}\n"
+                    f"{_linked}"
+                )
+
+            _ap = _apr.parse_staff_appointment(text_stripped)
+            if _ap is not None:
+                if not (master_registry and master_registry.match_hn(_ap["hn"])):
+                    return f"❌ ไม่พบ HN {_ap['hn']} ในทะเบียนผู้ป่วย"
+                if _ap["date"] < _apr.today_bkk():
+                    return "❌ วันที่นัดผ่านมาแล้ว"
+                _rec = appointment_store.create(
+                    _ap["hn"], _ap["type"], _ap["date"], _ap["time"], _ap["note"], user_hash,
+                )
+                if _rec is None:
+                    return "❌ บันทึกนัดไม่สำเร็จ กรุณาลองใหม่"
+                audit_logger.log("appointment_created", user_hash, {"id": _rec["id"], "type": _ap["type"]})
+                _lid = _patient_line_id_for_hn(_ap["hn"])
+                _notice = "✅ ส่งแจ้งผู้ป่วยทาง LINE แล้ว" if _lid and push_message(
+                    _lid, _apr.reminder_text(_rec, _patient_name_for_hn(_ap["hn"]), "new").replace("🔔 แจ้งเตือนนัด", "📅 นัดใหม่: ").replace(" วันนี้", "")
+                ) else "⚠️ ผู้ป่วยยังไม่ผูก LINE — จะไม่ได้รับแจ้งเตือน (ออกรหัส <HN> ให้ผู้ป่วยก่อน)"
+                return (
+                    f"📅 ตั้งนัดแล้ว\n👤 HN {_ap['hn']} {_patient_name_for_hn(_ap['hn'])}\n"
+                    f"{_apr.appointment_line(_rec)}\n{_notice}\n"
+                    "ระบบจะเตือนผู้ป่วยล่วงหน้า 1 วัน และเช้าวันนัด (08:00)"
+                )
+
     # ── รหัสผูกบัญชีผู้ป่วย ──────────────────────────────────
     _link_code = parse_link_command(text_stripped)
     if _link_code is not None and link_code_store is not None:
@@ -6950,6 +7053,13 @@ def handle_search_command(
         audit_logger.log("link_code_consumed", user_hash, {
             "success": ok, "hn": _clinic_hn,
         })
+        if ok and line_user_id:
+            # เก็บ LINE userId ไว้ส่งแจ้งเตือนนัด/ค่าวิกฤตถึงผู้ป่วยคนนี้
+            try:
+                from alert_delivery import store_enrolled_line_id
+                store_enrolled_line_id(storage, user_hash, line_user_id)
+            except Exception as _e:
+                logger.warning("เก็บ LINE ID ผู้ป่วยไม่สำเร็จ: %s", type(_e).__name__)
         if not ok:
             return (
                 f"❌ ผูกบัญชีไม่สำเร็จ: {msg}\n"
@@ -6963,6 +7073,19 @@ def handle_search_command(
             f"🏥 HN คลินิก: {_clinic_hn}\n\n"
             "กดเมนู \"ดูผลแล็บ\" เพื่อดูเอกสารของคุณ\n"
             "(เห็นเฉพาะของตัวเองเท่านั้น)"
+        )
+
+    if text_stripped in ("ส่งเตือนนัดตอนนี้", "รันเตือนนัด", "run reminders"):
+        if not is_admin_user(user_hash):
+            return None
+        _res = job_manager.run("daily_reminders")
+        _ap = (getattr(_res, "details", {}) or {}).get("appointments") or {}
+        audit_logger.log("daily_reminders_manual", user_hash, {"success": _res.success})
+        return (
+            f"{'✅' if _res.success else '❌'} รันแจ้งเตือนนัดแล้ว\n"
+            f"ส่งถึงผู้ป่วย: {_ap.get('sent', 0)} · ยังไม่ผูก LINE: {_ap.get('skipped_unlinked', 0)} · "
+            f"ส่งไปแล้วก่อนหน้า: {_ap.get('already', 0)} · ผิดพลาด: {_ap.get('errors', 0)}\n"
+            f"นัดวันนี้: {_ap.get('today_count', 0)} · แจ้งเจ้าหน้าที่: {_ap.get('staff_notified', 0)}"
         )
 
     _issue_hn = parse_issue_command(text_stripped)
@@ -9561,6 +9684,60 @@ except Exception as _lc_err:  # pragma: no cover
         lambda _t: None
     )
 
+# ── นัดหมายและแจ้งเตือนผู้ป่วย (ดู appointment_reminder.py) ─────────
+try:
+    import appointment_reminder as _apr
+    appointment_store = _apr.AppointmentStore(storage)
+except Exception as _ap_err:  # pragma: no cover
+    logger.error("appointment_reminder init failed: %s", type(_ap_err).__name__)
+    _apr = None
+    appointment_store = None
+
+
+def _patient_line_id_for_hn(clinic_hn: str) -> str:
+    """HN → LINE userId ของผู้ป่วยที่ผูกบัญชีแล้วเท่านั้น ("" ถ้าไม่มี)"""
+    try:
+        _p = hn_registry.get_by_clinic_hn(clinic_hn)
+        if not _p or not getattr(_p, "owner_hash", ""):
+            return ""
+        from alert_delivery import _lookup_enrolled_line_id
+        return _lookup_enrolled_line_id(storage, _p.owner_hash)
+    except Exception:
+        return ""
+
+
+def _patient_name_for_hn(clinic_hn: str) -> str:
+    try:
+        _m = master_registry.match_hn(clinic_hn) if master_registry else None
+        return (_m.patient_name if _m else "") or ""
+    except Exception:
+        return ""
+
+
+def _staff_line_ids() -> list[str]:
+    try:
+        return list(_alert_recipients.get("physician", []))
+    except Exception:
+        return []
+
+
+def job_daily_reminders() -> dict:
+    """งานประจำวัน 08:00: เตือนนัดพรุ่งนี้/วันนี้ + นัดประจำ + ฟอกเลือด + สรุปเจ้าหน้าที่"""
+    out: dict = {}
+    if _apr is not None and appointment_store is not None:
+        out["appointments"] = _apr.run_daily(
+            appointment_store, _patient_line_id_for_hn, _patient_name_for_hn,
+            push_message, _staff_line_ids(),
+        )
+    try:
+        import hd_schedule_reminder
+        out["hd"] = hd_schedule_reminder.send_reminders(
+            storage, master_registry, hn_registry, push_messages,
+        )
+    except Exception as _e:
+        out["hd"] = {"error": type(_e).__name__}
+    return out
+
 # ── Structured Event Logger (V4.0 Phase 1.2) ──
 from event_logger import EventLogger, generate_job_id, EventTimer
 event_logger = EventLogger(max_buffer=1000)
@@ -9588,6 +9765,10 @@ policy_engine = PolicyEngine()
 # ── Scheduled Jobs (V4.0 Phase 5.1) ──
 from scheduled_jobs import ScheduledJobManager
 job_manager = ScheduledJobManager()
+try:
+    job_manager.register("daily_reminders", job_daily_reminders)
+except Exception as _jr_err:  # pragma: no cover
+    logger.warning("register daily_reminders failed: %s", type(_jr_err).__name__)
 
 # ── V4.0: Initialize all modules with GCS storage ──
 if STORAGE_BACKEND == "gcs" and 'storage' in dir():
@@ -17379,6 +17560,37 @@ def _keepalive_worker():
         except Exception as e:
             logger.debug(f"Keep-alive ping failed: {type(e).__name__}")
 
+
+# ── ตัวจับเวลาแจ้งเตือนนัดประจำวัน (ไม่ต้องใช้ Render Cron Job/secret) ──
+# Starter ไม่หลับ จึงใช้ thread ในแอปเช็คทุกนาที ถึงเวลา REMINDER_HOUR
+# (เวลาไทย) ก็รัน job ทุก worker จะพยายามรัน แต่ตัวกันส่งซ้ำใน GCS
+# (create-only marker) ทำให้ผู้ป่วยแต่ละคนได้รับข้อความครั้งเดียว
+_REMINDER_HOUR = int(os.getenv("REMINDER_HOUR", "8"))
+_REMINDER_ENABLED = os.getenv("REMINDER_ENABLED", "true").strip().lower() == "true"
+
+
+def _reminder_scheduler_worker():
+    import time as _t
+    from datetime import timezone as _tz, timedelta as _td
+    _bkk = _tz(_td(hours=7))
+    _last_run_day = None
+    while True:
+        try:
+            _now = datetime.now(_bkk)
+            if _now.hour == _REMINDER_HOUR and _last_run_day != _now.date():
+                _last_run_day = _now.date()
+                _res = job_manager.run("daily_reminders")
+                logger.info("daily_reminders (scheduler): success=%s", _res.success)
+        except Exception as _e:
+            logger.warning("reminder scheduler: %s", type(_e).__name__)
+        _t.sleep(60)
+
+
+if _REMINDER_ENABLED and not IS_TESTING:
+    threading.Thread(
+        target=_reminder_scheduler_worker, daemon=True, name="reminder-scheduler",
+    ).start()
+    logger.info("Reminder scheduler: เปิดใช้งาน (ทุกวัน %02d:00 เวลาไทย)", _REMINDER_HOUR)
 
 if _KEEPALIVE_ENABLED and not IS_TESTING:
     _keepalive_thread = threading.Thread(

@@ -52,6 +52,7 @@ COPY monitoring_schedule.py .
 COPY nephrology_kpi.py .
 COPY patient_master_registry.py .
 COPY patient_link_code.py .
+COPY appointment_reminder.py .
 
 # Phase A-F: Clinical Intelligence Platform 2.0
 COPY clinical_dashboard.py .

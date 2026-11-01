@@ -830,14 +830,27 @@ def store_enrolled_line_id(storage, user_hash: str, line_user_id: str) -> bool:
         return False
     user_hash = user_hash.lower()
     try:
+        # เขียนเป็นไฟล์เวอร์ชันใหม่ — SA เขียนทับไม่ได้ (create-only) ถ้าใช้ชื่อ
+        # เดิม การผูกบัญชีซ้ำ (เช่น ผู้ป่วยเปลี่ยนโทรศัพท์) จะล้มเหลวเงียบ ๆ
+        # และการแจ้งเตือนไปที่เครื่องเก่า  ตัวอ่านเลือกไฟล์ล่าสุด
+        _payload = json.dumps({
+            "line_user_id": line_user_id,
+            "enrolled_at": datetime.now().isoformat(),
+        }, ensure_ascii=False).encode("utf-8")
+        _ts = datetime.now().strftime("%Y%m%d%H%M%S%f")
         storage.put(
-            f"{ENROLLED_IDS_PREFIX}{user_hash}.json",
-            json.dumps({
-                "line_user_id": line_user_id,
-                "enrolled_at": datetime.now().isoformat(),
-            }, ensure_ascii=False).encode("utf-8"),
-            content_type="application/json",
+            f"{ENROLLED_IDS_PREFIX}{user_hash}/v{_ts}.json",
+            _payload, content_type="application/json",
         )
+        # ไฟล์เดี่ยวแบบเดิมสำหรับผู้อ่านที่ไม่มี bucket (ครั้งแรกเท่านั้น —
+        # ครั้งถัดไปเขียนทับไม่ได้ ซึ่งไม่เป็นไร เพราะตัวอ่านดูเวอร์ชันก่อน)
+        try:
+            storage.put(
+                f"{ENROLLED_IDS_PREFIX}{user_hash}.json",
+                _payload, content_type="application/json",
+            )
+        except Exception:
+            pass
         return True
     except Exception as e:
         # ไม่ log ตัว ID — แค่ชนิดข้อผิดพลาด
@@ -857,7 +870,18 @@ def _lookup_enrolled_line_id(storage, user_hash: str) -> str:
     if not _OWNER_HASH_RE.match(user_hash):
         return ""
     try:
-        raw = storage.get(f"{ENROLLED_IDS_PREFIX}{user_hash}.json")
+        raw = None
+        bucket = getattr(storage, "_bucket", None)
+        if bucket is not None:
+            # ไฟล์เวอร์ชันล่าสุด (ผูกใหม่ชนะ)
+            latest = None
+            for b in bucket.list_blobs(prefix=f"{ENROLLED_IDS_PREFIX}{user_hash}/v"):
+                if latest is None or b.name > latest.name:
+                    latest = b
+            if latest is not None:
+                raw = latest.download_as_text().encode("utf-8")
+        if raw is None:
+            raw = storage.get(f"{ENROLLED_IDS_PREFIX}{user_hash}.json")
         if not raw:
             return ""
         uid = (json.loads(raw.decode("utf-8")) or {}).get("line_user_id", "")
