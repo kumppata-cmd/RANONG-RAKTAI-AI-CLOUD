@@ -155,6 +155,7 @@ def get_patient_labs_for_liff(
     hn_registry: Any = None,
     generate_signed_url_fn: Any = None,
     search_hn: str = "",
+    is_physician: bool = False,
 ) -> dict:
     """ดึงเอกสารของผู้ป่วยสำหรับ LIFF Patient Portal.
 
@@ -189,9 +190,15 @@ def get_patient_labs_for_liff(
         patient_hns: set[str] = set()
         patient_hn_display = ""
 
-        # ── ตรวจว่าเป็นแพทย์ไหม (server ส่ง is_physician มา) ──
-        # ถ้าแพทย์เปิดโดยไม่ search → แสดงหน้าค้นหาก่อน
-        if not search_hn and not owner_hash:
+        # ── [SEC-2] สิทธิ์แพทย์ต้องมาจาก server เท่านั้น ──
+        # เดิม: ผู้ป่วยที่ยังไม่ได้ผูก HN (patient_hns ว่าง) ถูกตีความ
+        # เป็น "physician mode" แล้วได้เห็นเอกสารของผู้ป่วยทุกคน
+        # (พบจริง 2026-11-01: ผู้ป่วยเพิ่มเพื่อน LINE แล้วเห็นผลแล็บ/ใบยา/
+        # ใบฟอกเลือดของคนอื่น)  ตอนนี้: ไม่ใช่แพทย์ = ห้ามค้น HN อื่น และ
+        # ไม่มี HN ที่ผูกไว้ = ไม่แสดงเอกสารใด ๆ เลย
+        if search_hn and not is_physician:
+            search_hn = ""
+        if is_physician and not search_hn:
             result["message"] = "physician_search"
             return result
 
@@ -221,13 +228,13 @@ def get_patient_labs_for_liff(
             except Exception:
                 pass
 
-        # is_physician_mode ถูกตั้งใน server.py ก่อนเรียกฟังก์ชันนี้
-        _is_physician_mode = bool(search_hn) or bool(
-            search_hn == "" and not patient_hns
-        )
-
-        if not patient_hns and not _is_physician_mode:
-            result["message"] = "กรุณาลงทะเบียน HN ก่อน โดยพิมพ์: ลงทะเบียนHN <เลข HN>"
+        if not patient_hns:
+            # ผู้ป่วยที่ยังไม่ผูก HN — ไม่มีเอกสารให้ดู (fail-closed)
+            result["message"] = (
+                "ยังไม่ได้ผูก HN กับ LINE นี้\n"
+                "กรุณาขอรหัสผูกบัญชี 6 หลักจากเจ้าหน้าที่คลินิก "
+                "แล้วพิมพ์ในแชท: ผูก <รหัส>"
+            )
             return result
 
         # ── Step 2: หาเอกสารจาก doc_index ──
@@ -241,16 +248,14 @@ def get_patient_labs_for_liff(
                     folder = (doc.get("patient_hn_folder") or "").upper()
                     if not folder:
                         continue
-                    if patient_hns:
-                        # กรองเฉพาะ HN ที่ระบุ
-                        matched = False
-                        for hn in patient_hns:
-                            if hn in folder:
-                                matched = True
-                                break
-                        if not matched:
-                            continue
-                    # ถ้าไม่มี patient_hns (physician mode) → เอาทั้งหมด
+                    # [SEC-3] เทียบ HN แบบตรงตัวเท่านั้น: แฟ้มชื่อ "<HN>_<ชื่อ>"
+                    # หรือ "<HN>"  เดิมใช้ substring (hn in folder) ทำให้
+                    # HN สั้น ๆ เช่น "5" ตรงกับแฟ้มของผู้ป่วยทุกคนที่มีเลข 5
+                    if not any(
+                        folder == hn or folder.startswith(hn + "_")
+                        for hn in patient_hns
+                    ):
+                        continue
                     patient_docs.append(doc)
             except Exception:
                 pass

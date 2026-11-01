@@ -6499,16 +6499,16 @@ def handle_search_command(
             "━━━━━━━━━━━━━━━━━━━━\n"
             "\n"
             "ผูก HN ของคุณกับบัญชี LINE\n"
-            "เพื่อให้เอกสารเข้าแฟ้มอัตโนมัติ\n"
+            "เพื่อดูผลแล็บ/ใบยาของตัวเองได้\n"
             "\n"
-            "📌 พิมพ์คำสั่ง:\n"
-            "ลงทะเบียนHN <HNคลินิก> <HNรพ.>\n"
+            "🔐 เพื่อความปลอดภัยของข้อมูล\n"
+            "ขอรหัสผูกบัญชี 6 หลักจากเจ้าหน้าที่คลินิก\n"
+            "แล้วพิมพ์ในแชทนี้:\n"
+            "ผูก <รหัส 6 หลัก>\n"
             "\n"
-            "ตัวอย่าง:\n"
-            "• ลงทะเบียนHN 1234 56789\n"
-            "• ลงทะเบียนHN 1234\n"
+            "ตัวอย่าง: ผูก 482913\n"
             "\n"
-            "💡 หลังลงทะเบียนแล้ว เอกสารที่ส่งจะเข้าแฟ้มของคุณอัตโนมัติ"
+            "💡 รหัสใช้ได้ครั้งเดียว ภายใน 48 ชั่วโมง"
         )
 
     # ── Admin: Deploy Rich Menu ──────────────────────────────
@@ -6924,6 +6924,87 @@ def handle_search_command(
     # ─ ไม่แสดง LINE userId จริง
     # ─ ไม่บันทึก Token หรือ userId ลง log
     # ─ ป้องกัน replay attack และ rate limiting
+    # ── รหัสผูกบัญชีผู้ป่วย ──────────────────────────────────
+    _link_code = parse_link_command(text_stripped)
+    if _link_code is not None and link_code_store is not None:
+        status, _hn = link_code_store.consume(_link_code, user_hash)
+        if status == "RATE_LIMITED":
+            audit_logger.log("link_code_rate_limited", user_hash, {})
+            return "⚠️ พิมพ์รหัสผิดหลายครั้ง กรุณารอ 1 ชั่วโมงแล้วลองใหม่"
+        if status == "EXPIRED":
+            audit_logger.log("link_code_expired", user_hash, {})
+            return "⏰ รหัสนี้หมดอายุแล้ว กรุณาขอรหัสใหม่จากเจ้าหน้าที่"
+        if status == "USED":
+            audit_logger.log("link_code_reused", user_hash, {})
+            return "❌ รหัสนี้ถูกใช้ไปแล้ว กรุณาขอรหัสใหม่จากเจ้าหน้าที่"
+        if status != "VALID":
+            audit_logger.log("link_code_invalid", user_hash, {})
+            return "❌ รหัสไม่ถูกต้อง กรุณาตรวจสอบกับเจ้าหน้าที่"
+        _pt = master_registry.match_hn(_hn) if master_registry else None
+        _clinic_hn = _pt.clinic_hn if _pt and _pt.clinic_hn else _hn
+        _hosp_hn = _pt.hospital_hn if _pt else ""
+        ok, msg = hn_registry.register(
+            owner_hash=user_hash, clinic_hn=_clinic_hn,
+            hospital_hn=_hosp_hn, registered_by="link_code",
+        )
+        audit_logger.log("link_code_consumed", user_hash, {
+            "success": ok, "hn": _clinic_hn,
+        })
+        if not ok:
+            return (
+                f"❌ ผูกบัญชีไม่สำเร็จ: {msg}\n"
+                "กรุณาติดต่อเจ้าหน้าที่คลินิก"
+            )
+        _name = (_pt.patient_name if _pt else "") or ""
+        return (
+            "✅ ผูกบัญชีสำเร็จ\n"
+            f"👤 {_name}\n" if _name else "✅ ผูกบัญชีสำเร็จ\n"
+        ) + (
+            f"🏥 HN คลินิก: {_clinic_hn}\n\n"
+            "กดเมนู \"ดูผลแล็บ\" เพื่อดูเอกสารของคุณ\n"
+            "(เห็นเฉพาะของตัวเองเท่านั้น)"
+        )
+
+    _issue_hn = parse_issue_command(text_stripped)
+    if _issue_hn is not None:
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None  # ไม่เปิดเผยว่ามีคำสั่งนี้
+        if link_code_store is None or master_registry is None:
+            return "❌ ระบบรหัสผูกบัญชียังไม่พร้อม"
+        _pt = master_registry.match_hn(_issue_hn)
+        if _pt is None:
+            return (
+                f"❌ ไม่พบ HN {_issue_hn} ในทะเบียนผู้ป่วย\n"
+                "ลงทะเบียนรายชื่อก่อน (พิมพ์ 'ลงทะเบียนรายชื่อ')"
+            )
+        ok, code_or_err = link_code_store.issue(
+            _pt.clinic_hn or _issue_hn, user_hash,
+        )
+        audit_logger.log("link_code_issued", user_hash, {
+            "success": ok, "hn": _pt.clinic_hn or _issue_hn,
+        })
+        if not ok:
+            return f"❌ {code_or_err}"
+        return (
+            "🔐 รหัสผูกบัญชีผู้ป่วย\n"
+            f"👤 {_pt.patient_name or '-'}\n"
+            f"🏥 HN: {_pt.clinic_hn or _issue_hn}\n\n"
+            f"รหัส: {code_or_err}\n\n"
+            "ให้ผู้ป่วยเพิ่มเพื่อน LINE OA แล้วพิมพ์:\n"
+            f"ผูก {code_or_err}\n\n"
+            "⏰ ใช้ได้ครั้งเดียว ภายใน 48 ชั่วโมง\n"
+            f"ยกเลิก: ยกเลิกรหัส {code_or_err}"
+        )
+
+    _revoke_code = parse_revoke_command(text_stripped)
+    if _revoke_code is not None:
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None
+        if link_code_store is not None and link_code_store.revoke(_revoke_code, user_hash):
+            audit_logger.log("link_code_revoked", user_hash, {})
+            return f"✅ ยกเลิกรหัส {_revoke_code} แล้ว"
+        return "❌ ยกเลิกไม่สำเร็จ (รหัสไม่ถูกต้องหรือถูกใช้/ยกเลิกแล้ว)"
+
     if text_stripped.startswith("ยืนยัน "):
         provided_token = text_stripped[len("ยืนยัน "):].strip()
         if not provided_token:
@@ -7113,6 +7194,28 @@ def handle_search_command(
         )
 
     if not is_authorized_user(user_hash):
+        if parsed.command_type == CommandType.REGISTER_HN:
+            # [SEC-4] ผู้ป่วยห้ามอ้าง HN เอง — ใช้รหัสจากเจ้าหน้าที่แทน
+            audit_logger.log("hn_self_register_blocked", user_hash, {})
+            return (
+                "🔐 การผูก HN ต้องยืนยันตัวตนที่คลินิก\n\n"
+                "กรุณาแจ้งเจ้าหน้าที่เพื่อรับรหัสผูกบัญชี 6 หลัก\n"
+                "แล้วพิมพ์ในแชทนี้ว่า:\n"
+                "ผูก <รหัส 6 หลัก>\n\n"
+                "ตัวอย่าง: ผูก 482913"
+            )
+        if parsed.command_type == CommandType.MY_HN:
+            # ผู้ป่วยดู HN ของตัวเองได้ (ข้อมูลของตัวเอง)
+            try:
+                _me = hn_registry.get_by_owner(user_hash)
+            except Exception:
+                _me = None
+            if _me and getattr(_me, "clinic_hn", ""):
+                return f"🏥 HN คลินิกของคุณ: {_me.clinic_hn}"
+            return (
+                "ยังไม่ได้ผูก HN กับ LINE นี้\n"
+                "ขอรหัสผูกบัญชีจากเจ้าหน้าที่ แล้วพิมพ์: ผูก <รหัส>"
+            )
         if parsed.command_type in PROTECTED_COMMANDS:
             audit_logger.log("unauthorized_access", user_hash, {
                 "command": text_stripped[:20]
@@ -8501,6 +8604,17 @@ def handle_search_command(
     # ── ลงทะเบียน HN ──
     if parsed.command_type == CommandType.REGISTER_HN:
         hn_input = parsed.args.strip()
+        if not is_authorized_user(user_hash):
+            # [SEC-4] ผู้ป่วยห้ามอ้าง HN เอง — ใครพิมพ์ HN ของคนอื่นก่อน
+            # จะได้เห็นเวชระเบียนของคนนั้น  ต้องใช้รหัสจากเจ้าหน้าที่แทน
+            audit_logger.log("hn_self_register_blocked", user_hash, {})
+            return (
+                "🔐 การผูก HN ต้องยืนยันตัวตนที่คลินิก\n\n"
+                "กรุณาแจ้งเจ้าหน้าที่เพื่อรับรหัสผูกบัญชี 6 หลัก\n"
+                "แล้วพิมพ์ในแชทนี้ว่า:\n"
+                "ผูก <รหัส 6 หลัก>\n\n"
+                "ตัวอย่าง: ผูก 482913"
+            )
         if not hn_input:
             return (
                 "📋 ลงทะเบียน HN\n\n"
@@ -9432,6 +9546,20 @@ class RateLimiter:
 state_store = StateStore(REDIS_URL)
 dedup_guard = DedupGuard(state_store)
 rate_limiter = RateLimiter(state_store)
+
+# ── รหัสผูกบัญชีผู้ป่วย (ดู patient_link_code.py) ──────────────
+try:
+    from patient_link_code import (
+        LinkCodeStore, parse_issue_command, parse_link_command,
+        parse_revoke_command,
+    )
+    link_code_store = LinkCodeStore(storage, state_store)
+except Exception as _lc_err:  # pragma: no cover
+    logger.error("patient_link_code init failed: %s", type(_lc_err).__name__)
+    link_code_store = None
+    parse_issue_command = parse_link_command = parse_revoke_command = (
+        lambda _t: None
+    )
 
 # ── Structured Event Logger (V4.0 Phase 1.2) ──
 from event_logger import EventLogger, generate_job_id, EventTimer
@@ -16841,6 +16969,7 @@ def liff_api_my_labs():
             hn_registry=hn_registry,
             generate_signed_url_fn=generate_signed_url,
             search_hn=search_hn,
+            is_physician=_is_physician,
         )
         data["is_physician"] = _is_physician
         return jsonify(data), 200, _liff_cors_headers()
