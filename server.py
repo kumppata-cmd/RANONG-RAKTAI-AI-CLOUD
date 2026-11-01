@@ -1542,7 +1542,10 @@ class DocumentIndex:
                     return False
 
             with self._lock:
-                self._docs = new_docs
+                # เอกสารที่ถูก "ซ่อน" (เช่น ซ้ำ — ผ่าน approval) ไม่อยู่ใน
+                # รายการที่ทุกส่วนของระบบมองเห็น แต่ยังอยู่ใน _doc_map
+                # เพื่อให้ get()/กันซ้ำถาวร ยังทำงาน  ไฟล์จริงใน GCS ไม่ถูกลบ
+                self._docs = [d for d in new_docs if not d.get("hidden")]
                 self._doc_map = new_map
                 self._cache_ts = time.time()
             return True
@@ -1656,7 +1659,8 @@ class DocumentIndex:
         if not owner_hash or not sha256_hex:
             return None
         self._ensure_fresh()
-        for d in reversed(self._docs):
+        # รวมเอกสารที่ถูกซ่อนด้วย — ซ่อนแล้วก็ยังไม่ควรรับซ้ำเข้ามาอีก
+        for d in reversed(list(self._doc_map.values())):
             if d.get("owner_hash") != owner_hash:
                 continue
             if d.get("content_sha256") == sha256_hex:
@@ -1664,6 +1668,81 @@ class DocumentIndex:
             if sha256_hex in (d.get("page_sha256s") or ()):
                 return d
         return None
+
+    def find_duplicates_in_folder(self, hn: str) -> list[list[dict]]:
+        """หาเอกสารซ้ำ (เนื้อหาตรงกัน 100%) ในแฟ้มผู้ป่วยเดียวกัน.
+
+        จับกลุ่มด้วย content_sha256 / page_sha256s  คืน list ของกลุ่ม
+        แต่ละกลุ่มเรียงจากเก่า→ใหม่ (ตัวแรก = ต้นฉบับที่ควรเก็บ)
+        ไม่รวมเอกสารที่ซ่อนไปแล้ว
+        """
+        self._ensure_fresh()
+        hn = (hn or "").strip()
+        if not hn:
+            return []
+        groups: dict[str, list[dict]] = {}
+        for d in self._docs:
+            folder = d.get("patient_hn_folder", "") or ""
+            if not (folder == hn or folder.startswith(hn + "_")):
+                continue
+            keys = set()
+            if d.get("content_sha256"):
+                keys.add(d["content_sha256"])
+            for ps in d.get("page_sha256s") or []:
+                keys.add(ps)
+            for k in keys:
+                groups.setdefault(k, []).append(d)
+        seen: set[str] = set()
+        out: list[list[dict]] = []
+        for docs in groups.values():
+            if len(docs) < 2:
+                continue
+            ids = tuple(sorted(x.get("document_id", "") for x in docs))
+            key = "|".join(ids)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(sorted(docs, key=lambda x: x.get("upload_date", "")))
+        return out
+
+    def set_hidden(self, doc_id: str, hidden: bool, reason: str = "") -> bool:
+        """ซ่อน/เลิกซ่อนเอกสาร (logical delete) — ไฟล์ต้นฉบับใน GCS ไม่ถูกแตะ.
+
+        เขียน versioned per-doc JSON (create-only) เพราะ SA ไม่มีสิทธิ์
+        overwrite/delete  loader จะเลือกไฟล์เวอร์ชันล่าสุดโดยอัตโนมัติ
+        """
+        self._ensure_fresh()
+        doc = self._doc_map.get(doc_id)
+        if doc is None:
+            return False
+        doc["hidden"] = bool(hidden)
+        doc["hidden_reason"] = (reason or "")[:120] if hidden else ""
+        doc["hidden_at"] = (
+            datetime.now(timezone.utc).isoformat() if hidden else ""
+        )
+        with self._lock:
+            if hidden:
+                self._docs = [d for d in self._docs if d.get("document_id") != doc_id]
+            elif all(d.get("document_id") != doc_id for d in self._docs):
+                self._docs.append(doc)
+        if self._storage and getattr(self._storage, "is_ready", False):
+            try:
+                _ts = int(time.time())
+                blob_path = f"{INDEX_DOC_PREFIX}{doc_id}_v{_ts}.json"
+                blob = self._storage._bucket.blob(blob_path)
+                blob.upload_from_string(
+                    json.dumps(doc, ensure_ascii=False),
+                    content_type="application/json",
+                    if_generation_match=0,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Document index set_hidden GCS write failed: "
+                    f"{type(e).__name__}"
+                )
+                return False
+        logger.info(f"Document index: doc={doc_id[:8]}… hidden={hidden}")
+        return True
 
     def search(self, query: str, max_results: int = SEARCH_MAX_RESULTS) -> list[dict]:
         """ค้นหาเอกสาร — substring match ใน category, extracted_text, upload_date.
@@ -5410,6 +5489,59 @@ def api_patient_data(hn):
 # Admin Compare Page: เปรียบเทียบเอกสาร — รูปจริง 2 รูปคู่กัน
 # ══════════════════════════════════════════════════════════════
 
+# ── Compare page auth helpers ────────────────────────────────
+# เดิม: secret อยู่ใน query string (?secret=...) และถูกส่งเป็นลิงก์เข้า LINE
+# → รั่วใน access log ของ Render, browser history และประวัติแชท LINE
+# ใหม่: ลิงก์จาก LINE ใช้ token ชั่วคราว (HMAC, หมดอายุ 1 ชม.) → เว็บตั้ง
+# cookie HttpOnly แล้ว redirect ไป URL สะอาด  หน้าเว็บ/API ใช้ cookie ต่อ
+# ยังรับ ?secret= แบบเดิมได้ (บุ๊กมาร์กเก่า) แต่จะ redirect ให้สะอาดทันที
+_COMPARE_TOKEN_TTL = 3600
+_ADMIN_COOKIE = "admin_secret"
+
+
+def _make_compare_token(hn: str, ttl: int = _COMPARE_TOKEN_TTL) -> str:
+    """token = <exp>.<hmac(hn|exp)> — ผูกกับ HN และเวลาหมดอายุ ไม่มี secret ในตัว."""
+    _secret = os.getenv("ADMIN_SECRET", "").strip()
+    _exp = str(int(time.time()) + ttl)
+    _sig = hmac.new(
+        _secret.encode("utf-8"), f"{hn}|{_exp}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:32]
+    return f"{_exp}.{_sig}"
+
+
+def _verify_compare_token(hn: str, token: str) -> bool:
+    try:
+        _exp_s, _sig = token.split(".", 1)
+        if int(_exp_s) < int(time.time()):
+            return False
+    except (ValueError, AttributeError):
+        return False
+    _secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not _secret:
+        return False
+    _want = hmac.new(
+        _secret.encode("utf-8"), f"{hn}|{_exp_s}".encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:32]
+    return hmac.compare_digest(_sig, _want)
+
+
+def _admin_cookie_ok() -> bool:
+    _secret = os.getenv("ADMIN_SECRET", "").strip()
+    _ck = request.cookies.get(_ADMIN_COOKIE, "")
+    return bool(_secret and _ck) and hmac.compare_digest(
+        _ck.encode("utf-8", "surrogateescape"), _secret.encode("utf-8")
+    )
+
+
+def _set_admin_cookie(resp):
+    """cookie HttpOnly+Secure+SameSite=Lax อายุ 12 ชม. — ไม่โผล่ใน URL/log/JS."""
+    resp.set_cookie(
+        _ADMIN_COOKIE, os.getenv("ADMIN_SECRET", "").strip(),
+        max_age=12 * 3600, httponly=True, secure=True, samesite="Lax", path="/admin",
+    )
+    return resp
+
+
 @app.route("/admin/compare/<hn>")
 def admin_compare_page(hn):
     """หน้าเว็บเปรียบเทียบเอกสาร — แสดงรูปจริง 2 รูปคู่กัน + ปุ่มสั่งการ
@@ -5422,15 +5554,29 @@ def admin_compare_page(hn):
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return "ระบบยังไม่ได้ตั้งค่า", 500
-    secret = request.args.get("secret", "")
-    if not secret or not hmac.compare_digest(
-        secret.encode("utf-8", "surrogateescape"),
-        admin_secret.encode("utf-8"),
-    ):
-        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
-
     hn = hn.strip()[:20]
     doc_type = request.args.get("type", "dialysis").strip().lower()
+
+    # ── Auth: cookie → token (ลิงก์จาก LINE) → ?secret= เดิม ──
+    # กรณี token/secret มาทาง URL: ตั้ง cookie แล้ว redirect ไป URL ที่ไม่มี
+    # ค่าลับ เพื่อไม่ให้ค้างใน history/log อีก
+    _q_token = request.args.get("token", "")
+    _q_secret = request.args.get("secret", "")
+    if _admin_cookie_ok():
+        pass
+    elif _q_token and _verify_compare_token(hn, _q_token):
+        return _set_admin_cookie(redirect(
+            f"/admin/compare/{hn}?type={doc_type}", code=302,
+        ))
+    elif _q_secret and hmac.compare_digest(
+        _q_secret.encode("utf-8", "surrogateescape"), admin_secret.encode("utf-8"),
+    ):
+        return _set_admin_cookie(redirect(
+            f"/admin/compare/{hn}?type={doc_type}", code=302,
+        ))
+    else:
+        return "⛔ ไม่มีสิทธิ์เข้าถึง (ลิงก์หมดอายุ — ขอลิงก์ใหม่จาก LINE)", 401
+    secret = ""  # ไม่ฝัง secret ลงในหน้าเว็บอีกต่อไป — ใช้ cookie
     base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
     hn_q = hn.replace("HN", "").replace("hn", "").strip()
 
@@ -5667,7 +5813,7 @@ function toggleZoom(img) {{
 }}
 
 function switchType(type) {{
-  window.location.href = BASE + '/admin/compare/' + HN + '?secret=' + SECRET + '&type=' + type;
+  window.location.href = BASE + '/admin/compare/' + HN + '?type=' + type;
 }}
 
 function showToast(msg) {{
@@ -5756,10 +5902,11 @@ def api_treatment_note():
     #  ทุกครั้งที่กดบันทึก; CI จับได้ตั้งแต่ 9381ca4 แต่ deploy ไปก่อน)
     _admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     _body_secret = str(data.get("secret", "") or "")
-    if not _admin_secret or not _body_secret or not hmac.compare_digest(
+    _body_ok = bool(_admin_secret and _body_secret) and hmac.compare_digest(
         _body_secret.encode("utf-8", "surrogateescape"),
         _admin_secret.encode("utf-8"),
-    ):
+    )
+    if not (_body_ok or _admin_cookie_ok()):
         return jsonify({"error": "Unauthorized"}), 401
     hn = data.get("hn", "")
     doc_id = data.get("doc_id", "")
@@ -6620,10 +6767,86 @@ def handle_search_command(
         if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
             return None
         _apr_id = text_stripped.replace("อนุมัติ ", "").replace("อนุมัติ", "").strip()
+        # อ่านคำขอก่อน approve — หลัง approve จะถูกย้ายออกจาก memory
+        _req = approval_engine.get_request(_apr_id) or {}
         _ok, _msg = approval_engine.approve(_apr_id, approver_hash=user_hash)
-        if _ok:
-            return f"✅ อนุมัติ {_apr_id} สำเร็จ"
-        return f"❌ {_msg}"
+        if not _ok:
+            return f"❌ {_msg}"
+        # ── ดำเนินการตามคำขอที่อนุมัติ ──
+        # ซ่อนเอกสารซ้ำ (logical delete — ไฟล์ต้นฉบับใน GCS ไม่ถูกลบ)
+        _hide_ids = (_req.get("metadata") or {}).get("hide_doc_ids") or []
+        if _req.get("action_type") == "delete_document" and _hide_ids:
+            _done, _fail = 0, 0
+            for _hid in _hide_ids:
+                if doc_index.set_hidden(_hid, True, reason=f"duplicate ({_apr_id})"):
+                    _done += 1
+                else:
+                    _fail += 1
+            audit_logger.log("documents_hidden", user_hash, {
+                "approval_id": _apr_id, "hidden": _done, "failed": _fail,
+            })
+            return (
+                f"✅ อนุมัติ {_apr_id} สำเร็จ\n"
+                f"🙈 ซ่อนเอกสารซ้ำแล้ว {_done} รายการ"
+                + (f" (ล้มเหลว {_fail})" if _fail else "")
+                + "\nไฟล์ต้นฉบับยังอยู่ใน GCS — กู้คืนได้ด้วย 'เลิกซ่อน <doc_id>'"
+            )
+        return f"✅ อนุมัติ {_apr_id} สำเร็จ"
+
+    # ── เอกสารซ้ำในแฟ้มผู้ป่วย: "ตรวจซ้ำ HN 1234" / "ซ่อนซ้ำ HN 1234" / "เลิกซ่อน <doc_id>" ──
+    _dup_m = re.match(r"^(ตรวจซ้ำ|ซ่อนซ้ำ)\s*(?:HN|hn)?\s*(\d{3,10})$", text_stripped)
+    if _dup_m:
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None
+        _dup_cmd, _dup_hn = _dup_m.group(1), _dup_m.group(2)
+        _groups = doc_index.find_duplicates_in_folder(_dup_hn)
+        if not _groups:
+            return f"✅ HN {_dup_hn}: ไม่พบเอกสารซ้ำ"
+        _lines = [f"🔍 HN {_dup_hn}: พบเอกสารซ้ำ {len(_groups)} กลุ่ม\n"]
+        _to_hide: list[str] = []
+        for _gi, _g in enumerate(_groups, 1):
+            _keep, _dups = _g[0], _g[1:]
+            _lines.append(
+                f"กลุ่ม {_gi}: {_CAT_NAMES.get(_keep.get('category', ''), '')} "
+                f"{_keep.get('upload_date', '')}"
+            )
+            _lines.append(f"  ✅ เก็บ {_keep.get('document_id', '')[:8]}")
+            for _d in _dups:
+                _lines.append(f"  🗑 ซ้ำ  {_d.get('document_id', '')[:8]} ({_d.get('upload_date', '')})")
+                _to_hide.append(_d.get("document_id", ""))
+        if _dup_cmd == "ตรวจซ้ำ":
+            _lines.append(f"\n💡 พิมพ์ 'ซ่อนซ้ำ HN {_dup_hn}' เพื่อขออนุมัติซ่อน {len(_to_hide)} รายการ")
+            return "\n".join(_lines)
+        _req = approval_engine.request_approval(
+            action_type="delete_document",
+            requester_hash=user_hash,
+            description=f"ซ่อนเอกสารซ้ำ {len(_to_hide)} รายการ ในแฟ้ม HN {_dup_hn}",
+            metadata={"hide_doc_ids": _to_hide, "hn": _dup_hn},
+        )
+        audit_logger.log("duplicate_hide_requested", user_hash, {
+            "hn": _dup_hn, "count": len(_to_hide), "approval_id": _req.approval_id,
+        })
+        _lines.append(
+            f"\n📋 สร้างคำขอ {_req.approval_id} แล้ว (หมดอายุ 60 นาที)\n"
+            f"พิมพ์ 'อนุมัติ {_req.approval_id}' เพื่อซ่อน {len(_to_hide)} รายการ\n"
+            "(ซ่อนจากทุกหน้าจอ — ไฟล์ต้นฉบับใน GCS ไม่ถูกลบ)"
+        )
+        return "\n".join(_lines)
+
+    _unhide_m = re.match(r"^เลิกซ่อน\s+([A-Za-z0-9-]{8,})$", text_stripped)
+    if _unhide_m:
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None
+        _uid = _unhide_m.group(1)
+        _full = next(
+            (k for k in doc_index._doc_map if k.startswith(_uid)), None
+        )
+        if not _full:
+            return f"❌ ไม่พบเอกสาร {_uid}"
+        if doc_index.set_hidden(_full, False):
+            audit_logger.log("document_unhidden", user_hash, {"doc": _full[:8]})
+            return f"✅ เลิกซ่อน {_full[:8]} แล้ว — กลับมาแสดงตามปกติ"
+        return f"❌ เลิกซ่อน {_uid} ไม่สำเร็จ"
 
     if text_stripped.startswith("ปฏิเสธ APR-") or text_stripped.startswith("ปฏิเสธAPR-"):
         if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
@@ -8192,7 +8415,6 @@ def handle_search_command(
             prev_date = _hist[1].get("upload_date", "?")
 
             _base = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
-            _admin_secret = os.getenv("ADMIN_SECRET", "").strip()
             _cmp_type = "dialysis"
             _type_label = "ฟอกเลือด"
             if cmd == CommandType.COMPARE_LAB_TIMELINE:
@@ -8202,9 +8424,10 @@ def handle_search_command(
                 _cmp_type = "rx"
                 _type_label = "ใบยา"
 
+            # token ชั่วคราว (1 ชม.) แทน ADMIN_SECRET — ไม่ให้ secret ค้างในแชท LINE
             _cmp_url = (
                 f"{_base}/admin/compare/{hn_query}"
-                f"?secret={_admin_secret}&type={_cmp_type}"
+                f"?token={_make_compare_token(hn_query)}&type={_cmp_type}"
             )
 
             _text = (
@@ -11497,6 +11720,45 @@ def process_file_async(
                             f"Lab extraction สำเร็จ: doc={_doc_id[:8]}, "
                             f"results={len(lab_report.results)}"
                         )
+                        # ── V5.0 Workflow trigger: lab_result_extracted ──
+                        # ส่งเฉพาะค่าตัวเลข/จำนวนผิดปกติ + HN folder (ไม่ส่งชื่อ)
+                        if v5 is not None:
+                            try:
+                                _abn = {"critical_high", "critical_low",
+                                        "abnormal_high", "abnormal_low"}
+                                _crit = {"critical_high", "critical_low"}
+                                _lab_ctx = {
+                                    "doc_id": _doc_id,
+                                    "category": category,
+                                    "patient_hn_folder": metadata.get("patient_hn_folder", ""),
+                                    "result_count": len(lab_report.results),
+                                    "abnormal_count": sum(
+                                        1 for r in lab_report.results
+                                        if _abn & set(r.flags or [])
+                                    ),
+                                    "critical_count": sum(
+                                        1 for r in lab_report.results
+                                        if _crit & set(r.flags or [])
+                                    ),
+                                    "specimen_date": getattr(lab_report, "specimen_date", ""),
+                                }
+                                _an_map = {
+                                    "egfr": ("egfr",), "creatinine": ("creatinine", "cr"),
+                                    "potassium": ("potassium", "k"),
+                                    "hemoglobin": ("hemoglobin", "hb", "hgb"),
+                                    "bun": ("bun",), "phosphorus": ("phosphorus", "phosphate"),
+                                    "calcium": ("calcium", "ca"), "albumin": ("albumin",),
+                                }
+                                for r in lab_report.results:
+                                    _a = (r.analyte or "").strip().lower()
+                                    for _k, _aliases in _an_map.items():
+                                        if _a in _aliases or _a.startswith(_k):
+                                            _lab_ctx.setdefault(_k, r.value)
+                                v5.fire("lab_result_extracted", _lab_ctx)
+                            except Exception as _wf_err:
+                                logger.warning(
+                                    "V5 lab workflow fire: %s", type(_wf_err).__name__
+                                )
 
                         # ── Lab Alert V1: แจ้งเตือนผลตรวจผิดปกติ ──
                         try:

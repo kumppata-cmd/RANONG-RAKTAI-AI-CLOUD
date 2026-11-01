@@ -117,6 +117,7 @@ class ApprovalRequest:
             "decided_by": self.decided_by[:8] if self.decided_by else "",
             "reason": self.reason,
             "expiry_minutes": self.expiry_minutes,
+            "metadata": dict(self.metadata or {}),
         }
 
     @classmethod
@@ -128,6 +129,7 @@ class ApprovalRequest:
         r.requester_hash = d.get("requester_hash", "")
         r.approver_hashes = d.get("approver_hashes", [])
         r.status = ApprovalStatus(d.get("status", "pending"))
+        r.metadata = dict(d.get("metadata") or {})
         r.created_at = d.get("created_at", r.created_at)
         r.decided_at = d.get("decided_at", "")
         r.decided_by = d.get("decided_by", "")

@@ -1,0 +1,102 @@
+# ตรวจสุขภาพ production ทุก 30 นาที — ไม่ต้องใช้บริการ/บัญชีภายนอก
+#
+# ตรวจ /health ว่า:
+#   - ตอบ HTTP 200
+#   - gcs.status == connected
+#   - state_store.status == connected (Redis)
+#   - external_ai_allowed == false (safety invariant)
+#   - accepting_documents == true
+# ผิดปกติ → เปิด GitHub Issue (label: production-alert) — GitHub ส่ง email
+#            แจ้งเจ้าของ repo อัตโนมัติ; ถ้ามี issue เปิดอยู่แล้วจะ comment เพิ่ม
+# กลับมาปกติ → comment + ปิด issue อัตโนมัติ
+#
+# ไม่ใช้ secret ใด ๆ — ใช้ GITHUB_TOKEN ที่ Actions ให้มาเอง (สิทธิ์แค่ issues)
+name: Production Health Monitor
+
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  contents: read
+
+concurrency:
+  group: health-monitor
+  cancel-in-progress: false
+
+env:
+  HEALTH_URL: https://ranong-raktai-ai-cloud.onrender.com/health
+  ISSUE_TITLE: "🚨 Production health check ล้มเหลว"
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "เรียก /health และตรวจ invariants"
+        id: probe
+        shell: bash
+        run: |
+          set +e
+          body=$(curl -sS --max-time 40 -w '\n%{http_code}' "$HEALTH_URL" 2>&1)
+          rc=$?
+          code=$(echo "$body" | tail -n1)
+          json=$(echo "$body" | sed '$d')
+          problems=()
+          if [ $rc -ne 0 ]; then problems+=("curl ล้มเหลว (rc=$rc): $(echo "$json" | head -c 200)"); fi
+          if [ "$code" != "200" ]; then problems+=("HTTP $code"); fi
+          if [ "$code" = "200" ]; then
+            check() { # $1=jq path  $2=expected  $3=label
+              v=$(echo "$json" | jq -r "$1" 2>/dev/null)
+              if [ "$v" != "$2" ]; then problems+=("$3 = $v (คาดว่า $2)"); fi
+            }
+            check '.gcs.status'            'connected' 'GCS'
+            check '.state_store.status'    'connected' 'Redis/state_store'
+            check '.external_ai_allowed'   'false'     'external_ai_allowed'
+            check '.accepting_documents'   'true'      'accepting_documents'
+            check '.status'                'running'   'status'
+            docs=$(echo "$json" | jq -r '.document_search.indexed_documents // 0')
+            echo "indexed_documents=$docs" >> "$GITHUB_OUTPUT"
+          fi
+          if [ ${#problems[@]} -eq 0 ]; then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+            echo "✅ healthy — docs=$docs"
+          else
+            echo "healthy=false" >> "$GITHUB_OUTPUT"
+            printf '%s\n' "${problems[@]}" > /tmp/problems.txt
+            { echo 'problems<<EOF'; cat /tmp/problems.txt; echo 'EOF'; } >> "$GITHUB_OUTPUT"
+            echo "❌ problems:"; cat /tmp/problems.txt
+          fi
+          exit 0
+
+      - name: "เปิด/อัปเดต/ปิด issue ตามผล"
+        uses: actions/github-script@v7
+        env:
+          HEALTHY: ${{ steps.probe.outputs.healthy }}
+          PROBLEMS: ${{ steps.probe.outputs.problems }}
+          DOCS: ${{ steps.probe.outputs.indexed_documents }}
+        with:
+          script: |
+            const title = process.env.ISSUE_TITLE;
+            const healthy = process.env.HEALTHY === 'true';
+            const problems = (process.env.PROBLEMS || '').trim();
+            const now = new Date().toLocaleString('th-TH', { timeZone: 'Asia/Bangkok' });
+            const { owner, repo } = context.repo;
+            const open = await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'production-alert', per_page: 5,
+            });
+            const existing = open.data.find(i => i.title === title);
+            if (!healthy) {
+              const body = `**เวลา:** ${now} (ไทย)\n**URL:** ${process.env.HEALTH_URL}\n\n**ปัญหาที่พบ:**\n\`\`\`\n${problems}\n\`\`\`\n\nตรวจที่ Render Dashboard → Logs / Events\nissue นี้จะปิดเองเมื่อ health กลับมาปกติ`;
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `ยังผิดปกติ — ${now}\n\`\`\`\n${problems}\n\`\`\`` });
+                core.setFailed('production unhealthy (issue updated)');
+              } else {
+                await github.rest.issues.create({ owner, repo, title, body, labels: ['production-alert'] });
+                core.setFailed('production unhealthy (issue opened)');
+              }
+            } else if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `✅ กลับมาปกติแล้ว — ${now} (indexed_documents=${process.env.DOCS})` });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+            }
