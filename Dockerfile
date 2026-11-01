@@ -70,6 +70,13 @@ COPY ai_search.py .
 COPY policy_engine.py .
 COPY scheduled_jobs.py .
 
+# V5.0: Multi-Agent + Conversational + No-Code Workflow
+COPY agent_orchestrator.py .
+COPY thai_intent_parser.py .
+COPY workflow_engine.py .
+COPY workflow_ui.py .
+COPY v5_integration.py .
+
 # Google Integration + Finance + Monitoring modules
 COPY google_drive_sync.py .
 COPY google_sheets_sync.py .

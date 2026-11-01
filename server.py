@@ -9054,6 +9054,18 @@ def handle_search_command(
                 f"HN {_summary_hn} ได้ในขณะนี้"
             )
 
+    # ── V5.0 Conversational Command Center ──────────────────
+    # ถึงจุดนี้ = ผู้ใช้ได้รับอนุญาตแล้ว แต่คำสั่งเดิม (legacy) ไม่รู้จัก
+    # ให้ Thai Intent Parser + Agent Orchestrator ลองตีความภาษาธรรมชาติ
+    # (rule-based, ไม่ใช้ External AI) — ตอบเฉพาะ intent ที่ Agent จัดการเองได้
+    if v5 is not None:
+        _v5_reply = v5.handle_line_text(text_stripped, user_hash)
+        if _v5_reply:
+            audit_logger.log("v5_conversational", user_hash, {
+                "command": text_stripped[:20],
+            })
+            return _v5_reply
+
     return None  # ไม่ใช่คำสั่งค้นหา
 
 
@@ -9378,6 +9390,26 @@ if STORAGE_BACKEND == "gcs" and 'storage' in dir():
         logger.info("V4.0 modules initialized with GCS persistence")
     except Exception as _v4_err:
         logger.warning("V4.0 module init: %s", type(_v4_err).__name__)
+
+# ── V5.0: Multi-Agent + Conversational + Workflow Builder ──
+# (agent_orchestrator / thai_intent_parser / workflow_engine) — ไม่ใช้ External AI
+v5 = None
+try:
+    import v5_integration as _v5i
+    v5 = _v5i.init(
+        storage=storage if 'storage' in dir() else None,
+        doc_index=doc_index if 'doc_index' in dir() else None,
+        state_store=state_store if 'state_store' in dir() else None,
+        backup_manager=backup_manager,
+        approval_engine=approval_engine,
+        field_encryption=field_encryptor,
+        rbac=rbac_engine,
+        policy_engine=policy_engine,
+        event_logger=event_logger,
+        push_message=push_message if 'push_message' in dir() else None,
+    )
+except Exception as _v5_err:
+    logger.warning("V5.0 init: %s: %s", type(_v5_err).__name__, _v5_err)
 
 # จำกัดงาน OCR ที่ทำพร้อมกันต่อ worker — ป้องกัน OOM บน instance เล็ก
 _ocr_semaphore = threading.Semaphore(max(1, OCR_MAX_CONCURRENT))
@@ -9889,6 +9921,16 @@ def push_message(user_id: str, text: str) -> bool:
             f"(status={status}) body={resp_body}"
         )
         return False
+
+
+# ── V5.0: wire push_message (นิยามหลัง init) + ลงทะเบียน routes/UI ──
+if v5 is not None:
+    try:
+        v5._deps["push_message"] = push_message
+        _v5i._register_action_handlers(v5, v5._deps)
+        _v5i.register_routes(app, _admin_api_auth, v5)
+    except Exception as _v5_err:
+        logger.warning("V5.0 routes: %s: %s", type(_v5_err).__name__, _v5_err)
 
 
 def push_messages(user_id: str, messages: list[dict]) -> bool:
@@ -11503,6 +11545,25 @@ def process_file_async(
                         "category": category,
                         "doc_id": _doc_id[:8],
                     })
+                    # ── V5.0 Workflow trigger (fire-and-forget, ไม่ throw) ──
+                    if v5 is not None:
+                        try:
+                            _wf_ctx = {
+                                "doc_id": _doc_id,
+                                "category": category,
+                                "original_name": doc_meta.get("original_name", ""),
+                                "patient_hn_folder": doc_meta.get("patient_hn_folder", ""),
+                                "bill_company": doc_meta.get("bill_company", ""),
+                                "vendor_needs_review": doc_meta.get("vendor_needs_review", False),
+                                "vendor_method": doc_meta.get("vendor_method", ""),
+                                "ocr_confidence": doc_meta.get("ocr_confidence", ""),
+                                "gcs_path": gcs_object_path or "",
+                            }
+                            v5.fire("document_indexed", _wf_ctx)
+                            if category == "bills":
+                                v5.fire("bill_received", _wf_ctx)
+                        except Exception as _wf_err:
+                            logger.warning("V5 workflow fire: %s", type(_wf_err).__name__)
                 except RuntimeError as idx_err:
                     # Index เขียน GCS ไม่ได้ — ไฟล์ upload แล้ว แต่ metadata หาย
                     # ไม่ตอบว่าสำเร็จ — แจ้ง error กลับไป
