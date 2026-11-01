@@ -1413,6 +1413,13 @@ class DocumentIndex:
         self._lock = threading.Lock()
         self._cache_ts: float = 0  # timestamp ที่ load cache ล่าสุด
         self._cache_ttl: float = INDEX_CACHE_TTL
+        # cache เนื้อหา per-doc file ตามชื่อ blob — ไฟล์ใน _index/docs/
+        # ถูกสร้างครั้งเดียวและไม่เคยถูกเขียนทับ (SA create-only, การแก้ไข
+        # เขียนเป็นไฟล์ชื่อใหม่ _v<ts>.json) ชื่อเดิม = เนื้อหาเดิมเสมอ
+        # จึงดาวน์โหลดเฉพาะชื่อที่ยังไม่เคยเห็น  เดิมดาวน์โหลดทุกไฟล์ใหม่
+        # ทุก 5 วินาที (113 ไฟล์ ≈ 5–10 วิ/ครั้ง) ทำให้ /health ตอบช้าเกิน
+        # 5 วิ → Render ฆ่า instance ซ้ำ ๆ ทั้งวัน และเอกสารที่กำลังรับหาย
+        self._blob_cache: dict[str, dict | None] = {}
 
     def _reload_from_gcs(self) -> bool:
         """โหลด index จาก GCS เข้า memory ใหม่ทั้งหมด.
@@ -1484,10 +1491,19 @@ class DocumentIndex:
                     self._storage.bucket_name,
                     prefix=INDEX_DOC_PREFIX,
                 )
+                _downloaded = 0
                 for blob in blobs:
                     try:
-                        content = blob.download_as_text(encoding="utf-8")
-                        doc = json.loads(content)
+                        if blob.name in self._blob_cache:
+                            doc = self._blob_cache[blob.name]
+                            if doc is None:
+                                continue  # ไฟล์เสีย — ข้ามโดยไม่โหลดซ้ำ
+                            doc = dict(doc)  # สำเนา — กัน mutation ปนเข้า cache
+                        else:
+                            content = blob.download_as_text(encoding="utf-8")
+                            _downloaded += 1
+                            doc = json.loads(content)
+                            self._blob_cache[blob.name] = doc
                         doc_id = doc.get("document_id", "")
                         if doc_id:
                             if doc_id in new_map:
@@ -1498,12 +1514,26 @@ class DocumentIndex:
                             else:
                                 new_docs.append(doc)
                             new_map[doc_id] = doc
-                    except (json.JSONDecodeError, Exception) as blob_err:
+                    except json.JSONDecodeError as blob_err:
+                        # เนื้อหาเสียถาวร (ไฟล์ไม่เปลี่ยน) → จำไว้ ไม่โหลดซ้ำ
+                        self._blob_cache[blob.name] = None
                         logger.warning(
                             f"Per-doc index file อ่านไม่ได้: "
                             f"{blob.name} — {type(blob_err).__name__}"
                         )
                         continue
+                    except Exception as blob_err:
+                        # network/transient → ไม่ cache จะลองใหม่รอบหน้า
+                        logger.warning(
+                            f"Per-doc index file อ่านไม่ได้: "
+                            f"{blob.name} — {type(blob_err).__name__}"
+                        )
+                        continue
+                if _downloaded:
+                    logger.info(
+                        "Document index: โหลดไฟล์ใหม่ %d ไฟล์ (cache %d)",
+                        _downloaded, len(self._blob_cache),
+                    )
                 _perdoc_ok = True
             except Exception as list_err:
                 err_code = getattr(list_err, "code", None)
