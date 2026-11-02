@@ -1374,6 +1374,25 @@ if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
 # สำหรับคลินิกที่มีเอกสาร < 50,000 ชิ้น index ≈ 50 MB ใน memory
 # ═══════════════════════════════════════════════════════════
 
+def _doc_recency_key(doc: dict) -> str:
+    """เวลาเข้าระบบของเอกสาร สำหรับเรียง "ล่าสุด"
+
+    ลำดับความน่าเชื่อถือ:
+      indexed_at     — เขียนตอนเพิ่มเข้า index (เอกสารใหม่ตั้งแต่ 2026-11-02)
+      _blob_created  — เวลาสร้างไฟล์ index บน GCS (เอกสารเก่า)
+      submitted_at   — เวลาส่ง/วันที่เอกสาร (บางกรณีเป็นวันที่ในใบ)
+      upload_date    — วัน (ไม่มีเวลา)
+    ISO 8601 เทียบเป็นสตริงได้ · เอกสารที่ไม่มีอะไรเลยจะอยู่ท้ายสุด (เก่าสุด)
+    """
+    return (
+        doc.get("indexed_at")
+        or doc.get("_blob_created")
+        or doc.get("submitted_at")
+        or doc.get("upload_date")
+        or ""
+    )
+
+
 class DocumentIndex:
     """Persistent document index stored in GCS as per-document JSON files.
 
@@ -1503,12 +1522,27 @@ class DocumentIndex:
                             content = blob.download_as_text(encoding="utf-8")
                             _downloaded += 1
                             doc = json.loads(content)
+                            # เวลาที่ไฟล์ index ถูกสร้างบน GCS — ใช้เรียง
+                            # "ล่าสุด" สำหรับเอกสารเก่าที่ยังไม่มี indexed_at
+                            _tc = getattr(blob, "time_created", None)
+                            if _tc and "_blob_created" not in doc:
+                                try:
+                                    doc["_blob_created"] = _tc.isoformat()
+                                except Exception:
+                                    pass
                             self._blob_cache[blob.name] = doc
                         doc_id = doc.get("document_id", "")
                         if doc_id:
                             if doc_id in new_map:
                                 # per-doc file overrides legacy entry
                                 old_doc = new_map[doc_id]
+                                # ไฟล์เวอร์ชันหลัง (update_fields) ต้องคง
+                                # เวลาเข้าระบบครั้งแรก ไม่ใช่เวลาที่แก้ไข
+                                _old_key = _doc_recency_key(old_doc)
+                                if _old_key and _old_key < _doc_recency_key(doc):
+                                    if old_doc.get("indexed_at"):
+                                        doc["indexed_at"] = old_doc["indexed_at"]
+                                    doc["_blob_created"] = _old_key
                                 idx = new_docs.index(old_doc)
                                 new_docs[idx] = doc
                             else:
@@ -1570,6 +1604,12 @@ class DocumentIndex:
                     )
                     # ไม่อัพเดท cache_ts → จะลอง reload อีกครั้ง
                     return False
+
+            # เรียงตามเวลาเข้าระบบ (เก่า → ใหม่) — GCS list คืนตามชื่อไฟล์
+            # (hash) ไม่ใช่เวลา ทำให้ "รายการล่าสุด" หลัง restart ผิดลำดับ
+            # (2026-11-02: ใบฟอกเลือดที่เพิ่งส่งไม่โผล่ แต่บิลเมื่อวานโผล่)
+            # ทุกจุดที่ใช้ reversed(self._docs) = ใหม่ก่อน จึงถูกต้องทันที
+            new_docs.sort(key=_doc_recency_key)
 
             with self._lock:
                 # เอกสารที่ถูก "ซ่อน" (เช่น ซ้ำ — ผ่าน approval) ไม่อยู่ใน
@@ -12041,6 +12081,10 @@ def process_file_async(
                     "gcs_object_path": gcs_object_path,
                     "category": category,
                     "upload_date": to_bangkok(_display_dt).strftime("%Y-%m-%d"),
+                    # เวลาเข้าระบบจริง (UTC) — ใช้เรียง "รายการล่าสุด"
+                    "indexed_at": datetime.now(timezone.utc).isoformat(
+                        timespec="seconds"
+                    ),
                     "mime_type": mime_map.get(ext_now, "application/octet-stream"),
                     "file_size": size_now,
                     "ocr_status": ocr_status,
