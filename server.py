@@ -11507,10 +11507,14 @@ def process_file_async(
     submitted_at_ms: int = 0,
     batch_id: str | None = None,
     page_sha256s: list[str] | None = None,
+    batch_patient_folder: str = "",
 ):
     """ประมวลผลไฟล์ในเธรดแยก.
 
     batch_id: รหัสชุดที่ส่งมาพร้อมกัน (multi-image แยกไฟล์) — เก็บใน metadata
+    batch_patient_folder: แฟ้มผู้ป่วย (จากทะเบียน) ที่หน้าอื่นในชุดเดียวกัน
+        จับคู่ได้ตรงกันเพียงรายเดียว — ใช้เมื่อหน้านี้ OCR อ่าน HN ไม่ได้
+        หรืออ่านได้แต่ไม่มีในทะเบียน (ส่งพร้อมกัน = ผู้ป่วยคนเดียวกัน)
     page_sha256s: sha256 ของแต่ละหน้าที่ถูกรวมเป็น PDF — ใช้กันซ้ำถาวร
 
     doc_id และ sha256_hex มาจากตอนรับไฟล์ ถ้าไม่ส่งมาจะอนุมานจากชื่อไฟล์
@@ -11729,6 +11733,19 @@ def process_file_async(
                                     "Auto HN route: no match for HN candidate "
                                     "(category=%s)", category
                                 )
+                        # ── ชุดเดียวกัน: หน้าอื่นจับคู่ทะเบียนได้รายเดียว ──
+                        # (2026-11-02: ใบฟอกเลือด 2 หน้าของผู้ป่วยคนเดียว
+                        # หน้า 2 OCR อ่าน HN เพี้ยนเป็น "162" → เข้าแฟ้ม HN162
+                        # LIFF ของผู้ป่วยจึงเห็นใบเดียว) → ใช้แฟ้มของชุด
+                        if not _matched_registry and batch_patient_folder:
+                            metadata["patient_hn_folder"] = batch_patient_folder
+                            metadata["hn_route_source"] = "batch_sibling"
+                            _matched_registry = True
+                            logger.info(
+                                "Auto HN route: OCR HN not in registry — "
+                                "using batch sibling folder (category=%s)",
+                                category,
+                            )
                         # ── Fallback: ใช้ HN จาก OCR เป็นชื่อ folder โดยตรง ──
                         # เมื่อ OCR ดึง HN ได้แต่ไม่พบในทะเบียนผู้ป่วยกลาง
                         # ใช้ HN เป็นชื่อ folder (เช่น HN003101075) แทนที่จะ
@@ -11750,6 +11767,15 @@ def process_file_async(
                             "Auto HN route: registry unavailable — using "
                             "HN as folder name: HN%s (category=%s)",
                             _fallback_hn, category,
+                        )
+                    elif not found_hns and batch_patient_folder:
+                        # หน้านี้อ่าน HN ไม่ได้เลย แต่หน้าอื่นในชุดเดียวกัน
+                        # ชี้ผู้ป่วยรายเดียว → เข้าแฟ้มเดียวกัน
+                        metadata["patient_hn_folder"] = batch_patient_folder
+                        metadata["hn_route_source"] = "batch_sibling"
+                        logger.info(
+                            "Auto HN route: no HN in OCR — using batch "
+                            "sibling folder (category=%s)", category
                         )
                     elif not found_hns:
                         logger.info(
@@ -14212,6 +14238,7 @@ def _multipage_flush(user_hash: str):
             f"— จะแจ้งผลทีละใบ)…",
         )
     logger.info(f"Multi-image → separate: n={actual_count}, batch={batch_id}")
+    batch_folder = _batch_patient_folder(page_texts)
     for idx, (data, ext, sha256_hex, doc_id, filename) in enumerate(pages_data):
         filepath = save_to_inbox(data, filename)
         process_file_async(
@@ -14222,7 +14249,41 @@ def _multipage_flush(user_hash: str):
             merged_page_count=0,
             submitted_at_ms=submitted_at_ms,
             batch_id=batch_id,
+            batch_patient_folder=batch_folder,
         )
+
+
+def _batch_patient_folder(page_texts: list[str]) -> str:
+    """หาแฟ้มผู้ป่วย (จากทะเบียน) ที่ทุกหน้าในชุดชี้ตรงกัน
+
+    คืนชื่อแฟ้มเมื่อหน้าที่จับคู่ทะเบียนได้ทั้งหมดชี้ผู้ป่วย "รายเดียว"
+    ถ้าไม่มีหน้าไหนจับคู่ได้ หรือชี้คนละราย (ส่งหลายผู้ป่วยในชุดเดียว)
+    คืน "" — แต่ละหน้าจัดแฟ้มตามเดิม ไม่เดา
+    """
+    if not master_registry:
+        return ""
+    folders: set[str] = set()
+    try:
+        for text in page_texts:
+            if not text:
+                continue
+            for hn in extract_hn_from_document(text):
+                folder = master_registry.get_folder_for_hn(hn)
+                if folder:
+                    folders.add(folder)
+    except Exception as e:
+        logger.warning("batch patient folder: %s", type(e).__name__)
+        return ""
+    if len(folders) == 1:
+        folder = next(iter(folders))
+        logger.info("Multi-image batch: single registered patient across pages")
+        return folder
+    if len(folders) > 1:
+        logger.info(
+            "Multi-image batch: %d different registered patients — "
+            "no sibling routing", len(folders),
+        )
+    return ""
 
 
 def _process_registration_image(
