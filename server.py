@@ -350,9 +350,12 @@ OCR_MAX_CONCURRENT = int(os.getenv("OCR_MAX_CONCURRENT", "1"))
 # ถ้า REDIS_URL ว่าง (ค่าเริ่มต้น) ระบบใช้ in-memory backend ต่อ worker
 REDIS_URL = os.getenv("REDIS_URL", "").strip()
 
-RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "5"))
-RATE_LIMIT_PER_HOUR = int(os.getenv("RATE_LIMIT_PER_HOUR", "30"))
-RATE_LIMIT_PER_DAY = int(os.getenv("RATE_LIMIT_PER_DAY", "100"))
+# เพดานต่อผู้ส่ง — นับทุกรูป/ไฟล์ (2026-11-02 แพทย์อนุมัติเพิ่มจาก 5/30/100
+# เพื่อให้ส่งชุดละ 8 รูปและเจ้าหน้าที่ส่งคนไข้ทั้งวันได้ โดยยังกันบัญชี
+# แปลกปลอมยิงรูปถล่ม) ตั้ง env ทับได้
+RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "20"))
+RATE_LIMIT_PER_HOUR = int(os.getenv("RATE_LIMIT_PER_HOUR", "150"))
+RATE_LIMIT_PER_DAY = int(os.getenv("RATE_LIMIT_PER_DAY", "600"))
 
 DEDUP_TTL_SECONDS = int(os.getenv("DEDUP_TTL_SECONDS", "86400"))      # 24 ชม.
 DEDUP_CONTENT_TTL_SECONDS = int(os.getenv("DEDUP_CONTENT_TTL", "600"))  # 10 นาที
@@ -11548,6 +11551,7 @@ def process_file_async(
     batch_id: str | None = None,
     page_sha256s: list[str] | None = None,
     batch_patient_folder: str = "",
+    batch_index: int = 0,
 ):
     """ประมวลผลไฟล์ในเธรดแยก.
 
@@ -12685,6 +12689,38 @@ def process_file_async(
                         pass
             _result_text = "\n".join(_reply_lines)
 
+            # ── ชุดหลายรูป: เก็บผลไว้สรุปข้อความเดียว (แทน push รายใบ) ──
+            _in_batch = False
+            if batch_id:
+                _ask_pending = bool(
+                    category == "review" and line_user_id
+                    and (owner_hash or "") and dest
+                )
+                _batch_item = {
+                    "n": batch_index,
+                    "doc8": _doc_id[:8],
+                    "cat": cat_name,
+                    "emoji": {"bills": "🧾", "rx": "💊", "lab": "🔬",
+                              "dialysis": "🩸"}.get(category, "📄"),
+                    "storage": _storage_display,
+                    "folder": (
+                        metadata.get("patient_hn_folder", "")
+                        if category in CLINICAL_CATEGORIES
+                        else (bill_company or "") if category == "bills" else ""
+                    ),
+                    "clinical": category in CLINICAL_CATEGORIES,
+                    "status": "ask" if _ask_pending else "ok",
+                }
+                _batch_bubble = None
+                if category != "review":
+                    try:
+                        _batch_bubble = _build_doc_flex_bubble(
+                            category, cat_name, _storage_display, _doc_id, dest,
+                        )
+                    except Exception:
+                        _batch_bubble = None
+                _in_batch = _batch_record(batch_id, _batch_item, _batch_bubble)
+
             # ── Interactive Classification: ถามผู้ใช้เมื่อ OCR ล้มเหลว ──
             if category == "review" and line_user_id:
                 # OCR ไม่สามารถจำแนกได้ → ถามผู้ใช้ผ่าน LINE
@@ -12711,12 +12747,16 @@ def process_file_async(
                         reply_message(reply_token, _ask_text)
                     else:
                         push_message(line_user_id, _ask_text)
+                elif _in_batch:
+                    pass  # อยู่ในสรุปชุดแล้ว
                 else:
                     # ไม่มี owner_hash หรือ dest → ส่ง reply ปกติ
                     if reply_token:
                         reply_message(reply_token, _result_text)
                     elif line_user_id:
                         push_message(line_user_id, _result_text)
+            elif _in_batch:
+                pass  # ผลรายใบอยู่ในข้อความสรุปชุด
             elif reply_token:
                 reply_message(reply_token, _result_text)
             elif line_user_id:
@@ -12729,7 +12769,8 @@ def process_file_async(
             # แจ้งเตือนทุกเอกสารที่เข้ามา — กรองเฉพาะผู้ส่งเอง
             # (ผู้ส่งได้รับ reply แล้ว ไม่ต้อง push ซ้ำ)
             try:
-                if category != "review":
+                if category != "review" and not _in_batch:
+                    # (ชุดหลายรูป: แจ้งผู้รับครั้งเดียวใน _batch_flush)
                     # ตรวจว่าผู้ส่งเป็นเจ้าหน้าที่หรือไม่ → ปรับข้อความ
                     _sender_is_staff = bool(
                         owner_hash and is_authorized_user(owner_hash)
@@ -12967,7 +13008,12 @@ def process_file_async(
                 "กรุณาลองส่งใหม่ในอีกสักครู่\n"
                 "หากยังไม่ได้ กรุณาแจ้งเจ้าหน้าที่"
             )
-            if reply_token:
+            if batch_id and _batch_record(batch_id, {
+                "n": batch_index, "doc8": _doc_id[:8], "status": "error",
+                "reason": "จัดเก็บไม่สำเร็จ (ระบบจัดเก็บไม่พร้อม)",
+            }):
+                pass  # รายงานในสรุปชุด
+            elif reply_token:
                 reply_message(reply_token, _store_err_msg)
             elif line_user_id:
                 # Multi-page flush: reply_token หมดอายุ → ใช้ push_message
@@ -12981,7 +13027,12 @@ def process_file_async(
                 "ขออภัย เกิดข้อผิดพลาดในการประมวลผลเอกสาร\n"
                 "กรุณาลองส่งใหม่อีกครั้ง"
             )
-            if reply_token:
+            if batch_id and _batch_record(batch_id, {
+                "n": batch_index, "doc8": _doc_id[:8], "status": "error",
+                "reason": f"ประมวลผลล้มเหลว ({type(e).__name__})",
+            }):
+                pass  # รายงานในสรุปชุด
+            elif reply_token:
                 reply_message(reply_token, _err_msg)
             elif line_user_id:
                 # Multi-page flush: reply_token หมดอายุ → ใช้ push_message
@@ -14176,11 +14227,8 @@ def _multipage_flush(user_hash: str):
         f"Multi-image batch: user={user_hash[:8]}…, images={actual_count}"
     )
 
-    if line_user_id:
-        push_message(
-            line_user_id,
-            f"📄 ได้รับ {actual_count} หน้า กำลังตรวจประเภทเอกสาร…",
-        )
+    # (ไม่ push "กำลังตรวจประเภท" แยกอีก — ข้อความถัดไปบอกผลอยู่แล้ว
+    #  ประหยัดโควต้า push ของ LINE OA 1 ข้อความต่อชุด)
 
     # OCR ทุกหน้า (ใช้ทั้งจัดประเภทและข้อความรวม)
     page_texts: list[str] = []
@@ -14278,11 +14326,11 @@ def _multipage_flush(user_hash: str):
         push_message(
             line_user_id,
             f"📄 ได้รับ {actual_count} รูป → แยกเก็บเป็น {actual_count} เอกสาร "
-            f"(แต่ละใบตรวจประเภทและประมวลผลแยกกัน "
-            f"— จะแจ้งผลทีละใบ)…",
+            f"กำลังประมวลผล… จะสรุปผลทั้งชุดในข้อความเดียว",
         )
     logger.info(f"Multi-image → separate: n={actual_count}, batch={batch_id}")
     batch_folder = _batch_patient_folder(page_texts)
+    _batch_register(batch_id, actual_count, line_user_id, owner_hash=user_hash)
     for idx, (data, ext, sha256_hex, doc_id, filename) in enumerate(pages_data):
         filepath = save_to_inbox(data, filename)
         process_file_async(
@@ -14294,7 +14342,215 @@ def _multipage_flush(user_hash: str):
             submitted_at_ms=submitted_at_ms,
             batch_id=batch_id,
             batch_patient_folder=batch_folder,
+            batch_index=idx + 1,
         )
+
+
+# ═══════════════════════════════════════════════════════════
+# สรุปผลชุดหลายรูปในข้อความเดียว (2026-11-02 แพทย์อนุมัติ)
+#
+# เดิม: ชุด 8 รูป → push หาผู้ส่ง 8 ข้อความ + push หาผู้รับแจ้ง 8 ครั้ง
+#       (ข้อความ + Flex ต่อใบ) → อ่านยาก และกินโควต้า push ของ LINE OA
+# ใหม่: ผู้ส่งได้ "สรุปชุด" 1 ข้อความ · ผู้รับแจ้งได้ 1 push
+#       (ข้อความสรุป + carousel ปุ่มเปิดเอกสาร/สั่งการรักษา ≤ 10 ใบ)
+#
+# ขอบเขต: เฉพาะโหมดหลายรูปแยกไฟล์ (batch_id) — รูปเดียว / PDF แล็บ
+# ไม่เปลี่ยน · ถ้าใบใดจำแนกไม่ได้ ระบบยังถามผู้ส่งทันทีเหมือนเดิม
+# (ต้องการคำตอบภายใน 5 นาที) แล้วระบุในสรุปว่าใบนั้นรอคำตอบ
+#
+# collector อยู่ใน memory ของ worker ที่แจกงาน — ทุกใบในชุดถูกประมวลผล
+# ใน worker เดียวกัน (thread) จึงไม่ต้องแชร์ข้าม worker
+# ตัวจับเวลาสำรอง: ถ้าใบใดค้าง/ล้ม ไม่รายงาน จะส่งสรุปเท่าที่มีภายใน
+# _BATCH_SUMMARY_TIMEOUT วินาที — ไม่มีทางที่ผู้ส่งจะไม่ได้ข้อความเลย
+# ═══════════════════════════════════════════════════════════
+
+_BATCH_SUMMARY_TIMEOUT = int(os.getenv("BATCH_SUMMARY_TIMEOUT_SECS", "300"))
+_batch_collectors: dict[str, dict] = {}
+_batch_lock = threading.Lock()
+
+
+def _batch_register(
+    batch_id: str, total: int, line_user_id: str, owner_hash: str = "",
+) -> None:
+    """เริ่มเก็บผลของชุด — เรียกก่อนแจกงานทุกใบ"""
+    if not batch_id or total <= 0:
+        return
+    timer = threading.Timer(
+        _BATCH_SUMMARY_TIMEOUT, _batch_flush, args=[batch_id, True],
+    )
+    timer.daemon = True
+    with _batch_lock:
+        _batch_collectors[batch_id] = {
+            "total": total,
+            "items": [],
+            "bubbles": [],
+            "line_user_id": line_user_id or "",
+            "owner_hash": owner_hash or "",
+            "timer": timer,
+            "started": time.time(),
+        }
+    timer.start()
+
+
+def _batch_record(batch_id: str, item: dict, bubble: dict | None = None) -> bool:
+    """บันทึกผลของใบหนึ่งในชุด — คืน True ถ้าชุดนี้ถูกเก็บรวม (ผู้เรียก
+    ไม่ต้อง push ผลรายใบ) · คืน False ถ้าไม่มี collector (ส่งแบบเดิม)"""
+    if not batch_id:
+        return False
+    with _batch_lock:
+        col = _batch_collectors.get(batch_id)
+        if col is None:
+            return False
+        col["items"].append(dict(item))
+        if bubble:
+            col["bubbles"].append(bubble)
+        done = len(col["items"]) >= col["total"]
+    if done:
+        _batch_flush(batch_id, False)
+    return True
+
+
+def _batch_summary_text(col: dict, partial: bool) -> str:
+    items = col["items"]
+    total = col["total"]
+    ok = [i for i in items if i.get("status") == "ok"]
+    ask = [i for i in items if i.get("status") == "ask"]
+    err = [i for i in items if i.get("status") == "error"]
+    lines = [f"📄 สรุปชุด {total} รูป — เสร็จ {len(items)}/{total}"]
+    if partial:
+        lines.append("⚠️ บางใบยังประมวลผลไม่เสร็จ/ไม่รายงานผล — ตรวจด้วย 'รายการล่าสุด'")
+    if ok:
+        lines.append(f"✅ เข้าระบบแล้ว {len(ok)} ใบ")
+        for i in ok:
+            where = i.get("folder") or i.get("storage") or ""
+            lines.append(
+                f" {i.get('n', '?')}. {i.get('emoji', '📄')} {i.get('cat', '')}"
+                f" → {where} (รหัส {i.get('doc8', '')})"
+            )
+    if ask:
+        lines.append(f"❓ รอคำตอบประเภทเอกสาร {len(ask)} ใบ (ตอบ 1–4 ตามคำถามด้านบน)")
+        for i in ask:
+            lines.append(f" {i.get('n', '?')}. รหัส {i.get('doc8', '')}")
+    if err:
+        lines.append(f"❌ ล้มเหลว {len(err)} ใบ — กรุณาส่งใบนั้นใหม่")
+        for i in err:
+            lines.append(
+                f" {i.get('n', '?')}. {i.get('reason', '')} (รหัส {i.get('doc8', '')})"
+            )
+    unknown = [i for i in ok if not i.get("folder") and i.get("clinical")]
+    if unknown:
+        lines.append(
+            f"👤 {len(unknown)} ใบยังไม่ระบุผู้ป่วย — "
+            "พิมพ์ 'ย้ายเอกสาร <รหัส> <HN>' เพื่อเข้าแฟ้มรายคน"
+        )
+    lines.append("💡 เข้าผิดแฟ้ม: 'ย้ายเอกสาร <รหัส> <HN>' · บิลผิดบริษัท: 'ย้ายบิล <รหัส> <บริษัท>'")
+    return "\n".join(lines)
+
+
+def _batch_flush(batch_id: str, from_timer: bool) -> None:
+    """ส่งสรุปชุด (ครั้งเดียว) ให้ผู้ส่ง + ผู้รับแจ้งเตือน"""
+    with _batch_lock:
+        col = _batch_collectors.pop(batch_id, None)
+    if col is None:
+        return  # ส่งไปแล้ว
+    try:
+        col["timer"].cancel()
+    except Exception:
+        pass
+    partial = len(col["items"]) < col["total"]
+    if from_timer and not col["items"]:
+        logger.warning("batch %s: ไม่มีผลใด ๆ ภายในเวลา — ไม่ส่งสรุป", batch_id)
+        return
+    col["items"].sort(key=lambda i: i.get("n", 0))
+    text = _batch_summary_text(col, partial)
+    sender = col.get("line_user_id", "")
+    if sender:
+        push_message(sender, text)
+
+    # ผู้รับแจ้งเตือน (ไม่รวมผู้ส่งเอง) — ข้อความสรุป + carousel ปุ่มเปิดเอกสาร
+    try:
+        notif_ids = list(_alert_recipients.get("physician", []))
+        if sender and sender in notif_ids:
+            notif_ids.remove(sender)
+        if not notif_ids:
+            return
+        is_staff = bool(col.get("owner_hash") and is_authorized_user(col["owner_hash"]))
+        head = "📬 ได้รับเอกสารชุดใหม่" + ("จากเจ้าหน้าที่" if is_staff else "จากภายนอก")
+        msgs: list[dict] = [{"type": "text", "text": head + "\n" + text}]
+        bubbles = [b for b in col.get("bubbles", []) if b][:10]
+        if bubbles:
+            msgs.append({
+                "type": "flex",
+                "altText": f"📄 เอกสารชุดใหม่ {len(bubbles)} ใบ — กดเพื่อเปิด",
+                "contents": {"type": "carousel", "contents": bubbles},
+            })
+        sent = sum(1 for rid in notif_ids if push_messages(rid, msgs))
+        logger.info(
+            "batch %s: สรุป %d/%d ใบ → ผู้ส่ง=%s ผู้รับแจ้ง %d/%d ราย%s",
+            batch_id, len(col["items"]), col["total"], bool(sender),
+            sent, len(notif_ids), " (timeout)" if from_timer else "",
+        )
+    except Exception as e:
+        logger.error("batch %s: แจ้งผู้รับล้มเหลว: %s", batch_id, type(e).__name__)
+
+
+def _build_doc_flex_bubble(
+    category: str, cat_name: str, storage_display: str,
+    doc_id: str, dest: str,
+) -> dict | None:
+    """Flex bubble ปุ่ม "เปิดเอกสาร" + "สั่งการรักษา" ของเอกสารหนึ่งใบ
+    (ย้ายมาจากโค้ดแจ้งเตือนรายใบ — ใช้ร่วมกันทั้งรายใบและ carousel ของชุด)
+    คืน None ถ้าสร้าง URL เปิดเอกสารไม่ได้"""
+    doc_download_url = None
+    if dest and dest.startswith("gs://"):
+        parts = dest.split("/", 3)
+        if len(parts) >= 4:
+            doc_download_url = get_download_url(parts[3])
+    if not doc_download_url:
+        return None
+    base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    persistent = ""
+    annotate = ""
+    if base_url and admin_secret and doc_id:
+        persistent = f"{base_url}/admin/doc/view/{doc_id}?secret={admin_secret}"
+        annotate = f"{base_url}/admin/annotate/{doc_id}?secret={admin_secret}"
+    if persistent and len(persistent) <= LINE_URI_ACTION_MAX_LENGTH:
+        final_url, expiry_note = persistent, ""
+    else:
+        final_url = doc_download_url
+        expiry_note = f"⏱️ ลิงก์หมดอายุใน {SIGNED_URL_EXPIRY // 60} นาที"
+    emoji = {"bills": "🧾", "rx": "💊", "lab": "🔬", "dialysis": "🩸"}.get(category, "📄")
+    footer = [{
+        "type": "button", "style": "primary", "color": "#1DB446",
+        "action": {"type": "uri", "label": "📎 เปิดเอกสาร", "uri": final_url},
+    }]
+    if annotate and len(annotate) <= LINE_URI_ACTION_MAX_LENGTH:
+        footer.append({
+            "type": "button", "style": "primary", "color": "#0066CC",
+            "action": {"type": "uri", "label": "✏️ สั่งการรักษา", "uri": annotate},
+            "margin": "sm",
+        })
+    body = [
+        {"type": "text", "text": f"{emoji} {cat_name}", "weight": "bold", "size": "lg"},
+        {"type": "separator", "margin": "md"},
+        {"type": "box", "layout": "vertical", "margin": "md", "contents": [{
+            "type": "box", "layout": "horizontal", "contents": [
+                {"type": "text", "text": "จัดเก็บ:", "size": "sm",
+                 "color": "#555555", "flex": 0},
+                {"type": "text", "text": storage_display[:40], "size": "sm",
+                 "color": "#111111", "align": "end", "wrap": True},
+            ],
+        }]},
+    ]
+    if expiry_note:
+        body.append({"type": "text", "text": expiry_note, "size": "xxs",
+                     "color": "#999999", "margin": "md"})
+    return {
+        "type": "bubble",
+        "body": {"type": "box", "layout": "vertical", "contents": body},
+        "footer": {"type": "box", "layout": "vertical", "contents": footer},
+    }
 
 
 def _batch_patient_folder(page_texts: list[str]) -> str:
