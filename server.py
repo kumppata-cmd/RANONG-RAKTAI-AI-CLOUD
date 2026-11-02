@@ -13053,7 +13053,15 @@ def process_file_async(
 # hit worker คนละตัว แล้วบัฟเฟอร์แยกกัน
 # ─────────────────────────────────────────────────────────────
 
-_MULTIPAGE_WINDOW_SECS = int(os.environ.get("MULTIPAGE_WINDOW_SECS", "30"))
+# หน้าต่างรวมรูปที่ส่งพร้อมกันเป็นชุดเดียว — ต่ำสุด 12 วินาที
+# (แพทย์อนุมัติ 2026-11-02: env บน Render ตั้ง 8 ไว้ ทำให้ชุดขาดเป็น 2 ชุด
+#  เมื่อมือถืออัปโหลดช้า → รูปที่มาช้าไม่มี "เพื่อนร่วมชุด" ให้อิง HN
+#  ตั้ง env สูงกว่า 12 ได้ ต่ำกว่า 12 จะถูกยกเป็น 12)
+_MULTIPAGE_WINDOW_MIN_SECS = 12
+_MULTIPAGE_WINDOW_SECS = max(
+    int(os.environ.get("MULTIPAGE_WINDOW_SECS", "12") or 12),
+    _MULTIPAGE_WINDOW_MIN_SECS,
+)
 _MULTIPAGE_MAX_PAGES = int(os.environ.get("MULTIPAGE_MAX_PAGES", "10"))
 
 # /tmp-based multipage buffer (shared across Gunicorn workers)

@@ -186,3 +186,12 @@ class TestRateLimitDefaults(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMultipageWindowFloor(unittest.TestCase):
+    """หน้าต่างรวมชุดต้องไม่ต่ำกว่า 12 วิ แม้ env ตั้ง 8 (แพทย์อนุมัติ 2026-11-02)"""
+
+    def test_window_at_least_12(self):
+        s = _server()
+        self.assertGreaterEqual(s._MULTIPAGE_WINDOW_SECS, 12)
+        self.assertEqual(s._MULTIPAGE_WINDOW_MIN_SECS, 12)
