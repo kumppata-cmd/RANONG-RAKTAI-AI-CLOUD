@@ -14304,11 +14304,7 @@ def _multipage_flush(user_hash: str):
                 f"[หน้า {i}/{actual_count}]\n{t or '(ไม่สามารถอ่านข้อความได้)'}"
                 for i, t in enumerate(page_texts, 1)
             )
-            if line_user_id:
-                push_message(
-                    line_user_id,
-                    f"📄 {_cat_label} {actual_count} หน้า → รวมเป็น PDF เดียว…",
-                )
+            # ไม่ push "รวมเป็น PDF…" — ผลลัพธ์สุดท้ายจะบอกจำนวนหน้าที่รวมเอง
             logger.info(
                 f"Multi-image → PDF: pages={actual_count}, "
                 f"bytes={len(pdf_bytes)}, chars={len(merged_text)}"
@@ -14330,12 +14326,7 @@ def _multipage_flush(user_hash: str):
 
     # ── โหมด B: แยกเป็นเอกสารคนละไฟล์ (ผูก batch_id) ──
     batch_id = f"BATCH-{pages_data[0][3][:8]}-{actual_count}"
-    if line_user_id:
-        push_message(
-            line_user_id,
-            f"📄 ได้รับ {actual_count} รูป → แยกเก็บเป็น {actual_count} เอกสาร "
-            f"กำลังประมวลผล… จะสรุปผลทั้งชุดในข้อความเดียว",
-        )
+    # ไม่ push "กำลังประมวลผล" — ข้อความถัดไปคือสรุปทั้งชุด (ภายใน ~1–2 นาที)
     logger.info(f"Multi-image → separate: n={actual_count}, batch={batch_id}")
     batch_folder = _batch_patient_folder(page_texts)
     _batch_register(batch_id, actual_count, line_user_id, owner_hash=user_hash)
@@ -14418,40 +14409,69 @@ def _batch_record(batch_id: str, item: dict, bubble: dict | None = None) -> bool
     return True
 
 
+_BATCH_SHORT_CAT = {
+    "เอกสารฟอกเลือด": "ฟอกเลือด", "ผลตรวจแล็บ": "แล็บ", "ใบสั่งยา": "ใบยา",
+    "ใบเสร็จ/บิล": "บิล", "รอตรวจสอบ": "รอตรวจ",
+}
+
+
 def _batch_summary_text(col: dict, partial: bool) -> str:
-    items = col["items"]
+    """ข้อความสรุปชุด — กระชับ: จัดกลุ่มตามแฟ้ม/บริษัท ไม่ไล่ทีละใบ
+    (2026-11-02 แพทย์สั่ง: "สรุปอยู่ที่ 1–2 ข้อความ ไม่รกตา")"""
+    items = sorted(col["items"], key=lambda i: i.get("n", 0))
     total = col["total"]
     ok = [i for i in items if i.get("status") == "ok"]
     ask = [i for i in items if i.get("status") == "ask"]
     err = [i for i in items if i.get("status") == "error"]
-    lines = [f"📄 สรุปชุด {total} รูป — เสร็จ {len(items)}/{total}"]
+
+    if len(ok) == total:
+        head = f"📄 สรุปชุด {total} รูป ✅ เข้าระบบครบ {total}/{total}"
+    else:
+        head = f"📄 สรุปชุด {total} รูป — เข้าระบบ {len(ok)}/{total}"
+    lines = [head]
     if partial:
-        lines.append("⚠️ บางใบยังประมวลผลไม่เสร็จ/ไม่รายงานผล — ตรวจด้วย 'รายการล่าสุด'")
+        lines.append("⏳ บางใบยังไม่เสร็จ — ดูเพิ่มที่ 'รายการล่าสุด'")
+
+    # จัดกลุ่ม: แฟ้มผู้ป่วย / บริษัท / ยังไม่ระบุ
+    groups: dict[str, list] = {}
+    for i in ok:
+        if i.get("clinical"):
+            key = ("👤 " + i["folder"]) if i.get("folder") else "👤 ยังไม่ระบุผู้ป่วย"
+        elif i.get("folder"):
+            key = "🏢 " + i["folder"]
+        else:
+            key = "📁 " + (i.get("storage") or "").split("/")[0]
+        groups.setdefault(key, []).append(i)
+
+    def _counts(lst):
+        c: dict[str, int] = {}
+        for i in lst:
+            cat = _BATCH_SHORT_CAT.get(i.get("cat", ""), i.get("cat", ""))
+            k = f"{i.get('emoji', '📄')} {cat}"
+            c[k] = c.get(k, 0) + 1
+        return " · ".join(f"{k} ×{n}" if n > 1 else k for k, n in c.items())
+
+    need_move_hint = False
+    for key, lst in groups.items():
+        lines.append(key)
+        lines.append("   " + _counts(lst))
+        if key.startswith("👤 ยังไม่ระบุ"):
+            need_move_hint = True
+            lines.append("   รหัส: " + " ".join(i.get("doc8", "") for i in lst))
     if ok:
-        lines.append(f"✅ เข้าระบบแล้ว {len(ok)} ใบ")
-        for i in ok:
-            where = i.get("folder") or i.get("storage") or ""
-            lines.append(
-                f" {i.get('n', '?')}. {i.get('emoji', '📄')} {i.get('cat', '')}"
-                f" → {where} (รหัส {i.get('doc8', '')})"
-            )
+        lines.append("รหัส: " + " ".join(i.get("doc8", "") for i in ok))
     if ask:
-        lines.append(f"❓ รอคำตอบประเภทเอกสาร {len(ask)} ใบ (ตอบ 1–4 ตามคำถามด้านบน)")
-        for i in ask:
-            lines.append(f" {i.get('n', '?')}. รหัส {i.get('doc8', '')}")
-    if err:
-        lines.append(f"❌ ล้มเหลว {len(err)} ใบ — กรุณาส่งใบนั้นใหม่")
-        for i in err:
-            lines.append(
-                f" {i.get('n', '?')}. {i.get('reason', '')} (รหัส {i.get('doc8', '')})"
-            )
-    unknown = [i for i in ok if not i.get("folder") and i.get("clinical")]
-    if unknown:
         lines.append(
-            f"👤 {len(unknown)} ใบยังไม่ระบุผู้ป่วย — "
-            "พิมพ์ 'ย้ายเอกสาร <รหัส> <HN>' เพื่อเข้าแฟ้มรายคน"
+            f"❓ รอคำตอบประเภท {len(ask)} ใบ (ตอบ 1–4 ตามคำถามด้านบน): "
+            + " ".join(i.get("doc8", "") for i in ask)
         )
-    lines.append("💡 เข้าผิดแฟ้ม: 'ย้ายเอกสาร <รหัส> <HN>' · บิลผิดบริษัท: 'ย้ายบิล <รหัส> <บริษัท>'")
+    if err:
+        lines.append(
+            f"❌ ล้มเหลว {len(err)} ใบ — ส่งใบนั้นใหม่: "
+            + " ".join(f"รูปที่ {i.get('n', '?')}" for i in err)
+        )
+    if need_move_hint:
+        lines.append("💡 'ย้ายเอกสาร <รหัส> <HN>' เพื่อเข้าแฟ้มรายคน")
     return "\n".join(lines)
 
 
@@ -14916,11 +14936,8 @@ def _handle_incoming_document(
                     _multipage_timers[user_hash] = new_timer
                 new_timer.start()
 
-                _safe_reply(
-                    reply_token, line_user_id,
-                    f"📄 ได้รับหน้าที่ {page_num} แล้ว\n"
-                    f"ส่งหน้าถัดไปได้เลย (รอ {_MULTIPAGE_WINDOW_SECS} วินาทีแล้วจะรวมอัตโนมัติ)",
-                )
+                # ไม่ push "ได้รับหน้าที่ N" — ผู้ส่งได้ตอบรับที่รูปแรกแล้ว
+                # และจะได้สรุปทั้งชุดในข้อความเดียว (ประหยัด 1 push/รูป)
                 return
             else:
                 # สร้างบัฟเฟอร์ใหม่ — หน้าแรก
@@ -14953,12 +14970,7 @@ def _handle_incoming_document(
                     _multipage_timers[user_hash] = new_timer
                 new_timer.start()
 
-                _safe_reply(
-                    reply_token, line_user_id,
-                    "📄 ได้รับหน้าที่ 1 แล้ว\n"
-                    f"ถ้ามีหลายหน้า ส่งต่อได้เลย (รอ {_MULTIPAGE_WINDOW_SECS} วินาทีแล้วจะรวมอัตโนมัติ)\n"
-                    "ถ้ามีหน้าเดียว ไม่ต้องทำอะไร — จะประมวลผลอัตโนมัติ",
-                )
+                # ตอบรับไปแล้วตอน webhook (รูปแรกของชุด) — ไม่ push ซ้ำ
                 return
         finally:
             if lock_fd:
@@ -14977,6 +14989,16 @@ def _handle_incoming_document(
 # reply_token หมดอายุเร็ว (~30 วินาที) — ถ้าอยู่ใน background thread
 # ให้ fallback ไป push_message แทน
 # ─────────────────────────────────────────────────────────────
+
+def _first_image_in_burst(user_hash: str, window_sec: int = 20) -> bool:
+    """True เฉพาะรูปแรกที่ผู้ใช้ส่งภายในหน้าต่างสั้น ๆ (แชร์ข้าม worker ผ่าน
+    state store) — ใช้ตัดสินว่าจะตอบรับรูปหรือเงียบ ถ้า state store ล่ม
+    ให้ตอบรับทุกรูป (ปลอดภัยกว่าเงียบทั้งหมด)"""
+    try:
+        return bool(state_store.set_if_absent(f"imgack:{user_hash}", window_sec))
+    except Exception:
+        return True
+
 
 def _safe_reply(reply_token: str | None, line_user_id: str, text: str):
     """ตอบกลับผู้ใช้ — ลอง reply ก่อน ถ้าไม่ได้ให้ใช้ push."""
@@ -15240,7 +15262,14 @@ def webhook():
 
                 # [FIX] Async processing — ดาวน์โหลดและประมวลผลใน background thread
                 # เพื่อให้ webhook return 200 ให้ LINE ทันก่อน timeout
-                reply_message(reply_token, "📷 ได้รับภาพแล้ว กำลังประมวลผล...")
+                # ตอบรับเฉพาะรูปแรกของชุด (2026-11-02 แพทย์สั่งลดข้อความ):
+                # รูปที่ตามมาภายใน 20 วิ ไม่ตอบ — ผลทั้งชุดจะอยู่ในสรุปเดียว
+                if _first_image_in_burst(user_hash):
+                    reply_message(
+                        reply_token,
+                        "📷 ได้รับรูปแล้ว — ถ้ามีหลายรูป ส่งต่อได้เลย\n"
+                        "ระบบจะรวมเป็นชุดและสรุปผลในข้อความเดียว",
+                    )
                 threading.Thread(
                     target=_async_process_image,
                     args=(msg_id, user_hash, _line_user_id, event_ts_ms),

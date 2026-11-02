@@ -65,10 +65,11 @@ class TestBatchSummary(BatchFixture):
         self.assertEqual(len(self.sent_single), 1)
         to, text = self.sent_single[0]
         self.assertEqual(to, "Udoctor")
-        self.assertIn("สรุปชุด 3 รูป — เสร็จ 3/3", text)
-        self.assertIn("เข้าระบบแล้ว 3 ใบ", text)
-        self.assertLess(text.index(" 1. "), text.index(" 2. "))   # เรียงตามหน้า
-        self.assertIn("63203_สมมติ", text)
+        self.assertIn("สรุปชุด 3 รูป ✅ เข้าระบบครบ 3/3", text)
+        self.assertIn("🩸 ฟอกเลือด ×3", text)                     # จัดกลุ่ม ไม่ไล่ทีละใบ
+        self.assertEqual(text.count("63203_สมมติ"), 1)
+        self.assertIn("รหัส: doc00001 doc00002 doc00003", text)   # เรียงตามหน้า
+        self.assertLessEqual(len(text.splitlines()), 5)
         # ผู้รับแจ้ง: ไม่ส่งซ้ำหาผู้ส่ง (Udoctor) → เฉพาะ Ustaff, push เดียว
         self.assertEqual([t for t, _ in self.sent_multi], ["Ustaff"])
         msgs = self.sent_multi[0][1]
@@ -86,10 +87,11 @@ class TestBatchSummary(BatchFixture):
         s._batch_record("B2", self._item(2, status="ask", folder=""))
         s._batch_record("B2", self._item(3, status="error", reason="ประมวลผลล้มเหลว (X)"))
         text = self.sent_single[0][1]
-        self.assertIn("เข้าระบบแล้ว 1 ใบ", text)
-        self.assertIn("รอคำตอบประเภทเอกสาร 1 ใบ", text)
+        self.assertIn("เข้าระบบ 1/3", text)
+        self.assertIn("รอคำตอบประเภท 1 ใบ", text)
+        self.assertIn("doc00002", text)
         self.assertIn("ล้มเหลว 1 ใบ", text)
-        self.assertIn("doc00003", text)
+        self.assertIn("รูปที่ 3", text)
 
     def test_unidentified_patient_hint(self):
         s = self.s
@@ -105,8 +107,8 @@ class TestBatchSummary(BatchFixture):
         self.assertEqual(self.sent_single, [])          # ยังไม่ครบ
         s._batch_flush("B4", True)                      # จำลองหมดเวลา
         text = self.sent_single[0][1]
-        self.assertIn("เสร็จ 2/4", text)
-        self.assertIn("ยังประมวลผลไม่เสร็จ", text)
+        self.assertIn("เข้าระบบ 2/4", text)
+        self.assertIn("ยังไม่เสร็จ", text)
         s._batch_flush("B4", True)                      # ซ้ำ → ไม่ส่งอีก
         self.assertEqual(len(self.sent_single), 1)
 
@@ -161,8 +163,8 @@ class TestEndToEndTwoImageBatch(BatchFixture):
         texts = [t for to, t in self.sent_single if to == "Udoctor"]
         summaries = [t for t in texts if "สรุปชุด 2 รูป" in t]
         self.assertEqual(len(summaries), 1, texts)
-        self.assertIn("เสร็จ 2/2", summaries[0])
-        self.assertIn("เข้าระบบแล้ว 2 ใบ", summaries[0])
+        self.assertIn("เข้าระบบครบ 2/2", summaries[0])
+        self.assertIn("🧾 บิล ×2", summaries[0])
         self.assertNotIn("ล้มเหลว", summaries[0])
         self.assertIn("NIKKISO", summaries[0])          # บิลระบุบริษัทได้
         # ผู้รับแจ้ง (Ustaff) ได้ push เดียว: สรุป + carousel 2 ใบ
@@ -172,6 +174,43 @@ class TestEndToEndTwoImageBatch(BatchFixture):
         # (carousel มีเฉพาะเมื่อสร้างลิงก์เปิดเอกสารได้ — local storage ไม่มี GCS URL)
         self.assertNotIn("รับเอกสารแล้ว (TXT)", "\n".join(texts))   # ไม่มี push รายใบ
         self.assertEqual(self.s._batch_collectors, {})
+
+
+class TestFirstImageAckOnly(unittest.TestCase):
+    """ตอบรับเฉพาะรูปแรกของชุด — รูปที่ตามมาภายใน 20 วิ เงียบ"""
+
+    def test_only_first_image_acknowledged(self):
+        s = _server()
+        seen = set()
+
+        class _Store:
+            def set_if_absent(self, key, ttl):
+                if key in seen:
+                    return False
+                seen.add(key)
+                return True
+        orig = s.state_store
+        s.state_store = _Store()
+        try:
+            self.assertTrue(s._first_image_in_burst("u1"))
+            self.assertFalse(s._first_image_in_burst("u1"))
+            self.assertFalse(s._first_image_in_burst("u1"))
+            self.assertTrue(s._first_image_in_burst("u2"))   # คนละผู้ส่ง
+        finally:
+            s.state_store = orig
+
+    def test_store_failure_falls_back_to_ack(self):
+        s = _server()
+
+        class _Broken:
+            def set_if_absent(self, key, ttl):
+                raise RuntimeError("redis down")
+        orig = s.state_store
+        s.state_store = _Broken()
+        try:
+            self.assertTrue(s._first_image_in_burst("u1"))
+        finally:
+            s.state_store = orig
 
 
 class TestRateLimitDefaults(unittest.TestCase):
