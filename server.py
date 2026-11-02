@@ -1377,6 +1377,19 @@ if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
 # สำหรับคลินิกที่มีเอกสาร < 50,000 ชิ้น index ≈ 50 MB ใน memory
 # ═══════════════════════════════════════════════════════════
 
+def _strip_gs_uri(path: str) -> str:
+    """ทำ path ของ object ให้เป็นรูปเดียว: ตัด gs://<bucket>/ ออก
+
+    ดัชนีต้องเก็บ path เปล่า (05_.../file.jpg) เพราะตัวสร้างลิงก์เปิดไฟล์
+    ใช้ path นี้เป็นชื่อ object ตรง ๆ — path รูป gs:// ทำให้ลิงก์ 404
+    (พบจริง 2026-11-02: ใบที่ถูก "จัดแฟ้มย้อนหลัง" แตะ เปิดไม่ได้)
+    """
+    p = (path or "").strip()
+    if p.startswith("gs://"):
+        return p.split("/", 3)[3] if p.count("/") >= 3 else ""
+    return p
+
+
 def _doc_recency_key(doc: dict) -> str:
     """เวลาเข้าระบบของเอกสาร สำหรับเรียง "ล่าสุด"
 
@@ -1525,6 +1538,10 @@ class DocumentIndex:
                             content = blob.download_as_text(encoding="utf-8")
                             _downloaded += 1
                             doc = json.loads(content)
+                            if str(doc.get("gcs_object_path", "")).startswith("gs://"):
+                                doc["gcs_object_path"] = _strip_gs_uri(
+                                    doc["gcs_object_path"]
+                                )
                             # เวลาที่ไฟล์ index ถูกสร้างบน GCS — ใช้เรียง
                             # "ล่าสุด" สำหรับเอกสารเก่าที่ยังไม่มี indexed_at
                             _tc = getattr(blob, "time_created", None)
@@ -2051,6 +2068,8 @@ class DocumentIndex:
         if doc is None:
             return False
         for k, v in (fields or {}).items():
+            if k == "gcs_object_path":
+                v = _strip_gs_uri(v)  # ดัชนีเก็บ path เปล่าเสมอ
             doc[k] = v
         if not self._storage.is_ready:
             return False
@@ -4025,7 +4044,7 @@ def generate_signed_url(gcs_object_path: str, expiry_seconds: int = SIGNED_URL_E
     if not storage.is_ready or not hasattr(storage, '_bucket'):
         return None
     try:
-        blob = storage._bucket.blob(gcs_object_path)
+        blob = storage._bucket.blob(_strip_gs_uri(gcs_object_path))
         # ไม่เรียก blob.exists() — SA อาจไม่มี objects.get permission
         # ถ้า blob ไม่มีจริง signed URL จะ return 404 เอง (ปลอดภัย)
         url = blob.generate_signed_url(
@@ -11534,7 +11553,10 @@ def copy_to_category(
 
 
 # จำนวนเอกสารที่ประมวลผล (OCR/จำแนก/อัปโหลด) พร้อมกันได้ต่อ worker
-_PROCESS_MAX_CONCURRENT = max(1, int(os.getenv("PROCESS_MAX_CONCURRENT", "2")))
+# 2026-11-02 17:35 instance OOM (>512MB) หลังชุด 2 รูป: 2 workers × 2 ฉบับ
+# = 4 ฉบับพร้อมกัน + OCR prepass → ลดเป็น 1 ฉบับ/worker (2 ทั้งเครื่อง)
+# ชุด 8 รูปช้าลง ~1 นาที แต่ไม่มีทางถูกฆ่ากลางคัน (env ทับได้)
+_PROCESS_MAX_CONCURRENT = max(1, int(os.getenv("PROCESS_MAX_CONCURRENT", "1")))
 _PROCESS_SEMAPHORE = threading.BoundedSemaphore(_PROCESS_MAX_CONCURRENT)
 
 
@@ -16970,6 +16992,18 @@ def _retroactive_route_run(dry_run: bool = True, cat_filter: str = "all") -> dic
         if not blob_path:
             continue
 
+        # อยู่ในแฟ้มผู้ป่วยแล้ว (folder/YYYY-Qn/YYYY-MM/<HN>_<ชื่อ>/file) และ
+        # แฟ้มนั้นคือแฟ้มที่จับคู่ได้ (หรือแฟ้มที่ดัชนีระบุไว้) → ไม่แตะ
+        # (2026-11-02: เดิมคำนวณ path ใหม่ทั้งเส้นแล้วเทียบ — เดือนที่คำนวณ
+        #  ต่างกันทำให้เอกสารที่ถูกอยู่แล้วถูก copy ซ้ำและดัชนีชี้ผิด)
+        _parts = blob_path.split("/")
+        if len(_parts) == 5 and _parts[3] and (
+            _parts[3] == matched_folder
+            or _parts[3] == (doc.get("patient_hn_folder") or "")
+        ):
+            already_in_folder += 1
+            continue
+
         # สร้าง path มาตรฐานใหม่ทั้งเส้น (ไม่ใช่แค่แทรก patient folder)
         # เอกสารเก่าอยู่แบบ folder/YYYY-MM/filename ต้องย้ายเข้าโครงสร้าง
         # folder/YYYY-QN/YYYY-MM/HN_ชื่อ/filename ให้ครบทั้งไตรมาส/เดือน/ผู้ป่วย
@@ -17016,8 +17050,9 @@ def _retroactive_route_run(dry_run: bool = True, cat_filter: str = "all") -> dic
             dest_blob = storage._bucket.blob(new_blob_path)
             if dest_blob.exists():
                 # อัปเดต doc index ให้ชี้ path ใหม่ (ถ้ายังไม่ได้อัปเดต)
-                new_gcs_uri = f"gs://{storage.bucket_name}/{new_blob_path}"
-                if doc.get("gcs_object_path") != new_gcs_uri or (
+                # path ในดัชนีเป็น path เปล่าเสมอ (ไม่มี gs://bucket/)
+                new_gcs_uri = new_blob_path
+                if _strip_gs_uri(doc.get("gcs_object_path", "")) != new_gcs_uri or (
                     matched_folder and doc.get("patient_hn_folder") != matched_folder
                 ):
                     doc_index.update_fields(doc_id, {
@@ -17041,7 +17076,7 @@ def _retroactive_route_run(dry_run: bool = True, cat_filter: str = "all") -> dic
             )
 
             # อัปเดต doc index — เขียน per-doc JSON ใหม่ ด้วย gcs_object_path ใหม่
-            new_gcs_uri = f"gs://{storage.bucket_name}/{new_blob_path}"
+            new_gcs_uri = new_blob_path  # path เปล่า — ไม่มี gs://
             # เขียน index แบบ versioned — เดิมเขียนทับ {doc_id}.json ได้ 403
             # เงียบ ๆ ทำให้ไฟล์ถูกคัดลอกเข้าแฟ้มผู้ป่วยแล้ว แต่ index ยังชี้ที่เก่า
             # และไม่มี patient_hn_folder → LIFF/ค้นหาไม่เห็น
@@ -18144,15 +18179,19 @@ _last_reconcile: dict = {}
 # งานครั้งเดียวที่แพทย์อนุมัติ 2026-11-01 ("ให้ดำเนินการได้เลย"): ย้ายสลิป
 # เซ็นทรัลโพลี 2 ใบที่เข้า _UNIDENTIFIED ก่อนมีการจับคู่ด้วยเลขบัญชี
 # ทำซ้ำได้: ถ้าย้ายแล้วจะได้ status=unchanged และไม่ทำอะไร
-_BOOT_BILL_MOVES = (("46515c44", "CENTRAL_POLY"), ("d3efd377", "CENTRAL_POLY"))
-
-
 def _reconcile_on_boot_worker():
+    """งานหลังบูต: ซ่อมดัชนีแฟ้มผู้ป่วยให้ตรงไฟล์จริง (idempotent) เท่านั้น
+
+    2026-11-02: เดิมรัน "จัดแฟ้มย้อนหลัง" ด้วย (งานครั้งเดียวที่แพทย์อนุมัติ
+    2026-11-01 และข้อมูลชุดนั้นถูกล้างไปแล้ว) แต่ฟังก์ชันนั้นคำนวณ path ใหม่
+    ให้เอกสารที่อยู่ในแฟ้มถูกแล้ว → copy เป็นไฟล์ซ้ำ + เขียน path รูป gs://
+    ลงดัชนี → ลิงก์เปิดไฟล์ 404 และรันซ้ำทุกครั้งที่ worker เกิดใหม่ (OOM)
+    จึงถอดออก — จัดแฟ้มย้อนหลังทำได้เฉพาะแพทย์สั่งทาง LINE
+    """
     import time as _t
     _t.sleep(45)  # รอ index โหลดและ Redis/GCS พร้อม
     global _last_reconcile
-    # ให้ worker เดียวทำ — 2 workers ทำพร้อมกันจะชนกันตอน copy ไฟล์เดียวกัน
-    # (SA เขียนทับไม่ได้ → อีกฝั่งได้ 403 ถูกนับเป็น error ทั้งที่งานสำเร็จแล้ว)
+    # ให้ worker เดียวทำ — 2 workers ทำพร้อมกันจะชนกัน
     try:
         if not state_store.set_if_absent("boot_maintenance_lock", 600):
             _last_reconcile = {"skipped": "another worker is running maintenance"}
@@ -18164,28 +18203,6 @@ def _reconcile_on_boot_worker():
         _last_reconcile["at"] = datetime.now(timezone.utc).isoformat()
     except Exception as _e:
         _last_reconcile = {"error": type(_e).__name__}
-    # จัดเอกสารเก่าเข้าแฟ้มผู้ป่วยย้อนหลัง (แพทย์อนุมัติ 2026-11-01) — idempotent:
-    # เอกสารที่อยู่ในแฟ้มแล้วถูกนับเป็น already_in_folder ไม่ถูกย้ายซ้ำ
-    try:
-        _r = _retroactive_route_run(dry_run=False, cat_filter="all")
-        _last_reconcile["retroactive"] = {
-            k: _r.get(k, 0) for k in (
-                "already_in_folder", "routed_to_patient_folder",
-                "routed_quarter_month_only", "skipped_count", "error_count",
-            )
-        }
-        if _r.get("error"):
-            _last_reconcile["retroactive"]["error"] = _r["error"]
-    except Exception as _e:
-        _last_reconcile["retroactive"] = {"error": type(_e).__name__}
-    try:
-        _mv = {}
-        for _doc8, _vendor in _BOOT_BILL_MOVES:
-            _res = _move_bill_to_vendor(_doc8, _vendor, "boot")
-            _mv[_doc8] = _res.get("status") or ("error:" + str(_res.get("error", ""))[:40])
-        _last_reconcile["bill_moves"] = _mv
-    except Exception as _e:
-        _last_reconcile["bill_moves"] = {"error": type(_e).__name__}
 
 
 if IS_PRODUCTION and not IS_TESTING:
