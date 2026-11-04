@@ -29,8 +29,73 @@ logger = logging.getLogger(__name__)
 # Data Model — Patient Entry in Master Registry
 # ─────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────
+# ESA Medication Mapping — รหัสย่อ → ชื่อยา/ขนาด
+# ─────────────────────────────────────────────────────────────
+ESA_CODE_MAP = {
+    "E4":        {"name": "Epiao", "dose": 4000, "unit": "unit"},
+    "H4":        {"name": "Hemax", "dose": 4000, "unit": "unit"},
+    "HM":        {"name": "Hema-plus", "dose": 4000, "unit": "unit"},
+    "HM4":       {"name": "Hema-plus", "dose": 4000, "unit": "unit"},
+    "H10":       {"name": "Hemax", "dose": 10000, "unit": "unit"},
+    "H4+H10":    {"name": "Hemax 4000+10000", "dose": 14000, "unit": "unit"},
+    "eposis":    {"name": "Eposis (Epoetin alfa)", "dose": 0, "unit": "unit"},
+    "Eposis":    {"name": "Eposis (Epoetin alfa)", "dose": 0, "unit": "unit"},
+    "hypercrit": {"name": "Hypercrit (Epoetin alfa)", "dose": 0, "unit": "unit"},
+}
+
+# วันฟอกเลือด — ภาษาไทย → ภาษาอังกฤษ (สำหรับ schedule matching)
+THAI_DAY_MAP = {
+    "จ": "mon", "จันทร์": "mon",
+    "อ": "tue", "อังคาร": "tue",
+    "พ": "wed", "พุธ": "wed",
+    "พฤ": "thu", "พฤหัสบดี": "thu",
+    "ศ": "fri", "ศุกร์": "fri",
+    "ส": "sat", "เสาร์": "sat",
+}
+
+THAI_DAY_DISPLAY = {
+    "mon": "จ", "tue": "อ", "wed": "พ",
+    "thu": "พฤ", "fri": "ศ", "sat": "ส",
+}
+
+
+def parse_schedule_text(schedule_text: str) -> list[str]:
+    """แปลงข้อความตารางฟอก เช่น 'จ/พ/ศ' → ['mon','wed','fri']"""
+    if not schedule_text:
+        return []
+    parts = re.split(r"[/,\s]+", schedule_text.strip())
+    days = []
+    for p in parts:
+        p = p.strip()
+        if p in THAI_DAY_MAP:
+            days.append(THAI_DAY_MAP[p])
+    return days
+
+
+def resolve_esa_code(code: str) -> dict:
+    """แปลงรหัส ESA → ข้อมูลยา (name, dose, unit)"""
+    if not code:
+        return {}
+    code = code.strip()
+    if code in ESA_CODE_MAP:
+        return dict(ESA_CODE_MAP[code])
+    return {"name": code, "dose": 0, "unit": "unit"}
+
+
 class MasterPatient:
-    """ข้อมูลผู้ป่วยในทะเบียนรวม — ใช้สำหรับจับคู่ HN กับเอกสาร"""
+    """ข้อมูลผู้ป่วยในทะเบียนรวม — ใช้สำหรับจับคู่ HN กับเอกสาร
+    และข้อมูลไตเทียม (ตารางฟอก, ยา ESA, vascular access)"""
+
+    # ฟิลด์ทั้งหมดที่ from_dict รับ
+    _ALL_FIELDS = {
+        "clinic_hn", "hospital_hn", "patient_name",
+        "registered_at", "updated_at", "registered_by", "notes",
+        # ── Dialysis fields (เพิ่ม 2026-11-05) ──
+        "dialysis_schedule", "dialysis_days", "hd_per_week",
+        "esa_code", "esa_medication", "esa_dose", "esa_unit",
+        "vascular_access", "shift", "bed_number",
+    }
 
     def __init__(
         self,
@@ -41,6 +106,17 @@ class MasterPatient:
         updated_at: str = "",
         registered_by: str = "admin",
         notes: str = "",
+        # ── Dialysis fields ──
+        dialysis_schedule: str = "",     # ข้อความต้นฉบับ เช่น "จ/พ/ศ"
+        dialysis_days: list = None,      # ['mon','wed','fri']
+        hd_per_week: int = 0,            # จำนวนครั้ง/สัปดาห์
+        esa_code: str = "",              # รหัสย่อจากต้นฉบับ เช่น "E4"
+        esa_medication: str = "",        # ชื่อยาเต็ม เช่น "Epiao"
+        esa_dose: int = 0,               # ขนาดยา (unit)
+        esa_unit: str = "unit",          # หน่วย
+        vascular_access: str = "",       # AVF / AVG / Perm's catheter
+        shift: str = "",                 # กะ/เวลา
+        bed_number: str = "",            # หมายเลขเตียง
     ):
         self.clinic_hn = clinic_hn.strip().upper() if clinic_hn else ""
         self.hospital_hn = hospital_hn.strip().upper() if hospital_hn else ""
@@ -51,9 +127,20 @@ class MasterPatient:
         self.updated_at = updated_at or self.registered_at
         self.registered_by = registered_by
         self.notes = notes
+        # ── Dialysis ──
+        self.dialysis_schedule = dialysis_schedule.strip() if dialysis_schedule else ""
+        self.dialysis_days = dialysis_days or []
+        self.hd_per_week = int(hd_per_week) if hd_per_week else 0
+        self.esa_code = esa_code.strip() if esa_code else ""
+        self.esa_medication = esa_medication.strip() if esa_medication else ""
+        self.esa_dose = int(esa_dose) if esa_dose else 0
+        self.esa_unit = esa_unit or "unit"
+        self.vascular_access = vascular_access.strip() if vascular_access else ""
+        self.shift = shift.strip() if shift else ""
+        self.bed_number = str(bed_number).strip() if bed_number else ""
 
     def to_dict(self) -> dict:
-        return {
+        d = {
             "clinic_hn": self.clinic_hn,
             "hospital_hn": self.hospital_hn,
             "patient_name": self.patient_name,
@@ -62,13 +149,32 @@ class MasterPatient:
             "registered_by": self.registered_by,
             "notes": self.notes,
         }
+        # เพิ่ม dialysis fields เฉพาะเมื่อมีค่า (ไม่รบกวน registry เดิม)
+        if self.dialysis_schedule:
+            d["dialysis_schedule"] = self.dialysis_schedule
+        if self.dialysis_days:
+            d["dialysis_days"] = self.dialysis_days
+        if self.hd_per_week:
+            d["hd_per_week"] = self.hd_per_week
+        if self.esa_code:
+            d["esa_code"] = self.esa_code
+        if self.esa_medication:
+            d["esa_medication"] = self.esa_medication
+        if self.esa_dose:
+            d["esa_dose"] = self.esa_dose
+        if self.esa_unit and self.esa_unit != "unit":
+            d["esa_unit"] = self.esa_unit
+        if self.vascular_access:
+            d["vascular_access"] = self.vascular_access
+        if self.shift:
+            d["shift"] = self.shift
+        if self.bed_number:
+            d["bed_number"] = self.bed_number
+        return d
 
     @classmethod
     def from_dict(cls, data: dict) -> "MasterPatient":
-        return cls(**{k: v for k, v in data.items() if k in {
-            "clinic_hn", "hospital_hn", "patient_name",
-            "registered_at", "updated_at", "registered_by", "notes",
-        }})
+        return cls(**{k: v for k, v in data.items() if k in cls._ALL_FIELDS})
 
     @property
     def hn_display(self) -> str:
@@ -626,6 +732,188 @@ class MasterPatientRegistry:
         # [perf] โหลดใหม่เฉพาะเมื่อแคชเก่าเกิน TTL — ดู _refresh_if_stale()
         self._refresh_if_stale()
         return len(self._patients)
+
+    # ── Dialysis queries (เพิ่ม 2026-11-05) ──────────────────
+
+    def get_patients_by_day(self, day_en: str) -> list[MasterPatient]:
+        """ดึงรายชื่อคนไข้ที่ฟอกในวัน day_en ('mon','tue',...'sat')"""
+        self._refresh_if_stale()
+        day = day_en.lower()
+        return [p for p in self._patients if day in (p.dialysis_days or [])]
+
+    def get_dialysis_summary(self) -> dict:
+        """สรุปภาพรวมตารางฟอก"""
+        self._refresh_if_stale()
+        total = len(self._patients)
+        with_schedule = sum(1 for p in self._patients if p.dialysis_days)
+        by_day = {}
+        for day in ["mon", "tue", "wed", "thu", "fri", "sat"]:
+            by_day[day] = sum(1 for p in self._patients if day in (p.dialysis_days or []))
+        esa_counts = {}
+        for p in self._patients:
+            if p.esa_code:
+                esa_counts[p.esa_code] = esa_counts.get(p.esa_code, 0) + 1
+        va_counts = {}
+        for p in self._patients:
+            va = p.vascular_access or "ไม่ระบุ"
+            va_counts[va] = va_counts.get(va, 0) + 1
+        return {
+            "total_patients": total,
+            "with_schedule": with_schedule,
+            "by_day": by_day,
+            "esa_counts": esa_counts,
+            "vascular_access_counts": va_counts,
+        }
+
+    def update_dialysis_profile(
+        self,
+        hn: str,
+        dialysis_schedule: str = "",
+        hd_per_week: int = 0,
+        esa_code: str = "",
+        vascular_access: str = "",
+        shift: str = "",
+        bed_number: str = "",
+    ) -> tuple[bool, str]:
+        """อัปเดตข้อมูลไตเทียมของผู้ป่วย
+
+        Returns: (success, message)
+        """
+        self._loaded = False
+        self._load()
+        patient = self.match_hn(hn.strip().upper())
+        if not patient:
+            return False, f"ไม่พบ HN: {hn}"
+        changed = False
+        if dialysis_schedule:
+            patient.dialysis_schedule = dialysis_schedule
+            patient.dialysis_days = parse_schedule_text(dialysis_schedule)
+            changed = True
+        if hd_per_week:
+            patient.hd_per_week = hd_per_week
+            changed = True
+        if esa_code:
+            patient.esa_code = esa_code
+            esa_info = resolve_esa_code(esa_code)
+            patient.esa_medication = esa_info.get("name", esa_code)
+            patient.esa_dose = esa_info.get("dose", 0)
+            patient.esa_unit = esa_info.get("unit", "unit")
+            changed = True
+        if vascular_access:
+            patient.vascular_access = vascular_access
+            changed = True
+        if shift:
+            patient.shift = shift
+            changed = True
+        if bed_number:
+            patient.bed_number = bed_number
+            changed = True
+        if not changed:
+            return False, "ไม่มีข้อมูลที่ต้องอัปเดต"
+        patient.updated_at = datetime.now(timezone.utc).isoformat()
+        self._rebuild_index()
+        ok, err = self._save()
+        if ok:
+            return True, f"✅ อัปเดตข้อมูลฟอกเลือด: {patient.hn_display} ({patient.patient_name})"
+        return False, f"❌ บันทึกไม่สำเร็จ: {err}"
+
+    def import_dialysis_batch(
+        self,
+        patients_data: list[dict],
+        registered_by: str = "excel_import",
+    ) -> tuple[int, int, int, list[str]]:
+        """นำเข้าข้อมูลไตเทียมจำนวนมาก (จาก Excel)
+
+        patients_data: list of dict with keys:
+          clinic_hn, hospital_hn, patient_name,
+          dialysis_schedule, hd_per_week, esa_code, vascular_access
+
+        Returns: (new_count, updated_count, skipped_count, messages)
+        """
+        self._loaded = False
+        self._load()
+        new_count = 0
+        updated_count = 0
+        skipped_count = 0
+        messages = []
+
+        for pdata in patients_data:
+            clinic_hn = str(pdata.get("clinic_hn", "")).strip().upper()
+            hospital_hn = str(pdata.get("hospital_hn", "")).strip().upper()
+            name = pdata.get("patient_name", "").strip()
+
+            if not clinic_hn and not hospital_hn:
+                skipped_count += 1
+                continue
+
+            # ค้นหาผู้ป่วยเดิม
+            existing_idx = None
+            if clinic_hn and clinic_hn in self._clinic_hn_index:
+                existing_idx = self._clinic_hn_index[clinic_hn]
+            elif hospital_hn and hospital_hn in self._hospital_hn_index:
+                existing_idx = self._hospital_hn_index[hospital_hn]
+            # Fallback: normalized HN
+            if existing_idx is None and clinic_hn:
+                norm = _normalize_hn(clinic_hn)
+                if norm and norm in self._normalized_hn_index:
+                    existing_idx = self._normalized_hn_index[norm]
+
+            schedule = pdata.get("dialysis_schedule", "")
+            days = parse_schedule_text(schedule)
+            hd = int(pdata.get("hd_per_week", 0) or 0)
+            esa_code = str(pdata.get("esa_code", "")).strip()
+            esa_info = resolve_esa_code(esa_code)
+            va = pdata.get("vascular_access", "")
+
+            if existing_idx is not None:
+                p = self._patients[existing_idx]
+                # อัปเดตข้อมูลไตเทียม
+                if name and not p.patient_name:
+                    p.patient_name = name
+                if hospital_hn and not p.hospital_hn:
+                    p.hospital_hn = hospital_hn
+                if schedule:
+                    p.dialysis_schedule = schedule
+                    p.dialysis_days = days
+                if hd:
+                    p.hd_per_week = hd
+                if esa_code:
+                    p.esa_code = esa_code
+                    p.esa_medication = esa_info.get("name", "")
+                    p.esa_dose = esa_info.get("dose", 0)
+                    p.esa_unit = esa_info.get("unit", "unit")
+                if va:
+                    p.vascular_access = va
+                p.updated_at = datetime.now(timezone.utc).isoformat()
+                updated_count += 1
+            else:
+                patient = MasterPatient(
+                    clinic_hn=clinic_hn,
+                    hospital_hn=hospital_hn,
+                    patient_name=name,
+                    registered_by=registered_by,
+                    dialysis_schedule=schedule,
+                    dialysis_days=days,
+                    hd_per_week=hd,
+                    esa_code=esa_code,
+                    esa_medication=esa_info.get("name", ""),
+                    esa_dose=esa_info.get("dose", 0),
+                    esa_unit=esa_info.get("unit", "unit"),
+                    vascular_access=va or "",
+                )
+                self._patients.append(patient)
+                new_count += 1
+
+        self._rebuild_index()
+        ok, err = self._save()
+        if ok:
+            messages.append(
+                f"✅ นำเข้า: ใหม่ {new_count} คน, อัปเดต {updated_count} คน"
+                + (f", ข้าม {skipped_count} คน" if skipped_count else "")
+            )
+        else:
+            messages.append(f"❌ บันทึกลง GCS ไม่สำเร็จ: {err}")
+        return new_count, updated_count, skipped_count, messages
 
     def update_patient(
         self,

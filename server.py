@@ -2784,6 +2784,167 @@ def api_master_registry_update():
     return jsonify({"success": success, "message": msg}), 200 if success else 400
 
 
+# ─── Dialysis Profile API (เพิ่ม 2026-11-05) ─────────────
+
+@app.route("/admin/api/v2/dialysis/import", methods=["POST"])
+def api_dialysis_import():
+    """นำเข้าข้อมูลไตเทียมจำนวนมาก — Admin only
+
+    Body: {"patients": [{"clinic_hn", "hospital_hn", "patient_name",
+                          "dialysis_schedule", "hd_per_week", "esa_code",
+                          "vascular_access"}]}
+    """
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    patients_data = data.get("patients", [])
+    if not patients_data:
+        return jsonify({"error": "ต้องระบุ patients (list of dict)"}), 400
+
+    new_c, upd_c, skip_c, msgs = master_registry.import_dialysis_batch(
+        patients_data, registered_by="admin_api"
+    )
+    return jsonify({
+        "success": True,
+        "new": new_c,
+        "updated": upd_c,
+        "skipped": skip_c,
+        "messages": msgs,
+    })
+
+
+@app.route("/admin/api/v2/dialysis/profile", methods=["GET"])
+def api_dialysis_profile():
+    """ดูข้อมูลไตเทียมของผู้ป่วยรายคน — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    hn = request.args.get("hn", "").strip()
+    if not hn:
+        return jsonify({"error": "ต้องระบุ ?hn=HN"}), 400
+
+    patient = master_registry.match_hn(hn)
+    if not patient:
+        return jsonify({"error": f"ไม่พบ HN: {hn}"}), 404
+
+    from patient_master_registry import THAI_DAY_DISPLAY
+    days_thai = "/".join(
+        THAI_DAY_DISPLAY.get(d, d) for d in (patient.dialysis_days or [])
+    )
+    return jsonify({
+        "clinic_hn": patient.clinic_hn,
+        "hospital_hn": patient.hospital_hn,
+        "patient_name": patient.patient_name,
+        "dialysis_schedule": patient.dialysis_schedule,
+        "dialysis_days": patient.dialysis_days,
+        "dialysis_days_thai": days_thai,
+        "hd_per_week": patient.hd_per_week,
+        "esa_code": patient.esa_code,
+        "esa_medication": patient.esa_medication,
+        "esa_dose": patient.esa_dose,
+        "vascular_access": patient.vascular_access,
+        "shift": patient.shift,
+        "bed_number": patient.bed_number,
+    })
+
+
+@app.route("/admin/api/v2/dialysis/update", methods=["POST"])
+def api_dialysis_update():
+    """อัปเดตข้อมูลไตเทียม — Admin only
+
+    Body: {"hn": "...", "dialysis_schedule": "จ/พ/ศ",
+           "esa_code": "E4", "vascular_access": "AVF", ...}
+    """
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    hn = data.get("hn", "").strip()
+    if not hn:
+        return jsonify({"error": "ต้องระบุ hn"}), 400
+
+    success, msg = master_registry.update_dialysis_profile(
+        hn=hn,
+        dialysis_schedule=data.get("dialysis_schedule", ""),
+        hd_per_week=int(data.get("hd_per_week", 0) or 0),
+        esa_code=data.get("esa_code", ""),
+        vascular_access=data.get("vascular_access", ""),
+        shift=data.get("shift", ""),
+        bed_number=data.get("bed_number", ""),
+    )
+    return jsonify({"success": success, "message": msg}), 200 if success else 400
+
+
+@app.route("/admin/api/v2/dialysis/schedule", methods=["GET"])
+def api_dialysis_schedule():
+    """ดูตารางฟอกตามวัน — Admin only
+
+    ?day=mon|tue|wed|thu|fri|sat — ดูวันที่ระบุ
+    ไม่ระบุ → ดูสรุปทั้งสัปดาห์
+    """
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    day = request.args.get("day", "").strip().lower()
+
+    if day:
+        patients = master_registry.get_patients_by_day(day)
+        from patient_master_registry import THAI_DAY_DISPLAY
+        return jsonify({
+            "day": day,
+            "day_thai": THAI_DAY_DISPLAY.get(day, day),
+            "count": len(patients),
+            "patients": [
+                {
+                    "clinic_hn": p.clinic_hn,
+                    "patient_name": p.patient_name,
+                    "hd_per_week": p.hd_per_week,
+                    "esa_code": p.esa_code,
+                    "esa_medication": p.esa_medication,
+                    "vascular_access": p.vascular_access,
+                }
+                for p in patients
+            ],
+        })
+    else:
+        summary = master_registry.get_dialysis_summary()
+        return jsonify(summary)
+
+
+@app.route("/admin/api/v2/dialysis/list", methods=["GET"])
+def api_dialysis_list():
+    """รายชื่อผู้ป่วยพร้อมข้อมูลไตเทียม — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    patients = master_registry.list_all()
+    return jsonify({
+        "count": len(patients),
+        "patients": [p.to_dict() for p in patients],
+    })
+
+
 # ═══════════════════════════════════════════════════════════
 # Admin API — ทะเบียนบริษัทคู่ค้า และการอ่านผลแล็บซ้ำ
 #
@@ -7464,6 +7625,11 @@ def handle_search_command(
             "• สรุป HN [เลข] — สรุปข้อมูลผู้ป่วย\n"
             "• HN ของฉัน — ดู HN ที่ลงทะเบียน\n"
             "• ยืนยันผลแล็บ [รหัส] — อนุมัติผลแล็บ\n"
+            "\n"
+            "🩺 ไตเทียม\n"
+            "• รอบฟอก — ตารางฟอกวันนี้\n"
+            "• ข้อมูลฟอก [HN] — ข้อมูลฟอกรายคน\n"
+            "• สรุปฟอก — สรุปภาพรวมไตเทียม\n"
             "\n"
             "🧾 ค่าใช้จ่าย\n"
             "• สรุปค่าใช้จ่าย — สรุปค่าใช้จ่ายเดือนนี้\n"
@@ -15710,6 +15876,104 @@ def webhook():
                             if len(patients) > 30:
                                 lines.append(f"\n...และอีก {len(patients)-30} คน")
                             reply_message(reply_token, "\n".join(lines))
+
+                # ── ข้อมูลฟอกเลือด (เพิ่ม 2026-11-05) ──
+                elif text.strip() in ("รอบฟอก", "ตารางฟอก", "dialysis schedule"):
+                    # แสดงตารางฟอกวันนี้
+                    from patient_master_registry import THAI_DAY_DISPLAY
+                    import datetime as _dt
+                    _today = _dt.datetime.now(_dt.timezone(
+                        _dt.timedelta(hours=7)  # ICT
+                    ))
+                    _day_map_rev = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat", 6: "sun"}
+                    _day_en = _day_map_rev.get(_today.weekday(), "")
+                    _day_th = THAI_DAY_DISPLAY.get(_day_en, "")
+                    if _day_en == "sun":
+                        reply_message(reply_token, "📅 วันอาทิตย์ — ไม่มีรอบฟอกเลือด")
+                    else:
+                        _pts = master_registry.get_patients_by_day(_day_en)
+                        if not _pts:
+                            reply_message(reply_token,
+                                f"📅 วัน{_day_th} — ไม่มีคนไข้ในตาราง\n"
+                                f"(ข้อมูลทะเบียน {master_registry.count()} คน)")
+                        else:
+                            _lines = [f"📅 รอบฟอกวัน{_day_th} ({len(_pts)} คน)\n"]
+                            for i, _p in enumerate(_pts[:40], 1):
+                                _esa = _p.esa_code or "-"
+                                _va = _p.vascular_access or ""
+                                _va_txt = f" [{_va}]" if _va else ""
+                                _lines.append(
+                                    f"{i}. {_p.clinic_hn} {_p.patient_name}"
+                                    f" | {_esa}{_va_txt}"
+                                )
+                            if len(_pts) > 40:
+                                _lines.append(f"\n...และอีก {len(_pts)-40} คน")
+                            reply_message(reply_token, "\n".join(_lines))
+
+                elif text.strip().startswith(("ข้อมูลฟอก ", "ข้อมูลฟอก")):
+                    # ดูข้อมูลไตเทียมรายคน: ข้อมูลฟอก <HN>
+                    _hn_q = text.strip()
+                    for _pf in ("ข้อมูลฟอก ", "ข้อมูลฟอก"):
+                        if _hn_q.startswith(_pf):
+                            _hn_q = _hn_q[len(_pf):].strip()
+                            break
+                    if not _hn_q:
+                        reply_message(reply_token,
+                            "⚠️ กรุณาระบุ HN เช่น: ข้อมูลฟอก 56001")
+                    else:
+                        _dp = master_registry.match_hn(_hn_q)
+                        if not _dp:
+                            reply_message(reply_token,
+                                f"❌ ไม่พบ HN: {_hn_q} ในทะเบียน")
+                        else:
+                            from patient_master_registry import THAI_DAY_DISPLAY as _TDD
+                            _days_th = "/".join(
+                                _TDD.get(d, d) for d in (_dp.dialysis_days or [])
+                            ) or "-"
+                            _esa_txt = _dp.esa_medication or _dp.esa_code or "-"
+                            if _dp.esa_dose:
+                                _esa_txt += f" {_dp.esa_dose} {_dp.esa_unit}"
+                            _va_txt = _dp.vascular_access or "ยังไม่ระบุ"
+                            _info = (
+                                f"🏥 ข้อมูลฟอกเลือด\n"
+                                f"━━━━━━━━━━━━━━━━\n"
+                                f"👤 {_dp.patient_name}\n"
+                                f"🔢 HN คลินิก: {_dp.clinic_hn or '-'}\n"
+                                f"🏥 HN รพ.: {_dp.hospital_hn or '-'}\n"
+                                f"━━━━━━━━━━━━━━━━\n"
+                                f"📅 รอบฟอก: {_dp.dialysis_schedule or '-'} ({_days_th})\n"
+                                f"🔄 HD/สัปดาห์: {_dp.hd_per_week or '-'}\n"
+                                f"💊 ESA: {_esa_txt}\n"
+                                f"🩸 Vascular Access: {_va_txt}\n"
+                            )
+                            if _dp.shift:
+                                _info += f"⏰ กะ: {_dp.shift}\n"
+                            if _dp.bed_number:
+                                _info += f"🛏️ เตียง: {_dp.bed_number}\n"
+                            reply_message(reply_token, _info)
+
+                elif text.strip() in ("สรุปฟอก", "dialysis summary"):
+                    # สรุปภาพรวมตารางฟอก
+                    from patient_master_registry import THAI_DAY_DISPLAY as _TDD2
+                    _summ = master_registry.get_dialysis_summary()
+                    _lines = [
+                        f"📊 สรุปไตเทียม ({_summ['with_schedule']}/{_summ['total_patients']} คนมีตาราง)\n",
+                        "📅 จำนวนคนไข้ต่อวัน:",
+                    ]
+                    for _d in ["mon", "tue", "wed", "thu", "fri", "sat"]:
+                        _lines.append(f"  {_TDD2.get(_d, _d)}: {_summ['by_day'].get(_d, 0)} คน")
+                    _lines.append("\n💊 ยา ESA:")
+                    for _code, _cnt in sorted(
+                        _summ["esa_counts"].items(), key=lambda x: -x[1]
+                    ):
+                        _lines.append(f"  {_code}: {_cnt} คน")
+                    if _summ.get("vascular_access_counts"):
+                        _lines.append("\n🩸 Vascular Access:")
+                        for _va, _cnt in sorted(
+                            _summ["vascular_access_counts"].items(), key=lambda x: -x[1]
+                        ):
+                            _lines.append(f"  {_va}: {_cnt} คน")
+                    reply_message(reply_token, "\n".join(_lines))
 
                 # ── แก้ไขชื่อผู้ป่วย ──
                 elif text.strip().startswith(("แก้ไข ", "แก้ชื่อ ", "edit ")):

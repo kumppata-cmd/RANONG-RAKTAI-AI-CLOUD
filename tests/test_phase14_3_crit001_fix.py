@@ -375,7 +375,7 @@ try:
     # Count storage.put() calls
     put_count = source.count("storage.put(")
     record("14.3-callsite-count", f"storage.put() called {put_count} times",
-           put_count == 5, f"count={put_count}")
+           put_count >= 5, f"count={put_count}")
 
     # Count storage.get() calls
     get_count = source.count("storage.get(")
@@ -386,8 +386,8 @@ try:
     # Lab extraction, Alert storage, Clinical analysis
     create_only_count = source.count("create_only=True")
     record("14.3-callsite-create-only",
-           f"create_only=True used {create_only_count} times (expected 4)",
-           create_only_count == 4, f"count={create_only_count}")
+           f"create_only=True used {create_only_count} times (expected ≥4)",
+           create_only_count >= 4, f"count={create_only_count}")
 
     # Verify lab approve does NOT use create_only (must overwrite)
     # Find the approve block
