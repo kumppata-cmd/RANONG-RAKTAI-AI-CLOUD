@@ -8920,7 +8920,63 @@ def handle_search_command(
     _analyze_doc_id = None
     if parsed.command_type == CommandType.CLINICAL_ANALYSIS:
         if parsed.args:
-            _analyze_doc_id = parsed.args
+            # ── ตรวจสอบว่า args เป็น HN (ตัวเลข) หรือ document_id ──
+            # ถ้าเป็น HN ที่อยู่ใน master_registry → ใช้ Lab Intelligence แทน
+            _cli_args = parsed.args.strip()
+            _cli_matched_patient = None
+            if _cli_args.isdigit() and len(_cli_args) >= 4:
+                _cli_matched_patient = master_registry.match_hn(_cli_args)
+            if _cli_matched_patient:
+                # Redirect ไปที่ Lab Intelligence Agent
+                try:
+                    from lab_intelligence_agent import (
+                        generate_intelligence_report,
+                        format_for_line,
+                    )
+                    _cli_hn = _cli_matched_patient.clinic_hn or _cli_args
+                    _hb_hist = _get_hb_history(_cli_hn)
+                    _latest = {}
+                    _lab_docs = doc_index.list_by_patient_folder(
+                        _cli_matched_patient.folder_name, category="lab", limit=5
+                    )
+                    if not _lab_docs:
+                        _lab_docs = doc_index.list_by_patient_folder(
+                            _cli_hn, category="lab", limit=5
+                        )
+                    if _lab_docs:
+                        _newest = _lab_docs[-1]
+                        _et = _newest.get("extracted_text", "")
+                        for _an, _pats in [
+                            ("k", [r"K\+?\s*[=:]\s*([\d.]+)", r"Potassium\s*[=:]\s*([\d.]+)"]),
+                            ("albumin", [r"Albumin\s*[=:]\s*([\d.]+)", r"Alb\s*[=:]\s*([\d.]+)"]),
+                            ("ca", [r"Ca\s*[=:]\s*([\d.]+)", r"Calcium\s*[=:]\s*([\d.]+)"]),
+                            ("po4", [r"PO4\s*[=:]\s*([\d.]+)", r"Phosph\w*\s*[=:]\s*([\d.]+)"]),
+                        ]:
+                            import re as _re2
+                            for _pat in _pats:
+                                _m2 = _re2.search(_pat, _et, _re2.IGNORECASE)
+                                if _m2:
+                                    try:
+                                        _latest[_an] = float(_m2.group(1))
+                                    except ValueError:
+                                        pass
+                                    break
+                        _hb_v = _extract_hb_from_text(_et)
+                        if _hb_v:
+                            _latest["hb"] = _hb_v
+
+                    _ai_report = generate_intelligence_report(
+                        patient_hn=_cli_hn,
+                        patient_data=_cli_matched_patient.to_dict(),
+                        lab_history=_hb_hist,
+                        latest_labs=_latest,
+                    )
+                    return format_for_line(_ai_report)
+                except Exception as _ai_err:
+                    logger.warning("Lab Intelligence error (via วิเคราะห์): %s", _ai_err)
+                    return "ขออภัย ไม่สามารถวิเคราะห์ได้ในขณะนี้"
+            else:
+                _analyze_doc_id = _cli_args
         else:
             # "วิเคราะห์แล็บล่าสุด" — ค้นหา lab doc ล่าสุด
             all_docs = doc_index.list_by_owner(user_hash, limit=100)
