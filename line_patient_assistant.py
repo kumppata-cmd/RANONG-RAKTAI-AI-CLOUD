@@ -815,11 +815,12 @@ def register_patient_assistant(app, storage_ref, doc_index_ref, audit_ref):
     pa_bp = Blueprint("patient_assistant", __name__)
 
     def _check_admin():
-        secret = flask_request.args.get("secret", "")
+        auth_header = flask_request.headers.get("X-Admin-Secret", "")
+        auth_cookie = flask_request.cookies.get("admin_secret", "")
         admin_secret = os.environ.get("ADMIN_SECRET", "")
-        if not admin_secret or secret != admin_secret:
+        if not admin_secret:
             return False
-        return True
+        return auth_header == admin_secret or auth_cookie == admin_secret
 
     @pa_bp.route("/admin/api/v2/patient/appointments", methods=["GET"])
     def api_appointments():

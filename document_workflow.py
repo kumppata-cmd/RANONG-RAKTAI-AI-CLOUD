@@ -74,13 +74,13 @@ STATUS_LABELS_TH = {
 # ═══════════════════════════════════════════════════════════
 
 def _check_admin_secret() -> bool:
-    """Verify ADMIN_SECRET from header or query param."""
+    """Verify ADMIN_SECRET from header or cookie."""
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return False
     auth_header = request.headers.get("X-Admin-Secret", "")
-    auth_param = request.args.get("secret", "")
-    return auth_header == admin_secret or auth_param == admin_secret
+    auth_cookie = request.cookies.get("admin_secret", "")
+    return auth_header == admin_secret or auth_cookie == admin_secret
 
 
 def _unauthorized():

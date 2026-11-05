@@ -41,8 +41,8 @@ def _check_admin_secret() -> bool:
     if not admin_secret:
         return False
     auth_header = request.headers.get("X-Admin-Secret", "")
-    auth_param = request.args.get("secret", "")
-    return auth_header == admin_secret or auth_param == admin_secret
+    auth_cookie = request.cookies.get("admin_secret", "")
+    return auth_header == admin_secret or auth_cookie == admin_secret
 
 
 def _unauthorized():
@@ -737,19 +737,32 @@ loadQueue();
 
 @ocr_review_bp.route("/admin/v2/ocr-review", methods=["GET"])
 def ocr_review_page():
-    """OCR Review UI page."""
+    """OCR Review UI page — cookie auth (set via ?secret= redirect)"""
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    auth_param = request.args.get("secret", "")
+    if not admin_secret:
+        return "ระบบยังไม่ได้ตั้งค่า ADMIN_SECRET", 500
+    auth_cookie = request.cookies.get("admin_secret", "")
     auth_header = request.headers.get("X-Admin-Secret", "")
-    if not admin_secret or (auth_header != admin_secret and auth_param != admin_secret):
-        return (
-            "<html><body style='font-family:sans-serif;text-align:center;"
-            "padding:60px;background:#0f172a;color:#e2e8f0'>"
-            "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
-            "<p style='color:#94a3b8'>เข้าถึง: /admin/v2/ocr-review?secret=YOUR_ADMIN_SECRET</p>"
-            "</body></html>"
-        ), 401
-    return OCR_REVIEW_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+    if auth_header == admin_secret or auth_cookie == admin_secret:
+        return OCR_REVIEW_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+    qs = request.args.get("secret", "")
+    if qs == admin_secret:
+        from flask import redirect, make_response
+        resp = make_response(redirect("/admin/v2/ocr-review", code=302))
+        resp.set_cookie(
+            "admin_secret", admin_secret,
+            max_age=12 * 3600, httponly=True, secure=True,
+            samesite="Lax", path="/admin",
+        )
+        return resp
+    return (
+        "<html><body style='font-family:sans-serif;text-align:center;"
+        "padding:60px;background:#0f172a;color:#e2e8f0'>"
+        "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
+        "<p style='color:#94a3b8'>เข้าครั้งแรก: /admin/v2/ocr-review?secret=...</p>"
+        "<p style='color:#64748b'>หลังจากนั้นใช้ cookie (12 ชม.)</p>"
+        "</body></html>"
+    ), 401
 
 
 def register_ocr_review(app, storage_ref, doc_index_ref, audit_ref):

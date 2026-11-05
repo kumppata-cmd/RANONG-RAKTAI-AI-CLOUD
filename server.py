@@ -4911,6 +4911,7 @@ def admin_annotate_page(doc_id):
     if auth_err is not None:
         return auth_err
 
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     # Sanitize doc_id
     doc_id = doc_id.strip()[:64]
     if not doc_id:
@@ -6235,7 +6236,19 @@ def _admin_page_auth(clean_url: str = ""):
         _hdr.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
     ):
         return None
-    # 3. POST form login → set cookie + redirect
+    # 3. ?secret= → set cookie + redirect (secret ออกจาก URL)
+    _qs = request.args.get("secret", "")
+    if _qs and hmac.compare_digest(
+        _qs.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
+    ):
+        if not clean_url:
+            from urllib.parse import urlencode
+            other_args = {k: v for k, v in request.args.items() if k != "secret"}
+            clean_url = request.path
+            if other_args:
+                clean_url += "?" + urlencode(other_args)
+        return _set_admin_cookie(redirect(clean_url, code=302))
+    # 4. POST form login → set cookie + redirect
     if request.method == "POST":
         _posted = request.form.get("secret", "")
         if _posted and hmac.compare_digest(
@@ -6244,7 +6257,7 @@ def _admin_page_auth(clean_url: str = ""):
             if not clean_url:
                 clean_url = request.path
             return _set_admin_cookie(redirect(clean_url, code=302))
-    # 4. ไม่ผ่าน → แสดง login form
+    # 5. ไม่ผ่าน → แสดง login form
     return (
         "<html><body style='font-family:sans-serif;text-align:center;"
         "padding:60px;background:#0f172a;color:#e2e8f0'>"
@@ -6278,15 +6291,15 @@ def admin_compare_page(hn):
     # กรณี token/secret มาทาง URL: ตั้ง cookie แล้ว redirect ไป URL ที่ไม่มี
     # ค่าลับ เพื่อไม่ให้ค้างใน history/log อีก
     _q_token = request.args.get("token", "")
+    _q_secret = request.args.get("secret", "")
     if _admin_cookie_ok():
         pass
     elif _q_token and _verify_compare_token(hn, _q_token):
         return _set_admin_cookie(redirect(
             f"/admin/compare/{hn}?type={doc_type}", code=302,
         ))
-    elif request.headers.get("X-Admin-Secret", "") and hmac.compare_digest(
-        request.headers.get("X-Admin-Secret", "").encode("utf-8", "surrogateescape"),
-        admin_secret.encode("utf-8"),
+    elif _q_secret and hmac.compare_digest(
+        _q_secret.encode("utf-8", "surrogateescape"), admin_secret.encode("utf-8"),
     ):
         return _set_admin_cookie(redirect(
             f"/admin/compare/{hn}?type={doc_type}", code=302,
@@ -17571,6 +17584,7 @@ def admin_dead_letter_page():
     if auth_err is not None:
         return auth_err
 
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     # ดึงข้อมูล
     entries = []
     stats = {"total": 0, "pending": 0, "resolved": 0, "abandoned": 0}
