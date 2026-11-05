@@ -8073,8 +8073,10 @@ def handle_search_command(
             "• ข้อมูลฟอก [HN] — ข้อมูลฟอกรายคน\n"
             "• สรุปฟอก — สรุปภาพรวมไตเทียม\n"
             "• ติดตามHb [HN] — แนวโน้ม Hb กับ ESA\n"
+            "• เปรียบเทียบ [HN] — เปิดหน้าเปรียบเทียบ\n"
             "\n"
-            "🧾 ค่าใช้จ่าย\n"
+            "📊 สถิติและค่าใช้จ่าย\n"
+            "• สถิติเดือนนี้ — สรุปภาพรวมเดือน\n"
             "• สรุปค่าใช้จ่าย — สรุปค่าใช้จ่ายเดือนนี้\n"
             "• สรุปค่าใช้จ่าย [เดือน/ปี] — สรุปเดือนที่ระบุ\n"
             "\n"
@@ -9694,6 +9696,84 @@ def handle_search_command(
             logger.warning(f"Nephrology KPI error: {type(e).__name__}")
             return "ขออภัย ไม่สามารถสร้างรายงาน KPI ไตได้ในขณะนี้"
 
+    # ── สถิติเดือนนี้ (Monthly Stats) — เพิ่ม 2026-11-05 ──
+    if text_stripped in ("สถิติเดือนนี้", "สถิติเดือน", "monthly stats"):
+        _bkk_tz = timezone(timedelta(hours=7))
+        _now_bkk = datetime.now(_bkk_tz)
+        _month_prefix = _now_bkk.strftime("%Y-%m")
+        _thai_month = f"{_now_bkk.month}/{_now_bkk.year + 543}"
+
+        # นับเอกสาร
+        _total_docs = 0
+        _lab_docs = 0
+        _rx_docs = 0
+        _bill_docs = 0
+        _other_docs = 0
+        for _d in (doc_index._docs if doc_index else []):
+            if _d.get("upload_date", "").startswith(_month_prefix):
+                _total_docs += 1
+                _cat = _d.get("category", "other")
+                if _cat == "lab":
+                    _lab_docs += 1
+                elif _cat in ("rx", "medication"):
+                    _rx_docs += 1
+                elif _cat in ("bill", "receipt"):
+                    _bill_docs += 1
+                else:
+                    _other_docs += 1
+
+        # ค่าวิกฤต
+        _crit_count = 0
+        _crit_ack = 0
+        if alert_service is not None:
+            try:
+                for _a in (alert_service.list_all() or []):
+                    if str(getattr(_a, 'created_at', '')).startswith(_month_prefix):
+                        _crit_count += 1
+                        if getattr(_a, 'acknowledged', False):
+                            _crit_ack += 1
+            except Exception:
+                pass
+
+        # ค่าใช้จ่าย
+        _expense_text = ""
+        if expense_tracker:
+            try:
+                _exp = expense_tracker.get_monthly_summary(
+                    _now_bkk.year, _now_bkk.month
+                )
+                _inv = _exp.get("invoice_count", 0)
+                _total_cost = _exp.get("total", 0)
+                if _inv > 0:
+                    _expense_text = f"\n💰 ค่าใช้จ่าย: {_total_cost:,.0f} บาท ({_inv} ใบ)"
+            except Exception:
+                pass
+
+        # ไตเทียม
+        _dialysis_text = ""
+        _summ = master_registry.get_dialysis_summary()
+        if _summ.get("total_patients", 0) > 0:
+            _dialysis_text = (
+                f"\n\n🩺 ไตเทียม:\n"
+                f"  ทะเบียน: {_summ['total_patients']} คน\n"
+                f"  มีตาราง: {_summ['with_schedule']} คน"
+            )
+
+        _stats_msg = (
+            f"📊 สถิติเดือน {_thai_month}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"\n📄 เอกสารรับเข้า: {_total_docs} รายการ\n"
+            f"  🔬 ผลแล็บ: {_lab_docs}\n"
+            f"  💊 ใบยา: {_rx_docs}\n"
+            f"  🧾 บิล/ใบเสร็จ: {_bill_docs}\n"
+            f"  📁 อื่นๆ: {_other_docs}\n"
+            f"\n⚠️ ค่าวิกฤต: {_crit_count} ครั้ง"
+            f" (ยืนยันแล้ว {_crit_ack})"
+            f"{_expense_text}"
+            f"{_dialysis_text}"
+        )
+        return _stats_msg
+
     # ── สรุปค่าใช้จ่าย (Expense Summary) ──
     if text_stripped.startswith("สรุปค่าใช้จ่าย"):
         if not expense_tracker:
@@ -10533,6 +10613,57 @@ def _send_dialysis_staff_summary() -> dict:
     return {"sent": sent, "errors": errors, "patients": len(pts), "day": _day_en}
 
 
+def _build_daily_digest() -> str:
+    """สร้างสรุปประจำวันรวมทุกส่วนในข้อความเดียว (เพิ่ม 2026-11-05)"""
+    from patient_master_registry import THAI_DAY_DISPLAY
+    _bkk = timezone(timedelta(hours=7))
+    _now = datetime.now(_bkk)
+    _day_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat"}
+    _day_en = _day_map.get(_now.weekday(), "")
+    _day_th = THAI_DAY_DISPLAY.get(_day_en, _day_en)
+    _date_th = f"{_now.day}/{_now.month}/{_now.year + 543}"
+
+    lines = [f"📊 สรุปประจำวัน{_day_th}ที่ {_date_th}", "━━━━━━━━━━━━━━━━━━━━"]
+
+    # 1. ฟอกเลือดวันนี้
+    if _day_en:
+        _pts = master_registry.get_patients_by_day(_day_en)
+        lines.append(f"🏥 ฟอกเลือดวันนี้: {len(_pts)} คน")
+    else:
+        lines.append("🏥 วันอาทิตย์ — ไม่มีรอบฟอก")
+
+    # 2. เอกสารใหม่เมื่อวาน
+    _yesterday = (_now - timedelta(days=1)).strftime("%Y-%m-%d")
+    _new_docs = 0
+    _new_labs = 0
+    for _d in (doc_index._docs if doc_index else []):
+        if _d.get("upload_date", "").startswith(_yesterday):
+            _new_docs += 1
+            if _d.get("category", "") == "lab":
+                _new_labs += 1
+    lines.append(f"📄 เอกสารใหม่เมื่อวาน: {_new_docs} ({_new_labs} ผลแล็บ)")
+
+    # 3. ค่าวิกฤตรอยืนยัน
+    _pending_critical = 0
+    if alert_service is not None:
+        try:
+            _alerts = alert_service.list_pending()
+            _pending_critical = len(_alerts) if _alerts else 0
+        except Exception:
+            pass
+    if _pending_critical > 0:
+        lines.append(f"⚠️ ค่าวิกฤตรอยืนยัน: {_pending_critical} รายการ")
+    else:
+        lines.append("✅ ไม่มีค่าวิกฤตค้าง")
+
+    # 4. สถิติเอกสารรวม
+    _total = len(doc_index._docs) if doc_index else 0
+    _patients = master_registry.count() if master_registry else 0
+    lines.append(f"\n📦 ทะเบียน: {_patients} คน | เอกสาร: {_total} รายการ")
+
+    return "\n".join(lines)
+
+
 def job_daily_reminders() -> dict:
     """งานประจำวัน 08:00: เตือนนัดพรุ่งนี้/วันนี้ + นัดประจำ + ฟอกเลือด + สรุปเจ้าหน้าที่"""
     out: dict = {}
@@ -10554,6 +10685,19 @@ def job_daily_reminders() -> dict:
     except Exception as _e:
         out["dialysis_staff_summary"] = {"error": type(_e).__name__}
         logger.warning("dialysis_staff_summary: %s", _e)
+    # ── สรุปรายวันรวม → เจ้าหน้าที่ (เพิ่ม 2026-11-05) ──
+    try:
+        _digest = _build_daily_digest()
+        _sent = 0
+        for _rid in _staff_line_ids():
+            try:
+                push_message(_rid, _digest)
+                _sent += 1
+            except Exception:
+                pass
+        out["daily_digest"] = {"sent": _sent, "length": len(_digest)}
+    except Exception as _e:
+        out["daily_digest"] = {"error": type(_e).__name__}
     return out
 
 # ── Structured Event Logger (V4.0 Phase 1.2) ──
@@ -13090,6 +13234,52 @@ def process_file_async(
                                 f"Lab alert ล้มเหลว: "
                                 f"{type(alert_err).__name__} "
                                 f"(doc_id={_doc_id[:8]})"
+                            )
+
+                        # ── Hb ต่ำ auto-alert → แจ้งแพทย์ (เพิ่ม 2026-11-05) ──
+                        try:
+                            _hb_val = _extract_hb_from_text(extracted_text)
+                            if _hb_val is not None and _hb_val < 8.0:
+                                _hn_folder = metadata.get(
+                                    "patient_hn_folder", ""
+                                )
+                                _hb_patient = master_registry.match_hn(
+                                    _hn_folder
+                                ) if _hn_folder else None
+                                _hb_name = (
+                                    _hb_patient.patient_name
+                                    if _hb_patient else _hn_folder
+                                )
+                                _hb_esa = ""
+                                if _hb_patient and _hb_patient.esa_code:
+                                    _esa_med = (
+                                        _hb_patient.esa_medication
+                                        or _hb_patient.esa_code
+                                    )
+                                    _hb_esa = f"\n💊 ESA ปัจจุบัน: {_esa_med}"
+                                _hb_alert_msg = (
+                                    f"🔴 Hb ต่ำ!\n"
+                                    f"━━━━━━━━━━━━━━━━\n"
+                                    f"👤 {_hb_name}\n"
+                                    f"🔢 HN: {_hn_folder}\n"
+                                    f"🩸 Hb = {_hb_val:.1f} g/dL"
+                                    f" (< 8.0){_hb_esa}\n\n"
+                                    f"📋 ควรพิจารณาให้เลือด"
+                                    f" หรือปรับยา ESA"
+                                )
+                                for _ph_id in _staff_line_ids():
+                                    try:
+                                        push_message(_ph_id, _hb_alert_msg)
+                                    except Exception:
+                                        pass
+                                logger.info(
+                                    f"Hb low alert: {_hn_folder} "
+                                    f"Hb={_hb_val:.1f}"
+                                )
+                        except Exception as _hb_err:
+                            logger.warning(
+                                "Hb alert error: %s",
+                                type(_hb_err).__name__
                             )
 
                 except Exception as lab_err:
@@ -16364,6 +16554,37 @@ def webhook():
                             if len(patients) > 30:
                                 lines.append(f"\n...และอีก {len(patients)-30} คน")
                             reply_message(reply_token, "\n".join(lines))
+
+                # ── เปรียบเทียบ <HN> — ส่ง link Compare page (เพิ่ม 2026-11-05) ──
+                if text.strip().startswith(("เปรียบเทียบ ", "compare ")):
+                    _cmp_q = text.strip()
+                    for _pf in ("เปรียบเทียบ ", "compare "):
+                        if _cmp_q.startswith(_pf):
+                            _cmp_q = _cmp_q[len(_pf):].strip()
+                            break
+                    if not _cmp_q:
+                        reply_message(reply_token,
+                            "⚠️ กรุณาระบุ HN เช่น: เปรียบเทียบ 56001")
+                    else:
+                        _cmp_p = master_registry.match_hn(_cmp_q)
+                        if not _cmp_p:
+                            reply_message(reply_token,
+                                f"❌ ไม่พบ HN: {_cmp_q} ในทะเบียน")
+                        else:
+                            _cmp_hn = _cmp_p.hospital_hn or _cmp_p.clinic_hn
+                            _cmp_url = (
+                                f"https://ranong-raktai-ai-cloud.onrender.com"
+                                f"/admin/compare/{_cmp_hn}"
+                            )
+                            _cmp_msg = (
+                                f"📊 เปรียบเทียบข้อมูลผู้ป่วย\n"
+                                f"━━━━━━━━━━━━━━━━\n"
+                                f"👤 {_cmp_p.patient_name}\n"
+                                f"🔢 HN: {_cmp_hn}\n\n"
+                                f"🔗 เปิดหน้าเปรียบเทียบ:\n{_cmp_url}\n\n"
+                                f"💡 ต้อง login ด้วย Admin Secret ครั้งแรก"
+                            )
+                            reply_message(reply_token, _cmp_msg)
 
                 # ── ข้อมูลฟอกเลือด (เพิ่ม 2026-11-05) ──
                 elif text.strip() in ("รอบฟอก", "ตารางฟอก", "dialysis schedule"):
