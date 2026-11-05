@@ -360,5 +360,85 @@ class TestParseDialysisExcel(unittest.TestCase):
         self.assertEqual(p2["esa_code"], "HM")
 
 
+def _server():
+    import server as _s
+    return _s
+
+
+class TestHbExtraction(unittest.TestCase):
+    """ทดสอบ _extract_hb_from_text — ดึง Hb จากข้อความ OCR"""
+
+    def test_basic_hb(self):
+        s = _server()
+        self.assertAlmostEqual(s._extract_hb_from_text("Hb 10.5 g/dL"), 10.5)
+
+    def test_hemoglobin_label(self):
+        s = _server()
+        self.assertAlmostEqual(s._extract_hb_from_text("Hemoglobin: 11.2"), 11.2)
+
+    def test_hgb_label(self):
+        s = _server()
+        self.assertAlmostEqual(s._extract_hb_from_text("HGB = 9.8 gm/dl"), 9.8)
+
+    def test_thai_label(self):
+        s = _server()
+        self.assertAlmostEqual(s._extract_hb_from_text("ฮีโมโกลบิน 10.0"), 10.0)
+
+    def test_out_of_range_rejected(self):
+        s = _server()
+        # 0.5 too low, 30 too high
+        self.assertIsNone(s._extract_hb_from_text("Hb 0.5"))
+        self.assertIsNone(s._extract_hb_from_text("Hb 30"))
+
+    def test_no_hb_returns_none(self):
+        s = _server()
+        self.assertIsNone(s._extract_hb_from_text("BUN 25 mg/dL Cr 5.2"))
+        self.assertIsNone(s._extract_hb_from_text(""))
+        self.assertIsNone(s._extract_hb_from_text(None))
+
+    def test_integer_hb(self):
+        s = _server()
+        self.assertAlmostEqual(s._extract_hb_from_text("Hb 11 g/dL"), 11.0)
+
+
+class TestHbTrend(unittest.TestCase):
+    """ทดสอบ _hb_trend — คำนวณแนวโน้ม"""
+
+    def test_rising(self):
+        s = _server()
+        hist = [{"value": 9.0}, {"value": 9.8}, {"value": 10.5}]
+        self.assertEqual(s._hb_trend(hist), "rising")
+
+    def test_falling(self):
+        s = _server()
+        hist = [{"value": 11.5}, {"value": 10.8}, {"value": 10.0}]
+        self.assertEqual(s._hb_trend(hist), "falling")
+
+    def test_stable(self):
+        s = _server()
+        hist = [{"value": 10.5}, {"value": 10.3}, {"value": 10.4}]
+        self.assertEqual(s._hb_trend(hist), "stable")
+
+    def test_too_few(self):
+        s = _server()
+        self.assertEqual(s._hb_trend([{"value": 10.5}]), "unknown")
+        self.assertEqual(s._hb_trend([]), "unknown")
+
+
+class TestHbAssessment(unittest.TestCase):
+
+    def test_low(self):
+        s = _server()
+        self.assertEqual(s._hb_assessment(8.5), "ต่ำ")
+
+    def test_target(self):
+        s = _server()
+        self.assertEqual(s._hb_assessment(10.5), "เป้าหมาย")
+
+    def test_high(self):
+        s = _server()
+        self.assertEqual(s._hb_assessment(13.0), "สูง")
+
+
 if __name__ == "__main__":
     unittest.main()

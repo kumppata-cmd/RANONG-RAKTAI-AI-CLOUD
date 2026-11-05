@@ -4138,6 +4138,232 @@ loadPatients();
 </html>'''
 
 
+# ─── Dashboard ไตเทียม (เพิ่ม 2026-11-05 — แพทย์อนุมัติ) ─────────
+
+@app.route("/admin/dialysis-dashboard")
+def admin_dialysis_dashboard():
+    """หน้าเว็บ Dashboard ไตเทียม — ตารางฟอก, ยา ESA, ค่าใช้จ่าย"""
+    return '''<!DOCTYPE html>
+<html lang="th"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ไตเทียม Dashboard — คลินิกระนอง รักษ์ไต</title>
+<style>
+:root{--bg:#f8fafc;--card:#fff;--fg:#1e293b;--fg2:#64748b;--accent:#0ea5e9;--accent2:#06b6d4;
+--border:#e2e8f0;--ok:#22c55e;--warn:#f59e0b;--err:#ef4444;--row-alt:#f1f5f9}
+@media(prefers-color-scheme:dark){:root{--bg:#0f172a;--card:#1e293b;--fg:#f1f5f9;--fg2:#94a3b8;
+--border:#334155;--row-alt:#1e293b}}
+*{box-sizing:border-box;margin:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--fg);padding:0}
+.app{max-width:1100px;margin:0 auto;padding:16px}
+.header{background:linear-gradient(135deg,#0ea5e9,#06b6d4);color:#fff;padding:20px;border-radius:12px;margin-bottom:16px}
+.header h1{font-size:1.4em;margin-bottom:4px}
+.header .sub{opacity:.85;font-size:.9em}
+.auth-box{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:24px;text-align:center;margin:40px 0}
+.auth-box input{padding:10px 16px;font-size:15px;border:1px solid var(--border);border-radius:8px;width:260px;margin:8px}
+.auth-box button{padding:10px 24px;font-size:15px;border:none;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer}
+.tabs{display:flex;gap:4px;margin-bottom:16px;flex-wrap:wrap}
+.tab{padding:10px 18px;border-radius:8px 8px 0 0;cursor:pointer;background:var(--card);border:1px solid var(--border);
+border-bottom:none;font-size:.9em;color:var(--fg2);transition:.15s}
+.tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.panel{display:none;background:var(--card);border:1px solid var(--border);border-radius:0 8px 8px 8px;padding:20px}
+.panel.active{display:block}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:20px}
+.stat{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;text-align:center}
+.stat .val{font-size:1.8em;font-weight:700;color:var(--accent)}
+.stat .lbl{font-size:.82em;color:var(--fg2);margin-top:4px}
+table{width:100%;border-collapse:collapse;font-size:.88em}
+th{background:var(--accent);color:#fff;padding:10px 8px;text-align:left;position:sticky;top:0}
+td{padding:8px;border-bottom:1px solid var(--border)}
+tr:nth-child(even){background:var(--row-alt)}
+.esa-bar{display:flex;align-items:center;gap:8px;margin:6px 0}
+.esa-bar .bar{height:22px;border-radius:4px;min-width:2px;transition:.3s}
+.esa-bar .lbl{font-size:.85em;min-width:80px}
+.esa-bar .cnt{font-size:.85em;color:var(--fg2)}
+.week-grid{display:grid;grid-template-columns:repeat(6,1fr);gap:8px}
+.day-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:14px;text-align:center}
+.day-card .day-name{font-weight:600;color:var(--accent);font-size:1.1em}
+.day-card .day-count{font-size:2em;font-weight:700;color:var(--fg);margin:8px 0}
+.day-card.today{border-color:var(--accent);box-shadow:0 0 0 2px rgba(14,165,233,.3)}
+.cost-row{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)}
+.cost-row:last-child{border-bottom:none}
+.cost-total{font-size:1.2em;font-weight:700;color:var(--accent);margin-top:12px;text-align:right}
+.hidden{display:none!important}
+@media(max-width:600px){.week-grid{grid-template-columns:repeat(3,1fr)} .stats{grid-template-columns:repeat(2,1fr)}}
+</style></head><body>
+<div class="app">
+<div class="header">
+  <h1>🩺 ไตเทียม Dashboard</h1>
+  <div class="sub">คลินิกระนอง รักษ์ไต — ตารางฟอก · ยา ESA · ค่าใช้จ่าย</div>
+</div>
+
+<div class="auth-box" id="authBox">
+  <div style="font-size:1.5em;margin-bottom:12px">🔐</div>
+  <div>กรุณายืนยันตัวตน</div>
+  <div style="margin-top:12px">
+    <input type="password" id="secretInput" placeholder="ADMIN_SECRET" onkeydown="if(event.key==='Enter')doAuth()">
+    <button onclick="doAuth()">เข้าสู่ระบบ</button>
+  </div>
+  <div id="authErr" style="color:var(--err);margin-top:8px"></div>
+</div>
+
+<div id="mainContent" class="hidden">
+<div class="stats" id="statsBar">
+  <div class="stat"><div class="val" id="sTotalPt">-</div><div class="lbl">ผู้ป่วยทั้งหมด</div></div>
+  <div class="stat"><div class="val" id="sTodayPt">-</div><div class="lbl">ฟอกวันนี้</div></div>
+  <div class="stat"><div class="val" id="sESATypes">-</div><div class="lbl">ชนิดยา ESA</div></div>
+  <div class="stat"><div class="val" id="sMonthlyCost">-</div><div class="lbl">ค่ายา/เดือน (ประมาณ)</div></div>
+</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="showTab('today')">📅 วันนี้</div>
+  <div class="tab" onclick="showTab('week')">📊 รายสัปดาห์</div>
+  <div class="tab" onclick="showTab('esa')">💊 สรุป ESA</div>
+  <div class="tab" onclick="showTab('cost')">💰 ค่าใช้จ่าย</div>
+</div>
+
+<div class="panel active" id="panelToday">
+  <h3 id="todayTitle" style="margin-bottom:12px">📅 ตารางฟอกวันนี้</h3>
+  <table><thead><tr><th>#</th><th>HN</th><th>ชื่อ-สกุล</th><th>ESA</th><th>VA</th><th>HD/wk</th></tr></thead>
+  <tbody id="todayBody"></tbody></table>
+</div>
+
+<div class="panel" id="panelWeek">
+  <h3 style="margin-bottom:16px">📊 ตารางฟอกรายสัปดาห์</h3>
+  <div class="week-grid" id="weekGrid"></div>
+  <div id="dayDetail" style="margin-top:16px"></div>
+</div>
+
+<div class="panel" id="panelEsa">
+  <h3 style="margin-bottom:16px">💊 สรุปยา ESA ทั้งหมด</h3>
+  <div id="esaChart"></div>
+  <table style="margin-top:16px"><thead><tr><th>รหัส</th><th>ชื่อยา</th><th>ขนาด</th><th>จำนวนคนไข้</th></tr></thead>
+  <tbody id="esaBody"></tbody></table>
+</div>
+
+<div class="panel" id="panelCost">
+  <h3 style="margin-bottom:16px">💰 ประมาณการค่ายา ESA รายเดือน</h3>
+  <div id="costList"></div>
+  <div class="cost-total" id="costTotal"></div>
+  <div style="margin-top:12px;font-size:.82em;color:var(--fg2)">* ค่าใช้จ่ายเป็นค่าประมาณ อ้างอิงจากราคาเฉลี่ยต่อโดส</div>
+</div>
+</div>
+</div>
+
+<script>
+const API = location.origin;
+let SECRET = '';
+const DAY_TH = {mon:'จันทร์',tue:'อังคาร',wed:'พุธ',thu:'พฤหัสบดี',fri:'ศุกร์',sat:'เสาร์'};
+const DAY_ORDER = ['mon','tue','wed','thu','fri','sat'];
+const TODAY_DAY = ['mon','tue','wed','thu','fri','sat','sun'][(new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Bangkok'})).getDay()+6)%7];
+
+function hdr(){return {'X-Admin-Secret':SECRET,'Content-Type':'application/json'}}
+async function api(path){const r=await fetch(API+path,{headers:hdr()});if(!r.ok)throw new Error(r.status);return r.json()}
+
+async function doAuth(){
+  SECRET=document.getElementById('secretInput').value;
+  if(!SECRET){document.getElementById('authErr').textContent='กรุณาใส่ ADMIN_SECRET';return}
+  try{
+    const d=await api('/admin/api/v2/dialysis/schedule');
+    document.getElementById('authBox').classList.add('hidden');
+    document.getElementById('mainContent').classList.remove('hidden');
+    loadAll();
+  }catch(e){document.getElementById('authErr').textContent='❌ Secret ไม่ถูกต้อง หรือระบบไม่พร้อม'}
+}
+
+function showTab(name){
+  document.querySelectorAll('.tab').forEach((t,i)=>t.classList.toggle('active',['today','week','esa','cost'][i]===name));
+  document.querySelectorAll('.panel').forEach((p,i)=>p.classList.toggle('active',['today','week','esa','cost'][i]===name));
+}
+
+function fmt(n){return n?Number(n).toLocaleString('th-TH'):'-'}
+
+async function loadAll(){
+  // Today's patients
+  try{
+    const d=await api('/admin/api/v2/dialysis/schedule?day='+TODAY_DAY);
+    document.getElementById('sTodayPt').textContent=d.count;
+    document.getElementById('todayTitle').textContent='📅 ตารางฟอกวัน'+DAY_TH[TODAY_DAY]+' ('+d.count+' คน)';
+    let html='';
+    d.patients.forEach((p,i)=>{
+      html+='<tr><td>'+(i+1)+'</td><td>'+p.clinic_hn+'</td><td>'+p.patient_name+'</td>'
+        +'<td>'+(p.esa_code||'-')+'</td><td>'+(p.vascular_access||'-')+'</td>'
+        +'<td>'+(p.hd_per_week||'-')+'</td></tr>';
+    });
+    document.getElementById('todayBody').innerHTML=html||'<tr><td colspan=6 style="text-align:center;padding:30px">วันนี้ไม่มีรอบฟอก</td></tr>';
+  }catch(e){console.error(e)}
+
+  // Summary
+  try{
+    const s=await api('/admin/api/v2/dialysis/schedule');
+    document.getElementById('sTotalPt').textContent=s.total_patients;
+    document.getElementById('sESATypes').textContent=Object.keys(s.esa_counts||{}).length;
+    // Week grid
+    let wh='';
+    DAY_ORDER.forEach(d=>{
+      const c=s.by_day[d]||0;
+      const cls=d===TODAY_DAY?'day-card today':'day-card';
+      wh+='<div class="'+cls+'" onclick="loadDay(\''+d+'\')"><div class="day-name">'+DAY_TH[d]+'</div><div class="day-count">'+c+'</div><div style="font-size:.8em;color:var(--fg2)">คน</div></div>';
+    });
+    document.getElementById('weekGrid').innerHTML=wh;
+    // ESA chart
+    const esa=s.esa_counts||{};
+    const esaMax=Math.max(...Object.values(esa),1);
+    const colors=['#0ea5e9','#06b6d4','#22c55e','#f59e0b','#ef4444','#8b5cf6','#ec4899','#64748b'];
+    let eh='';
+    Object.entries(esa).sort((a,b)=>b[1]-a[1]).forEach(([code,cnt],i)=>{
+      const w=Math.round(cnt/esaMax*100);
+      eh+='<div class="esa-bar"><div class="lbl">'+code+'</div><div class="bar" style="width:'+w+'%;background:'+colors[i%colors.length]+'"></div><div class="cnt">'+cnt+' คน</div></div>';
+    });
+    document.getElementById('esaChart').innerHTML=eh;
+  }catch(e){console.error(e)}
+
+  // ESA detail table
+  try{
+    const all=await api('/admin/api/v2/dialysis/list');
+    const esaMap={};
+    all.patients.forEach(p=>{
+      const c=p.esa_code||'ไม่ระบุ';
+      if(!esaMap[c])esaMap[c]={code:c,med:p.esa_medication||c,dose:p.esa_dose||0,count:0};
+      esaMap[c].count++;
+    });
+    let th='';
+    Object.values(esaMap).sort((a,b)=>b.count-a.count).forEach(e=>{
+      th+='<tr><td>'+e.code+'</td><td>'+e.med+'</td><td>'+(e.dose?fmt(e.dose)+' unit':'-')+'</td><td>'+e.count+'</td></tr>';
+    });
+    document.getElementById('esaBody').innerHTML=th;
+  }catch(e){console.error(e)}
+
+  // Cost report
+  try{
+    const cr=await api('/admin/api/v2/dialysis/esa-report');
+    document.getElementById('sMonthlyCost').textContent='฿'+fmt(cr.total_monthly_cost);
+    let ch='';
+    cr.esa_drugs.forEach(d=>{
+      if(d.esa_code==='ไม่ระบุ')return;
+      ch+='<div class="cost-row"><div><strong>'+d.medication_name+'</strong> ('+d.esa_code+')<br>'
+        +'<span style="font-size:.82em;color:var(--fg2)">'+d.patient_count+' คน × '+fmt(d.sessions_per_month)+' โดส/เดือน × ฿'+fmt(d.cost_per_dose)+'</span></div>'
+        +'<div style="font-weight:600;color:var(--accent)">฿'+fmt(d.cost_per_month)+'</div></div>';
+    });
+    document.getElementById('costList').innerHTML=ch;
+    document.getElementById('costTotal').textContent='รวมประมาณ ฿'+fmt(cr.total_monthly_cost)+'/เดือน';
+  }catch(e){console.error(e)}
+}
+
+async function loadDay(day){
+  try{
+    const d=await api('/admin/api/v2/dialysis/schedule?day='+day);
+    let html='<h4>📅 วัน'+DAY_TH[day]+' ('+d.count+' คน)</h4><table><thead><tr><th>#</th><th>HN</th><th>ชื่อ</th><th>ESA</th><th>VA</th></tr></thead><tbody>';
+    d.patients.forEach((p,i)=>{
+      html+='<tr><td>'+(i+1)+'</td><td>'+p.clinic_hn+'</td><td>'+p.patient_name+'</td><td>'+(p.esa_code||'-')+'</td><td>'+(p.vascular_access||'-')+'</td></tr>';
+    });
+    html+='</tbody></table>';
+    document.getElementById('dayDetail').innerHTML=html;
+  }catch(e){console.error(e)}
+}
+
+document.getElementById('secretInput').focus();
+</script></body></html>'''
+
+
 @app.route("/admin/api/v2/master-registry/debug-gcs", methods=["GET"])
 def api_master_registry_debug_gcs():
     """ทดสอบ GCS write โดยตรง — Admin only"""
@@ -6210,6 +6436,19 @@ body {{ font-family:'Sarabun',sans-serif; background:#f0f2f5; color:#333; }}
        onclick="switchType('bills')">📄 บิล</div>
 </div>
 
+{"" if not _cmp_patient else f'''
+<div class="compare-area" style="padding-bottom:0">
+  <div class="dialysis-card">
+    <div class="dc-item"><span class="dc-label">💊 ESA:</span>
+      <span class="dc-val">{_cmp_esa or "ไม่ระบุ"}</span></div>
+    <div class="dc-item"><span class="dc-label">🩸 Vascular:</span>
+      <span class="dc-val">{_cmp_va or "ไม่ระบุ"}</span></div>
+    <div class="dc-item"><span class="dc-label">📅 รอบฟอก:</span>
+      <span class="dc-val">{_cmp_schedule or "-"} ({_cmp_hd} ครั้ง/สัปดาห์)</span></div>
+  </div>
+</div>
+'''}
+
 <div class="compare-area">
 
   <div class="doc-selector">
@@ -6448,17 +6687,12 @@ def api_treatment_note():
 
 @app.route("/admin/patient/<hn>")
 def admin_patient_page(hn):
-    """หน้าเว็บสรุปผู้ป่วย — Server-Side Render (ไม่ต้อง fetch API)"""
-    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    if not admin_secret:
-        return "ระบบยังไม่ได้ตั้งค่า", 500
-    secret = request.args.get("secret", "")
-    if not secret or not hmac.compare_digest(
-        secret.encode("utf-8", "surrogateescape"),
-        admin_secret.encode("utf-8"),
-    ):
-        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+    """หน้าเว็บสรุปผู้ป่วย — cookie auth (set via ?secret= redirect)"""
+    auth_err = _admin_page_auth()
+    if auth_err is not None:
+        return auth_err
 
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     hn = hn.strip()[:20]
     base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
     hn_q = hn.replace("HN", "").replace("hn", "").strip()
@@ -17325,15 +17559,9 @@ def api_finance_status():
 @app.route("/admin/v2/dead-letter")
 def admin_dead_letter_page():
     """หน้าเว็บ Dead-Letter Queue — ดูเอกสารที่มีปัญหา"""
-    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    if not admin_secret:
-        return "ระบบยังไม่ได้ตั้งค่า", 500
-    secret = request.args.get("secret", "")
-    if not secret or not hmac.compare_digest(
-        secret.encode("utf-8", "surrogateescape"),
-        admin_secret.encode("utf-8"),
-    ):
-        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+    auth_err = _admin_page_auth()
+    if auth_err is not None:
+        return auth_err
 
     # ดึงข้อมูล
     entries = []
@@ -18003,15 +18231,9 @@ except ImportError:
 @app.route("/admin/clinical-dashboard", methods=["GET"])
 def admin_clinical_dashboard():
     """Kidney Clinical Intelligence Dashboard — Phase A."""
-    auth_param = request.headers.get("X-Admin-Secret", "")
-    auth_header = request.headers.get("X-Admin-Secret", "")
-    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
-        return (
-            "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>"
-            "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
-            "<p>เข้าถึง: /admin/clinical-dashboard?secret=YOUR_ADMIN_SECRET</p>"
-            "</body></html>"
-        ), 401
+    auth_err = _admin_page_auth()
+    if auth_err is not None:
+        return auth_err
     return CLINICAL_DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
@@ -18385,16 +18607,9 @@ def liff_api_save_note():
 @app.route("/admin/dashboard", methods=["GET"])
 def admin_dashboard():
     """Admin Dashboard — Web UI สำหรับดูสถิติระบบ."""
-    # Auth: ตรวจสอบ secret จาก query parameter (สำหรับเปิดในเบราว์เซอร์)
-    auth_param = request.headers.get("X-Admin-Secret", "")
-    auth_header = request.headers.get("X-Admin-Secret", "")
-    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
-        return (
-            "<html><body style='font-family:sans-serif;text-align:center;padding:60px'>"
-            "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
-            "<p>เข้าถึง: /admin/dashboard?secret=YOUR_ADMIN_SECRET</p>"
-            "</body></html>"
-        ), 401
+    auth_err = _admin_page_auth()
+    if auth_err is not None:
+        return auth_err
     return DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
