@@ -7942,6 +7942,59 @@ def handle_search_command(
             "(เห็นเฉพาะของตัวเองเท่านั้น)"
         )
 
+    # ── ตรวจสอบระบบ (Admin/Staff) — เพิ่ม 2026-11-05 ──
+    if text_stripped in ("ตรวจสอบระบบ", "สถานะระบบ", "system status"):
+        if not _is_staff:
+            return None
+        _bkk_tz = timezone(timedelta(hours=7))
+        _now_bkk = datetime.now(_bkk_tz)
+        _doc_total = len(doc_index._docs) if doc_index else 0
+        _pt_total = master_registry.count() if master_registry else 0
+        _gcs_ok = bool(storage and hasattr(storage, "_bucket") and storage._bucket)
+        _redis_st = state_store.status if state_store else "N/A"
+        _db_st = db.status if db else "N/A"
+
+        # นับเอกสารวันนี้
+        _today_str = _now_bkk.strftime("%Y-%m-%d")
+        _today_docs = sum(
+            1 for _d in (doc_index._docs if doc_index else [])
+            if _d.get("upload_date", "").startswith(_today_str)
+        )
+
+        # ค่าวิกฤตค้าง
+        _pending_alerts = 0
+        if alert_service:
+            try:
+                _pa = alert_service.list_pending()
+                _pending_alerts = len(_pa) if _pa else 0
+            except Exception:
+                pass
+
+        # Dialysis summary
+        _dial_summ = master_registry.get_dialysis_summary() if master_registry else {}
+        _with_sched = _dial_summ.get("with_schedule", 0)
+
+        _status_msg = (
+            f"🖥️ สถานะระบบ RANONG RAKTAI AI\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"🕐 {_now_bkk.strftime('%d/%m/%Y %H:%M')}\n"
+            f"\n"
+            f"📦 Storage: {'✅ GCS' if _gcs_ok else '❌ GCS'}\n"
+            f"🗄️ Database: {_db_st}\n"
+            f"🔄 Redis: {_redis_st}\n"
+            f"\n"
+            f"👥 ผู้ป่วยทะเบียน: {_pt_total} คน\n"
+            f"🏥 มีตารางฟอก: {_with_sched} คน\n"
+            f"📄 เอกสารรวม: {_doc_total} ฉบับ\n"
+            f"📄 วันนี้: {_today_docs} ฉบับ\n"
+        )
+        if _pending_alerts > 0:
+            _status_msg += f"\n⚠️ ค่าวิกฤตรอยืนยัน: {_pending_alerts}\n"
+        else:
+            _status_msg += f"\n✅ ไม่มีค่าวิกฤตค้าง\n"
+
+        return _status_msg
+
     if text_stripped in ("ตรวจแฟ้มย้อนหลัง", "จัดแฟ้มย้อนหลัง"):
         if not is_admin_user(user_hash):
             return None
@@ -8216,8 +8269,9 @@ def handle_search_command(
             "• วิเคราะห์ [HN] — AI วิเคราะห์แล็บ+ESA เชิงลึก\n"
             "• เปรียบเทียบ [HN] — เปิดหน้าเปรียบเทียบ\n"
             "\n"
-            "📊 สถิติและค่าใช้จ่าย\n"
+            "📊 สถิติและระบบ\n"
             "• สถิติเดือนนี้ — สรุปภาพรวมเดือน\n"
+            "• ตรวจสอบระบบ — สถานะระบบทั้งหมด\n"
             "• สรุปค่าใช้จ่าย — สรุปค่าใช้จ่ายเดือนนี้\n"
             "• สรุปค่าใช้จ่าย [เดือน/ปี] — สรุปเดือนที่ระบุ\n"
             "\n"
@@ -10333,35 +10387,56 @@ def handle_search_command(
                     "   " + " | ".join(_cat_parts)
                 )
 
+            # ── ข้อมูลไตเทียม (จาก master_registry) ──
+            _s_mr = master_registry.match_hn(_s_hn_q) if master_registry else None
+            if _s_mr and _s_mr.dialysis_schedule:
+                from patient_master_registry import THAI_DAY_DISPLAY as _TDS
+                _ds_days = "/".join(
+                    _TDS.get(d, d) for d in (_s_mr.dialysis_days or [])
+                ) or _s_mr.dialysis_schedule
+                _esa_txt = _s_mr.esa_medication or _s_mr.esa_code or "-"
+                lines.append("")
+                lines.append("🏥 ไตเทียม")
+                lines.append(f"   📅 รอบฟอก: {_ds_days}")
+                lines.append(f"   🔄 HD/สัปดาห์: {_s_mr.hd_per_week or '-'}")
+                lines.append(f"   💊 ESA: {_esa_txt}")
+                _va = _s_mr.vascular_access or "ยังไม่ระบุ"
+                lines.append(f"   🩸 Vascular: {_va}")
+
+            # ── Hb trend + ESA assessment (Lab Intelligence) ──
+            try:
+                _hb_hist = _get_hb_history(_s_hn_q)
+                if _hb_hist and len(_hb_hist) >= 1:
+                    from lab_intelligence_agent import analyze_esa_response
+                    _esa_r = analyze_esa_response(
+                        _hb_hist,
+                        esa_code=(_s_mr.esa_code if _s_mr else ""),
+                        esa_medication=(_s_mr.esa_medication if _s_mr else ""),
+                    )
+                    lines.append("")
+                    lines.append(f"🧠 AI Assessment: {_esa_r.recommendation.split(chr(10))[0]}")
+            except Exception:
+                pass
+
             # ── ลิงก์ดูรายละเอียดเว็บ ──
             _pd_base = os.getenv(
                 "RENDER_EXTERNAL_URL", ""
             ).rstrip("/")
-            _pd_secret = os.getenv(
-                "ADMIN_SECRET", ""
-            ).strip()
-            if _pd_base and _pd_secret:
-                _pd_url = (
-                    f"{_pd_base}/admin/patient/{_s_hn_q}"
-                    f"?secret={_pd_secret}"
-                )
+            if _pd_base:
+                _cmp_hn = _s_hospital_hn or _s_clinic_hn or _s_hn_q
+                _pd_url = f"{_pd_base}/admin/compare/{_cmp_hn}"
                 if len(_pd_url) <= LINE_URI_ACTION_MAX_LENGTH:
                     lines.append("")
-                    lines.append(
-                        "🔗 ดูรายละเอียด + เปรียบเทียบ:"
-                    )
+                    lines.append("🔗 เปรียบเทียบย้อนหลัง:")
                     lines.append(_pd_url)
 
             lines.append("")
             lines.append("💡 คำสั่งเพิ่มเติม:")
+            lines.append(f"• วิเคราะห์ {_s_hn_q} — AI วิเคราะห์เชิงลึก")
             lines.append(f"• ผลแล็บ HN {_s_hn_q}")
             lines.append(f"• ตรวจยา HN {_s_hn_q}")
-            lines.append(
-                f"• เปรียบเทียบแล็บย้อนหลัง HN {_s_hn_q}"
-            )
-            lines.append(
-                f"• เปรียบเทียบยาย้อนหลัง HN {_s_hn_q}"
-            )
+            lines.append(f"• ติดตามHb {_s_hn_q}")
+            lines.append(f"• ข้อมูลฟอก {_s_hn_q}")
 
             audit_logger.log("patient_summary_view", user_hash, {
                 "hn": _s_hn_q,
