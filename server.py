@@ -17423,6 +17423,12 @@ def health():
             "admin_secret_set": bool(ADMIN_SECRET),
         }
 
+    # ── PostgreSQL status ──
+    if db and db.is_ready:
+        health_info["database"] = db.health()
+    elif db:
+        health_info["database"] = {"status": db.status}
+
     return jsonify(health_info), http_status
 
 
