@@ -163,3 +163,160 @@ class BackupManager:
             "last_drill": None,  # ยังไม่เคยทำ restoration drill
             "next_drill_recommended": "ภายใน 30 วัน",
         }
+
+    def run_daily_backup(self, doc_index=None, master_registry=None) -> dict:
+        """สร้าง daily snapshot ของข้อมูลสำคัญไว้บน GCS
+
+        เรียกจาก scheduled job ทุกวัน เก็บไว้ใน _backups/daily/ บน GCS
+        เก็บ snapshot ย้อนหลัง 30 วัน (ลบอัตโนมัติ)
+
+        Safety:
+          - อ่านอย่างเดียว ไม่แก้ไขข้อมูลต้นฉบับ
+          - เขียน backup ไปที่ _backups/ prefix เท่านั้น
+          - ไม่ส่งข้อมูลออกนอกระบบ
+        """
+        if not self._storage:
+            return {"status": "skipped", "reason": "no storage"}
+
+        now = datetime.now(timezone.utc)
+        date_str = now.strftime("%Y-%m-%d")
+        backup_prefix = f"_backups/daily/{date_str}"
+        result = {
+            "date": date_str,
+            "timestamp": now.isoformat(),
+            "files": [],
+            "errors": [],
+        }
+
+        # 1. Backup document index
+        if doc_index:
+            try:
+                docs = doc_index.list_all() if hasattr(doc_index, 'list_all') else []
+                if not docs and hasattr(doc_index, '_docs'):
+                    docs = list(doc_index._docs.values())
+                if docs:
+                    # ลบ extracted_text เพื่อลดขนาด (เก็บแค่ metadata)
+                    backup_docs = []
+                    for d in docs:
+                        doc_copy = {k: v for k, v in d.items()
+                                    if k != "extracted_text"}
+                        backup_docs.append(doc_copy)
+                    payload = json.dumps({
+                        "type": "document_index_backup",
+                        "date": date_str,
+                        "count": len(backup_docs),
+                        "documents": backup_docs,
+                    }, ensure_ascii=False, default=str).encode("utf-8")
+                    path = f"{backup_prefix}/document_index.json"
+                    self._storage.put(path, payload,
+                                      content_type="application/json")
+                    result["files"].append({
+                        "path": path,
+                        "records": len(backup_docs),
+                    })
+                    logger.info("Backup: document index %d records → %s",
+                                len(backup_docs), path)
+            except Exception as e:
+                result["errors"].append(f"document_index: {e}")
+                logger.warning("Backup document index failed: %s", e)
+
+        # 2. Backup patient registry
+        if master_registry:
+            try:
+                patients = []
+                if hasattr(master_registry, '_patients'):
+                    patients = [p.to_dict() if hasattr(p, 'to_dict') else p
+                                for p in master_registry._patients.values()]
+                elif hasattr(master_registry, 'list_all'):
+                    patients = master_registry.list_all()
+                if patients:
+                    payload = json.dumps({
+                        "type": "patient_registry_backup",
+                        "date": date_str,
+                        "count": len(patients),
+                        "patients": patients,
+                    }, ensure_ascii=False, default=str).encode("utf-8")
+                    path = f"{backup_prefix}/patient_registry.json"
+                    self._storage.put(path, payload,
+                                      content_type="application/json")
+                    result["files"].append({
+                        "path": path,
+                        "records": len(patients),
+                    })
+                    logger.info("Backup: patient registry %d records → %s",
+                                len(patients), path)
+            except Exception as e:
+                result["errors"].append(f"patient_registry: {e}")
+                logger.warning("Backup patient registry failed: %s", e)
+
+        # 3. Backup summary (heartbeat)
+        try:
+            summary = json.dumps({
+                "type": "daily_backup_summary",
+                "date": date_str,
+                "timestamp": now.isoformat(),
+                "files_created": len(result["files"]),
+                "errors": len(result["errors"]),
+                "total_records": sum(f.get("records", 0) for f in result["files"]),
+            }, ensure_ascii=False).encode("utf-8")
+            summary_path = f"{backup_prefix}/backup_summary.json"
+            self._storage.put(summary_path, summary,
+                              content_type="application/json")
+        except Exception:
+            pass
+
+        # 4. Cleanup old backups (> 30 days)
+        try:
+            self._cleanup_old_backups(30)
+        except Exception as e:
+            result["errors"].append(f"cleanup: {e}")
+
+        result["status"] = "completed" if not result["errors"] else "partial"
+        return result
+
+    def _cleanup_old_backups(self, keep_days: int = 30) -> int:
+        """ลบ backup เก่ากว่า keep_days วัน
+
+        Returns: จำนวน folders ที่ลบ
+        """
+        if not self._storage or not hasattr(self._storage, 'list_files'):
+            return 0
+
+        from datetime import timedelta
+        cutoff = datetime.now(timezone.utc) - timedelta(days=keep_days)
+        cutoff_str = cutoff.strftime("%Y-%m-%d")
+        deleted = 0
+
+        try:
+            # List backup directories
+            files = self._storage.list_files(prefix="_backups/daily/")
+            if not files:
+                return 0
+
+            # Extract unique dates
+            dates = set()
+            for f in files:
+                name = f if isinstance(f, str) else f.get("name", "")
+                parts = name.split("/")
+                if len(parts) >= 3:
+                    dates.add(parts[2])  # _backups/daily/YYYY-MM-DD
+
+            # Delete old ones
+            for date_dir in sorted(dates):
+                if date_dir < cutoff_str:
+                    try:
+                        old_files = self._storage.list_files(
+                            prefix=f"_backups/daily/{date_dir}/"
+                        )
+                        for f in (old_files or []):
+                            fname = f if isinstance(f, str) else f.get("name", "")
+                            if fname:
+                                self._storage.delete(fname)
+                        deleted += 1
+                        logger.info("Backup cleanup: deleted %s", date_dir)
+                    except Exception:
+                        pass
+        except Exception as e:
+            logger.warning("Backup cleanup error: %s", e)
+
+        return deleted

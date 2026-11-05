@@ -10997,6 +10997,15 @@ def job_daily_reminders() -> dict:
         out["daily_digest"] = {"sent": _sent, "length": len(_digest)}
     except Exception as _e:
         out["daily_digest"] = {"error": type(_e).__name__}
+    # ── Automated Daily Backup (เพิ่ม 2026-11-05) ──
+    try:
+        out["daily_backup"] = backup_manager.run_daily_backup(
+            doc_index=doc_index,
+            master_registry=master_registry,
+        )
+    except Exception as _e:
+        out["daily_backup"] = {"error": type(_e).__name__}
+        logger.warning("daily_backup: %s", _e)
     return out
 
 # ── Structured Event Logger (V4.0 Phase 1.2) ──
