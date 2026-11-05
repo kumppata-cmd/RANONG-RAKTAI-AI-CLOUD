@@ -6306,7 +6306,7 @@ def admin_compare_page(hn):
         ))
     else:
         return "⛔ ไม่มีสิทธิ์เข้าถึง (ลิงก์หมดอายุ — ขอลิงก์ใหม่จาก LINE)", 401
-    secret = ""  # ไม่ฝัง secret ลงในหน้าเว็บอีกต่อไป — ใช้ cookie
+    # ไม่ฝัง secret ลงในหน้าเว็บอีกต่อไป — ใช้ cookie
     base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
     hn_q = hn.replace("HN", "").replace("hn", "").strip()
 
@@ -6522,7 +6522,7 @@ body {{ font-family:'Sarabun',sans-serif; background:#f0f2f5; color:#333; }}
 <script>
 const DOCS = {docs_json};
 const HN = "{hn_q}";
-const SECRET = "{secret}";
+const SECRET = "";
 const BASE = "{base_url}";
 const DOC_TYPE = "{doc_type}";
 
@@ -6797,7 +6797,7 @@ def admin_patient_page(hn):
             if did and base_url:
                 view_btn = (
                     f"<a href='{base_url}/admin/doc/view/{did}"
-                    f"?secret={secret}' class='btn-sm'>📎 เปิดเอกสาร</a>"
+                    f"' class='btn-sm'>📎 เปิดเอกสาร</a>"
                 )
             parts.append(
                 f"<div class='card'>"
@@ -6830,7 +6830,7 @@ def admin_patient_page(hn):
             if did and base_url:
                 view_btn = (
                     f"<a href='{base_url}/admin/doc/view/{did}"
-                    f"?secret={secret}' class='btn-sm'>📎 เปิดเอกสาร</a>"
+                    f"' class='btn-sm'>📎 เปิดเอกสาร</a>"
                 )
             parts.append(
                 f"<div class='card'>"
@@ -6863,7 +6863,7 @@ def admin_patient_page(hn):
             if did and base_url:
                 view_btn = (
                     f"<a href='{base_url}/admin/doc/view/{did}"
-                    f"?secret={secret}' class='btn-sm'>📎 เปิดเอกสาร</a>"
+                    f"' class='btn-sm'>📎 เปิดเอกสาร</a>"
                 )
             parts.append(
                 f"<div class='card'>"
@@ -6939,7 +6939,7 @@ def admin_patient_page(hn):
         if _latest_did:
             _annotate_btn = (
                 f"<a href='{base_url}/admin/annotate/{_latest_did}"
-                f"?secret={secret}' class='bottom-btn'>"
+                f"' class='bottom-btn'>"
                 f"✏️ สั่งการรักษา</a>"
             )
 
