@@ -5588,6 +5588,49 @@ def api_uptime_status():
 
 
 # ═══════════════════════════════════════════════════════════
+# Lab Intelligence Agent API (Phase 2.2)
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/admin/api/v2/lab-intelligence/<hn>", methods=["GET"])
+def api_lab_intelligence(hn):
+    """วิเคราะห์แล็บเชิงลึก + ESA optimization สำหรับผู้ป่วย"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    patient = master_registry.match_hn(hn)
+    if not patient:
+        return jsonify({"error": f"ไม่พบ HN: {hn}"}), 404
+
+    from lab_intelligence_agent import generate_intelligence_report
+    hb_hist = _get_hb_history(patient.clinic_hn or hn)
+    report = generate_intelligence_report(
+        patient_hn=patient.clinic_hn or hn,
+        patient_data=patient.to_dict(),
+        lab_history=hb_hist,
+    )
+    return jsonify({
+        "patient_hn": report.patient_hn,
+        "generated_at": report.generated_at,
+        "trends": [
+            {"analyte": t.analyte, "current": t.current_value,
+             "direction": t.direction, "assessment": t.assessment}
+            for t in report.trends
+        ],
+        "esa_recommendation": {
+            "current_esa": report.esa_recommendation.current_esa,
+            "current_dose": report.esa_recommendation.current_dose,
+            "current_hb": report.esa_recommendation.current_hb,
+            "action": report.esa_recommendation.action,
+            "recommendation": report.esa_recommendation.recommendation,
+            "iron_status": report.esa_recommendation.iron_status,
+        } if report.esa_recommendation else None,
+        "clinical_flags": report.clinical_flags,
+        "next_lab_suggestions": report.next_lab_suggestions,
+        "summary": report.summary_th,
+    })
+
+
+# ═══════════════════════════════════════════════════════════
 # Database Admin API (Phase 1.1)
 # ═══════════════════════════════════════════════════════════
 
@@ -8170,6 +8213,7 @@ def handle_search_command(
             "• ข้อมูลฟอก [HN] — ข้อมูลฟอกรายคน\n"
             "• สรุปฟอก — สรุปภาพรวมไตเทียม\n"
             "• ติดตามHb [HN] — แนวโน้ม Hb กับ ESA\n"
+            "• วิเคราะห์ [HN] — AI วิเคราะห์แล็บ+ESA เชิงลึก\n"
             "• เปรียบเทียบ [HN] — เปิดหน้าเปรียบเทียบ\n"
             "\n"
             "📊 สถิติและค่าใช้จ่าย\n"
@@ -16659,6 +16703,73 @@ def webhook():
                             if len(patients) > 30:
                                 lines.append(f"\n...และอีก {len(patients)-30} คน")
                             reply_message(reply_token, "\n".join(lines))
+
+                # ── วิเคราะห์ <HN> — Lab Intelligence Report (เพิ่ม 2026-11-05) ──
+                if text.strip().startswith(("วิเคราะห์ ", "analyze ")):
+                    _ai_q = text.strip()
+                    for _pf in ("วิเคราะห์ ", "analyze "):
+                        if _ai_q.startswith(_pf):
+                            _ai_q = _ai_q[len(_pf):].strip()
+                            break
+                    if not _ai_q:
+                        reply_message(reply_token,
+                            "⚠️ กรุณาระบุ HN เช่น: วิเคราะห์ 56001")
+                    else:
+                        _ai_p = master_registry.match_hn(_ai_q)
+                        if not _ai_p:
+                            reply_message(reply_token,
+                                f"❌ ไม่พบ HN: {_ai_q} ในทะเบียน")
+                        else:
+                            try:
+                                from lab_intelligence_agent import (
+                                    generate_intelligence_report,
+                                    format_for_line,
+                                )
+                                _ai_hn = _ai_p.clinic_hn or _ai_q
+                                _hb_hist = _get_hb_history(_ai_hn)
+                                # ดึง latest labs (ถ้ามี)
+                                _latest = {}
+                                _lab_docs = doc_index.list_by_patient_folder(
+                                    _ai_p.folder_name, category="lab", limit=5
+                                )
+                                if not _lab_docs:
+                                    _lab_docs = doc_index.list_by_patient_folder(
+                                        _ai_hn, category="lab", limit=5
+                                    )
+                                if _lab_docs:
+                                    _newest = _lab_docs[-1]
+                                    _et = _newest.get("extracted_text", "")
+                                    # extract key values
+                                    for _an, _pats in [
+                                        ("k", [r"K\+?\s*[=:]\s*([\d.]+)", r"Potassium\s*[=:]\s*([\d.]+)"]),
+                                        ("albumin", [r"Albumin\s*[=:]\s*([\d.]+)", r"Alb\s*[=:]\s*([\d.]+)"]),
+                                        ("ca", [r"Ca\s*[=:]\s*([\d.]+)", r"Calcium\s*[=:]\s*([\d.]+)"]),
+                                        ("po4", [r"PO4\s*[=:]\s*([\d.]+)", r"Phosph\w*\s*[=:]\s*([\d.]+)"]),
+                                    ]:
+                                        import re as _re2
+                                        for _pat in _pats:
+                                            _m2 = _re2.search(_pat, _et, _re2.IGNORECASE)
+                                            if _m2:
+                                                try:
+                                                    _latest[_an] = float(_m2.group(1))
+                                                except ValueError:
+                                                    pass
+                                                break
+                                    _hb_v = _extract_hb_from_text(_et)
+                                    if _hb_v:
+                                        _latest["hb"] = _hb_v
+
+                                _ai_report = generate_intelligence_report(
+                                    patient_hn=_ai_hn,
+                                    patient_data=_ai_p.to_dict(),
+                                    lab_history=_hb_hist,
+                                    latest_labs=_latest,
+                                )
+                                reply_message(reply_token, format_for_line(_ai_report))
+                            except Exception as _ai_err:
+                                logger.warning("Lab Intelligence error: %s", _ai_err)
+                                reply_message(reply_token,
+                                    "ขออภัย ไม่สามารถวิเคราะห์ได้ในขณะนี้")
 
                 # ── เปรียบเทียบ <HN> — ส่ง link Compare page (เพิ่ม 2026-11-05) ──
                 if text.strip().startswith(("เปรียบเทียบ ", "compare ")):
