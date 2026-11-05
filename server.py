@@ -3057,15 +3057,8 @@ def _get_hb_history(hn: str, limit: int = 10) -> list[dict]:
     if not patient:
         return []
 
-    # ค้นเอกสาร lab ของผู้ป่วย
-    lab_docs = doc_index.list_by_patient_folder(
-        patient.folder_name, category="lab", limit=50
-    )
-    if not lab_docs:
-        # ลอง clinic_hn เป็น folder name
-        lab_docs = doc_index.list_by_patient_folder(
-            patient.clinic_hn, category="lab", limit=50
-        )
+    # ค้นเอกสาร lab ของผู้ป่วย (ใช้ shared helper)
+    lab_docs = _get_patient_lab_docs(patient, patient.clinic_hn, limit=50)
 
     results = []
     for doc in lab_docs:
@@ -3108,6 +3101,64 @@ def _hb_assessment(value: float) -> str:
         return "เป้าหมาย"
     else:
         return "สูง"
+
+
+# ── Shared helpers — ลดโค้ดซ้ำซ้อน (Phase 1 Consolidation) ──
+
+_LAB_EXTRACT_PATTERNS = [
+    ("k", [r"K\+?\s*[=:]\s*([\d.]+)", r"Potassium\s*[=:]\s*([\d.]+)"]),
+    ("albumin", [r"Albumin\s*[=:]\s*([\d.]+)", r"Alb\s*[=:]\s*([\d.]+)"]),
+    ("ca", [r"Ca\s*[=:]\s*([\d.]+)", r"Calcium\s*[=:]\s*([\d.]+)"]),
+    ("po4", [r"PO4\s*[=:]\s*([\d.]+)", r"Phosph\w*\s*[=:]\s*([\d.]+)"]),
+]
+
+
+def _extract_latest_labs(extracted_text: str) -> dict:
+    """ดึงค่า lab (Hb, K+, Albumin, Ca, PO4) จาก extracted_text ของเอกสาร
+
+    Returns: dict เช่น {"hb": 10.5, "k": 4.8, "albumin": 3.8}
+    เดิม regex block นี้ถูก copy-paste ไป 3 ที่ใน server.py
+    """
+    result = {}
+    if not extracted_text:
+        return result
+
+    for name, patterns in _LAB_EXTRACT_PATTERNS:
+        for pat in patterns:
+            m = re.search(pat, extracted_text, re.IGNORECASE)
+            if m:
+                try:
+                    result[name] = float(m.group(1))
+                except ValueError:
+                    pass
+                break
+
+    hb_v = _extract_hb_from_text(extracted_text)
+    if hb_v:
+        result["hb"] = hb_v
+
+    return result
+
+
+def _get_patient_lab_docs(patient, hn: str, limit: int = 5) -> list:
+    """ดึงเอกสาร lab ของผู้ป่วย โดยลอง folder_name ก่อน แล้ว fallback เป็น HN
+
+    Args:
+        patient: MasterPatientRegistry entry (ต้องมี .folder_name)
+        hn: HN ที่ใช้เป็น fallback
+        limit: จำนวนเอกสารสูงสุด
+
+    Returns: list of doc metadata
+    เดิม pattern นี้ถูกเขียนซ้ำ 4 ที่ใน server.py
+    """
+    docs = doc_index.list_by_patient_folder(
+        patient.folder_name, category="lab", limit=limit
+    )
+    if not docs:
+        docs = doc_index.list_by_patient_folder(
+            hn, category="lab", limit=limit
+        )
+    return docs or []
 
 
 @app.route("/admin/api/v2/dialysis/hb-trend", methods=["GET"])
@@ -8935,35 +8986,10 @@ def handle_search_command(
                     )
                     _cli_hn = _cli_matched_patient.clinic_hn or _cli_args
                     _hb_hist = _get_hb_history(_cli_hn)
-                    _latest = {}
-                    _lab_docs = doc_index.list_by_patient_folder(
-                        _cli_matched_patient.folder_name, category="lab", limit=5
+                    _lab_docs = _get_patient_lab_docs(_cli_matched_patient, _cli_hn)
+                    _latest = _extract_latest_labs(
+                        _lab_docs[-1].get("extracted_text", "") if _lab_docs else ""
                     )
-                    if not _lab_docs:
-                        _lab_docs = doc_index.list_by_patient_folder(
-                            _cli_hn, category="lab", limit=5
-                        )
-                    if _lab_docs:
-                        _newest = _lab_docs[-1]
-                        _et = _newest.get("extracted_text", "")
-                        for _an, _pats in [
-                            ("k", [r"K\+?\s*[=:]\s*([\d.]+)", r"Potassium\s*[=:]\s*([\d.]+)"]),
-                            ("albumin", [r"Albumin\s*[=:]\s*([\d.]+)", r"Alb\s*[=:]\s*([\d.]+)"]),
-                            ("ca", [r"Ca\s*[=:]\s*([\d.]+)", r"Calcium\s*[=:]\s*([\d.]+)"]),
-                            ("po4", [r"PO4\s*[=:]\s*([\d.]+)", r"Phosph\w*\s*[=:]\s*([\d.]+)"]),
-                        ]:
-                            import re as _re2
-                            for _pat in _pats:
-                                _m2 = _re2.search(_pat, _et, _re2.IGNORECASE)
-                                if _m2:
-                                    try:
-                                        _latest[_an] = float(_m2.group(1))
-                                    except ValueError:
-                                        pass
-                                    break
-                        _hb_v = _extract_hb_from_text(_et)
-                        if _hb_v:
-                            _latest["hb"] = _hb_v
 
                     _ai_report = generate_intelligence_report(
                         patient_hn=_cli_hn,
@@ -16836,72 +16862,8 @@ def webhook():
                                 lines.append(f"\n...และอีก {len(patients)-30} คน")
                             reply_message(reply_token, "\n".join(lines))
 
-                # ── วิเคราะห์ <HN> — Lab Intelligence Report (เพิ่ม 2026-11-05) ──
-                if text.strip().startswith(("วิเคราะห์ ", "analyze ")):
-                    _ai_q = text.strip()
-                    for _pf in ("วิเคราะห์ ", "analyze "):
-                        if _ai_q.startswith(_pf):
-                            _ai_q = _ai_q[len(_pf):].strip()
-                            break
-                    if not _ai_q:
-                        reply_message(reply_token,
-                            "⚠️ กรุณาระบุ HN เช่น: วิเคราะห์ 56001")
-                    else:
-                        _ai_p = master_registry.match_hn(_ai_q)
-                        if not _ai_p:
-                            reply_message(reply_token,
-                                f"❌ ไม่พบ HN: {_ai_q} ในทะเบียน")
-                        else:
-                            try:
-                                from lab_intelligence_agent import (
-                                    generate_intelligence_report,
-                                    format_for_line,
-                                )
-                                _ai_hn = _ai_p.clinic_hn or _ai_q
-                                _hb_hist = _get_hb_history(_ai_hn)
-                                # ดึง latest labs (ถ้ามี)
-                                _latest = {}
-                                _lab_docs = doc_index.list_by_patient_folder(
-                                    _ai_p.folder_name, category="lab", limit=5
-                                )
-                                if not _lab_docs:
-                                    _lab_docs = doc_index.list_by_patient_folder(
-                                        _ai_hn, category="lab", limit=5
-                                    )
-                                if _lab_docs:
-                                    _newest = _lab_docs[-1]
-                                    _et = _newest.get("extracted_text", "")
-                                    # extract key values
-                                    for _an, _pats in [
-                                        ("k", [r"K\+?\s*[=:]\s*([\d.]+)", r"Potassium\s*[=:]\s*([\d.]+)"]),
-                                        ("albumin", [r"Albumin\s*[=:]\s*([\d.]+)", r"Alb\s*[=:]\s*([\d.]+)"]),
-                                        ("ca", [r"Ca\s*[=:]\s*([\d.]+)", r"Calcium\s*[=:]\s*([\d.]+)"]),
-                                        ("po4", [r"PO4\s*[=:]\s*([\d.]+)", r"Phosph\w*\s*[=:]\s*([\d.]+)"]),
-                                    ]:
-                                        import re as _re2
-                                        for _pat in _pats:
-                                            _m2 = _re2.search(_pat, _et, _re2.IGNORECASE)
-                                            if _m2:
-                                                try:
-                                                    _latest[_an] = float(_m2.group(1))
-                                                except ValueError:
-                                                    pass
-                                                break
-                                    _hb_v = _extract_hb_from_text(_et)
-                                    if _hb_v:
-                                        _latest["hb"] = _hb_v
-
-                                _ai_report = generate_intelligence_report(
-                                    patient_hn=_ai_hn,
-                                    patient_data=_ai_p.to_dict(),
-                                    lab_history=_hb_hist,
-                                    latest_labs=_latest,
-                                )
-                                reply_message(reply_token, format_for_line(_ai_report))
-                            except Exception as _ai_err:
-                                logger.warning("Lab Intelligence error: %s", _ai_err)
-                                reply_message(reply_token,
-                                    "ขออภัย ไม่สามารถวิเคราะห์ได้ในขณะนี้")
+                # ── วิเคราะห์ <HN> handler ถูกย้ายไป CLINICAL_ANALYSIS redirect
+                # (ดู Phase 1 Consolidation — ลบ dead code) ──
 
                 # ── เปรียบเทียบ <HN> — ส่ง link Compare page (เพิ่ม 2026-11-05) ──
                 if text.strip().startswith(("เปรียบเทียบ ", "compare ")):
@@ -17101,13 +17063,7 @@ def webhook():
                                 _egfr_hn = _egfr_p.clinic_hn or _egfr_q
                                 # ดึง eGFR history จากเอกสาร lab
                                 _egfr_hist = []
-                                _egfr_docs = doc_index.list_by_patient_folder(
-                                    _egfr_p.folder_name, category="lab", limit=20
-                                )
-                                if not _egfr_docs:
-                                    _egfr_docs = doc_index.list_by_patient_folder(
-                                        _egfr_hn, category="lab", limit=20
-                                    )
+                                _egfr_docs = _get_patient_lab_docs(_egfr_p, _egfr_hn, limit=20)
                                 import re as _re_egfr
                                 for _ed in (_egfr_docs or []):
                                     _et = _ed.get("extracted_text", "")
