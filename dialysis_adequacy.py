@@ -387,10 +387,9 @@ def get_status() -> dict:
 # ─── Helpers ─────────────────────────────────────────────────
 
 def _safe_float(val) -> float | None:
-    """แปลงค่าเป็น float อย่างปลอดภัย."""
-    if val is None:
-        return None
-    try:
-        return float(val)
-    except (TypeError, ValueError):
-        return None
+    """แปลงค่าเป็น float อย่างปลอดภัย.
+
+    Phase 2 Consolidation: delegate ไป utils.safe_float()
+    """
+    from utils import safe_float
+    return safe_float(val)

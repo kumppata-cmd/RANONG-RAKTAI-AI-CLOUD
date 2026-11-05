@@ -30,11 +30,10 @@ def safe_float(val: Any) -> Optional[float]:
 
 
 def validate_hn(hn: str) -> bool:
-    """ตรวจสอบว่า HN ถูกต้องหรือไม่ (ตัวเลข 4-10 หลัก)
+    """ตรวจรูปแบบ HN — ยอมรับตัวเลข ตัวอักษร ขีด
 
     เดิมถูกเขียนซ้ำใน: patient_hn_registry, patient_master_registry
     """
     if not hn or not isinstance(hn, str):
         return False
-    hn_clean = hn.strip()
-    return bool(hn_clean) and hn_clean.isdigit() and 4 <= len(hn_clean) <= 10
+    return bool(re.match(r'^[A-Za-z0-9\-/]{1,20}$', hn.strip()))

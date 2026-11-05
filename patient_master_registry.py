@@ -1416,8 +1416,9 @@ def _is_likely_hn(hn: str, text: str, pos: int) -> bool:
 # ─────────────────────────────────────────────────────────────
 
 def _validate_hn(hn: str) -> bool:
-    """ตรวจรูปแบบ HN — ยอมรับตัวเลข ตัวอักษร ขีด (ใจกว้างกว่า HNRegistry)"""
-    return bool(re.match(r'^[A-Za-z0-9\-/]{1,20}$', hn.strip()))
+    """ตรวจรูปแบบ HN — Phase 2 Consolidation: delegate ไป utils.validate_hn()"""
+    from utils import validate_hn
+    return validate_hn(hn)
 
 
 def _sanitize_folder_name(name: str) -> str:

@@ -82,49 +82,12 @@ def get_ckd_stage(egfr: float) -> dict:
 
     Returns:
         {"stage", "description" (Thai), "color", "egfr_range"}
+
+    Phase 2 Consolidation: delegate ไป lab_intelligence_agent.classify_ckd_full()
+    เพื่อให้ logic อยู่ที่เดียว — ไฟล์นี้เป็น wrapper ที่ API เดิมยังใช้ได้ 100%
     """
-    if egfr >= 90:
-        return {
-            "stage": "G1",
-            "description": "ปกติหรือสูง",
-            "color": "green",
-            "egfr_range": "≥90",
-        }
-    elif egfr >= 60:
-        return {
-            "stage": "G2",
-            "description": "ลดลงเล็กน้อย",
-            "color": "yellow",
-            "egfr_range": "60-89",
-        }
-    elif egfr >= 45:
-        return {
-            "stage": "G3a",
-            "description": "ลดลงเล็กน้อยถึงปานกลาง",
-            "color": "orange",
-            "egfr_range": "45-59",
-        }
-    elif egfr >= 30:
-        return {
-            "stage": "G3b",
-            "description": "ลดลงปานกลางถึงรุนแรง",
-            "color": "orange",
-            "egfr_range": "30-44",
-        }
-    elif egfr >= 15:
-        return {
-            "stage": "G4",
-            "description": "ลดลงรุนแรง",
-            "color": "red",
-            "egfr_range": "15-29",
-        }
-    else:
-        return {
-            "stage": "G5",
-            "description": "ไตวายระยะสุดท้าย",
-            "color": "darkred",
-            "egfr_range": "<15",
-        }
+    from lab_intelligence_agent import classify_ckd_full
+    return classify_ckd_full(egfr)
 
 
 # ═══════════════════════════════════════════════════════════

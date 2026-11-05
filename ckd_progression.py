@@ -246,18 +246,9 @@ def get_ckd_stage(egfr: float) -> str:
     Returns:
         CKDStage value string — หมวดค่า eGFR
     """
-    if egfr >= 90:
-        return CKDStage.G1.value
-    elif egfr >= 60:
-        return CKDStage.G2.value
-    elif egfr >= 45:
-        return CKDStage.G3a.value
-    elif egfr >= 30:
-        return CKDStage.G3b.value
-    elif egfr >= 15:
-        return CKDStage.G4.value
-    else:
-        return CKDStage.G5.value
+    # Phase 2 Consolidation: delegate ไป lab_intelligence_agent._classify_ckd()
+    from lab_intelligence_agent import _classify_ckd
+    return _classify_ckd(egfr)
 
 
 def _date_to_days(date_str: str, reference_date: str) -> float:

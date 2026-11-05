@@ -388,8 +388,9 @@ class HNRegistry:
 # ─────────────────────────────────────────────────────────────
 
 def _validate_hn(hn: str) -> bool:
-    """ตรวจรูปแบบ HN — ยอมรับตัวเลข ตัวอักษร ขีด"""
-    return bool(re.match(r'^[A-Za-z0-9\-/]{1,20}$', hn.strip()))
+    """ตรวจรูปแบบ HN — Phase 2 Consolidation: delegate ไป utils.validate_hn()"""
+    from utils import validate_hn
+    return validate_hn(hn)
 
 
 def resolve_patient_folder(

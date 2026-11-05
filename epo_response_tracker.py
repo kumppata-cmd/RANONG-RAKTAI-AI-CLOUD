@@ -125,18 +125,13 @@ def _is_hb_analyte(analyte_name: str) -> bool:
 
 
 def _parse_float(val: Any) -> float | None:
-    """แปลง value เป็น float อย่างปลอดภัย."""
-    if val is None:
-        return None
-    if isinstance(val, (int, float)):
-        return float(val)
-    try:
-        # handle strings like "12.5", "10.0 g/dL", ">15"
-        cleaned = re.sub(r"[<>≤≥]", "", str(val).strip())
-        cleaned = cleaned.split()[0] if cleaned else ""
-        return float(cleaned) if cleaned else None
-    except (ValueError, TypeError, IndexError):
-        return None
+    """แปลง value เป็น float อย่างปลอดภัย.
+
+    Phase 2 Consolidation: delegate ไป utils.safe_float()
+    คงชื่อ _parse_float ไว้เพื่อไม่กระทบ callers ภายในไฟล์
+    """
+    from utils import safe_float
+    return safe_float(val)
 
 
 # ─── Core functions ────────────────────────────────────────

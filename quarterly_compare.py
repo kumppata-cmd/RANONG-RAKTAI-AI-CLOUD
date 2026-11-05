@@ -630,13 +630,12 @@ def compare_latest_labs(
 # ─────────────────────────────────────────────────────────────
 
 def _safe_float(val) -> float | None:
-    """แปลงเป็น float อย่างปลอดภัย"""
-    if val is None:
-        return None
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return None
+    """แปลงเป็น float อย่างปลอดภัย
+
+    Phase 2 Consolidation: delegate ไป utils.safe_float()
+    """
+    from utils import safe_float
+    return safe_float(val)
 
 
 def _load_lab_json(storage, prefix: str, doc_id: str) -> dict | None:

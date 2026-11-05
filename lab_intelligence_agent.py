@@ -481,6 +481,29 @@ def _classify_ckd(egfr: float) -> str:
     return "G5"
 
 
+# ── Canonical CKD stage classification (Phase 2 Consolidation) ──
+# ใช้ร่วมกันทุก module: ckd_staging, ckd_progression, clinical_analyzer
+_CKD_STAGE_INFO = {
+    "G1": {"description": "ปกติหรือสูง", "color": "green", "egfr_range": "≥90"},
+    "G2": {"description": "ลดลงเล็กน้อย", "color": "yellow", "egfr_range": "60-89"},
+    "G3a": {"description": "ลดลงเล็กน้อยถึงปานกลาง", "color": "orange", "egfr_range": "45-59"},
+    "G3b": {"description": "ลดลงปานกลางถึงรุนแรง", "color": "orange", "egfr_range": "30-44"},
+    "G4": {"description": "ลดลงรุนแรง", "color": "red", "egfr_range": "15-29"},
+    "G5": {"description": "ไตวายระยะสุดท้าย", "color": "darkred", "egfr_range": "<15"},
+}
+
+
+def classify_ckd_full(egfr: float) -> dict:
+    """จำแนก CKD stage พร้อมรายละเอียด (KDIGO 2012)
+
+    Returns: {"stage": "G4", "description": "ลดลงรุนแรง", "color": "red", "egfr_range": "15-29"}
+    เป็น canonical function — ckd_staging.get_ckd_stage() delegate มาที่นี่
+    """
+    stage = _classify_ckd(egfr)
+    info = _CKD_STAGE_INFO.get(stage, _CKD_STAGE_INFO["G5"])
+    return {"stage": stage, **info}
+
+
 def analyze_ckd_progression(
     egfr_history: list[dict],
 ) -> CKDProgressionReport:
