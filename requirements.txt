@@ -72,6 +72,11 @@ google-api-python-client==2.147.0
 # ถ้า REDIS_URL ว่าง → fallback in-memory ต่อ worker อัตโนมัติ
 redis==5.0.8
 
+# PostgreSQL — Phase 1.1 Foundation Upgrade
+# structured queries สำหรับ patients, documents, labs, alerts
+# ถ้า DATABASE_URL ว่าง → ใช้ GCS JSON เดิม อัตโนมัติ
+psycopg2-binary==2.9.10
+
 # Date utilities — ใช้ relativedelta ใน quarterly_compare
 python-dateutil
 

@@ -52,6 +52,7 @@ COPY monitoring_schedule.py .
 COPY nephrology_kpi.py .
 COPY patient_master_registry.py .
 COPY import_dialysis_excel.py .
+COPY database.py .
 COPY patient_link_code.py .
 COPY appointment_reminder.py .
 

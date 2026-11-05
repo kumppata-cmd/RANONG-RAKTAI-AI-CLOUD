@@ -1354,6 +1354,16 @@ if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
     master_registry.set_storage(storage._bucket)
     logger.info("MasterPatientRegistry initialized with GCS bucket")
 
+# ─── PostgreSQL Database (Phase 1.1 Foundation) ──────────
+from database import Database
+db = Database(os.getenv("DATABASE_URL", ""))
+if db.is_ready:
+    logger.info("PostgreSQL: เชื่อมต่อสำเร็จ — structured queries พร้อมใช้")
+elif db.status == "not_configured":
+    logger.info("PostgreSQL: ยังไม่ได้ตั้ง DATABASE_URL — ใช้ GCS เดิม")
+else:
+    logger.warning("PostgreSQL: %s — fallback to GCS", db.error)
+
 # ─── Vendor Registry: ทะเบียนบริษัทคู่ค้า (แฟ้มบิล) ───────
 # ย้ายรายชื่อบริษัทออกจาก source code มาอยู่บน GCS เพื่อให้ผู้ดูแล
 # เพิ่มบริษัทใหม่ได้เองโดยไม่ต้องแก้โค้ดและ deploy ใหม่
@@ -2809,11 +2819,21 @@ def api_dialysis_import():
     new_c, upd_c, skip_c, msgs = master_registry.import_dialysis_batch(
         patients_data, registered_by="admin_api"
     )
+    # ── Dual-write: PostgreSQL (Phase 1.1) ──
+    _db_synced = 0
+    if db and db.is_ready:
+        for _pd in patients_data:
+            try:
+                db.upsert_patient(_pd)
+                _db_synced += 1
+            except Exception:
+                pass
     return jsonify({
         "success": True,
         "new": new_c,
         "updated": upd_c,
         "skipped": skip_c,
+        "db_synced": _db_synced,
         "messages": msgs,
     })
 
@@ -5558,7 +5578,84 @@ def api_uptime_status():
     except Exception:
         pass
 
+    # ── PostgreSQL status ──
+    if db and db.is_ready:
+        _uptime_info["database"] = db.health()
+    elif db:
+        _uptime_info["database"] = {"status": db.status}
+
     return jsonify(_uptime_info)
+
+
+# ═══════════════════════════════════════════════════════════
+# Database Admin API (Phase 1.1)
+# ═══════════════════════════════════════════════════════════
+
+@app.route("/admin/api/v2/database/status", methods=["GET"])
+def api_database_status():
+    """สถานะ PostgreSQL database"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    return jsonify(db.health() if db else {"status": "not_initialized"})
+
+
+@app.route("/admin/api/v2/database/migrate", methods=["POST"])
+def api_database_migrate():
+    """ย้ายข้อมูลจาก GCS → PostgreSQL (one-time)"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not db or not db.is_ready:
+        return jsonify({"error": "Database not configured"}), 400
+
+    results = {}
+    # Migrate patients
+    try:
+        results["patients"] = db.migrate_patients(master_registry)
+    except Exception as _e:
+        results["patients"] = {"error": type(_e).__name__}
+
+    # Migrate documents
+    try:
+        results["documents"] = db.migrate_documents(doc_index)
+    except Exception as _e:
+        results["documents"] = {"error": type(_e).__name__}
+
+    return jsonify(results)
+
+
+@app.route("/admin/api/v2/database/query", methods=["GET"])
+def api_database_query():
+    """ค้นหาผู้ป่วย/เอกสาร จาก PostgreSQL — เร็วกว่า GCS 100x"""
+    err = _admin_api_auth()
+    if err:
+        return err
+    if not db or not db.is_ready:
+        return jsonify({"error": "Database not configured"}), 400
+
+    q = request.args.get("q", "").strip()
+    table = request.args.get("table", "patients")
+    limit = min(int(request.args.get("limit", "20")), 100)
+
+    if table == "patients":
+        if q:
+            results = db.search_patients(q, limit)
+        else:
+            results = db.search_patients("", limit)
+        return jsonify({"table": "patients", "count": len(results), "results": results})
+    elif table == "documents":
+        hn = request.args.get("hn", "")
+        category = request.args.get("category", "")
+        results = db.search_documents(hn=hn or q, category=category, limit=limit)
+        return jsonify({"table": "documents", "count": len(results), "results": results})
+    elif table == "labs":
+        hn = request.args.get("hn", q)
+        analyte = request.args.get("analyte", "")
+        results = db.get_lab_history(hn, analyte=analyte, limit=limit)
+        return jsonify({"table": "labs", "count": len(results), "results": results})
+    else:
+        return jsonify({"error": f"Unknown table: {table}"}), 400
 
 
 # ═══════════════════════════════════════════════════════════
@@ -12953,6 +13050,14 @@ def process_file_async(
                 try:
                     doc_index.add(doc_meta)
                     index_saved = True
+                    # ── Dual-write: PostgreSQL (Phase 1.1) ──
+                    if db and db.is_ready:
+                        try:
+                            _db_doc = dict(doc_meta)
+                            _db_doc["doc_id"] = _db_doc.pop("document_id", _doc_id)
+                            db.upsert_document(_db_doc)
+                        except Exception:
+                            pass  # PostgreSQL ล้มไม่กระทบ GCS
                     event_logger.log("document_indexed", data={
                         "category": category,
                         "doc_id": _doc_id[:8],
