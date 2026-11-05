@@ -856,12 +856,14 @@ class TestOcrSafetyComprehensive(unittest.TestCase):
 class TestRollbackReadiness(unittest.TestCase):
     """Verify system state is consistent for rollback."""
 
-    def test_no_database_migrations(self):
-        """System uses GCS only — no DB migrations to rollback."""
+    def test_database_is_optional(self):
+        """Database is optional — system works without DATABASE_URL."""
         import server
-        # No SQLAlchemy, no database URL
-        self.assertFalse(hasattr(server, "db"),
-                         "Should not have database dependency")
+        # Phase 1.1: db exists but falls back to GCS when not configured
+        if hasattr(server, "db") and server.db is not None:
+            # ถ้ามี db object ต้องไม่ configured (CI ไม่มี DATABASE_URL)
+            self.assertIn(server.db.status, ("not_configured", "connected"),
+                          "DB should be not_configured or connected")
 
     def test_gcs_data_backward_compatible(self):
         """Lab report format is backward compatible."""
