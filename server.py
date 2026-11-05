@@ -6235,20 +6235,28 @@ def _admin_page_auth(clean_url: str = ""):
         _hdr.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
     ):
         return None
-    # 3. ?secret= → set cookie + redirect (secret ออกจาก URL)
-    _qs = request.args.get("secret", "")
-    if _qs and hmac.compare_digest(
-        _qs.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
-    ):
-        if not clean_url:
-            # สร้าง URL ที่ตัด secret ออก แต่เก็บ query params อื่น
-            from urllib.parse import urlencode
-            other_args = {k: v for k, v in request.args.items() if k != "secret"}
-            clean_url = request.path
-            if other_args:
-                clean_url += "?" + urlencode(other_args)
-        return _set_admin_cookie(redirect(clean_url, code=302))
-    return ("⛔ ไม่มีสิทธิ์เข้าถึง", 401)
+    # 3. POST form login → set cookie + redirect
+    if request.method == "POST":
+        _posted = request.form.get("secret", "")
+        if _posted and hmac.compare_digest(
+            _posted.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
+        ):
+            if not clean_url:
+                clean_url = request.path
+            return _set_admin_cookie(redirect(clean_url, code=302))
+    # 4. ไม่ผ่าน → แสดง login form
+    return (
+        "<html><body style='font-family:sans-serif;text-align:center;"
+        "padding:60px;background:#0f172a;color:#e2e8f0'>"
+        "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
+        "<form method='POST' style='margin:20px'>"
+        "<input type='password' name='secret' placeholder='ADMIN_SECRET' "
+        "style='padding:10px;font-size:16px;border-radius:4px;border:1px solid #475569;"
+        "background:#1e293b;color:#e2e8f0;width:250px'><br><br>"
+        "<button type='submit' style='padding:10px 24px;background:#2563eb;color:white;"
+        "border:none;border-radius:6px;font-size:16px;cursor:pointer'>เข้าสู่ระบบ</button>"
+        "</form></body></html>"
+    ), 401
 
 
 @app.route("/admin/compare/<hn>")
@@ -6270,15 +6278,15 @@ def admin_compare_page(hn):
     # กรณี token/secret มาทาง URL: ตั้ง cookie แล้ว redirect ไป URL ที่ไม่มี
     # ค่าลับ เพื่อไม่ให้ค้างใน history/log อีก
     _q_token = request.args.get("token", "")
-    _q_secret = request.args.get("secret", "")
     if _admin_cookie_ok():
         pass
     elif _q_token and _verify_compare_token(hn, _q_token):
         return _set_admin_cookie(redirect(
             f"/admin/compare/{hn}?type={doc_type}", code=302,
         ))
-    elif _q_secret and hmac.compare_digest(
-        _q_secret.encode("utf-8", "surrogateescape"), admin_secret.encode("utf-8"),
+    elif request.headers.get("X-Admin-Secret", "") and hmac.compare_digest(
+        request.headers.get("X-Admin-Secret", "").encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
     ):
         return _set_admin_cookie(redirect(
             f"/admin/compare/{hn}?type={doc_type}", code=302,

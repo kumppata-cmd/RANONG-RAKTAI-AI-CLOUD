@@ -44,8 +44,9 @@ def _check_admin_secret() -> bool:
     if not admin_secret:
         return False
     auth_header = request.headers.get("X-Admin-Secret", "")
-    auth_param = request.args.get("secret", "")
-    return auth_header == admin_secret or auth_param == admin_secret
+    # cookie auth สำหรับหน้าเว็บที่ redirect มาจาก ?secret=
+    auth_cookie = request.cookies.get("admin_secret", "")
+    return auth_header == admin_secret or auth_cookie == admin_secret
 
 
 def _unauthorized():
@@ -905,21 +906,43 @@ loadOverview();
 </html>"""
 
 
-@lab_dashboard_bp.route("/admin/v2/lab-dashboard", methods=["GET"])
+@lab_dashboard_bp.route("/admin/v2/lab-dashboard", methods=["GET", "POST"])
 def lab_dashboard_page():
-    """Lab & Dialysis Dashboard page."""
+    """Lab & Dialysis Dashboard page — cookie auth (set via ?secret= redirect)"""
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    auth_param = request.args.get("secret", "")
+    if not admin_secret:
+        return "ระบบยังไม่ได้ตั้งค่า ADMIN_SECRET", 500
+    # cookie auth or header auth
+    auth_cookie = request.cookies.get("admin_secret", "")
     auth_header = request.headers.get("X-Admin-Secret", "")
-    if not admin_secret or (auth_header != admin_secret and auth_param != admin_secret):
-        return (
-            "<html><body style='font-family:sans-serif;text-align:center;"
-            "padding:60px;background:#0f172a;color:#e2e8f0'>"
-            "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
-            "<p style='color:#94a3b8'>เข้าถึง: /admin/v2/lab-dashboard?secret=YOUR_ADMIN_SECRET</p>"
-            "</body></html>"
-        ), 401
-    return LAB_DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+    if auth_header == admin_secret or auth_cookie == admin_secret:
+        return LAB_DASHBOARD_HTML, 200, {"Content-Type": "text/html; charset=utf-8"}
+    # POST login → set cookie + redirect (ไม่ใช้ ?secret= ใน URL)
+    if request.method == "POST":
+        posted_secret = request.form.get("secret", "")
+        if posted_secret == admin_secret:
+            from flask import redirect, make_response
+            resp = make_response(redirect("/admin/v2/lab-dashboard", code=302))
+            resp.set_cookie(
+                "admin_secret", admin_secret,
+                max_age=12 * 3600, httponly=True, secure=True,
+                samesite="Lax", path="/admin",
+            )
+            return resp
+    return (
+        "<html><body style='font-family:sans-serif;text-align:center;"
+        "padding:60px;background:#0f172a;color:#e2e8f0'>"
+        "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
+        "<form method='POST' style='margin:20px'>"
+        "<input type='password' name='secret' placeholder='ADMIN_SECRET' "
+        "style='padding:10px;font-size:16px;border-radius:4px;border:1px solid #475569;"
+        "background:#1e293b;color:#e2e8f0;width:250px'><br><br>"
+        "<button type='submit' style='padding:10px 24px;background:#2563eb;color:white;"
+        "border:none;border-radius:6px;font-size:16px;cursor:pointer'>เข้าสู่ระบบ</button>"
+        "</form>"
+        "<p style='color:#64748b'>กรอกรหัสผู้ดูแลแล้วกดเข้าสู่ระบบ</p>"
+        "</body></html>"
+    ), 401
 
 
 def register_lab_dashboard(app, storage_ref, doc_index_ref, audit_ref):
