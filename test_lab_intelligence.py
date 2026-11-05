@@ -209,5 +209,60 @@ class TestIntelligenceReport(unittest.TestCase):
         self.assertIn("56001", text)
 
 
+class TestCKDProgression(unittest.TestCase):
+
+    def test_rapid_decline(self):
+        from lab_intelligence_agent import analyze_ckd_progression
+        r = analyze_ckd_progression([
+            {"date": "2026-01-01", "value": 40},
+            {"date": "2026-07-01", "value": 35},
+            {"date": "2027-01-01", "value": 28},
+        ])
+        self.assertEqual(r.decline_rate, "rapid")
+        self.assertIsNotNone(r.egfr_slope)
+        self.assertLess(r.egfr_slope, -5)
+
+    def test_stable(self):
+        from lab_intelligence_agent import analyze_ckd_progression
+        r = analyze_ckd_progression([
+            {"date": "2026-01-01", "value": 45},
+            {"date": "2026-07-01", "value": 44},
+            {"date": "2027-01-01", "value": 43},
+        ])
+        self.assertEqual(r.decline_rate, "stable")
+
+    def test_improving(self):
+        from lab_intelligence_agent import analyze_ckd_progression
+        r = analyze_ckd_progression([
+            {"date": "2026-01-01", "value": 30},
+            {"date": "2027-01-01", "value": 35},
+        ])
+        self.assertEqual(r.decline_rate, "improving")
+
+    def test_single_value(self):
+        from lab_intelligence_agent import analyze_ckd_progression
+        r = analyze_ckd_progression([{"date": "2026-01-01", "value": 25}])
+        self.assertEqual(r.decline_rate, "insufficient")
+        self.assertEqual(r.ckd_stage, "G4")
+
+    def test_months_to_dialysis(self):
+        from lab_intelligence_agent import analyze_ckd_progression
+        r = analyze_ckd_progression([
+            {"date": "2026-01-01", "value": 25},
+            {"date": "2027-01-01", "value": 18},
+        ])
+        self.assertIsNotNone(r.months_to_dialysis)
+        self.assertGreater(r.months_to_dialysis, 0)
+
+    def test_ckd_stage_classification(self):
+        from lab_intelligence_agent import _classify_ckd
+        self.assertEqual(_classify_ckd(95), "G1")
+        self.assertEqual(_classify_ckd(65), "G2")
+        self.assertEqual(_classify_ckd(50), "G3a")
+        self.assertEqual(_classify_ckd(35), "G3b")
+        self.assertEqual(_classify_ckd(20), "G4")
+        self.assertEqual(_classify_ckd(8), "G5")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

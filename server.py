@@ -8267,6 +8267,7 @@ def handle_search_command(
             "• สรุปฟอก — สรุปภาพรวมไตเทียม\n"
             "• ติดตามHb [HN] — แนวโน้ม Hb กับ ESA\n"
             "• วิเคราะห์ [HN] — AI วิเคราะห์แล็บ+ESA เชิงลึก\n"
+            "• ติดตามeGFR [HN] — แนวโน้ม eGFR + CKD progression\n"
             "• เปรียบเทียบ [HN] — เปิดหน้าเปรียบเทียบ\n"
             "\n"
             "📊 สถิติและระบบ\n"
@@ -17023,6 +17024,80 @@ def webhook():
                             else:
                                 _msg_lines.append("📈 ยังไม่มีผลแล็บ Hb ในระบบ")
                             reply_message(reply_token, "\n".join(_msg_lines))
+
+                # ── ติดตาม eGFR / CKD Progression (เพิ่ม 2026-11-05) ──
+                elif text.strip().startswith(("ติดตามeGFR ", "ติดตามeGFR", "ติดตาม eGFR ", "egfr trend ")):
+                    _egfr_q = text.strip()
+                    for _pf in ("ติดตามeGFR ", "ติดตามeGFR", "ติดตาม eGFR ", "egfr trend "):
+                        if _egfr_q.startswith(_pf):
+                            _egfr_q = _egfr_q[len(_pf):].strip()
+                            break
+                    if not _egfr_q:
+                        reply_message(reply_token,
+                            "⚠️ กรุณาระบุ HN เช่น: ติดตามeGFR 56001")
+                    else:
+                        _egfr_p = master_registry.match_hn(_egfr_q)
+                        if not _egfr_p:
+                            reply_message(reply_token,
+                                f"❌ ไม่พบ HN: {_egfr_q} ในทะเบียน")
+                        else:
+                            try:
+                                _egfr_hn = _egfr_p.clinic_hn or _egfr_q
+                                # ดึง eGFR history จากเอกสาร lab
+                                _egfr_hist = []
+                                _egfr_docs = doc_index.list_by_patient_folder(
+                                    _egfr_p.folder_name, category="lab", limit=20
+                                )
+                                if not _egfr_docs:
+                                    _egfr_docs = doc_index.list_by_patient_folder(
+                                        _egfr_hn, category="lab", limit=20
+                                    )
+                                import re as _re_egfr
+                                for _ed in (_egfr_docs or []):
+                                    _et = _ed.get("extracted_text", "")
+                                    _em = _re_egfr.search(
+                                        r'(?:eGFR|GFR)\s*[=:]\s*([\d.]+)',
+                                        _et, _re_egfr.IGNORECASE
+                                    )
+                                    if _em:
+                                        try:
+                                            _ev = float(_em.group(1))
+                                            if 1 <= _ev <= 200:
+                                                _egfr_hist.append({
+                                                    "date": _ed.get("upload_date", ""),
+                                                    "value": _ev,
+                                                })
+                                        except ValueError:
+                                            pass
+                                if _egfr_hist:
+                                    from lab_intelligence_agent import (
+                                        analyze_ckd_progression,
+                                    )
+                                    _ckd_r = analyze_ckd_progression(_egfr_hist)
+                                    _ckd_msg = (
+                                        f"🏥 CKD Progression — {_egfr_p.patient_name}\n"
+                                        f"━━━━━━━━━━━━━━━━\n"
+                                        f"{_ckd_r.risk_assessment}\n"
+                                    )
+                                    if _ckd_r.months_to_dialysis:
+                                        _ckd_msg += (
+                                            f"\n⏱️ คาดว่าถึง eGFR 10: "
+                                            f"~{_ckd_r.months_to_dialysis:.0f} เดือน"
+                                        )
+                                    _ckd_msg += (
+                                        f"\n\n📊 ประวัติ eGFR ({len(_egfr_hist)} ครั้ง):"
+                                    )
+                                    for _eh in _egfr_hist[-6:]:
+                                        _ckd_msg += f"\n  {_eh['date']}: {_eh['value']:.0f}"
+                                    _ckd_msg += "\n\n⚕️ ข้อมูลประกอบ ต้องแพทย์พิจารณา"
+                                    reply_message(reply_token, _ckd_msg)
+                                else:
+                                    reply_message(reply_token,
+                                        f"ไม่พบค่า eGFR ในผลแล็บของ HN {_egfr_q}")
+                            except Exception as _egfr_err:
+                                logger.warning("eGFR tracking: %s", _egfr_err)
+                                reply_message(reply_token,
+                                    "ขออภัย ไม่สามารถวิเคราะห์ eGFR ได้ในขณะนี้")
 
                 # ── แก้ไขชื่อผู้ป่วย ──
                 elif text.strip().startswith(("แก้ไข ", "แก้ชื่อ ", "edit ")):

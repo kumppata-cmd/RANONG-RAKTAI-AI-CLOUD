@@ -457,6 +457,152 @@ def check_cross_correlations(labs: dict) -> list[str]:
 
 
 # ─────────────────────────────────────────────────────
+# CKD Progression Tracker
+# ─────────────────────────────────────────────────────
+
+@dataclass
+class CKDProgressionReport:
+    """รายงานการดำเนินโรค CKD จาก eGFR slope"""
+    current_egfr: float
+    ckd_stage: str
+    egfr_slope: float | None         # mL/min/year (negative = declining)
+    decline_rate: str                 # "rapid", "moderate", "stable", "improving"
+    months_to_dialysis: float | None  # ถ้า slope negative + eGFR > 15
+    risk_assessment: str              # Thai description
+    egfr_history: list[TrendPoint] = field(default_factory=list)
+
+
+def _classify_ckd(egfr: float) -> str:
+    if egfr >= 90: return "G1"
+    if egfr >= 60: return "G2"
+    if egfr >= 45: return "G3a"
+    if egfr >= 30: return "G3b"
+    if egfr >= 15: return "G4"
+    return "G5"
+
+
+def analyze_ckd_progression(
+    egfr_history: list[dict],
+) -> CKDProgressionReport:
+    """วิเคราะห์การดำเนินโรค CKD จาก eGFR ย้อนหลัง
+
+    Args:
+        egfr_history: [{date: "YYYY-MM-DD", value: float}] เรียงเก่า→ใหม่
+
+    KDIGO: eGFR decline > 5 mL/min/1.73m²/year = rapid progression
+    """
+    if not egfr_history:
+        return CKDProgressionReport(
+            current_egfr=0, ckd_stage="unknown",
+            egfr_slope=None, decline_rate="insufficient",
+            months_to_dialysis=None,
+            risk_assessment="ไม่มีข้อมูล eGFR",
+        )
+
+    current = float(egfr_history[-1].get("value", 0))
+    stage = _classify_ckd(current)
+
+    points = [
+        TrendPoint(
+            date=v.get("date", ""),
+            value=float(v.get("value", 0)),
+        )
+        for v in egfr_history
+    ]
+
+    if len(egfr_history) < 2:
+        return CKDProgressionReport(
+            current_egfr=current, ckd_stage=stage,
+            egfr_slope=None, decline_rate="insufficient",
+            months_to_dialysis=None,
+            risk_assessment=f"eGFR {current:.0f} (CKD {stage}) — ต้องมีค่าอย่างน้อย 2 ครั้งเพื่อดูแนวโน้ม",
+            egfr_history=points,
+        )
+
+    # Calculate slope (mL/min/year) using first and last values
+    first = egfr_history[0]
+    last = egfr_history[-1]
+    first_val = float(first.get("value", 0))
+    last_val = float(last.get("value", 0))
+
+    # Calculate time difference in years
+    try:
+        from datetime import datetime as _dt
+        d1 = _dt.strptime(first.get("date", "")[:10], "%Y-%m-%d")
+        d2 = _dt.strptime(last.get("date", "")[:10], "%Y-%m-%d")
+        years = (d2 - d1).days / 365.25
+    except (ValueError, TypeError):
+        years = 0
+
+    if years < 0.08:  # less than 1 month
+        return CKDProgressionReport(
+            current_egfr=current, ckd_stage=stage,
+            egfr_slope=None, decline_rate="insufficient",
+            months_to_dialysis=None,
+            risk_assessment=f"eGFR {current:.0f} (CKD {stage}) — ช่วงเวลาสั้นเกินไป ต้อง ≥1 เดือน",
+            egfr_history=points,
+        )
+
+    slope = (last_val - first_val) / years  # positive = improving
+
+    # Classify decline rate
+    if slope > 1:
+        decline_rate = "improving"
+    elif slope > -3:
+        decline_rate = "stable"
+    elif slope > -EGFR_RAPID_DECLINE:
+        decline_rate = "moderate"
+    else:
+        decline_rate = "rapid"
+
+    # Estimate months to dialysis (eGFR = 10)
+    months_to_dialysis = None
+    if slope < -0.5 and current > 10:
+        years_to_10 = (current - 10) / abs(slope)
+        months_to_dialysis = round(years_to_10 * 12, 0)
+
+    # Risk assessment text
+    arrows = {"rapid": "↓↓↓", "moderate": "↓↓", "stable": "→", "improving": "↑"}
+    assessment_parts = [
+        f"eGFR {current:.0f} (CKD {stage}) {arrows.get(decline_rate, '')}",
+        f"อัตราเปลี่ยนแปลง: {slope:+.1f} mL/min/year",
+    ]
+
+    if decline_rate == "rapid":
+        assessment_parts.append(
+            f"🔴 eGFR ลดเร็ว! (>{EGFR_RAPID_DECLINE} mL/min/year = rapid progression)"
+        )
+        assessment_parts.append("ควรหาสาเหตุ: AKI, obstruction, drug toxicity, uncontrolled HTN/DM")
+    elif decline_rate == "moderate":
+        assessment_parts.append("⚠️ eGFR ลดปานกลาง — ติดตามใกล้ชิดทุก 1-3 เดือน")
+    elif decline_rate == "stable":
+        assessment_parts.append("✅ eGFR คงที่")
+    else:
+        assessment_parts.append("✅ eGFR ดีขึ้น")
+
+    if months_to_dialysis is not None:
+        if months_to_dialysis < 12:
+            assessment_parts.append(
+                f"🔴 คาดว่าถึง eGFR 10 ใน ~{months_to_dialysis:.0f} เดือน — เตรียม vascular access!"
+            )
+        elif months_to_dialysis < 24:
+            assessment_parts.append(
+                f"⚠️ คาดว่าถึง eGFR 10 ใน ~{months_to_dialysis:.0f} เดือน — วางแผน dialysis"
+            )
+
+    if stage in ("G4", "G5") and decline_rate in ("rapid", "moderate"):
+        assessment_parts.append("📋 ส่งต่อ nephrologist ถ้ายังไม่ได้ดูแล")
+
+    return CKDProgressionReport(
+        current_egfr=current, ckd_stage=stage,
+        egfr_slope=slope, decline_rate=decline_rate,
+        months_to_dialysis=months_to_dialysis,
+        risk_assessment="\n".join(assessment_parts),
+        egfr_history=points,
+    )
+
+
+# ─────────────────────────────────────────────────────
 # Next Lab Suggestions
 # ─────────────────────────────────────────────────────
 
