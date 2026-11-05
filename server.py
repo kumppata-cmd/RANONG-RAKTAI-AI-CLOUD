@@ -3863,7 +3863,7 @@ def api_labs_reextract():
 
 
 
-@app.route("/admin/registry")
+@app.route("/admin/registry", methods=["GET", "POST"])
 def admin_registry_page():
     """หน้าเว็บทะเบียนผู้ป่วย — cookie auth (set via ?secret= redirect)"""
     auth_err = _admin_page_auth()
@@ -5303,7 +5303,7 @@ def api_order_ack():
         }), 500
 
 
-@app.route("/admin/order/ack/<order_id>")
+@app.route("/admin/order/ack/<order_id>", methods=["GET", "POST"])
 def order_ack_page(order_id):
     """หน้าเว็บสำหรับพยาบาลยืนยันรับทราบคำสั่ง"""
     auth_err = _admin_page_auth()
@@ -5401,7 +5401,7 @@ function ack(st) {{
 
 
 # ── Audit Log Viewer — PDPA Compliance ──
-@app.route("/admin/v2/audit-log")
+@app.route("/admin/v2/audit-log", methods=["GET", "POST"])
 def admin_audit_log_page():
     """หน้าเว็บดูบันทึกการเข้าถึง (Audit Log)"""
     auth_err = _admin_page_auth()
@@ -6236,19 +6236,7 @@ def _admin_page_auth(clean_url: str = ""):
         _hdr.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
     ):
         return None
-    # 3. ?secret= → set cookie + redirect (secret ออกจาก URL)
-    _qs = request.args.get("secret", "")
-    if _qs and hmac.compare_digest(
-        _qs.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
-    ):
-        if not clean_url:
-            from urllib.parse import urlencode
-            other_args = {k: v for k, v in request.args.items() if k != "secret"}
-            clean_url = request.path
-            if other_args:
-                clean_url += "?" + urlencode(other_args)
-        return _set_admin_cookie(redirect(clean_url, code=302))
-    # 4. POST form login → set cookie + redirect
+    # 3. POST form login → set cookie + redirect
     if request.method == "POST":
         _posted = request.form.get("secret", "")
         if _posted and hmac.compare_digest(
@@ -6291,15 +6279,15 @@ def admin_compare_page(hn):
     # กรณี token/secret มาทาง URL: ตั้ง cookie แล้ว redirect ไป URL ที่ไม่มี
     # ค่าลับ เพื่อไม่ให้ค้างใน history/log อีก
     _q_token = request.args.get("token", "")
-    _q_secret = request.args.get("secret", "")
     if _admin_cookie_ok():
         pass
     elif _q_token and _verify_compare_token(hn, _q_token):
         return _set_admin_cookie(redirect(
             f"/admin/compare/{hn}?type={doc_type}", code=302,
         ))
-    elif _q_secret and hmac.compare_digest(
-        _q_secret.encode("utf-8", "surrogateescape"), admin_secret.encode("utf-8"),
+    elif request.headers.get("X-Admin-Secret", "") and hmac.compare_digest(
+        request.headers.get("X-Admin-Secret", "").encode("utf-8", "surrogateescape"),
+        admin_secret.encode("utf-8"),
     ):
         return _set_admin_cookie(redirect(
             f"/admin/compare/{hn}?type={doc_type}", code=302,
@@ -6706,7 +6694,7 @@ def api_treatment_note():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/admin/patient/<hn>")
+@app.route("/admin/patient/<hn>", methods=["GET", "POST"])
 def admin_patient_page(hn):
     """หน้าเว็บสรุปผู้ป่วย — cookie auth (set via ?secret= redirect)"""
     auth_err = _admin_page_auth()
@@ -17577,7 +17565,7 @@ def api_finance_status():
         return jsonify({"enabled": False, "error": str(type(e).__name__)})
 
 
-@app.route("/admin/v2/dead-letter")
+@app.route("/admin/v2/dead-letter", methods=["GET", "POST"])
 def admin_dead_letter_page():
     """หน้าเว็บ Dead-Letter Queue — ดูเอกสารที่มีปัญหา"""
     auth_err = _admin_page_auth()
@@ -18250,7 +18238,7 @@ except ImportError:
         """Fallback เมื่อโหลด liff_app ไม่ได้"""
 
 
-@app.route("/admin/clinical-dashboard", methods=["GET"])
+@app.route("/admin/clinical-dashboard", methods=["GET", "POST"])
 def admin_clinical_dashboard():
     """Kidney Clinical Intelligence Dashboard — Phase A."""
     auth_err = _admin_page_auth()
@@ -18626,7 +18614,7 @@ def liff_api_save_note():
         return jsonify({"error": "save failed"}), 500, _liff_cors_headers()
 
 
-@app.route("/admin/dashboard", methods=["GET"])
+@app.route("/admin/dashboard", methods=["GET", "POST"])
 def admin_dashboard():
     """Admin Dashboard — Web UI สำหรับดูสถิติระบบ."""
     auth_err = _admin_page_auth()
