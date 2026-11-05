@@ -737,8 +737,16 @@ def _build_summary(report: LabIntelligenceReport, patient_data: dict) -> str:
     # ESA recommendation
     if report.esa_recommendation:
         r = report.esa_recommendation
-        lines.append(f"\n💊 ESA: {r.current_esa} {r.current_dose}")
-        lines.append(f"🩸 Hb: {r.current_hb:.1f} g/dL")
+        # แสดง ESA เฉพาะเมื่อมีข้อมูลจริง (ไม่ใช่ "ไม่ทราบ ไม่ทราบ")
+        if r.current_esa and r.current_esa != "ไม่ทราบ":
+            lines.append(f"\n💊 ESA: {r.current_esa} {r.current_dose}")
+        else:
+            lines.append(f"\n💊 ESA: ยังไม่ได้บันทึกข้อมูล ESA")
+        # แสดง Hb เฉพาะเมื่อมีค่าจริง (> 0)
+        if r.current_hb > 0:
+            lines.append(f"🩸 Hb: {r.current_hb:.1f} g/dL")
+        else:
+            lines.append(f"🩸 Hb: ไม่มีข้อมูล")
         lines.append(f"\n📋 คำแนะนำ:")
         lines.append(r.recommendation)
         if r.iron_status and r.iron_status != "ไม่มีข้อมูล iron status":
