@@ -2490,7 +2490,7 @@ def api_compare_lab():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2511,7 +2511,7 @@ def api_compare_patient_labs():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2531,7 +2531,7 @@ def api_patient_lab_history():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2555,7 +2555,7 @@ def api_hn_register():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2594,7 +2594,7 @@ def api_hn_list():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2621,7 +2621,7 @@ def api_hn_search():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2656,7 +2656,7 @@ def api_master_registry_list():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2683,7 +2683,7 @@ def api_master_registry_register():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2710,7 +2710,7 @@ def api_master_registry_search():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2740,7 +2740,7 @@ def api_master_registry_delete():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2759,7 +2759,7 @@ def api_master_registry_update():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2797,7 +2797,7 @@ def api_dialysis_import():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2824,7 +2824,7 @@ def api_dialysis_profile():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2867,7 +2867,7 @@ def api_dialysis_update():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2898,7 +2898,7 @@ def api_dialysis_schedule():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2934,7 +2934,7 @@ def api_dialysis_list():
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ADMIN_SECRET not configured"}), 500
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -2942,6 +2942,187 @@ def api_dialysis_list():
     return jsonify({
         "count": len(patients),
         "patients": [p.to_dict() for p in patients],
+    })
+
+
+@app.route("/admin/api/v2/dialysis/esa-report", methods=["GET"])
+def api_dialysis_esa_report():
+    """รายงานยา ESA รายเดือน — จำนวนคนไข้, โดสต่อเดือน, ค่าใช้จ่ายโดยประมาณ"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    from patient_master_registry import ESA_CODE_MAP
+    # ค่ายาโดยประมาณ (บาท/โดส)
+    _ESA_COST = {
+        "E4": 350, "H4": 400, "HM": 300, "HM4": 300,
+        "H10": 900, "H4+H10": 1300,
+        "eposis": 250, "Eposis": 250, "hypercrit": 200,
+    }
+    patients = master_registry.list_all()
+    by_esa: dict = {}
+    for p in patients:
+        code = p.esa_code or "ไม่ระบุ"
+        if code not in by_esa:
+            info = ESA_CODE_MAP.get(code, {})
+            by_esa[code] = {
+                "esa_code": code,
+                "medication_name": info.get("name", code),
+                "dose_per_session": info.get("dose", 0),
+                "unit": info.get("unit", "unit"),
+                "cost_per_dose": _ESA_COST.get(code, 0),
+                "patient_count": 0,
+                "total_sessions_per_week": 0,
+            }
+        by_esa[code]["patient_count"] += 1
+        by_esa[code]["total_sessions_per_week"] += p.hd_per_week or 0
+
+    result = []
+    grand_monthly = 0
+    for code, d in sorted(by_esa.items(), key=lambda x: -x[1]["patient_count"]):
+        sessions_month = d["total_sessions_per_week"] * 4.33  # avg weeks/month
+        cost_month = sessions_month * d["cost_per_dose"]
+        grand_monthly += cost_month
+        result.append({
+            **d,
+            "sessions_per_month": round(sessions_month, 1),
+            "cost_per_month": round(cost_month, 0),
+        })
+
+    return jsonify({
+        "esa_drugs": result,
+        "total_patients": len(patients),
+        "total_monthly_cost": round(grand_monthly, 0),
+        "note": "ค่าใช้จ่ายเป็นค่าประมาณเท่านั้น",
+    })
+
+
+# ─── Hb tracking helper (เพิ่ม 2026-11-05) ────────────────
+
+_HB_PATTERN = re.compile(
+    r'(?:'
+    r'(?:Hb|Hemoglobin|HGB|ฮีโมโกลบิน|Hgb)'
+    r'[\s:=]*'
+    r')'
+    r'(\d{1,2}(?:\.\d{1,2})?)'
+    r'(?:\s*(?:g/dL|g/dl|gm/dl|กรัม)?)?',
+    re.IGNORECASE,
+)
+
+
+def _extract_hb_from_text(text: str) -> float | None:
+    """ดึงค่า Hb จาก extracted_text ของผลแล็บ
+
+    Returns: ค่า Hb (g/dL) หรือ None ถ้าไม่พบ
+    """
+    if not text:
+        return None
+    m = _HB_PATTERN.search(text)
+    if m:
+        val = float(m.group(1))
+        if 3.0 <= val <= 25.0:  # ช่วงค่า Hb ที่เป็นไปได้
+            return val
+    return None
+
+
+def _get_hb_history(hn: str, limit: int = 10) -> list[dict]:
+    """ดึงประวัติ Hb จากเอกสาร lab ของผู้ป่วย
+
+    Returns: list of {date, value, doc_id} เรียงจากเก่า→ใหม่
+    """
+    patient = master_registry.match_hn(hn)
+    if not patient:
+        return []
+
+    # ค้นเอกสาร lab ของผู้ป่วย
+    lab_docs = doc_index.list_by_patient_folder(
+        patient.folder_name, category="lab", limit=50
+    )
+    if not lab_docs:
+        # ลอง clinic_hn เป็น folder name
+        lab_docs = doc_index.list_by_patient_folder(
+            patient.clinic_hn, category="lab", limit=50
+        )
+
+    results = []
+    for doc in lab_docs:
+        text = doc.get("extracted_text", "")
+        hb_val = _extract_hb_from_text(text)
+        if hb_val is not None:
+            results.append({
+                "date": doc.get("upload_date", doc.get("submitted_at", "?")),
+                "value": hb_val,
+                "doc_id": doc.get("document_id", ""),
+            })
+
+    # เรียงตามวันที่ (เก่า → ใหม่) แล้วตัดตามลิมิต
+    results.sort(key=lambda x: x["date"])
+    return results[-limit:]
+
+
+def _hb_trend(history: list[dict]) -> str:
+    """คำนวณ trend จากประวัติ Hb
+
+    Returns: 'rising' | 'stable' | 'falling' | 'unknown'
+    """
+    if len(history) < 2:
+        return "unknown"
+    recent = [h["value"] for h in history[-3:]]
+    if len(recent) >= 2:
+        diff = recent[-1] - recent[0]
+        if diff > 0.5:
+            return "rising"
+        elif diff < -0.5:
+            return "falling"
+    return "stable"
+
+
+def _hb_assessment(value: float) -> str:
+    """ประเมินค่า Hb ตาม KDIGO guidelines"""
+    if value < 10.0:
+        return "ต่ำ"
+    elif value <= 12.0:
+        return "เป้าหมาย"
+    else:
+        return "สูง"
+
+
+@app.route("/admin/api/v2/dialysis/hb-trend", methods=["GET"])
+def api_dialysis_hb_trend():
+    """ดูแนวโน้ม Hb กับ ESA ของผู้ป่วย — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return jsonify({"error": "ADMIN_SECRET not configured"}), 500
+    auth = request.headers.get("X-Admin-Secret", "")
+    if auth != admin_secret:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    hn = request.args.get("hn", "").strip()
+    if not hn:
+        return jsonify({"error": "ต้องระบุ ?hn=HN"}), 400
+
+    patient = master_registry.match_hn(hn)
+    if not patient:
+        return jsonify({"error": f"ไม่พบ HN: {hn}"}), 404
+
+    history = _get_hb_history(hn)
+    trend = _hb_trend(history)
+    trend_emoji = {"rising": "↑", "falling": "↓", "stable": "→"}.get(trend, "?")
+
+    return jsonify({
+        "clinic_hn": patient.clinic_hn,
+        "patient_name": patient.patient_name,
+        "esa_code": patient.esa_code,
+        "esa_medication": patient.esa_medication,
+        "esa_dose": patient.esa_dose,
+        "hb_history": history,
+        "trend": trend,
+        "trend_emoji": trend_emoji,
+        "latest_hb": history[-1]["value"] if history else None,
+        "latest_assessment": _hb_assessment(history[-1]["value"]) if history else None,
     })
 
 
@@ -3684,16 +3865,11 @@ def api_labs_reextract():
 
 @app.route("/admin/registry")
 def admin_registry_page():
-    """หน้าเว็บทะเบียนผู้ป่วย — เปิดจาก browser ได้เลย (same-origin)"""
+    """หน้าเว็บทะเบียนผู้ป่วย — cookie auth (set via ?secret= redirect)"""
+    auth_err = _admin_page_auth()
+    if auth_err is not None:
+        return auth_err
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    auth = request.args.get("secret", "")
-    # compare_digest — เทียบเวลาคงที่ เหมือน _admin_api_auth
-    # เทียบเป็น bytes เพราะ compare_digest โยน TypeError ถ้า str มีอักขระ
-    # นอก ASCII (เช่น ?secret=ไทย) ซึ่งจะกลายเป็น 500 แทนที่จะเป็น 401
-    if not admin_secret or not hmac.compare_digest(
-        auth.encode("utf-8"), admin_secret.encode("utf-8")
-    ):
-        return "<h2>Unauthorized</h2><p>กรุณาเพิ่ม ?secret=... ใน URL</p>", 401
     return REGISTRY_HTML.replace("__ADMIN_SECRET__", admin_secret)
 
 
@@ -3966,7 +4142,7 @@ loadPatients();
 def api_master_registry_debug_gcs():
     """ทดสอบ GCS write โดยตรง — Admin only"""
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    auth = request.headers.get("X-Admin-Secret", "") or request.args.get("secret", "")
+    auth = request.headers.get("X-Admin-Secret", "")
     if not admin_secret or auth != admin_secret:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -4451,19 +4627,12 @@ def _resolve_nurse_line_ids() -> list[str]:
 def admin_doc_view(doc_id):
     """ดูเอกสาร — ลิงก์ถาวรไม่หมดอายุ (สร้าง Signed URL ใหม่ทุกครั้งที่เปิด)
 
-    Auth: ?secret=ADMIN_SECRET (ส่งผ่าน query string เพราะ LINE uri action
-    ไม่สามารถตั้ง header ได้)
-    ลิงก์นี้ใช้ใน LINE Flex Message แทน Signed URL ที่หมดอายุ 15 นาที
+    Auth: cookie (set via ?secret= redirect) หรือ X-Admin-Secret header
+    ลิงก์นี้ใช้ใน LINE Flex Message — เข้าครั้งแรกด้วย ?secret= แล้วระบบตั้ง cookie
     """
-    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    if not admin_secret:
-        return "ระบบยังไม่ได้ตั้งค่า", 500
-    secret = request.args.get("secret", "")
-    if not secret or not hmac.compare_digest(
-        secret.encode("utf-8", "surrogateescape"),
-        admin_secret.encode("utf-8"),
-    ):
-        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+    auth_err = _admin_page_auth()
+    if auth_err is not None:
+        return auth_err
 
     doc_id = doc_id.strip()[:64]
     if not doc_id:
@@ -4510,18 +4679,11 @@ def admin_doc_view(doc_id):
 def admin_annotate_page(doc_id):
     """หน้าเว็บสำหรับแพทย์สั่งการรักษา — เปิดจาก LINE Flex Message
 
-    Auth: ?secret=ADMIN_SECRET (ส่งผ่าน query string เพราะ LINE uri action
-    ไม่สามารถตั้ง header ได้ — URL นี้เข้าถึงได้เฉพาะแพทย์ที่มี secret)
+    Auth: cookie (set via ?secret= redirect) หรือ X-Admin-Secret header
     """
-    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    if not admin_secret:
-        return "ระบบยังไม่ได้ตั้งค่า", 500
-    secret = request.args.get("secret", "")
-    if not secret or not hmac.compare_digest(
-        secret.encode("utf-8", "surrogateescape"),
-        admin_secret.encode("utf-8"),
-    ):
-        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+    auth_err = _admin_page_auth()
+    if auth_err is not None:
+        return auth_err
 
     # Sanitize doc_id
     doc_id = doc_id.strip()[:64]
@@ -4846,11 +5008,7 @@ def api_order_ack():
     if not admin_secret:
         return jsonify({"success": False, "error": "ระบบยังไม่ได้ตั้งค่า"}), 500
 
-    # Accept both header and query string
-    secret = (
-        request.headers.get("X-Admin-Secret", "")
-        or request.args.get("secret", "")
-    )
+    secret = request.headers.get("X-Admin-Secret", "")
     if not secret or not hmac.compare_digest(
         secret.encode("utf-8", "surrogateescape"),
         admin_secret.encode("utf-8"),
@@ -4921,16 +5079,11 @@ def api_order_ack():
 @app.route("/admin/order/ack/<order_id>")
 def order_ack_page(order_id):
     """หน้าเว็บสำหรับพยาบาลยืนยันรับทราบคำสั่ง"""
-    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    if not admin_secret:
-        return "ระบบยังไม่ได้ตั้งค่า", 500
-    secret = request.args.get("secret", "")
-    if not secret or not hmac.compare_digest(
-        secret.encode("utf-8", "surrogateescape"),
-        admin_secret.encode("utf-8"),
-    ):
-        return "⛔ ไม่มีสิทธิ์เข้าถึง", 401
+    auth_err = _admin_page_auth()
+    if auth_err is not None:
+        return auth_err
 
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     order_id = order_id.strip()[:64]
     base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
 
@@ -5024,15 +5177,9 @@ function ack(st) {{
 @app.route("/admin/v2/audit-log")
 def admin_audit_log_page():
     """หน้าเว็บดูบันทึกการเข้าถึง (Audit Log)"""
-    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    if not admin_secret:
-        return "ระบบยังไม่ได้ตั้งค่า", 500
-    secret = request.args.get("secret", "")
-    if not secret or not hmac.compare_digest(
-        secret.encode("utf-8", "surrogateescape"),
-        admin_secret.encode("utf-8"),
-    ):
-        return "⛔ ไม่มีสิทธิ์เข้าถึง — ต้องการรหัสผู้ดูแล", 401
+    auth_err = _admin_page_auth()
+    if auth_err is not None:
+        return auth_err
 
     # ดึง audit events จากเดือนปัจจุบัน (อ่าน JSONL จาก GCS)
     _entries = []
@@ -5703,10 +5850,7 @@ def api_patient_data(hn):
     admin_secret = os.getenv("ADMIN_SECRET", "").strip()
     if not admin_secret:
         return jsonify({"error": "ระบบยังไม่ได้ตั้งค่า"}), 500
-    secret = (
-        request.args.get("secret", "")
-        or request.headers.get("X-Admin-Secret", "")
-    )
+    secret = request.headers.get("X-Admin-Secret", "")
     if not secret or not hmac.compare_digest(
         secret.encode("utf-8", "surrogateescape"),
         admin_secret.encode("utf-8"),
@@ -5847,6 +5991,40 @@ def _set_admin_cookie(resp):
     return resp
 
 
+def _admin_page_auth(clean_url: str = ""):
+    """Auth สำหรับหน้าเว็บ admin — cookie > header > ?secret= (set cookie แล้ว redirect)
+
+    Returns None ถ้าผ่าน, Response ถ้าไม่ผ่าน (return ทันที)
+    ถ้ามี ?secret= ในURL → ตั้ง cookie แล้ว redirect ไปURL ที่ไม่มี secret
+    """
+    _secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not _secret:
+        return ("⛔ ADMIN_SECRET ยังไม่ได้ตั้งค่า", 500)
+    # 1. cookie
+    if _admin_cookie_ok():
+        return None
+    # 2. header
+    _hdr = request.headers.get("X-Admin-Secret", "")
+    if _hdr and hmac.compare_digest(
+        _hdr.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
+    ):
+        return None
+    # 3. ?secret= → set cookie + redirect (secret ออกจาก URL)
+    _qs = request.args.get("secret", "")
+    if _qs and hmac.compare_digest(
+        _qs.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
+    ):
+        if not clean_url:
+            # สร้าง URL ที่ตัด secret ออก แต่เก็บ query params อื่น
+            from urllib.parse import urlencode
+            other_args = {k: v for k, v in request.args.items() if k != "secret"}
+            clean_url = request.path
+            if other_args:
+                clean_url += "?" + urlencode(other_args)
+        return _set_admin_cookie(redirect(clean_url, code=302))
+    return ("⛔ ไม่มีสิทธิ์เข้าถึง", 401)
+
+
 @app.route("/admin/compare/<hn>")
 def admin_compare_page(hn):
     """หน้าเว็บเปรียบเทียบเอกสาร — แสดงรูปจริง 2 รูปคู่กัน + ปุ่มสั่งการ
@@ -5895,6 +6073,21 @@ def admin_compare_page(hn):
             f"<h2>ไม่พบผู้ป่วย HN {hn}</h2>"
             f"<p>{err}</p></body></html>"
         ), 404
+
+    # ── ข้อมูลไตเทียม (เพิ่ม 2026-11-05 — แพทย์อนุมัติปลดล็อก) ──
+    _cmp_patient = master_registry.match_hn(hn_q)
+    _cmp_esa = ""
+    _cmp_va = ""
+    _cmp_schedule = ""
+    _cmp_hd = 0
+    if _cmp_patient:
+        _cmp_esa_name = _cmp_patient.esa_medication or _cmp_patient.esa_code or ""
+        _cmp_esa = _cmp_esa_name
+        if _cmp_patient.esa_dose:
+            _cmp_esa += f" {_cmp_patient.esa_dose} {_cmp_patient.esa_unit}"
+        _cmp_va = _cmp_patient.vascular_access or ""
+        _cmp_schedule = _cmp_patient.dialysis_schedule or ""
+        _cmp_hd = _cmp_patient.hd_per_week or 0
 
     # ── ค้นเอกสารตาม type ──
     all_docs = []
@@ -5988,8 +6181,14 @@ body {{ font-family:'Sarabun',sans-serif; background:#f0f2f5; color:#333; }}
 .toast {{ position:fixed; bottom:20px; left:50%; transform:translateX(-50%);
   background:#333; color:#fff; padding:12px 24px; border-radius:8px;
   font-size:14px; z-index:300; display:none; }}
+.dialysis-card {{ display:flex; gap:12px; flex-wrap:wrap; padding:10px 12px;
+  background:#e8f5e9; border-radius:8px; margin-bottom:12px; font-size:13px; }}
+.dialysis-card .dc-item {{ display:flex; gap:4px; align-items:center; }}
+.dialysis-card .dc-label {{ font-weight:600; color:#2e7d32; }}
+.dialysis-card .dc-val {{ color:#333; }}
 @media(max-width:600px) {{
   .images {{ flex-direction:column; }}
+  .dialysis-card {{ flex-direction:column; gap:6px; }}
 }}
 </style>
 </head>
@@ -7630,6 +7829,7 @@ def handle_search_command(
             "• รอบฟอก — ตารางฟอกวันนี้\n"
             "• ข้อมูลฟอก [HN] — ข้อมูลฟอกรายคน\n"
             "• สรุปฟอก — สรุปภาพรวมไตเทียม\n"
+            "• ติดตามHb [HN] — แนวโน้ม Hb กับ ESA\n"
             "\n"
             "🧾 ค่าใช้จ่าย\n"
             "• สรุปค่าใช้จ่าย — สรุปค่าใช้จ่ายเดือนนี้\n"
@@ -10051,6 +10251,45 @@ def _staff_line_ids() -> list[str]:
         return []
 
 
+def _send_dialysis_staff_summary() -> dict:
+    """ส่งสรุปตารางฟอกวันนี้ให้เจ้าหน้าที่ (เพิ่ม 2026-11-05)
+
+    ส่ง push ไปยัง alert recipients ทุกเช้า จ-ส (ไม่ส่งวันอาทิตย์)
+    """
+    from patient_master_registry import THAI_DAY_DISPLAY
+    _bkk = timezone(timedelta(hours=7))
+    _now = datetime.now(_bkk)
+    _weekday = _now.weekday()  # 0=Mon, 6=Sun
+    _day_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat"}
+    if _weekday not in _day_map:
+        return {"skipped": "sunday"}
+    _day_en = _day_map[_weekday]
+    _day_th = THAI_DAY_DISPLAY.get(_day_en, _day_en)
+
+    pts = master_registry.get_patients_by_day(_day_en)
+    if not pts:
+        return {"skipped": "no_patients", "day": _day_en}
+
+    lines = [f"📋 ตารางฟอกวัน{_day_th} ({len(pts)} คน)\n"]
+    for i, p in enumerate(pts, 1):
+        _esa = p.esa_code or "-"
+        _va = f" [{p.vascular_access}]" if p.vascular_access else ""
+        lines.append(f"{i}. {p.clinic_hn} {p.patient_name} | {_esa}{_va}")
+
+    text = "\n".join(lines)
+    sent = 0
+    errors = 0
+    # ส่งให้ alert recipients (physician + nurse + admin)
+    for _recip_id in _staff_line_ids():
+        try:
+            push_message(_recip_id, text)
+            sent += 1
+        except Exception as _e:
+            logger.warning("dialysis_staff_summary push failed: %s", type(_e).__name__)
+            errors += 1
+    return {"sent": sent, "errors": errors, "patients": len(pts), "day": _day_en}
+
+
 def job_daily_reminders() -> dict:
     """งานประจำวัน 08:00: เตือนนัดพรุ่งนี้/วันนี้ + นัดประจำ + ฟอกเลือด + สรุปเจ้าหน้าที่"""
     out: dict = {}
@@ -10066,6 +10305,12 @@ def job_daily_reminders() -> dict:
         )
     except Exception as _e:
         out["hd"] = {"error": type(_e).__name__}
+    # ── สรุปตารางฟอกวันนี้ → เจ้าหน้าที่ (เพิ่ม 2026-11-05) ──
+    try:
+        out["dialysis_staff_summary"] = _send_dialysis_staff_summary()
+    except Exception as _e:
+        out["dialysis_staff_summary"] = {"error": type(_e).__name__}
+        logger.warning("dialysis_staff_summary: %s", _e)
     return out
 
 # ── Structured Event Logger (V4.0 Phase 1.2) ──
@@ -15975,6 +16220,55 @@ def webhook():
                             _lines.append(f"  {_va}: {_cnt} คน")
                     reply_message(reply_token, "\n".join(_lines))
 
+                elif text.strip().startswith(("ติดตามHb ", "ติดตามHb", "ติดตาม Hb ", "hb trend ")):
+                    # ดูแนวโน้ม Hb กับ ESA: ติดตามHb <HN>
+                    _hb_q = text.strip()
+                    for _pf in ("ติดตามHb ", "ติดตามHb", "ติดตาม Hb ", "hb trend "):
+                        if _hb_q.startswith(_pf):
+                            _hb_q = _hb_q[len(_pf):].strip()
+                            break
+                    if not _hb_q:
+                        reply_message(reply_token,
+                            "⚠️ กรุณาระบุ HN เช่น: ติดตามHb 56001")
+                    else:
+                        _hp = master_registry.match_hn(_hb_q)
+                        if not _hp:
+                            reply_message(reply_token,
+                                f"❌ ไม่พบ HN: {_hb_q} ในทะเบียน")
+                        else:
+                            _hb_hist = _get_hb_history(_hb_q, limit=5)
+                            _hb_tr = _hb_trend(_hb_hist)
+                            _trend_emoji = {"rising": "↑ ขาขึ้น", "falling": "↓ ขาลง",
+                                            "stable": "→ คงที่"}.get(_hb_tr, "? ไม่ทราบ")
+                            _esa_txt = _hp.esa_medication or _hp.esa_code or "-"
+                            if _hp.esa_dose:
+                                _esa_txt += f" {_hp.esa_dose} {_hp.esa_unit}"
+                            _msg_lines = [
+                                f"📊 ติดตาม Hb — {_hp.patient_name}",
+                                f"━━━━━━━━━━━━━━━━",
+                                f"💊 ESA: {_esa_txt}",
+                                f"🩸 Vascular: {_hp.vascular_access or 'ไม่ระบุ'}",
+                                f"━━━━━━━━━━━━━━━━",
+                            ]
+                            if _hb_hist:
+                                _msg_lines.append("📈 ค่า Hb (g/dL):")
+                                for _h in _hb_hist:
+                                    _assess = _hb_assessment(_h["value"])
+                                    _marker = "🟢" if _assess == "เป้าหมาย" else (
+                                        "🔴" if _assess == "ต่ำ" else "🟡")
+                                    _msg_lines.append(
+                                        f"  {_h['date']}: {_h['value']:.1f} {_marker} {_assess}"
+                                    )
+                                _msg_lines.append(f"\n📉 แนวโน้ม: {_trend_emoji}")
+                                _latest = _hb_hist[-1]["value"]
+                                if _latest < 10.0:
+                                    _msg_lines.append("⚠️ Hb ต่ำกว่าเป้าหมาย — พิจารณาปรับ ESA")
+                                elif _latest > 12.0:
+                                    _msg_lines.append("⚠️ Hb สูงกว่าเป้าหมาย — พิจารณาลด ESA")
+                            else:
+                                _msg_lines.append("📈 ยังไม่มีผลแล็บ Hb ในระบบ")
+                            reply_message(reply_token, "\n".join(_msg_lines))
+
                 # ── แก้ไขชื่อผู้ป่วย ──
                 elif text.strip().startswith(("แก้ไข ", "แก้ชื่อ ", "edit ")):
                     _admin_hash = os.getenv("ADMIN_LINE_HASH", "").strip()
@@ -16316,8 +16610,8 @@ def index():
 # ─── OCR Debug Endpoint (ชั่วคราว — ไม่เก็บ PHI ลง disk/log) ──────────
 @app.route("/admin/ocr-debug", methods=["GET"])
 def admin_ocr_debug():
-    """คืนค่า OCR debug จาก memory — ต้องมี secret parameter"""
-    secret = request.args.get("secret", "")
+    """คืนค่า OCR debug จาก memory — ต้องมี X-Admin-Secret header"""
+    secret = request.headers.get("X-Admin-Secret", "")
     if secret != ADMIN_SECRET:
         return jsonify({"error": "unauthorized"}), 401
     if not _ocr_debug_store:
@@ -16602,7 +16896,7 @@ def admin_legacy_docs():
 @app.route("/admin/api/v2/debug-paths", methods=["GET"])
 def admin_debug_paths():
     """แสดง GCS path ของเอกสาร — ไม่แสดงข้อมูลผู้ป่วย."""
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or auth_param != ADMIN_SECRET:
         return jsonify({"error": "Unauthorized"}), 401
     cat_filter = request.args.get("category", "")
@@ -16628,7 +16922,7 @@ def admin_debug_hn_extract():
     ตรวจว่า extract_hn_from_document พบ HN ในข้อความ OCR หรือไม่
     และ master_registry จับคู่ได้หรือไม่
     """
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or auth_param != ADMIN_SECRET:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -17404,7 +17698,7 @@ def admin_retroactive_route():
       dry_run: "true" เพื่อดู preview ก่อน (ไม่ copy จริง)
       category: "all" (default) หรือ "lab", "rx", "dialysis"
     """
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or auth_param != ADMIN_SECRET:
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -17420,7 +17714,7 @@ def admin_retroactive_route():
 def admin_api_stats():
     """API สำหรับดึงข้อมูลสถิติระบบ — ใช้โดย Dashboard."""
     auth_header = request.headers.get("X-Admin-Secret", "")
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
         return jsonify({"error": "Unauthorized"}), 401
 
@@ -17709,7 +18003,7 @@ except ImportError:
 @app.route("/admin/clinical-dashboard", methods=["GET"])
 def admin_clinical_dashboard():
     """Kidney Clinical Intelligence Dashboard — Phase A."""
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     auth_header = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
         return (
@@ -17724,7 +18018,7 @@ def admin_clinical_dashboard():
 @app.route("/admin/api/clinical-kpi", methods=["GET"])
 def admin_api_clinical_kpi():
     """API สำหรับดึงข้อมูล Clinical KPI — Phase A."""
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     auth_header = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
         return jsonify({"error": "Unauthorized"}), 401
@@ -17751,7 +18045,7 @@ def admin_api_drug_review():
 
     Safety: ผลเป็นข้อมูลประกอบ — ห้ามใช้สั่งยา
     """
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     auth_header = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
         return jsonify({"error": "Unauthorized"}), 401
@@ -17784,7 +18078,7 @@ def admin_api_monthly_report():
 
     Safety: aggregate only — ไม่มีข้อมูลระบุตัวผู้ป่วย
     """
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     auth_header = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
         return jsonify({"error": "Unauthorized"}), 401
@@ -17822,7 +18116,7 @@ def admin_api_send_report():
     - ส่งเฉพาะ PHYSICIAN_USERS
     - ห้ามส่งข้อมูลผู้ป่วยออกภายนอก
     """
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     auth_header = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
         return jsonify({"error": "Unauthorized"}), 401
@@ -18092,7 +18386,7 @@ def liff_api_save_note():
 def admin_dashboard():
     """Admin Dashboard — Web UI สำหรับดูสถิติระบบ."""
     # Auth: ตรวจสอบ secret จาก query parameter (สำหรับเปิดในเบราว์เซอร์)
-    auth_param = request.args.get("secret", "")
+    auth_param = request.headers.get("X-Admin-Secret", "")
     auth_header = request.headers.get("X-Admin-Secret", "")
     if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
         return (
