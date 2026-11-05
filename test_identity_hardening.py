@@ -169,8 +169,9 @@ class TestHnRegistryGuard(unittest.TestCase):
 
     def test_rejects_raw_user_id(self):
         r = self.client.post(
-            f"/admin/api/v2/hn-registry/register?secret={self.SECRET}",
+            "/admin/api/v2/hn-registry/register",
             json={"owner_hash": "U1234567890abcdef", "clinic_hn": "57042"},
+            headers={"X-Admin-Secret": self.SECRET},
         )
         self.assertEqual(r.status_code, 400)
         self.assertIn("ผิดรูปแบบ", str(r.get_json()))

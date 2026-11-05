@@ -93,7 +93,7 @@ class TestLabDashboardAPI(unittest.TestCase):
             del os.environ["ADMIN_SECRET"]
 
     def _get(self, path):
-        return self.client.get(path + ("&" if "?" in path else "?") + "secret=test-secret-lab")
+        return self.client.get(path, headers={"X-Admin-Secret": "test-secret-lab"})
 
     # ── Auth ──
     def test_summary_unauthorized(self):
