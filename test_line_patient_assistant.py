@@ -337,14 +337,13 @@ class TestPatientAssistantAPI(unittest.TestCase):
             del os.environ["ADMIN_SECRET"]
 
     def _get(self, path):
-        sep = "&" if "?" in path else "?"
-        return self.client.get(path + sep + "secret=test-secret-pa")
+        return self.client.get(path, headers={"X-Admin-Secret": "test-secret-pa"})
 
     def _post(self, path, data=None):
-        sep = "&" if "?" in path else "?"
         return self.client.post(
-            path + sep + "secret=test-secret-pa",
+            path,
             json=data or {},
+            headers={"X-Admin-Secret": "test-secret-pa"},
         )
 
     # Auth

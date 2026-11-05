@@ -199,7 +199,7 @@ class TestOCRReviewAPI(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_queue_authorized(self):
-        r = self.client.get("/admin/api/v2/ocr/queue?secret=test-secret-123")
+        r = self.client.get("/admin/api/v2/ocr/queue", headers={"X-Admin-Secret": "test-secret-123"})
         self.assertEqual(r.status_code, 200)
         data = json.loads(r.data)
         self.assertIn("items", data)
@@ -207,23 +207,23 @@ class TestOCRReviewAPI(unittest.TestCase):
         self.assertEqual(data["total"], 3)
 
     def test_queue_filter_category(self):
-        r = self.client.get("/admin/api/v2/ocr/queue?secret=test-secret-123&category=bills")
+        r = self.client.get("/admin/api/v2/ocr/queue?category=bills", headers={"X-Admin-Secret": "test-secret-123"})
         data = json.loads(r.data)
         self.assertEqual(data["total"], 1)
         self.assertEqual(data["items"][0]["category"], "bills")
 
     def test_queue_filter_status_has_text(self):
-        r = self.client.get("/admin/api/v2/ocr/queue?secret=test-secret-123&status=has_text")
+        r = self.client.get("/admin/api/v2/ocr/queue?status=has_text", headers={"X-Admin-Secret": "test-secret-123"})
         data = json.loads(r.data)
         self.assertEqual(data["total"], 2)  # bills + lab have text
 
     def test_queue_filter_status_no_text(self):
-        r = self.client.get("/admin/api/v2/ocr/queue?secret=test-secret-123&status=no_text")
+        r = self.client.get("/admin/api/v2/ocr/queue?status=no_text", headers={"X-Admin-Secret": "test-secret-123"})
         data = json.loads(r.data)
         self.assertEqual(data["total"], 1)  # inbox has no text
 
     def test_document_detail_bills(self):
-        r = self.client.get("/admin/api/v2/ocr/document/abc12345?secret=test-secret-123")
+        r = self.client.get("/admin/api/v2/ocr/document/abc12345", headers={"X-Admin-Secret": "test-secret-123"})
         self.assertEqual(r.status_code, 200)
         data = json.loads(r.data)
         self.assertEqual(data["category"], "bills")
@@ -233,7 +233,7 @@ class TestOCRReviewAPI(unittest.TestCase):
         self.assertEqual(sd["vat"], 1750.0)
 
     def test_document_detail_lab(self):
-        r = self.client.get("/admin/api/v2/ocr/document/def67890?secret=test-secret-123")
+        r = self.client.get("/admin/api/v2/ocr/document/def67890", headers={"X-Admin-Secret": "test-secret-123"})
         self.assertEqual(r.status_code, 200)
         data = json.loads(r.data)
         self.assertEqual(data["category"], "lab")
@@ -243,11 +243,11 @@ class TestOCRReviewAPI(unittest.TestCase):
         self.assertEqual(analytes["Creatinine"]["value"], 2.5)
 
     def test_document_not_found(self):
-        r = self.client.get("/admin/api/v2/ocr/document/zzzzzzz?secret=test-secret-123")
+        r = self.client.get("/admin/api/v2/ocr/document/zzzzzzz", headers={"X-Admin-Secret": "test-secret-123"})
         self.assertEqual(r.status_code, 404)
 
     def test_extract_bills(self):
-        r = self.client.get("/admin/api/v2/ocr/extract-bills?secret=test-secret-123")
+        r = self.client.get("/admin/api/v2/ocr/extract-bills", headers={"X-Admin-Secret": "test-secret-123"})
         self.assertEqual(r.status_code, 200)
         data = json.loads(r.data)
         self.assertIn("bills", data)
@@ -259,12 +259,12 @@ class TestOCRReviewAPI(unittest.TestCase):
         self.assertEqual(r.status_code, 401)
 
     def test_ocr_review_page_authorized(self):
-        r = self.client.get("/admin/v2/ocr-review?secret=test-secret-123")
+        r = self.client.get("/admin/v2/ocr-review", headers={"X-Admin-Secret": "test-secret-123"})
         self.assertEqual(r.status_code, 200)
         self.assertIn(b"OCR Review", r.data)
 
     def test_queue_summary_counts(self):
-        r = self.client.get("/admin/api/v2/ocr/queue?secret=test-secret-123")
+        r = self.client.get("/admin/api/v2/ocr/queue", headers={"X-Admin-Secret": "test-secret-123"})
         data = json.loads(r.data)
         summary = data["summary"]
         self.assertEqual(summary["total_docs"], 3)
@@ -273,7 +273,7 @@ class TestOCRReviewAPI(unittest.TestCase):
 
     def test_doc_ids_truncated(self):
         """ตรวจสอบว่า doc_id ถูกตัดเหลือ 8 ตัว (ไม่แสดง full ID)."""
-        r = self.client.get("/admin/api/v2/ocr/queue?secret=test-secret-123")
+        r = self.client.get("/admin/api/v2/ocr/queue", headers={"X-Admin-Secret": "test-secret-123"})
         data = json.loads(r.data)
         for item in data["items"]:
             self.assertTrue(len(item["doc_id"]) <= 8)
