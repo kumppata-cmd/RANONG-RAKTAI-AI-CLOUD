@@ -6701,7 +6701,7 @@ body {{ font-family:'Sarabun',sans-serif; background:#f0f2f5; color:#333; }}
 <script>
 const DOCS = {docs_json};
 const HN = "{hn_q}";
-const SECRET = "";
+let SECRET = sessionStorage.getItem('_admin_secret') || "";
 const BASE = "{base_url}";
 const DOC_TYPE = "{doc_type}";
 
@@ -6773,14 +6773,26 @@ function saveNote(action) {{
     return;
   }}
 
+  // ถ้ายังไม่มี SECRET → ถามครั้งเดียว เก็บไว้ใน sessionStorage
+  if (!SECRET) {{
+    const s = prompt('กรุณาใส่รหัส Admin เพื่อบันทึกคำสั่งการรักษา:');
+    if (!s) return;
+    SECRET = s;
+    sessionStorage.setItem('_admin_secret', s);
+  }}
+
   const ci = parseInt(document.getElementById('selCur').value);
   const docId = DOCS[ci] ? DOCS[ci].id : '';
 
   fetch(BASE + '/admin/api/v2/treatment-note', {{
     method: 'POST',
-    headers: {{ 'Content-Type': 'application/json' }},
+    headers: {{
+      'Content-Type': 'application/json',
+      'X-Admin-Secret': SECRET,
+    }},
     credentials: 'same-origin',
     body: JSON.stringify({{
+      secret: SECRET,
       hn: HN,
       doc_id: docId,
       action: action,
@@ -6788,8 +6800,17 @@ function saveNote(action) {{
       doc_type: DOC_TYPE,
     }})
   }})
-  .then(r => r.json())
+  .then(r => {{
+    if (r.status === 401) {{
+      SECRET = '';
+      sessionStorage.removeItem('_admin_secret');
+      showToast('❌ รหัส Admin ไม่ถูกต้อง กรุณาลองใหม่');
+      return null;
+    }}
+    return r.json();
+  }})
   .then(data => {{
+    if (!data) return;
     if (data.success) {{
       showToast('✅ บันทึกเรียบร้อย');
       document.getElementById('noteText').value = '';
@@ -6843,14 +6864,17 @@ def api_treatment_note():
     # หน้าเปรียบเทียบส่ง secret มาใน JSON body — ตรวจกับ ADMIN_SECRET
     # (เดิมเรียก _check_admin_secret() ซึ่งไม่มีใน server.py → NameError 500
     #  ทุกครั้งที่กดบันทึก; CI จับได้ตั้งแต่ 9381ca4 แต่ deploy ไปก่อน)
-    _admin_secret = os.getenv("ADMIN_SECRET", "").strip()
-    _body_secret = str(data.get("secret", "") or "")
-    _body_ok = bool(_admin_secret and _body_secret) and hmac.compare_digest(
-        _body_secret.encode("utf-8", "surrogateescape"),
-        _admin_secret.encode("utf-8"),
-    )
-    if not (_body_ok or _admin_cookie_ok()):
-        return jsonify({"error": "Unauthorized"}), 401
+    # Auth: body secret / X-Admin-Secret header / cookie (เลือกอันใดก็ได้)
+    if not (_admin_api_auth() or _admin_cookie_ok()):
+        # fallback: ตรวจ secret ใน body (สำหรับ backward compatibility)
+        _admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+        _body_secret = str(data.get("secret", "") or "")
+        _body_ok = bool(_admin_secret and _body_secret) and hmac.compare_digest(
+            _body_secret.encode("utf-8", "surrogateescape"),
+            _admin_secret.encode("utf-8"),
+        )
+        if not _body_ok:
+            return jsonify({"error": "Unauthorized"}), 401
     hn = data.get("hn", "")
     doc_id = data.get("doc_id", "")
     action = data.get("action", "")
