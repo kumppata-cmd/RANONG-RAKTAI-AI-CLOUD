@@ -11120,8 +11120,26 @@ def _patient_name_for_hn(clinic_hn: str) -> str:
 
 
 def _staff_line_ids() -> list[str]:
+    """รวม LINE IDs ของเจ้าหน้าที่ทุก group (physician + admin + nurse)
+
+    เดิม: ดึงแค่ physician → admin ไม่ได้รับ
+    แก้: รวมทุก group แล้ว deduplicate
+    """
     try:
-        return list(_alert_recipients.get("physician", []))
+        ids = set()
+        for group in ("physician", "admin", "nurse", "staff"):
+            for uid in (_alert_recipients.get(group, []) or []):
+                if uid:
+                    ids.add(uid)
+        # fallback: ถ้าไม่มี group ไหนเลย ลองดึงค่าตรงจาก ENV
+        if not ids:
+            _env_ids = os.getenv("ALERT_RECIPIENTS", "").strip()
+            if _env_ids:
+                for uid in _env_ids.split(","):
+                    uid = uid.strip()
+                    if uid and uid.startswith("U"):
+                        ids.add(uid)
+        return list(ids)
     except Exception:
         return []
 
