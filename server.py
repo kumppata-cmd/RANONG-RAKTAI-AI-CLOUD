@@ -6779,8 +6779,8 @@ function saveNote(action) {{
   fetch(BASE + '/admin/api/v2/treatment-note', {{
     method: 'POST',
     headers: {{ 'Content-Type': 'application/json' }},
+    credentials: 'same-origin',
     body: JSON.stringify({{
-      secret: SECRET,
       hn: HN,
       doc_id: docId,
       action: action,
