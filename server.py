@@ -6885,6 +6885,35 @@ def api_treatment_note():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/admin/api/v2/treatment-notes/<hn>", methods=["GET"])
+def api_treatment_notes_list(hn):
+    """ดึงประวัติคำสั่งการรักษาของผู้ป่วย"""
+    if not _admin_api_auth():
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        notes = []
+        prefix = f"_treatment_notes/{hn}/"
+        if storage.is_ready and hasattr(storage, '_bucket'):
+            blobs = storage._bucket.list_blobs(prefix=prefix)
+            for blob in blobs:
+                try:
+                    data = json.loads(blob.download_as_text())
+                    data["_path"] = blob.name
+                    notes.append(data)
+                except Exception:
+                    pass
+        # เรียงจากใหม่สุด
+        notes.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+        return jsonify({
+            "hn": hn,
+            "count": len(notes),
+            "notes": notes,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/admin/patient/<hn>", methods=["GET", "POST"])
 def admin_patient_page(hn):
     """หน้าเว็บสรุปผู้ป่วย — cookie auth (set via ?secret= redirect)"""
@@ -8323,6 +8352,7 @@ def handle_search_command(
             "\n"
             "💊 การรักษา\n"
             "• ปรับยา [HN] [รายละเอียด] — บันทึกการปรับยา\n"
+            "• คำสั่งการรักษา [HN] — ดูคำสั่งที่ส่งจากหน้าเปรียบเทียบ\n"
             "• ประวัติการรักษา [HN] — ดูประวัติการปรับยา\n"
             "• ติดตามผลการรักษา — รายการที่ต้องติดตาม\n"
             "\n"
@@ -17205,6 +17235,78 @@ def webhook():
                                 logger.warning("Treatment record: %s", _rx_err)
                                 reply_message(reply_token,
                                     "ขออภัย ไม่สามารถบันทึกได้ในขณะนี้")
+
+                # ── คำสั่งการรักษา <HN> — ดูคำสั่งที่ส่งจากหน้าเปรียบเทียบ (เพิ่ม 2026-11-06) ──
+                elif text.strip().startswith(("คำสั่งการรักษา ", "ดูคำสั่ง ")):
+                    _tn_q = text.strip()
+                    for _pf in ("คำสั่งการรักษา ", "ดูคำสั่ง "):
+                        if _tn_q.startswith(_pf):
+                            _tn_q = _tn_q[len(_pf):].strip()
+                            break
+                    _tn_p = master_registry.match_hn(_tn_q)
+                    if not _tn_p:
+                        reply_message(reply_token, f"❌ ไม่พบ HN: {_tn_q} ในทะเบียน")
+                    else:
+                        _tn_hn = _tn_p.clinic_hn or _tn_q
+                        try:
+                            _tn_notes = []
+                            _tn_prefix = f"_treatment_notes/{_tn_hn}/"
+                            if storage.is_ready and hasattr(storage, '_bucket'):
+                                _tn_blobs = storage._bucket.list_blobs(
+                                    prefix=_tn_prefix)
+                                for _tn_b in _tn_blobs:
+                                    try:
+                                        _tn_d = json.loads(
+                                            _tn_b.download_as_text())
+                                        _tn_notes.append(_tn_d)
+                                    except Exception:
+                                        pass
+                            _tn_notes.sort(
+                                key=lambda x: x.get("timestamp", 0),
+                                reverse=True)
+
+                            if not _tn_notes:
+                                reply_message(reply_token,
+                                    f"📋 HN: {_tn_hn} ({_tn_p.patient_name})\n"
+                                    f"ยังไม่มีคำสั่งการรักษาในระบบ")
+                            else:
+                                _tn_lines = [
+                                    "📋 คำสั่งการรักษา",
+                                    "━━━━━━━━━━━━━━━━",
+                                    f"🔢 HN: {_tn_hn}",
+                                    f"👤 {_tn_p.patient_name}",
+                                    f"📄 ทั้งหมด {len(_tn_notes)} รายการ",
+                                    "",
+                                ]
+                                for _i, _n in enumerate(_tn_notes[:5], 1):
+                                    _dt = _n.get("created_at", "")[:10]
+                                    _act = _n.get("action", "")
+                                    _note = _n.get("note", "")[:80]
+                                    _dtype = _n.get("doc_type", "")
+                                    _act_th = {
+                                        "treatment": "💊 สั่งการรักษา",
+                                        "edit": "✏️ แก้ไข",
+                                    }.get(_act, f"📝 {_act}")
+                                    _tn_lines.append(
+                                        f"{_i}. [{_dt}] {_act_th}")
+                                    if _dtype:
+                                        _tn_lines.append(f"   📂 {_dtype}")
+                                    _tn_lines.append(f"   {_note}")
+                                    _tn_lines.append("")
+
+                                if len(_tn_notes) > 5:
+                                    _tn_lines.append(
+                                        f"... อีก {len(_tn_notes)-5} รายการ")
+
+                                _tn_lines.append("─" * 20)
+                                _tn_lines.append(
+                                    "⚕️ ข้อมูลประกอบการตัดสินใจ")
+                                reply_message(reply_token,
+                                    "\n".join(_tn_lines))
+                        except Exception as _tn_err:
+                            logger.warning("Treatment notes: %s", _tn_err)
+                            reply_message(reply_token,
+                                "ขออภัย ไม่สามารถดึงข้อมูลได้")
 
                 # ── ประวัติการรักษา (เพิ่ม 2026-11-06) ──
                 elif text.strip().startswith(("ประวัติการรักษา ", "ประวัติยา ")):
