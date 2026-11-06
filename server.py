@@ -17237,12 +17237,16 @@ def webhook():
                                     "ขออภัย ไม่สามารถบันทึกได้ในขณะนี้")
 
                 # ── คำสั่งการรักษา <HN> — ดูคำสั่งที่ส่งจากหน้าเปรียบเทียบ (เพิ่ม 2026-11-06) ──
-                elif text.strip().startswith(("คำสั่งการรักษา ", "ดูคำสั่ง ")):
+                elif text.strip().startswith(("คำสั่งการรักษา ", "ดูคำสั่ง ",
+                                              "คำสั่งการรักษา HN ", "คำสั่งการรักษาHN")):
                     _tn_q = text.strip()
-                    for _pf in ("คำสั่งการรักษา ", "ดูคำสั่ง "):
+                    for _pf in ("คำสั่งการรักษา HN ", "คำสั่งการรักษาHN",
+                                "คำสั่งการรักษา ", "ดูคำสั่ง "):
                         if _tn_q.startswith(_pf):
                             _tn_q = _tn_q[len(_pf):].strip()
                             break
+                    # ตัด "HN" prefix ถ้ายังเหลือ (เช่น "HN 69453" → "69453")
+                    _tn_q = re.sub(r'^(?:HN\s*|hn\s*)', '', _tn_q).strip()
                     _tn_p = master_registry.match_hn(_tn_q)
                     if not _tn_p:
                         reply_message(reply_token, f"❌ ไม่พบ HN: {_tn_q} ในทะเบียน")
@@ -17309,12 +17313,15 @@ def webhook():
                                 "ขออภัย ไม่สามารถดึงข้อมูลได้")
 
                 # ── ประวัติการรักษา (เพิ่ม 2026-11-06) ──
-                elif text.strip().startswith(("ประวัติการรักษา ", "ประวัติยา ")):
+                elif text.strip().startswith(("ประวัติการรักษา ", "ประวัติยา ",
+                                              "ประวัติการรักษา HN ")):
                     _hist_q = text.strip()
-                    for _pf in ("ประวัติการรักษา ", "ประวัติยา "):
+                    for _pf in ("ประวัติการรักษา HN ", "ประวัติการรักษา ",
+                                "ประวัติยา "):
                         if _hist_q.startswith(_pf):
                             _hist_q = _hist_q[len(_pf):].strip()
                             break
+                    _hist_q = re.sub(r'^(?:HN\s*|hn\s*)', '', _hist_q).strip()
                     _hist_p = master_registry.match_hn(_hist_q)
                     if not _hist_p:
                         reply_message(reply_token, f"❌ ไม่พบ HN: {_hist_q} ในทะเบียน")
