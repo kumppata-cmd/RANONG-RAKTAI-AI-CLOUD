@@ -456,7 +456,7 @@ def parse_staff_rule(text: str):
 
 def parse_view(text: str):
     """"ดูนัด <HN>" (เจ้าหน้าที่) / "ดูนัด" (ผู้ป่วย) → HN หรือ "" ; None ถ้าไม่ใช่"""
-    m = re.match(r"^\s*(?:ดูนัด|นัดของฉัน|ดูนัดหมาย)\s*(?:HN\s*)?([A-Za-z0-9-]{3,20})?\s*$", text or "")
+    m = re.match(r"^\s*(?:ดูนัด|นัดของฉัน|ดูนัดหมาย|นัดหมาย|นัดหมายของฉัน)\s*(?:HN\s*)?([A-Za-z0-9-]{3,20})?\s*$", text or "")
     return (m.group(1) or "").upper() if m else None
 
 

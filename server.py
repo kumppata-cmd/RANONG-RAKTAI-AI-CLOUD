@@ -8486,8 +8486,104 @@ def handle_search_command(
             logger.warning(f"Feature 6 error: {type(e).__name__}")
             return "ขออภัย ระบบขัดข้องชั่วคราว กรุณาลองใหม่"
 
-    # ── วิธีใช้ / Help — เปิดให้ทุกคน (ไม่ต้อง authorize) ──
+    # ── วิธีใช้ / Help — Flex Carousel Quick Menu ──
     if text_stripped in ("วิธีใช้", "help", "คำสั่ง", "เมนู", "ช่วยเหลือ"):
+        def _help_bubble(title, icon, color, items):
+            """สร้าง Flex Bubble สำหรับแต่ละหมวด"""
+            body_contents = []
+            for item in items:
+                body_contents.append({
+                    "type": "box", "layout": "horizontal", "spacing": "sm",
+                    "contents": [
+                        {"type": "text", "text": "•", "size": "sm", "color": "#888888",
+                         "flex": 0},
+                        {"type": "text", "text": item, "size": "sm", "color": "#555555",
+                         "wrap": True, "flex": 1},
+                    ],
+                })
+            return {
+                "type": "bubble", "size": "micro",
+                "header": {
+                    "type": "box", "layout": "vertical",
+                    "backgroundColor": color,
+                    "paddingAll": "12px",
+                    "contents": [
+                        {"type": "text", "text": icon, "size": "xl",
+                         "align": "center"},
+                        {"type": "text", "text": title, "size": "sm",
+                         "color": "#ffffff", "weight": "bold",
+                         "align": "center", "margin": "xs"},
+                    ],
+                },
+                "body": {
+                    "type": "box", "layout": "vertical", "spacing": "xs",
+                    "paddingAll": "10px",
+                    "contents": body_contents,
+                },
+            }
+
+        _help_flex = {
+            "type": "flex", "altText": "📋 คำสั่งทั้งหมด — เลื่อนดูแต่ละหมวด",
+            "contents": {
+                "type": "carousel",
+                "contents": [
+                    _help_bubble("ผลแล็บ", "🔬", "#2E8B57", [
+                        "ผลแล็บ — ผลล่าสุด",
+                        "วิเคราะห์ [HN]",
+                        "แนวโน้มแล็บ",
+                        "เปรียบเทียบแล็บ",
+                        "รายงานแล็บ",
+                    ]),
+                    _help_bubble("ไตเทียม", "🩺", "#1E88E5", [
+                        "รอบฟอก — วันนี้",
+                        "ข้อมูลฟอก [HN]",
+                        "สรุปฟอก",
+                        "ติดตามHb [HN]",
+                        "ติดตามeGFR [HN]",
+                        "เปรียบเทียบ [HN]",
+                    ]),
+                    _help_bubble("การรักษา", "💊", "#6735B7", [
+                        "ปรับยา [HN] [รายละเอียด]",
+                        "คำสั่งการรักษา [HN]",
+                        "ประวัติการรักษา [HN]",
+                        "ติดตามผลการรักษา",
+                        "ตรวจยา [HN]",
+                    ]),
+                    _help_bubble("เอกสาร", "📂", "#E65100", [
+                        "ค้นหา [คำ]",
+                        "ขอไฟล์ [รหัส]",
+                        "รายการล่าสุด",
+                        "ส่งเอกสาร — ส่งรูป/PDF",
+                    ]),
+                    _help_bubble("ผู้ป่วย", "👤", "#C62828", [
+                        "สรุป HN [เลข]",
+                        "HN ของฉัน",
+                        "ลงทะเบียน",
+                        "ดูนัด / นัดหมาย",
+                    ]),
+                    _help_bubble("ระบบ", "📊", "#00796B", [
+                        "สถิติเดือนนี้",
+                        "ตรวจสอบระบบ",
+                        "KPI / KPIไต",
+                        "สรุปค่าใช้จ่าย",
+                        "สถานะgoogle",
+                    ]),
+                ],
+            },
+        }
+        # ส่ง Flex Carousel + Quick Reply
+        _help_qr = [
+            {"label": "🔬 ผลแล็บ", "text": "ผลแล็บ"},
+            {"label": "🩺 รอบฟอก", "text": "รอบฟอก"},
+            {"label": "📅 ดูนัด", "text": "ดูนัด"},
+            {"label": "📊 สถิติ", "text": "สถิติเดือนนี้"},
+            {"label": "🔍 ค้นหา", "text": "ค้นหา"},
+        ]
+        reply_flex_with_quick_reply(reply_token, _help_flex, _help_qr)
+        return "__ALREADY_REPLIED__"
+
+    # ── วิธีใช้ (legacy text fallback) ──
+    if False:  # kept for reference, now using Flex above
         return (
             "📋 คำสั่งที่ใช้ได้ในระบบ RANONG RAKTAI AI\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
@@ -17171,7 +17267,9 @@ def webhook():
                     text, user_hash, _line_user_id,
                 )
                 if search_response:
-                    if isinstance(search_response, dict) and search_response.get("type") == "flex":
+                    if search_response == "__ALREADY_REPLIED__":
+                        pass  # Flex Message ส่งไปแล้วจากใน handler
+                    elif isinstance(search_response, dict) and search_response.get("type") == "flex":
                         # Flex Message (เช่น ขอไฟล์ → ปุ่มเปิด PDF)
                         reply_line_message(reply_token, search_response)
                     else:
@@ -17509,7 +17607,7 @@ def webhook():
                                 _patient_quick_reply_items(_cmp_hn))
 
                 # ── ข้อมูลฟอกเลือด (เพิ่ม 2026-11-05) ──
-                elif text.strip() in ("รอบฟอก", "ตารางฟอก", "dialysis schedule"):
+                elif text.strip() in ("รอบฟอก", "รอบฟอกวันนี้", "ตารางฟอก", "ตารางฟอกวันนี้", "dialysis schedule"):
                     # แสดงตารางฟอกวันนี้
                     from patient_master_registry import THAI_DAY_DISPLAY
                     import datetime as _dt
