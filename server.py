@@ -6826,24 +6826,43 @@ function refreshDocs() {{
 }}
 
 function sendToLine() {{
+  if (!SECRET) {{
+    const s = prompt('กรุณาใส่รหัส Admin เพื่อส่ง LINE:');
+    if (!s) return;
+    SECRET = s;
+    sessionStorage.setItem('_admin_secret', s);
+  }}
+
   const note = document.getElementById('noteText').value.trim();
   const ci = parseInt(document.getElementById('selCur').value);
   const docId = DOCS[ci] ? DOCS[ci].id : '';
 
   fetch(BASE + '/admin/api/v2/send-note-line', {{
     method: 'POST',
-    headers: {{ 'Content-Type': 'application/json' }},
+    headers: {{
+      'Content-Type': 'application/json',
+      'X-Admin-Secret': SECRET,
+    }},
+    credentials: 'same-origin',
     body: JSON.stringify({{
-      secret: SECRET,
       hn: HN,
       doc_id: docId,
       note: note || 'ดูเอกสารแล้ว',
       doc_type: DOC_TYPE,
     }})
   }})
-  .then(r => r.json())
+  .then(r => {{
+    if (r.status === 401) {{
+      SECRET = '';
+      sessionStorage.removeItem('_admin_secret');
+      showToast('❌ รหัส Admin ไม่ถูกต้อง');
+      return null;
+    }}
+    return r.json();
+  }})
   .then(data => {{
-    if (data.success) showToast('✅ ส่ง LINE แล้ว');
+    if (!data) return;
+    if (data.success) showToast('✅ ส่ง LINE แล้ว (' + (data.sent || 0) + ' คน)');
     else showToast('❌ ' + (data.error || 'ส่งไม่ได้'));
   }})
   .catch(e => showToast('❌ เชื่อมต่อไม่ได้'));
@@ -6907,6 +6926,62 @@ def api_treatment_note():
     except Exception as e:
         logger.error("Treatment note failed: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/admin/api/v2/send-note-line", methods=["POST"])
+def api_send_note_line():
+    """ส่งคำสั่งการรักษา/ข้อความจากหน้าเปรียบเทียบไปยังเจ้าหน้าที่ผ่าน LINE
+
+    ส่งถึง: staff LINE IDs ทั้งหมด (เจ้าหน้าที่)
+    เนื้อหา: แพทย์ดูเอกสาร HN xxx + สั่งการรักษา
+    """
+    if not (_admin_api_auth() or _admin_cookie_ok()):
+        data = request.get_json(force=True) or {}
+        _admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+        _body_secret = str(data.get("secret", "") or "")
+        _body_ok = bool(_admin_secret and _body_secret) and hmac.compare_digest(
+            _body_secret.encode("utf-8", "surrogateescape"),
+            _admin_secret.encode("utf-8"),
+        )
+        if not _body_ok:
+            return jsonify({"error": "Unauthorized"}), 401
+    else:
+        data = request.get_json(force=True) or {}
+
+    hn = data.get("hn", "")
+    note = data.get("note", "ดูเอกสารแล้ว")
+    doc_type = data.get("doc_type", "")
+
+    # หา patient name
+    patient_name = ""
+    if master_registry and hn:
+        p = master_registry.match_hn(hn)
+        if p:
+            patient_name = p.patient_name or ""
+
+    # สร้างข้อความ
+    _type_th = {"lab": "ผลแล็บ", "rx": "ใบยา", "dialysis": "ใบฟอกเลือด",
+                "bill": "บิล"}.get(doc_type, doc_type or "เอกสาร")
+    msg = (f"📋 คำสั่งจากแพทย์\n"
+           f"━━━━━━━━━━━━━━━━\n"
+           f"🔢 HN: {hn}\n")
+    if patient_name:
+        msg += f"👤 {patient_name}\n"
+    msg += (f"📂 ประเภท: {_type_th}\n"
+            f"\n💊 {note}\n"
+            f"\n⏰ {datetime.now(timezone(timedelta(hours=7))).strftime('%d/%m/%Y %H:%M')}")
+
+    # ส่งให้เจ้าหน้าที่ทั้งหมด
+    sent = 0
+    for staff_id in _staff_line_ids():
+        try:
+            push_message(staff_id, msg)
+            sent += 1
+        except Exception:
+            pass
+
+    logger.info("Send note LINE: HN=%s sent=%d", hn, sent)
+    return jsonify({"success": True, "sent": sent})
 
 
 @app.route("/admin/api/v2/treatment-notes/<hn>", methods=["GET"])
