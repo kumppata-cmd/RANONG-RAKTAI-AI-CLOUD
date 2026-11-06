@@ -8321,6 +8321,11 @@ def handle_search_command(
             "• ติดตามeGFR [HN] — แนวโน้ม eGFR + CKD progression\n"
             "• เปรียบเทียบ [HN] — เปิดหน้าเปรียบเทียบ\n"
             "\n"
+            "💊 การรักษา\n"
+            "• ปรับยา [HN] [รายละเอียด] — บันทึกการปรับยา\n"
+            "• ประวัติการรักษา [HN] — ดูประวัติการปรับยา\n"
+            "• ติดตามผลการรักษา — รายการที่ต้องติดตาม\n"
+            "\n"
             "📊 สถิติและระบบ\n"
             "• สถิติเดือนนี้ — สรุปภาพรวมเดือน\n"
             "• ตรวจสอบระบบ — สถานะระบบทั้งหมด\n"
@@ -10997,6 +11002,25 @@ def job_daily_reminders() -> dict:
         out["daily_digest"] = {"sent": _sent, "length": len(_digest)}
     except Exception as _e:
         out["daily_digest"] = {"error": type(_e).__name__}
+    # ── Treatment Followup Alert (เพิ่ม 2026-11-06) ──
+    try:
+        _pending = treatment_tracker.get_pending_followups()
+        if _pending:
+            _fu_msg = treatment_tracker.format_pending_for_line(_pending)
+            _fu_sent = 0
+            for _rid in _staff_line_ids():
+                try:
+                    push_message(_rid, _fu_msg)
+                    _fu_sent += 1
+                except Exception:
+                    pass
+            out["treatment_followup"] = {
+                "pending": len(_pending), "sent": _fu_sent
+            }
+        else:
+            out["treatment_followup"] = {"pending": 0}
+    except Exception as _e:
+        out["treatment_followup"] = {"error": type(_e).__name__}
     # ── Automated Daily Backup (เพิ่ม 2026-11-05) ──
     try:
         out["daily_backup"] = backup_manager.run_daily_backup(
@@ -11015,6 +11039,10 @@ event_logger = EventLogger(max_buffer=1000)
 # ── Backup Manager (V4.0 Phase 2.4) ──
 from backup_manager import BackupManager
 backup_manager = BackupManager()
+
+# ── Treatment Change Tracker (2026-11-06) ──
+from treatment_tracker import TreatmentTracker, TREATMENT_CATEGORIES
+treatment_tracker = TreatmentTracker()
 
 # ── Approval Workflow (V4.0 Phase 3.1) ──
 from approval_workflow import ApprovalEngine
@@ -11046,6 +11074,7 @@ if STORAGE_BACKEND == "gcs" and 'storage' in dir():
         event_logger.set_storage(storage)
         backup_manager.set_storage(storage)
         approval_engine.set_storage(storage)
+        treatment_tracker.set_storage(storage)
         logger.info("V4.0 modules initialized with GCS persistence")
     except Exception as _v4_err:
         logger.warning("V4.0 module init: %s", type(_v4_err).__name__)
@@ -17119,6 +17148,91 @@ def webhook():
                                 logger.warning("eGFR tracking: %s", _egfr_err)
                                 reply_message(reply_token,
                                     "ขออภัย ไม่สามารถวิเคราะห์ eGFR ได้ในขณะนี้")
+
+                # ── ปรับยา / บันทึกการเปลี่ยนแปลงการรักษา (เพิ่ม 2026-11-06) ──
+                elif text.strip().startswith(("ปรับยา ", "ปรับการรักษา ")):
+                    _rx_text = text.strip()
+                    for _pf in ("ปรับยา ", "ปรับการรักษา "):
+                        if _rx_text.startswith(_pf):
+                            _rx_text = _rx_text[len(_pf):].strip()
+                            break
+                    # รูปแบบ: ปรับยา <HN> <รายละเอียด>
+                    # เช่น: ปรับยา 56001 เพิ่ม Epiao 4000→6000 เพราะ Hb ต่ำ
+                    _rx_parts = _rx_text.split(None, 1)
+                    if len(_rx_parts) < 2:
+                        reply_message(reply_token,
+                            "⚠️ รูปแบบ: ปรับยา <HN> <รายละเอียด>\n"
+                            "ตัวอย่าง:\n"
+                            "• ปรับยา 56001 เพิ่ม Epiao 4000→6000 เพราะ Hb ต่ำ\n"
+                            "• ปรับยา 69453 หยุด amlodipine เพราะ BP ต่ำ\n"
+                            "• ปรับยา 56001 เริ่ม IV iron เพราะ Ferritin ต่ำ")
+                    else:
+                        _rx_hn = _rx_parts[0]
+                        _rx_detail = _rx_parts[1]
+                        _rx_patient = master_registry.match_hn(_rx_hn)
+                        if not _rx_patient:
+                            reply_message(reply_token, f"❌ ไม่พบ HN: {_rx_hn} ในทะเบียน")
+                        else:
+                            try:
+                                parsed = treatment_tracker.parse_treatment_text(_rx_detail)
+                                category = treatment_tracker.detect_category(
+                                    parsed.get("drug_name", ""))
+                                change = treatment_tracker.record_change(
+                                    patient_hn=_rx_patient.clinic_hn or _rx_hn,
+                                    category=category,
+                                    action=parsed.get("action", "other"),
+                                    drug_name=parsed.get("drug_name", _rx_detail),
+                                    old_value=parsed.get("old_value", ""),
+                                    new_value=parsed.get("new_value", ""),
+                                    reason=parsed.get("reason", ""),
+                                )
+                                _cat_th = TREATMENT_CATEGORIES.get(
+                                    category, {}).get("name_th", category)
+                                reply_message(reply_token,
+                                    f"✅ บันทึกการปรับการรักษา\n"
+                                    f"━━━━━━━━━━━━━━━━\n"
+                                    f"🔢 HN: {change.patient_hn}\n"
+                                    f"👤 {_rx_patient.patient_name}\n"
+                                    f"💊 {change.drug_name}\n"
+                                    f"🔄 {change.old_value} → {change.new_value}\n"
+                                    f"📝 เหตุผล: {change.reason or '-'}\n"
+                                    f"📂 หมวด: {_cat_th}\n"
+                                    f"\n📅 ติดตามผล: {change.followup_date}\n"
+                                    f"🔬 ตรวจ: {change.monitor_lab} "
+                                    f"(เป้า {change.monitor_target})\n"
+                                    f"\n💡 ID: {change.change_id}")
+                            except Exception as _rx_err:
+                                logger.warning("Treatment record: %s", _rx_err)
+                                reply_message(reply_token,
+                                    "ขออภัย ไม่สามารถบันทึกได้ในขณะนี้")
+
+                # ── ประวัติการรักษา (เพิ่ม 2026-11-06) ──
+                elif text.strip().startswith(("ประวัติการรักษา ", "ประวัติยา ")):
+                    _hist_q = text.strip()
+                    for _pf in ("ประวัติการรักษา ", "ประวัติยา "):
+                        if _hist_q.startswith(_pf):
+                            _hist_q = _hist_q[len(_pf):].strip()
+                            break
+                    _hist_p = master_registry.match_hn(_hist_q)
+                    if not _hist_p:
+                        reply_message(reply_token, f"❌ ไม่พบ HN: {_hist_q} ในทะเบียน")
+                    else:
+                        _hist_hn = _hist_p.clinic_hn or _hist_q
+                        reply_message(reply_token,
+                            treatment_tracker.format_history_for_line(
+                                _hist_hn, _hist_p.patient_name))
+
+                # ── ติดตามผลการรักษา — รายการที่ครบกำหนด (เพิ่ม 2026-11-06) ──
+                elif text.strip() in ("ติดตามผลการรักษา", "followup",
+                                       "ติดตามผลยา", "รายการติดตาม"):
+                    try:
+                        _pending = treatment_tracker.get_pending_followups()
+                        reply_message(reply_token,
+                            treatment_tracker.format_pending_for_line(_pending))
+                    except Exception as _fu_err:
+                        logger.warning("Pending followups: %s", _fu_err)
+                        reply_message(reply_token,
+                            "ขออภัย ไม่สามารถดึงรายการติดตามได้")
 
                 # ── แก้ไขชื่อผู้ป่วย ──
                 elif text.strip().startswith(("แก้ไข ", "แก้ชื่อ ", "edit ")):

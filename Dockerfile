@@ -55,6 +55,7 @@ COPY import_dialysis_excel.py .
 COPY database.py .
 COPY lab_intelligence_agent.py .
 COPY utils.py .
+COPY treatment_tracker.py .
 COPY patient_link_code.py .
 COPY appointment_reminder.py .
 
