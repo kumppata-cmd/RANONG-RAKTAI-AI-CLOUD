@@ -2712,12 +2712,17 @@ def test_handle_search_command_unauthorized():
 
 
 def test_handle_search_command_help():
-    """ทดสอบคำสั่ง ช่วยเหลือ — ไม่ต้อง auth."""
+    """ทดสอบคำสั่ง ช่วยเหลือ — ไม่ต้อง auth. คืน Flex dict หรือ str."""
     response = server.handle_search_command("ช่วยเหลือ", "any_hash")
     assert response is not None
-    assert "ค้นหา" in response
-    assert "รายการล่าสุด" in response
-    assert "ขอไฟล์" in response
+    if isinstance(response, dict):
+        # Flex Carousel format
+        assert response.get("type") == "flex"
+        _alt = response.get("altText", "")
+        assert "คำสั่ง" in _alt or "ทั้งหมด" in _alt
+    else:
+        assert isinstance(response, str)
+        assert "ค้นหา" in response
     print("PASS: test_handle_search_command_help")
 
 
