@@ -10990,7 +10990,47 @@ def _build_daily_digest() -> str:
     else:
         lines.append("✅ ไม่มีค่าวิกฤตค้าง")
 
-    # 4. สถิติเอกสารรวม
+    # 4. ติดตามผลการรักษา (ข้อ 4 — actionable digest)
+    try:
+        _pending_tx = treatment_tracker.get_pending_followups()
+        if _pending_tx:
+            lines.append(f"\n💊 ติดตามผลยา: {len(_pending_tx)} ราย")
+            for _ptx in _pending_tx[:3]:
+                lines.append(
+                    f"  • HN {_ptx.patient_hn}: {_ptx.drug_name} "
+                    f"({_ptx.old_value}→{_ptx.new_value}) "
+                    f"→ ตรวจ {_ptx.monitor_lab}")
+            if len(_pending_tx) > 3:
+                lines.append(f"  ... อีก {len(_pending_tx)-3} ราย")
+            lines.append("  💡 พิมพ์ 'ติดตามผลการรักษา' ดูทั้งหมด")
+    except Exception:
+        pass
+
+    # 5. Hb วิกฤต (< 8 g/dL) จากข้อมูล registry
+    try:
+        _low_hb = []
+        for _p in (master_registry._patients.values()
+                   if hasattr(master_registry, '_patients') else []):
+            _p_hn = _p.clinic_hn if hasattr(_p, 'clinic_hn') else ""
+            if _p_hn:
+                _p_docs = _get_patient_lab_docs(_p, _p_hn, limit=1)
+                if _p_docs:
+                    _p_labs = _extract_latest_labs(
+                        _p_docs[-1].get("extracted_text", ""))
+                    _hb = _p_labs.get("hb")
+                    if _hb and 0 < _hb < 8:
+                        _p_name = _p.patient_name if hasattr(_p, 'patient_name') else _p_hn
+                        _low_hb.append(f"  • HN {_p_hn} ({_p_name}): Hb {_hb:.1f}")
+                if len(_low_hb) >= 5:
+                    break  # จำกัดไม่ให้ loop นาน
+        if _low_hb:
+            lines.append(f"\n🔴 Hb < 8: {len(_low_hb)} ราย")
+            for _lh in _low_hb:
+                lines.append(_lh)
+    except Exception:
+        pass
+
+    # 6. สถิติเอกสารรวม
     _total = len(doc_index._docs) if doc_index else 0
     _patients = master_registry.count() if master_registry else 0
     lines.append(f"\n📦 ทะเบียน: {_patients} คน | เอกสาร: {_total} รายการ")
@@ -11764,6 +11804,189 @@ def reply_line_message(reply_token: str, message: dict):
         logger.error(
             f"ตอบกลับ LINE (flex) ไม่สำเร็จ: {type(e).__name__} (status={status})"
         )
+
+
+def reply_with_quick_reply(reply_token: str, text: str,
+                           quick_items: list[dict]):
+    """ส่งข้อความ + Quick Reply buttons ตอบกลับ LINE.
+
+    quick_items: [{"label": "สรุป", "text": "สรุป 69453"}, ...]
+    """
+    if IS_TESTING and not IS_TESTING_DOCS:
+        return
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        return
+    qr_items = []
+    for item in quick_items[:13]:  # LINE max 13 items
+        qr_items.append({
+            "type": "action",
+            "action": {
+                "type": "message",
+                "label": item["label"][:20],  # LINE max 20 chars
+                "text": item["text"][:300],
+            },
+        })
+    msg = {
+        "type": "text",
+        "text": text[:5000],
+        "quickReply": {"items": qr_items},
+    }
+    url = "https://api.line.me/v2/bot/message/reply"
+    body = json.dumps(
+        {"replyToken": reply_token, "messages": [msg]},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        resp = http_requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            data=body, timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        status = getattr(getattr(e, "response", None), "status_code", "-")
+        logger.error("reply_with_quick_reply: %s (status=%s)",
+                     type(e).__name__, status)
+
+
+def reply_flex_with_quick_reply(reply_token: str, flex_msg: dict,
+                                 quick_items: list[dict]):
+    """ส่ง Flex Message + Quick Reply buttons."""
+    if IS_TESTING and not IS_TESTING_DOCS:
+        return
+    if not LINE_CHANNEL_ACCESS_TOKEN:
+        return
+    qr_items = []
+    for item in quick_items[:13]:
+        qr_items.append({
+            "type": "action",
+            "action": {
+                "type": "message",
+                "label": item["label"][:20],
+                "text": item["text"][:300],
+            },
+        })
+    flex_msg["quickReply"] = {"items": qr_items}
+    url = "https://api.line.me/v2/bot/message/reply"
+    body = json.dumps(
+        {"replyToken": reply_token, "messages": [flex_msg]},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        resp = http_requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                "Content-Type": "application/json; charset=utf-8",
+            },
+            data=body, timeout=10,
+        )
+        resp.raise_for_status()
+    except Exception as e:
+        status = getattr(getattr(e, "response", None), "status_code", "-")
+        logger.error("reply_flex_with_quick_reply: %s (status=%s)",
+                     type(e).__name__, status)
+
+
+def _patient_quick_reply_items(hn: str) -> list[dict]:
+    """สร้าง Quick Reply items สำหรับคำสั่งที่เกี่ยวกับ HN นี้"""
+    return [
+        {"label": "📋 สรุป", "text": f"สรุป {hn}"},
+        {"label": "🧠 วิเคราะห์", "text": f"วิเคราะห์ {hn}"},
+        {"label": "📊 เปรียบเทียบ", "text": f"เปรียบเทียบ {hn}"},
+        {"label": "💉 ติดตามHb", "text": f"ติดตามHb {hn}"},
+        {"label": "🏥 eGFR", "text": f"ติดตามeGFR {hn}"},
+        {"label": "💊 ประวัติยา", "text": f"ประวัติการรักษา {hn}"},
+        {"label": "📄 คำสั่งรักษา", "text": f"คำสั่งการรักษา {hn}"},
+    ]
+
+
+def _build_patient_card_flex(hn: str, patient, hb_val=None,
+                              esa_info="", dialysis_info="") -> dict:
+    """สร้าง Flex Message card สรุปข้อมูลผู้ป่วย (ข้อ 5: ผป command)"""
+    body_contents = [
+        {"type": "text", "text": f"👤 {patient.patient_name}",
+         "weight": "bold", "size": "lg", "wrap": True},
+        {"type": "text", "text": f"🔢 HN: {hn}",
+         "size": "sm", "color": "#666666"},
+        {"type": "separator", "margin": "md"},
+    ]
+
+    # Info rows
+    info_rows = []
+    if hb_val and hb_val > 0:
+        hb_status = "✅" if 10 <= hb_val <= 12 else ("⚠️" if hb_val < 10 else "🔺")
+        info_rows.append(f"🩸 Hb: {hb_val:.1f} g/dL {hb_status}")
+    else:
+        info_rows.append("🩸 Hb: ไม่มีข้อมูล")
+
+    if esa_info:
+        info_rows.append(f"💊 ESA: {esa_info}")
+
+    if dialysis_info:
+        info_rows.append(f"🏥 {dialysis_info}")
+
+    if hasattr(patient, 'vascular_access') and patient.vascular_access:
+        info_rows.append(f"🔴 Vascular: {patient.vascular_access}")
+
+    for row in info_rows:
+        body_contents.append({
+            "type": "text", "text": row,
+            "size": "sm", "margin": "sm", "wrap": True,
+        })
+
+    return {
+        "type": "flex",
+        "altText": f"ข้อมูลผู้ป่วย HN {hn}",
+        "contents": {
+            "type": "bubble",
+            "body": {
+                "type": "box",
+                "layout": "vertical",
+                "contents": body_contents,
+                "paddingAll": "16px",
+            },
+            "footer": {
+                "type": "box",
+                "layout": "vertical",
+                "spacing": "sm",
+                "contents": [
+                    {
+                        "type": "button",
+                        "action": {"type": "message", "label": "🧠 วิเคราะห์แล็บ",
+                                   "text": f"วิเคราะห์ {hn}"},
+                        "style": "primary", "height": "sm",
+                        "color": "#2E7D32",
+                    },
+                    {
+                        "type": "box",
+                        "layout": "horizontal",
+                        "spacing": "sm",
+                        "contents": [
+                            {
+                                "type": "button",
+                                "action": {"type": "message",
+                                           "label": "📊 เปรียบเทียบ",
+                                           "text": f"เปรียบเทียบ {hn}"},
+                                "style": "secondary", "height": "sm",
+                            },
+                            {
+                                "type": "button",
+                                "action": {"type": "message",
+                                           "label": "💉 Hb trend",
+                                           "text": f"ติดตามHb {hn}"},
+                                "style": "secondary", "height": "sm",
+                            },
+                        ],
+                    },
+                ],
+                "paddingAll": "12px",
+            },
+        },
+    }
 
 
 def download_line_content(message_id: str) -> bytes | None:
@@ -16962,7 +17185,8 @@ def webhook():
                                 f"🔗 เปิดหน้าเปรียบเทียบ:\n{_cmp_url}\n\n"
                                 f"💡 ต้อง login ด้วย Admin Secret ครั้งแรก"
                             )
-                            reply_message(reply_token, _cmp_msg)
+                            reply_with_quick_reply(reply_token, _cmp_msg,
+                                _patient_quick_reply_items(_cmp_hn))
 
                 # ── ข้อมูลฟอกเลือด (เพิ่ม 2026-11-05) ──
                 elif text.strip() in ("รอบฟอก", "ตารางฟอก", "dialysis schedule"):
@@ -17170,7 +17394,8 @@ def webhook():
                                     for _eh in _egfr_hist[-6:]:
                                         _ckd_msg += f"\n  {_eh['date']}: {_eh['value']:.0f}"
                                     _ckd_msg += "\n\n⚕️ ข้อมูลประกอบ ต้องแพทย์พิจารณา"
-                                    reply_message(reply_token, _ckd_msg)
+                                    reply_with_quick_reply(reply_token, _ckd_msg,
+                                        _patient_quick_reply_items(_egfr_hn))
                                 else:
                                     reply_message(reply_token,
                                         f"ไม่พบค่า eGFR ในผลแล็บของ HN {_egfr_q}")
@@ -17302,8 +17527,9 @@ def webhook():
                                 _tn_lines.append("─" * 20)
                                 _tn_lines.append(
                                     "⚕️ ข้อมูลประกอบการตัดสินใจ")
-                                reply_message(reply_token,
-                                    "\n".join(_tn_lines))
+                                reply_with_quick_reply(reply_token,
+                                    "\n".join(_tn_lines),
+                                    _patient_quick_reply_items(_tn_hn))
                         except Exception as _tn_err:
                             logger.warning("Treatment notes: %s", _tn_err)
                             reply_message(reply_token,
@@ -17322,9 +17548,10 @@ def webhook():
                         reply_message(reply_token, f"❌ ไม่พบ HN: {_hist_q} ในทะเบียน")
                     else:
                         _hist_hn = _hist_p.clinic_hn or _hist_q
-                        reply_message(reply_token,
+                        reply_with_quick_reply(reply_token,
                             treatment_tracker.format_history_for_line(
-                                _hist_hn, _hist_p.patient_name))
+                                _hist_hn, _hist_p.patient_name),
+                            _patient_quick_reply_items(_hist_hn))
 
                 # ── ติดตามผลการรักษา — รายการที่ครบกำหนด (เพิ่ม 2026-11-06) ──
                 elif text.strip() in ("ติดตามผลการรักษา", "followup",
@@ -17393,6 +17620,53 @@ def webhook():
                         f"Storage: {STORAGE_BACKEND}\n"
                         f"รองรับ: TXT, PDF, JPG, PNG",
                     )
+                # ── ข้อ 1+5: พิมพ์แค่ HN หรือ "ผป <HN>" → Patient Card + Quick Reply ──
+                elif (text.strip().startswith(("ผป ", "ผป.", "patient "))
+                      or (text.strip().isdigit() and len(text.strip()) >= 4)):
+                    _pc_q = text.strip()
+                    # ตัด prefix
+                    for _pf in ("ผป ", "ผป.", "patient "):
+                        if _pc_q.startswith(_pf):
+                            _pc_q = _pc_q[len(_pf):].strip()
+                            break
+                    _pc_p = master_registry.match_hn(_pc_q)
+                    if _pc_p:
+                        _pc_hn = _pc_p.clinic_hn or _pc_q
+                        # ดึง Hb ล่าสุด
+                        _pc_hb = None
+                        try:
+                            _pc_docs = _get_patient_lab_docs(_pc_p, _pc_hn, limit=3)
+                            if _pc_docs:
+                                _pc_labs = _extract_latest_labs(
+                                    _pc_docs[-1].get("extracted_text", ""))
+                                _pc_hb = _pc_labs.get("hb")
+                        except Exception:
+                            pass
+                        # ESA info
+                        _pc_esa = ""
+                        if hasattr(_pc_p, 'esa_medication') and _pc_p.esa_medication:
+                            _pc_esa = f"{_pc_p.esa_medication}"
+                            if hasattr(_pc_p, 'esa_dose') and _pc_p.esa_dose:
+                                _pc_esa += f" {_pc_p.esa_dose}u"
+                        # Dialysis info
+                        _pc_dial = ""
+                        if hasattr(_pc_p, 'hd_per_week') and _pc_p.hd_per_week:
+                            _d_days = ""
+                            if hasattr(_pc_p, 'dialysis_days') and _pc_p.dialysis_days:
+                                _d_days = f" ({_pc_p.dialysis_days})"
+                            _pc_dial = f"ฟอก {_pc_p.hd_per_week} ครั้ง/สัปดาห์{_d_days}"
+
+                        _pc_flex = _build_patient_card_flex(
+                            _pc_hn, _pc_p, hb_val=_pc_hb,
+                            esa_info=_pc_esa, dialysis_info=_pc_dial)
+                        reply_flex_with_quick_reply(
+                            reply_token, _pc_flex,
+                            _patient_quick_reply_items(_pc_hn))
+                    else:
+                        reply_message(reply_token,
+                            f"❌ ไม่พบ HN: {_pc_q} ในทะเบียน\n"
+                            f"ลองพิมพ์ 'ทะเบียนผู้ป่วย' เพื่อดูรายชื่อ")
+
                 else:
                     reply_message(
                         reply_token,
@@ -17401,10 +17675,8 @@ def webhook():
                         "  ค้นหา [คำค้น] — ค้นหาเอกสาร\n"
                         "  ผลแล็บล่าสุด — ดูผลตรวจล่าสุด\n"
                         "  สถิติ — ดูสถิติเอกสาร\n"
-                        "  ลงทะเบียนรายชื่อ — ลงทะเบียนผู้ป่วย (admin)\n"
-                        "  ทะเบียนผู้ป่วย — ดูรายชื่อ (admin)\n"
-                        "  แก้ไข [HN] [ชื่อใหม่] — แก้ชื่อผู้ป่วย (admin)\n"
-                        "  ช่วยเหลือ — ดูคำสั่งทั้งหมด",
+                        "  ช่วยเหลือ — ดูคำสั่งทั้งหมด\n"
+                        "\n💡 พิมพ์แค่เลข HN (เช่น 69453) → ดูข้อมูลผู้ป่วย",
                     )
             else:
                 logger.info(f"ข้าม message type: {msg_type}")
