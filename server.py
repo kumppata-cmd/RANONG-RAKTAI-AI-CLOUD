@@ -10596,6 +10596,125 @@ def handle_search_command(
                 f"HN {_summary_hn} ได้ในขณะนี้"
             )
 
+    # ── คำสั่งการรักษา / ปรับยา / ประวัติการรักษา (เพิ่ม 2026-11-06) ──
+    # ต้องอยู่ใน process function นี้ ไม่ใช่ใน webhook handler โดยตรง
+    if text_stripped.startswith(("คำสั่งการรักษา ", "ดูคำสั่ง ")):
+        _tn_q = text_stripped
+        for _pf in ("คำสั่งการรักษา ", "ดูคำสั่ง "):
+            if _tn_q.startswith(_pf):
+                _tn_q = _tn_q[len(_pf):].strip()
+                break
+        _tn_p = master_registry.match_hn(_tn_q)
+        if not _tn_p:
+            return f"❌ ไม่พบ HN: {_tn_q} ในทะเบียน"
+        _tn_hn = _tn_p.clinic_hn or _tn_q
+        try:
+            _tn_notes = []
+            _tn_prefix = f"_treatment_notes/{_tn_hn}/"
+            if storage.is_ready and hasattr(storage, '_bucket'):
+                _tn_blobs = storage._bucket.list_blobs(prefix=_tn_prefix)
+                for _tn_b in _tn_blobs:
+                    try:
+                        _tn_d = json.loads(_tn_b.download_as_text())
+                        _tn_notes.append(_tn_d)
+                    except Exception:
+                        pass
+            _tn_notes.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+            if not _tn_notes:
+                return (f"📋 HN: {_tn_hn} ({_tn_p.patient_name})\n"
+                        f"ยังไม่มีคำสั่งการรักษาในระบบ")
+            _tn_lines = [
+                "📋 คำสั่งการรักษา",
+                "━━━━━━━━━━━━━━━━",
+                f"🔢 HN: {_tn_hn}",
+                f"👤 {_tn_p.patient_name}",
+                f"📄 ทั้งหมด {len(_tn_notes)} รายการ",
+                "",
+            ]
+            for _i, _n in enumerate(_tn_notes[:5], 1):
+                _dt = _n.get("created_at", "")[:10]
+                _act = _n.get("action", "")
+                _note = _n.get("note", "")[:80]
+                _dtype = _n.get("doc_type", "")
+                _act_th = {"treatment": "💊 สั่งการรักษา",
+                           "edit": "✏️ แก้ไข"}.get(_act, f"📝 {_act}")
+                _tn_lines.append(f"{_i}. [{_dt}] {_act_th}")
+                if _dtype:
+                    _tn_lines.append(f"   📂 {_dtype}")
+                _tn_lines.append(f"   {_note}")
+                _tn_lines.append("")
+            if len(_tn_notes) > 5:
+                _tn_lines.append(f"... อีก {len(_tn_notes)-5} รายการ")
+            _tn_lines.append("─" * 20)
+            _tn_lines.append("⚕️ ข้อมูลประกอบการตัดสินใจ")
+            return "\n".join(_tn_lines)
+        except Exception as _tn_err:
+            logger.warning("Treatment notes: %s", _tn_err)
+            return "ขออภัย ไม่สามารถดึงข้อมูลได้"
+
+    if text_stripped.startswith(("ปรับยา ", "ปรับการรักษา ")):
+        _rx_text = text_stripped
+        for _pf in ("ปรับยา ", "ปรับการรักษา "):
+            if _rx_text.startswith(_pf):
+                _rx_text = _rx_text[len(_pf):].strip()
+                break
+        _rx_parts = _rx_text.split(None, 1)
+        if len(_rx_parts) < 2:
+            return ("⚠️ รูปแบบ: ปรับยา <HN> <รายละเอียด>\n"
+                    "ตัวอย่าง:\n"
+                    "• ปรับยา 56001 เพิ่ม Epiao 4000→6000 เพราะ Hb ต่ำ\n"
+                    "• ปรับยา 69453 หยุด amlodipine เพราะ BP ต่ำ")
+        _rx_hn = _rx_parts[0]
+        _rx_detail = _rx_parts[1]
+        _rx_patient = master_registry.match_hn(_rx_hn)
+        if not _rx_patient:
+            return f"❌ ไม่พบ HN: {_rx_hn} ในทะเบียน"
+        try:
+            _parsed_rx = treatment_tracker.parse_treatment_text(_rx_detail)
+            _cat = treatment_tracker.detect_category(_parsed_rx.get("drug_name", ""))
+            _change = treatment_tracker.record_change(
+                patient_hn=_rx_patient.clinic_hn or _rx_hn,
+                category=_cat,
+                action=_parsed_rx.get("action", "other"),
+                drug_name=_parsed_rx.get("drug_name", _rx_detail),
+                old_value=_parsed_rx.get("old_value", ""),
+                new_value=_parsed_rx.get("new_value", ""),
+                reason=_parsed_rx.get("reason", ""),
+            )
+            _cat_th = TREATMENT_CATEGORIES.get(_cat, {}).get("name_th", _cat)
+            return (f"✅ บันทึกการปรับการรักษา\n"
+                    f"━━━━━━━━━━━━━━━━\n"
+                    f"🔢 HN: {_change.patient_hn}\n"
+                    f"👤 {_rx_patient.patient_name}\n"
+                    f"💊 {_change.drug_name}\n"
+                    f"🔄 {_change.old_value} → {_change.new_value}\n"
+                    f"📝 เหตุผล: {_change.reason or '-'}\n"
+                    f"📂 หมวด: {_cat_th}\n"
+                    f"\n📅 ติดตามผล: {_change.followup_date}\n"
+                    f"🔬 ตรวจ: {_change.monitor_lab} (เป้า {_change.monitor_target})")
+        except Exception as _rx_err:
+            logger.warning("Treatment record: %s", _rx_err)
+            return "ขออภัย ไม่สามารถบันทึกได้ในขณะนี้"
+
+    if text_stripped.startswith(("ประวัติการรักษา ", "ประวัติยา ")):
+        _hist_q = text_stripped
+        for _pf in ("ประวัติการรักษา ", "ประวัติยา "):
+            if _hist_q.startswith(_pf):
+                _hist_q = _hist_q[len(_pf):].strip()
+                break
+        _hist_p = master_registry.match_hn(_hist_q)
+        if not _hist_p:
+            return f"❌ ไม่พบ HN: {_hist_q} ในทะเบียน"
+        _hist_hn = _hist_p.clinic_hn or _hist_q
+        return treatment_tracker.format_history_for_line(_hist_hn, _hist_p.patient_name)
+
+    if text_stripped in ("ติดตามผลการรักษา", "followup", "ติดตามผลยา", "รายการติดตาม"):
+        try:
+            _pending = treatment_tracker.get_pending_followups()
+            return treatment_tracker.format_pending_for_line(_pending)
+        except Exception:
+            return "ขออภัย ไม่สามารถดึงรายการติดตามได้"
+
     # ── V5.0 Conversational Command Center ──────────────────
     # ถึงจุดนี้ = ผู้ใช้ได้รับอนุญาตแล้ว แต่คำสั่งเดิม (legacy) ไม่รู้จัก
     # ให้ Thai Intent Parser + Agent Orchestrator ลองตีความภาษาธรรมชาติ
