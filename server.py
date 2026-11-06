@@ -338,6 +338,9 @@ ADMIN_USERS: set[str] = {
     u.strip() for u in _admin_env.split(",") if u.strip()
 }
 
+# ─── Rich Menu IDs (populated by ตั้งค่าเมนู command) ─────
+_RICH_MENU_IDS: dict[str, str] = {}  # {"staff": "...", "patient": "...", "sub": "..."}
+
 # ─── OCR ─────────────────────────────────────────────────
 # 200 DPI เพียงพอสำหรับ Tesseract กับข้อความขนาดปกติ และใช้หน่วยความจำ
 # น้อยกว่า 300 DPI ราว 56% (A4: ~26 MB → ~11.6 MB ต่อหน้า)
@@ -7537,10 +7540,10 @@ def handle_search_command(
             "💡 รหัสใช้ได้ครั้งเดียว ภายใน 48 ชั่วโมง"
         )
 
-    # ── Admin: Deploy Rich Menu ──────────────────────────────
+    # ── Admin: Deploy Rich Menu (Staff/Patient/Sub) ─────────
     if text_stripped in ("ตั้งค่าเมนู", "deploy richmenu", "อัปเดตเมนู"):
         if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
-            return None  # ไม่เปิดเผยว่ามีคำสั่งนี้
+            return None
 
         if not LINE_CHANNEL_ACCESS_TOKEN:
             return "❌ LINE_CHANNEL_ACCESS_TOKEN ยังไม่ได้ตั้งค่า"
@@ -7550,105 +7553,184 @@ def handle_search_command(
         _liff_id = os.environ.get("LIFF_ID", "")
         _liff_url = f"https://liff.line.me/{_liff_id}" if _liff_id else ""
         _base_dir = os.path.dirname(os.path.abspath(__file__))
-        _img_path = os.path.join(_base_dir, "rich_menu_v2.png")
-
-        if not os.path.exists(_img_path):
-            return "❌ ไม่พบไฟล์ rich_menu_v2.png"
-
         _headers = {
             "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
             "Content-Type": "application/json",
         }
 
-        try:
-            # Step 0: ลบ Rich Menu เก่าทั้งหมดจาก Messaging API ก่อน
-            _req.delete(
-                "https://api.line.me/v2/bot/user/all/richmenu",
-                headers=_headers, timeout=15,
-            )
-            _old_list = _req.get(
-                "https://api.line.me/v2/bot/richmenu/list",
-                headers=_headers, timeout=15,
-            )
-            for _old_m in (_old_list.json().get("richmenus", []) if _old_list.status_code == 200 else []):
-                _old_id = _old_m.get("richMenuId", "")
-                if _old_id:
-                    _req.delete(f"https://api.line.me/v2/bot/richmenu/{_old_id}",
+        def _rm_cleanup():
+            """ลบ Rich Menu + Alias เก่าทั้งหมด"""
+            _req.delete("https://api.line.me/v2/bot/user/all/richmenu",
+                        headers=_headers, timeout=15)
+            # ลบ aliases ก่อน (ต้องลบก่อน menu)
+            for _alias_id in ("richmenu-alias-staff", "richmenu-alias-patient",
+                              "richmenu-alias-sub"):
+                _req.delete(f"https://api.line.me/v2/bot/richmenu/alias/{_alias_id}",
+                            headers=_headers, timeout=15)
+            # ลบ menus ทั้งหมด
+            r = _req.get("https://api.line.me/v2/bot/richmenu/list",
+                         headers=_headers, timeout=15)
+            for m in (r.json().get("richmenus", []) if r.status_code == 200 else []):
+                mid = m.get("richMenuId", "")
+                if mid:
+                    _req.delete(f"https://api.line.me/v2/bot/richmenu/{mid}",
                                 headers=_headers, timeout=15)
 
-            # Step 1: สร้าง Rich Menu 6 ปุ่ม (3x2 grid)
-            _col_w = 833   # 2500 / 3
-            _row_h = 421   # 843 / 2
-            _rm_body = {
+        def _rm_create(name, areas):
+            """สร้าง Rich Menu และคืน richMenuId"""
+            body = {
                 "size": {"width": 2500, "height": 843},
                 "selected": True,
-                "name": "ระนอง รักษ์ไต เมนูหลัก v3",
+                "name": name,
                 "chatBarText": "เมนู",
-                "areas": [
-                    # Row 1
-                    {
-                        "bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
-                        "action": {"type": "uri", "label": "ดูผลแล็บ",
-                                   "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff"},
-                    },
-                    {
-                        "bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
-                        "action": {"type": "message", "label": "ส่งเอกสาร", "text": "ส่งเอกสาร"},
-                    },
-                    {
-                        "bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
-                        "action": {"type": "message", "label": "ลงทะเบียน", "text": "ลงทะเบียน"},
-                    },
-                    # Row 2
-                    {
-                        "bounds": {"x": 0, "y": _row_h, "width": _col_w, "height": _row_h + 1},
-                        "action": {"type": "message", "label": "รอบฟอก", "text": "รอบฟอกวันนี้"},
-                    },
-                    {
-                        "bounds": {"x": _col_w, "y": _row_h, "width": _col_w + 1, "height": _row_h + 1},
-                        "action": {"type": "message", "label": "ดูนัด", "text": "นัดหมาย"},
-                    },
-                    {
-                        "bounds": {"x": _col_w * 2 + 1, "y": _row_h, "width": _col_w, "height": _row_h + 1},
-                        "action": {"type": "message", "label": "คำสั่ง", "text": "ช่วยเหลือ"},
-                    },
-                ],
+                "areas": areas,
             }
+            r = _req.post("https://api.line.me/v2/bot/richmenu",
+                          json=body, headers=_headers, timeout=15)
+            if r.status_code != 200:
+                return None, f"สร้าง {name} ล้มเหลว ({r.status_code})"
+            return r.json().get("richMenuId", ""), None
 
-            r1 = _req.post("https://api.line.me/v2/bot/richmenu",
-                           json=_rm_body, headers=_headers, timeout=15)
-            if r1.status_code != 200:
-                return f"❌ สร้าง Rich Menu ไม่สำเร็จ ({r1.status_code})"
-
-            _menu_id = r1.json().get("richMenuId", "")
-
-            # Step 2: อัปโหลดรูป
-            with open(_img_path, "rb") as _f:
-                _img = _f.read()
-            r2 = _req.post(
-                f"https://api-data.line.me/v2/bot/richmenu/{_menu_id}/content",
-                data=_img,
+        def _rm_upload_img(menu_id, img_file):
+            """อัปโหลดรูปภาพ"""
+            path = os.path.join(_base_dir, img_file)
+            if not os.path.exists(path):
+                return False
+            with open(path, "rb") as f:
+                data = f.read()
+            r = _req.post(
+                f"https://api-data.line.me/v2/bot/richmenu/{menu_id}/content",
+                data=data,
                 headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
                          "Content-Type": "image/png"},
-                timeout=30,
-            )
+                timeout=30)
+            return r.status_code == 200
 
-            # Step 3: ตั้งเป็น default
-            r3 = _req.post(
-                f"https://api.line.me/v2/bot/user/all/richmenu/{_menu_id}",
-                headers=_headers, timeout=15,
-            )
+        def _rm_create_alias(alias_id, menu_id):
+            """สร้าง Rich Menu Alias"""
+            r = _req.post("https://api.line.me/v2/bot/richmenu/alias",
+                          json={"richMenuAliasId": alias_id,
+                                "richMenuId": menu_id},
+                          headers=_headers, timeout=15)
+            return r.status_code == 200
 
-            _img_ok = "✅" if r2.status_code == 200 else "❌"
-            _def_ok = "✅" if r3.status_code == 200 else "❌"
+        try:
+            _col_w = 833
+            _row_h = 421
+
+            # === Step 0: Cleanup ===
+            _rm_cleanup()
+            _log = []
+
+            # === Step 1: Staff Menu ===
+            _staff_areas = [
+                {"bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
+                 "action": {"type": "uri", "label": "ดูผลแล็บ",
+                            "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff"}},
+                {"bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
+                 "action": {"type": "message", "label": "ส่งเอกสาร", "text": "ส่งเอกสาร"}},
+                {"bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
+                 "action": {"type": "message", "label": "รอบฟอก", "text": "รอบฟอกวันนี้"}},
+                {"bounds": {"x": 0, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                 "action": {"type": "message", "label": "วิเคราะห์", "text": "วิเคราะห์"}},
+                {"bounds": {"x": _col_w, "y": _row_h, "width": _col_w + 1, "height": _row_h + 1},
+                 "action": {"type": "message", "label": "ดูนัด", "text": "นัดหมาย"}},
+                {"bounds": {"x": _col_w * 2 + 1, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                 "action": {"type": "richmenuswitch",
+                            "richMenuAliasId": "richmenu-alias-sub",
+                            "data": "switch-to-sub"}},
+            ]
+            _staff_id, _err = _rm_create("Staff Menu v4", _staff_areas)
+            if _err:
+                return f"❌ {_err}"
+            _rm_upload_img(_staff_id, "rich_menu_staff.png")
+            _log.append(f"👨‍⚕️ Staff: ✅ {_staff_id[:12]}...")
+
+            # === Step 2: Patient Menu ===
+            _patient_areas = [
+                {"bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
+                 "action": {"type": "uri", "label": "ดูผลแล็บ",
+                            "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff"}},
+                {"bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
+                 "action": {"type": "message", "label": "ส่งเอกสาร", "text": "ส่งเอกสาร"}},
+                {"bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
+                 "action": {"type": "message", "label": "ลงทะเบียน", "text": "ลงทะเบียน"}},
+                {"bounds": {"x": 0, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                 "action": {"type": "message", "label": "นัดหมาย", "text": "นัดหมาย"}},
+                {"bounds": {"x": _col_w, "y": _row_h, "width": _col_w + 1, "height": _row_h + 1},
+                 "action": {"type": "message", "label": "ติดต่อ", "text": "ติดต่อเจ้าหน้าที่"}},
+                {"bounds": {"x": _col_w * 2 + 1, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                 "action": {"type": "message", "label": "ช่วยเหลือ", "text": "ช่วยเหลือ"}},
+            ]
+            _patient_id, _err = _rm_create("Patient Menu v4", _patient_areas)
+            if _err:
+                return f"❌ {_err}"
+            _rm_upload_img(_patient_id, "rich_menu_patient.png")
+            _log.append(f"🧑‍🤝‍🧑 Patient: ✅ {_patient_id[:12]}...")
+
+            # === Step 3: Sub Menu ===
+            _sub_areas = [
+                {"bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
+                 "action": {"type": "richmenuswitch",
+                            "richMenuAliasId": "richmenu-alias-staff",
+                            "data": "switch-to-staff"}},
+                {"bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
+                 "action": {"type": "message", "label": "คำสั่ง", "text": "ช่วยเหลือ"}},
+                {"bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
+                 "action": {"type": "message", "label": "ลงทะเบียน", "text": "ลงทะเบียน"}},
+                {"bounds": {"x": 0, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                 "action": {"type": "message", "label": "ค้นหา", "text": "ค้นหา"}},
+                {"bounds": {"x": _col_w, "y": _row_h, "width": _col_w + 1, "height": _row_h + 1},
+                 "action": {"type": "message", "label": "KPI", "text": "KPI"}},
+                {"bounds": {"x": _col_w * 2 + 1, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                 "action": {"type": "message", "label": "ระบบ", "text": "ตรวจสอบระบบ"}},
+            ]
+            _sub_id, _err = _rm_create("Sub Menu v4", _sub_areas)
+            if _err:
+                return f"❌ {_err}"
+            _rm_upload_img(_sub_id, "rich_menu_sub.png")
+            _log.append(f"📋 Sub: ✅ {_sub_id[:12]}...")
+
+            # === Step 4: Create Aliases ===
+            _a1 = _rm_create_alias("richmenu-alias-staff", _staff_id)
+            _a2 = _rm_create_alias("richmenu-alias-patient", _patient_id)
+            _a3 = _rm_create_alias("richmenu-alias-sub", _sub_id)
+            _alias_ok = "✅" if (_a1 and _a2 and _a3) else f"⚠️ ({_a1},{_a2},{_a3})"
+            _log.append(f"🔗 Aliases: {_alias_ok}")
+
+            # === Step 5: Set Patient menu as default ===
+            r_def = _req.post(
+                f"https://api.line.me/v2/bot/user/all/richmenu/{_patient_id}",
+                headers=_headers, timeout=15)
+            _def_ok = "✅" if r_def.status_code == 200 else "❌"
+            _log.append(f"🌐 Default (Patient): {_def_ok}")
+
+            # === Step 6: Link Staff menu to admin/physician ===
+            _staff_linked = 0
+            _all_staff_ids = _staff_line_ids()
+            for _sid in _all_staff_ids:
+                r_link = _req.post(
+                    f"https://api.line.me/v2/bot/user/{_sid}/richmenu/{_staff_id}",
+                    headers=_headers, timeout=10)
+                if r_link.status_code == 200:
+                    _staff_linked += 1
+            _log.append(f"👨‍⚕️ Staff linked: {_staff_linked}/{len(_all_staff_ids)}")
+
+            # Save menu IDs to env-like storage for auto-link
+            global _RICH_MENU_IDS
+            _RICH_MENU_IDS = {
+                "staff": _staff_id,
+                "patient": _patient_id,
+                "sub": _sub_id,
+            }
 
             return (
-                f"🎨 Rich Menu Deploy\n"
+                f"🎨 Rich Menu Deploy (Staff/Patient/Sub)\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"สร้าง: ✅ {_menu_id[:16]}...\n"
-                f"อัปโหลดรูป: {_img_ok}\n"
-                f"ตั้ง Default: {_def_ok}\n"
-                f"\n💡 ปิด-เปิดแชทเพื่อเห็นเมนูใหม่"
+                + "\n".join(_log) +
+                f"\n\n💡 ปิด-เปิดแชทเพื่อเห็นเมนูใหม่\n"
+                f"• เจ้าหน้าที่ → เมนู Staff + ปุ่ม 'เพิ่มเติม'\n"
+                f"• ผู้ป่วย → เมนู Patient"
             )
         except Exception as _e:
             return f"❌ {type(_e).__name__}: {str(_e)[:100]}"
@@ -17111,6 +17193,25 @@ def webhook():
 
         _line_user_id = event.get("source", {}).get("userId", "")
         user_hash = hash_user_id(_line_user_id)
+
+        # ── Auto-link Rich Menu ตาม role (Staff/Patient) ──
+        if _line_user_id and _RICH_MENU_IDS.get("staff") and \
+                (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            _auto_link_key = f"rm_linked_{_line_user_id}"
+            if not getattr(app, '_rm_linked_cache', None):
+                app._rm_linked_cache = set()
+            if _auto_link_key not in app._rm_linked_cache:
+                try:
+                    import requests as _alr
+                    _alr.post(
+                        f"https://api.line.me/v2/bot/user/{_line_user_id}"
+                        f"/richmenu/{_RICH_MENU_IDS['staff']}",
+                        headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+                                 "Content-Type": "application/json"},
+                        timeout=10)
+                    app._rm_linked_cache.add(_auto_link_key)
+                except Exception:
+                    pass
 
         if event_type == "message":
             msg = event.get("message", {})

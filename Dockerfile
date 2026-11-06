@@ -97,8 +97,11 @@ COPY epo_response_tracker.py .
 COPY hd_schedule_reminder.py .
 COPY ckd_staging.py .
 
-# Rich Menu icon
+# Rich Menu icons (Staff/Patient/Sub + legacy v2)
 COPY rich_menu_v2.png .
+COPY rich_menu_staff.png .
+COPY rich_menu_patient.png .
+COPY rich_menu_sub.png .
 
 # สร้าง non-root user สำหรับ runtime
 RUN groupadd -r appuser && \
