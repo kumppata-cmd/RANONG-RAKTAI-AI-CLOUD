@@ -7623,7 +7623,9 @@ def handle_search_command(
             return f"❌ {type(_e).__name__}: {str(_e)[:100]}"
 
     # ── Admin: ลบ Rich Menu จาก Messaging API ทั้งหมด ──────────
-    if text_stripped in ("ลบเมนูapi", "ลบเมนู api", "delete richmenu api", "cleanup richmenu"):
+    _text_lower = text_stripped.lower()
+    if _text_lower in ("ลบเมนูapi", "ลบเมนู api", "ลบเมนู", "delete richmenu api",
+                        "cleanup richmenu", "ลบrichmenu", "ลบ richmenu"):
         if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
             return None
 
