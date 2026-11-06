@@ -569,7 +569,12 @@ class MasterPatientRegistry:
         """
         # [perf] โหลดใหม่เฉพาะเมื่อแคชเก่าเกิน TTL — ดู _refresh_if_stale()
         self._refresh_if_stale()
-        hn = hn.strip().upper()
+        hn = hn.strip()
+        # ตัด prefix "HN", "HN:", "HN " ที่ผู้ใช้อาจพิมพ์มา
+        # เช่น "HN 69453", "HN:56001", "hn69453" → "69453", "56001"
+        import re as _re_hn
+        hn = _re_hn.sub(r'^(?:HN|hn|H\.?N\.?)\s*[:\-]?\s*', '', hn).strip()
+        hn = hn.upper()
         if not hn:
             return None
         # ค้นหา clinic_hn ก่อน
