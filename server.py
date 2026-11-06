@@ -7561,25 +7561,56 @@ def handle_search_command(
         }
 
         try:
-            # Step 1: สร้าง Rich Menu
+            # Step 0: ลบ Rich Menu เก่าทั้งหมดจาก Messaging API ก่อน
+            _req.delete(
+                "https://api.line.me/v2/bot/user/all/richmenu",
+                headers=_headers, timeout=15,
+            )
+            _old_list = _req.get(
+                "https://api.line.me/v2/bot/richmenu/list",
+                headers=_headers, timeout=15,
+            )
+            for _old_m in (_old_list.json().get("richmenus", []) if _old_list.status_code == 200 else []):
+                _old_id = _old_m.get("richMenuId", "")
+                if _old_id:
+                    _req.delete(f"https://api.line.me/v2/bot/richmenu/{_old_id}",
+                                headers=_headers, timeout=15)
+
+            # Step 1: สร้าง Rich Menu 6 ปุ่ม (3x2 grid)
+            _col_w = 833   # 2500 / 3
+            _row_h = 421   # 843 / 2
             _rm_body = {
                 "size": {"width": 2500, "height": 843},
                 "selected": True,
-                "name": "ระนอง รักษ์ไต เมนูหลัก v2",
+                "name": "ระนอง รักษ์ไต เมนูหลัก v3",
                 "chatBarText": "เมนู",
                 "areas": [
+                    # Row 1
                     {
-                        "bounds": {"x": 0, "y": 0, "width": 833, "height": 843},
+                        "bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
                         "action": {"type": "uri", "label": "ดูผลแล็บ",
                                    "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff"},
                     },
                     {
-                        "bounds": {"x": 833, "y": 0, "width": 834, "height": 843},
+                        "bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
                         "action": {"type": "message", "label": "ส่งเอกสาร", "text": "ส่งเอกสาร"},
                     },
                     {
-                        "bounds": {"x": 1667, "y": 0, "width": 833, "height": 843},
+                        "bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
                         "action": {"type": "message", "label": "ลงทะเบียน", "text": "ลงทะเบียน"},
+                    },
+                    # Row 2
+                    {
+                        "bounds": {"x": 0, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                        "action": {"type": "message", "label": "รอบฟอก", "text": "รอบฟอกวันนี้"},
+                    },
+                    {
+                        "bounds": {"x": _col_w, "y": _row_h, "width": _col_w + 1, "height": _row_h + 1},
+                        "action": {"type": "message", "label": "ดูนัด", "text": "นัดหมาย"},
+                    },
+                    {
+                        "bounds": {"x": _col_w * 2 + 1, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                        "action": {"type": "message", "label": "คำสั่ง", "text": "ช่วยเหลือ"},
                     },
                 ],
             }
