@@ -402,12 +402,14 @@ class TestHandleSearchEdgeCases(unittest.TestCase):
     """handle_search_command edge cases."""
 
     def test_help_returns_usage(self):
-        """ช่วยเหลือ → คืนข้อความวิธีใช้."""
+        """ช่วยเหลือ → คืนข้อความวิธีใช้ (str หรือ Flex dict)."""
         result = server.handle_search_command("ช่วยเหลือ", "anyhash")
         self.assertIsNotNone(result)
-        self.assertIsInstance(result, str)
-        # ต้องมีคำสั่งแนะนำ
-        self.assertTrue(len(result) > 50)
+        if isinstance(result, dict):
+            self.assertEqual(result.get("type"), "flex")
+        else:
+            self.assertIsInstance(result, str)
+            self.assertTrue(len(result) > 50)
 
     @patch("server.is_authorized_user", return_value=True)
     def test_recent_with_no_docs(self, mock_auth):
