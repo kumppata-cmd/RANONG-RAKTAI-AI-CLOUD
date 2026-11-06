@@ -7622,6 +7622,57 @@ def handle_search_command(
         except Exception as _e:
             return f"❌ {type(_e).__name__}: {str(_e)[:100]}"
 
+    # ── Admin: ลบ Rich Menu จาก Messaging API ทั้งหมด ──────────
+    if text_stripped in ("ลบเมนูapi", "ลบเมนู api", "delete richmenu api", "cleanup richmenu"):
+        if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
+            return None
+
+        if not LINE_CHANNEL_ACCESS_TOKEN:
+            return "❌ LINE_CHANNEL_ACCESS_TOKEN ยังไม่ได้ตั้งค่า"
+
+        import requests as _req
+        _headers = {
+            "Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}",
+        }
+
+        try:
+            # Step 1: ยกเลิก default Rich Menu ของ Messaging API
+            _req.delete(
+                "https://api.line.me/v2/bot/user/all/richmenu",
+                headers=_headers, timeout=15,
+            )
+
+            # Step 2: ดึงรายการ Rich Menu ทั้งหมดจาก Messaging API
+            r_list = _req.get(
+                "https://api.line.me/v2/bot/richmenu/list",
+                headers=_headers, timeout=15,
+            )
+            _menus = r_list.json().get("richmenus", []) if r_list.status_code == 200 else []
+            _deleted = 0
+
+            # Step 3: ลบทุก Rich Menu
+            for _m in _menus:
+                _mid = _m.get("richMenuId", "")
+                if _mid:
+                    rd = _req.delete(
+                        f"https://api.line.me/v2/bot/richmenu/{_mid}",
+                        headers=_headers, timeout=15,
+                    )
+                    if rd.status_code == 200:
+                        _deleted += 1
+
+            return (
+                f"🧹 Cleanup Rich Menu (Messaging API)\n"
+                f"━━━━━━━━━━━━━━━━━━━━\n"
+                f"พบ Rich Menu: {len(_menus)} ตัว\n"
+                f"ลบสำเร็จ: {_deleted} ตัว\n"
+                f"ยกเลิก Default API: ✅\n"
+                f"\n💡 ตอนนี้จะใช้ Rich Menu จาก OA Manager (6 ปุ่ม)\n"
+                f"ปิด-เปิดแชท LINE เพื่อเห็นเมนูใหม่"
+            )
+        except Exception as _e:
+            return f"❌ {type(_e).__name__}: {str(_e)[:100]}"
+
     # ── Google Integration Commands (Admin/Physician only) ────
     # คำสั่ง: "สถานะgoogle", "syncแล็บ", "syncทะเบียน",
     #         "backupไดรฟ์", "ส่งรายงานemail"
