@@ -32,16 +32,21 @@ def build_patient_summary_flex(
     if not master_registry:
         return None
 
-    patient = master_registry.get(hn)
+    patient = master_registry.match_hn(hn)
     if not patient:
         return None
 
-    name = patient.get("name", f"HN {hn}")
-    esa = patient.get("esa_drug", "ไม่ระบุ")
-    esa_dose = patient.get("esa_dose", "")
-    schedule_days = patient.get("schedule_days", "ไม่ระบุ")
-    vascular = patient.get("vascular_access", "ไม่ระบุ")
-    dry_weight = patient.get("dry_weight", "")
+    # MasterPatientRegistry returns objects with attributes, not dict
+    def _g(attr, default=""):
+        return getattr(patient, attr, default) or default
+
+    name = _g("patient_name", f"HN {hn}")
+    esa = _g("esa_drug", "ไม่ระบุ")
+    esa_dose = _g("esa_dose", "")
+    schedule_days = _g("schedule_days", "ไม่ระบุ")
+    vascular = _g("vascular_access", "ไม่ระบุ")
+    dry_weight = _g("dry_weight", "")
+    hn = _g("clinic_hn", hn)  # ใช้ clinic_hn จริง
 
     # ─── Lab Agent ───
     lab_text = "ยังไม่มีผลแล็บ"
@@ -53,7 +58,7 @@ def build_patient_summary_flex(
                 lab_text = lab_summary
         # ลอง CKD staging
         if lab_agent and hasattr(lab_agent, 'classify_ckd_full'):
-            egfr = patient.get("latest_egfr")
+            egfr = _g("latest_egfr")
             if egfr:
                 ckd = lab_agent.classify_ckd_full(egfr)
                 ckd_stage = f"CKD {ckd.get('stage', '?')}"
