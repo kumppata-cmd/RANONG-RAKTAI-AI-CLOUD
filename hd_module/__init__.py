@@ -28,9 +28,10 @@ def register_hd_module(app):
         return False
 
     try:
-        from .blueprint import hd_bp
+        from .blueprint import hd_bp, hd_web
         app.register_blueprint(hd_bp)
-        logger.info("HD Smart Monitoring module registered at /hd/api/v1/")
+        app.register_blueprint(hd_web)
+        logger.info("HD Smart Monitoring module registered at /hd/api/v1/ + /hd/ (web)")
         return True
     except Exception as e:
         logger.error(f"Failed to register HD module: {e}")

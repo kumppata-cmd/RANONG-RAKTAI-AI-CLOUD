@@ -1,0 +1,146 @@
+{% extends "hd_base.html" %}
+{% block title %}รายชื่อผู้ป่วย{% endblock %}
+{% block nav_patients %}active{% endblock %}
+{% block page_title %}👥 รายชื่อผู้ป่วย HD{% endblock %}
+
+{% block extra_css %}
+<style>
+.search-bar { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
+.search-bar input { flex: 1; min-width: 200px; }
+.search-bar select { min-width: 150px; }
+.patient-table { width: 100%; border-collapse: collapse; }
+.patient-table th { background: var(--bg-sidebar); padding: 12px 14px; text-align: left; font-size: .8rem; color: var(--fg-muted); font-weight: 700; text-transform: uppercase; letter-spacing: .5px; position: sticky; top: 0; }
+.patient-table td { padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: .9rem; }
+.patient-table tr { cursor: pointer; transition: background .1s; }
+.patient-table tbody tr:hover { background: rgba(52,152,219,.05); }
+.patient-table tbody tr:active { background: rgba(52,152,219,.1); }
+.patient-avatar { width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: .9rem; }
+.patient-name-cell { display: flex; align-items: center; gap: 10px; }
+.schedule-badge { font-size: .75rem; padding: 3px 8px; border-radius: 10px; font-weight: 600; background: rgba(52,152,219,.1); color: var(--info); }
+.access-badge { font-size: .75rem; padding: 3px 8px; border-radius: 10px; font-weight: 600; }
+.access-avf { background: rgba(39,174,96,.1); color: var(--success); }
+.access-avg { background: rgba(243,156,18,.1); color: var(--warning); }
+.access-cvc { background: rgba(231,76,60,.1); color: var(--danger); }
+.stat-row { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.stat-card { padding: 14px 20px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 10px; }
+.stat-card .num { font-size: 1.5rem; font-weight: 800; }
+.stat-card .lbl { font-size: .8rem; color: var(--fg-muted); }
+.table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+@media (max-width: 600px) {
+  .patient-table th:nth-child(4), .patient-table td:nth-child(4),
+  .patient-table th:nth-child(5), .patient-table td:nth-child(5) { display: none; }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Stats -->
+<div class="stat-row">
+  <div class="stat-card"><span class="num" id="totalPatients" style="color:var(--accent);">0</span><span class="lbl">ผู้ป่วยทั้งหมด</span></div>
+  <div class="stat-card"><span class="num" id="activeToday" style="color:var(--success);">0</span><span class="lbl">ฟอกวันนี้</span></div>
+  <div class="stat-card"><span class="num" id="alertPatients" style="color:var(--danger);">0</span><span class="lbl">ต้องเฝ้าระวัง</span></div>
+</div>
+
+<!-- Search -->
+<div class="search-bar">
+  <input type="text" class="form-control" id="searchInput" placeholder="🔍 ค้นหา HN, ชื่อ..." oninput="filterPatients()">
+  <select class="form-control" id="filterSchedule" onchange="filterPatients()">
+    <option value="">ทุกตาราง</option>
+    <option value="จ-พ-ศ">จ-พ-ศ</option>
+    <option value="อ-พฤ-ส">อ-พฤ-ส</option>
+  </select>
+  <select class="form-control" id="filterAccess" onchange="filterPatients()">
+    <option value="">ทุก Vascular Access</option>
+    <option value="AVF">AVF</option>
+    <option value="AVG">AVG</option>
+    <option value="CVC">CVC</option>
+  </select>
+</div>
+
+<!-- Table -->
+<div class="card">
+  <div class="table-wrapper">
+    <table class="patient-table">
+      <thead>
+        <tr>
+          <th>ผู้ป่วย</th>
+          <th>HN</th>
+          <th>ตาราง</th>
+          <th>Vascular Access</th>
+          <th>DW (kg)</th>
+          <th>ฟอกล่าสุด</th>
+        </tr>
+      </thead>
+      <tbody id="patientTableBody">
+        <tr><td colspan="6" style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let allPatients = [];
+
+function getInitials(name){
+  if(!name) return '?';
+  const parts = name.trim().split(/\s+/);
+  return parts.length > 1 ? (parts[0][0]||'')+(parts[1][0]||'') : name.substring(0,2);
+}
+
+function accessClass(a){
+  if(!a) return '';
+  const l = a.toUpperCase();
+  if(l.includes('AVF')) return 'access-avf';
+  if(l.includes('AVG')) return 'access-avg';
+  if(l.includes('CVC')) return 'access-cvc';
+  return '';
+}
+
+function renderPatients(patients){
+  const tbody = document.getElementById('patientTableBody');
+  if(!patients.length){
+    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่พบผู้ป่วย</td></tr>';
+    return;
+  }
+  tbody.innerHTML = patients.map(p => `
+    <tr onclick="window.location.href='/hd/session/new?hn=${p.hn}'">
+      <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(p.name)}</div><span>${p.name||'-'}</span></div></td>
+      <td><strong>${p.hn||'-'}</strong></td>
+      <td>${p.schedule_days ? '<span class="schedule-badge">'+p.schedule_days+'</span>' : '-'}</td>
+      <td>${p.vascular_access ? '<span class="access-badge '+accessClass(p.vascular_access)+'">'+p.vascular_access+'</span>' : '-'}</td>
+      <td>${p.dry_weight||'-'}</td>
+      <td>${p.last_hd||'-'}</td>
+    </tr>
+  `).join('');
+}
+
+function filterPatients(){
+  const q = (document.getElementById('searchInput').value||'').toLowerCase();
+  const sched = document.getElementById('filterSchedule').value;
+  const access = document.getElementById('filterAccess').value;
+  let filtered = allPatients;
+  if(q) filtered = filtered.filter(p => (p.name||'').toLowerCase().includes(q) || (p.hn||'').toLowerCase().includes(q));
+  if(sched) filtered = filtered.filter(p => (p.schedule_days||'') === sched);
+  if(access) filtered = filtered.filter(p => (p.vascular_access||'').toUpperCase().includes(access));
+  renderPatients(filtered);
+}
+
+function fetchPatients(){
+  fetch('/hd/api/v1/patients')
+    .then(r=>r.json())
+    .then(data=>{
+      allPatients = data.patients || [];
+      document.getElementById('totalPatients').textContent = allPatients.length;
+      renderPatients(allPatients);
+    })
+    .catch(()=>{
+      document.getElementById('patientTableBody').innerHTML =
+        '<tr><td colspan="6" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่สามารถโหลดข้อมูลได้</td></tr>';
+    });
+}
+
+fetchPatients();
+</script>
+{% endblock %}

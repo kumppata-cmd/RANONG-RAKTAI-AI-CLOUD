@@ -446,9 +446,11 @@ class TestHdAudit(unittest.TestCase):
 class TestHdBlueprint(unittest.TestCase):
 
     def test_blueprint_import(self):
-        from hd_module.blueprint import hd_bp
+        from hd_module.blueprint import hd_bp, hd_web
         self.assertEqual(hd_bp.name, "hd")
         self.assertEqual(hd_bp.url_prefix, "/hd/api/v1")
+        self.assertEqual(hd_web.name, "hd_web")
+        self.assertEqual(hd_web.url_prefix, "/hd")
 
     def test_feature_flag_disabled(self):
         with patch.dict(os.environ, {"HD_MODULE_ENABLED": "false"}):
@@ -470,7 +472,7 @@ class TestHdBlueprint(unittest.TestCase):
             app.register_blueprint.assert_not_called()
 
     def test_register_enabled(self):
-        """Module registers when enabled."""
+        """Module registers when enabled (API + web blueprints)."""
         with patch.dict(os.environ, {"HD_MODULE_ENABLED": "true"}):
             import importlib
             import hd_module
@@ -478,7 +480,7 @@ class TestHdBlueprint(unittest.TestCase):
             app = MagicMock()
             result = hd_module.register_hd_module(app)
             self.assertTrue(result)
-            app.register_blueprint.assert_called_once()
+            self.assertEqual(app.register_blueprint.call_count, 2)
 
     def test_health_endpoint(self):
         """HD health endpoint returns 200."""
@@ -587,7 +589,56 @@ class TestHdBlueprint(unittest.TestCase):
 
 
 # ═══════════════════════════════════════════════════════════
-# Test 7: Migrations
+# Test 7: Web UI Routes (Phase 2)
+# ═══════════════════════════════════════════════════════════
+
+class TestHdWebRoutes(unittest.TestCase):
+    """Test template rendering routes at /hd/*."""
+
+    def setUp(self):
+        from flask import Flask
+        from hd_module.blueprint import hd_bp, hd_web
+        self.app = Flask(__name__)
+        self.app.register_blueprint(hd_bp)
+        self.app.register_blueprint(hd_web)
+        self.client = self.app.test_client()
+
+    def test_root_redirects_to_login(self):
+        resp = self.client.get("/hd/")
+        self.assertIn(resp.status_code, (301, 302, 308))
+
+    def test_login_page_renders(self):
+        resp = self.client.get("/hd/login")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"PIN", resp.data)
+
+    def test_dashboard_page_renders(self):
+        resp = self.client.get("/hd/dashboard")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("bed-grid".encode(), resp.data)
+
+    def test_session_new_page_renders(self):
+        resp = self.client.get("/hd/session/new")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("Pre-HD".encode(), resp.data)
+
+    def test_session_detail_page_renders(self):
+        resp = self.client.get("/hd/session/1")
+        self.assertEqual(resp.status_code, 200)
+
+    def test_patient_list_page_renders(self):
+        resp = self.client.get("/hd/patients")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("patient-table".encode(), resp.data)
+
+    def test_alerts_page_renders(self):
+        resp = self.client.get("/hd/alerts")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn("alert-list".encode(), resp.data)
+
+
+# ═══════════════════════════════════════════════════════════
+# Test 8: Migrations
 # ═══════════════════════════════════════════════════════════
 
 class TestHdMigrations(unittest.TestCase):

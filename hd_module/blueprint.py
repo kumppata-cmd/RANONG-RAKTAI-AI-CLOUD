@@ -5,14 +5,72 @@ All routes under /hd/api/v1/.  Completely isolated from server.py.
 
 import logging
 from datetime import date, datetime, timezone  # noqa: F401
-from flask import Blueprint, request, jsonify, g  # noqa: F401
+from flask import (  # noqa: F401
+    Blueprint, request, jsonify, g, render_template, redirect, url_for,
+)
 
 from .auth import require_role  # noqa: F401
 from .audit import log_action
 
 logger = logging.getLogger(__name__)
 
-hd_bp = Blueprint("hd", __name__, url_prefix="/hd/api/v1")
+hd_bp = Blueprint(
+    "hd", __name__,
+    url_prefix="/hd/api/v1",
+    template_folder="templates",
+)
+
+# ── Web UI (template) routes ─────────────────────────────
+# Mounted at /hd/* via a second Blueprint so the API prefix
+# doesn't collide with page URLs.
+
+hd_web = Blueprint(
+    "hd_web", __name__,
+    url_prefix="/hd",
+    template_folder="templates",
+)
+
+
+@hd_web.route("/")
+def hd_index():
+    """Redirect root to login."""
+    return redirect(url_for("hd_web.hd_login_page"))
+
+
+@hd_web.route("/login")
+def hd_login_page():
+    """Render login page."""
+    return render_template("hd_login.html")
+
+
+@hd_web.route("/dashboard")
+def hd_dashboard_page():
+    """Render 30-bed dashboard."""
+    return render_template("hd_dashboard.html")
+
+
+@hd_web.route("/session/new")
+def hd_session_new():
+    """Render new HD session form (Pre/Intra/Post tabs)."""
+    return render_template("hd_session.html")
+
+
+@hd_web.route("/session/<int:session_id>")
+def hd_session_detail(session_id):
+    """Render existing HD session."""
+    return render_template("hd_session.html", session_id=session_id)
+
+
+@hd_web.route("/patients")
+def hd_patient_list_page():
+    """Render patient list."""
+    return render_template("hd_patient_list.html")
+
+
+@hd_web.route("/alerts")
+def hd_alerts_page():
+    """Render clinical alerts page."""
+    return render_template("hd_alerts.html")
 
 
 # ── Health / Status ───────────────────────────────────────

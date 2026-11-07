@@ -1,0 +1,160 @@
+{% extends "hd_base.html" %}
+{% block title %}แจ้งเตือนทางคลินิก{% endblock %}
+{% block nav_alerts %}active{% endblock %}
+{% block page_title %}🔔 แจ้งเตือนทางคลินิก{% endblock %}
+
+{% block extra_css %}
+<style>
+.alert-filters { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; }
+.filter-chip { padding: 10px 16px; border: 2px solid var(--border); border-radius: 20px; background: var(--bg-card); cursor: pointer; font-weight: 600; font-size: .85rem; min-height: var(--touch-min); display: flex; align-items: center; gap: 6px; color: var(--fg); }
+.filter-chip.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+.filter-chip .count { background: rgba(255,255,255,.2); padding: 1px 8px; border-radius: 10px; font-size: .75rem; }
+.alert-list { display: flex; flex-direction: column; gap: 12px; }
+.alert-item { padding: 16px; border-radius: var(--radius); border: 2px solid var(--border); background: var(--bg-card); display: flex; gap: 14px; align-items: flex-start; }
+.alert-item.critical { border-color: var(--danger); border-left-width: 6px; }
+.alert-item.warning { border-color: var(--warning); border-left-width: 6px; }
+.alert-item.info { border-color: var(--info); border-left-width: 6px; }
+.alert-item.acknowledged { opacity: .5; }
+.alert-icon { font-size: 1.5rem; min-width: 36px; text-align: center; }
+.alert-body { flex: 1; }
+.alert-title { font-weight: 700; font-size: .95rem; margin-bottom: 4px; }
+.alert-detail { font-size: .85rem; color: var(--fg-muted); margin-bottom: 6px; }
+.alert-meta { display: flex; gap: 12px; font-size: .75rem; color: var(--fg-muted); flex-wrap: wrap; align-items: center; }
+.alert-actions { display: flex; gap: 8px; align-items: center; }
+.btn-ack { padding: 8px 16px; border: 2px solid var(--success); border-radius: var(--radius-sm); background: transparent; color: var(--success); font-weight: 700; cursor: pointer; min-height: var(--touch-min); font-size: .85rem; }
+.btn-ack:active { background: var(--success); color: #fff; }
+.empty-state { text-align: center; padding: 60px 20px; color: var(--fg-muted); }
+.empty-state .icon { font-size: 3rem; margin-bottom: 12px; }
+.alert-summary { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.summary-card { padding: 12px 20px; border-radius: var(--radius-sm); display: flex; align-items: center; gap: 10px; border: 1px solid var(--border); background: var(--bg-card); }
+.summary-card .num { font-size: 1.4rem; font-weight: 800; }
+.summary-card .lbl { font-size: .8rem; color: var(--fg-muted); }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Summary -->
+<div class="alert-summary">
+  <div class="summary-card"><span class="num" style="color:var(--danger);" id="critCount">0</span><span class="lbl">🔴 วิกฤต</span></div>
+  <div class="summary-card"><span class="num" style="color:var(--warning);" id="warnCount">0</span><span class="lbl">🟡 เฝ้าระวัง</span></div>
+  <div class="summary-card"><span class="num" style="color:var(--info);" id="infoCount">0</span><span class="lbl">🔵 ข้อมูล</span></div>
+  <div class="summary-card"><span class="num" style="color:var(--fg-muted);" id="ackCount">0</span><span class="lbl">✅ รับทราบแล้ว</span></div>
+</div>
+
+<!-- Filters -->
+<div class="alert-filters">
+  <button class="filter-chip active" onclick="filterAlerts(this,'all')">ทั้งหมด <span class="count" id="countAll">0</span></button>
+  <button class="filter-chip" onclick="filterAlerts(this,'critical')">🔴 วิกฤต</button>
+  <button class="filter-chip" onclick="filterAlerts(this,'warning')">🟡 เฝ้าระวัง</button>
+  <button class="filter-chip" onclick="filterAlerts(this,'unack')">⏳ ยังไม่รับทราบ</button>
+</div>
+
+<!-- Alert List -->
+<div class="alert-list" id="alertList">
+  <div class="empty-state">
+    <div class="icon">✅</div>
+    <h3>ไม่มีแจ้งเตือน</h3>
+    <p>ระบบทำงานปกติ — ยังไม่มีแจ้งเตือนทางคลินิก</p>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let allAlerts = [];
+let currentFilter = 'all';
+
+const ALERT_ICONS = {
+  idh: '📉', severe_idh: '🚨', high_uf_rate: '💧',
+  excess_idwg: '⚖️', bradycardia: '💓', tachycardia: '💗',
+  missing_data: '❓'
+};
+const ALERT_SEVERITY = {
+  critical: {icon: '🔴', cls: 'critical'},
+  warning: {icon: '🟡', cls: 'warning'},
+  info: {icon: '🔵', cls: 'info'},
+};
+
+function renderAlerts(alerts){
+  const el = document.getElementById('alertList');
+  if(!alerts.length){
+    el.innerHTML = '<div class="empty-state"><div class="icon">✅</div><h3>ไม่มีแจ้งเตือน</h3><p>ไม่มีแจ้งเตือนที่ตรงกับตัวกรอง</p></div>';
+    return;
+  }
+  el.innerHTML = alerts.map(a => {
+    const sev = ALERT_SEVERITY[a.severity] || ALERT_SEVERITY.info;
+    const icon = ALERT_ICONS[a.rule_id] || '⚠️';
+    const ackClass = a.acknowledged ? ' acknowledged' : '';
+    const ackBtn = a.acknowledged
+      ? '<span style="color:var(--success);font-weight:600;font-size:.8rem;">✅ รับทราบแล้ว</span>'
+      : `<button class="btn-ack" onclick="acknowledgeAlert(${a.id},event)">✅ รับทราบ</button>`;
+    return `
+      <div class="alert-item ${sev.cls}${ackClass}">
+        <div class="alert-icon">${icon}</div>
+        <div class="alert-body">
+          <div class="alert-title">${a.title||a.rule_id||'แจ้งเตือน'}</div>
+          <div class="alert-detail">${a.message||''}</div>
+          <div class="alert-meta">
+            <span>🛏 เตียง ${a.bed_number||'-'}</span>
+            <span>👤 ${a.patient_name||'HN '+( a.patient_hn||'-')}</span>
+            <span>🕐 ${a.created_at||'-'}</span>
+          </div>
+        </div>
+        <div class="alert-actions">${ackBtn}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function filterAlerts(btn, filter){
+  currentFilter = filter;
+  document.querySelectorAll('.filter-chip').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  let filtered = allAlerts;
+  if(filter==='critical') filtered = allAlerts.filter(a=>a.severity==='critical');
+  else if(filter==='warning') filtered = allAlerts.filter(a=>a.severity==='warning');
+  else if(filter==='unack') filtered = allAlerts.filter(a=>!a.acknowledged);
+  renderAlerts(filtered);
+}
+
+function acknowledgeAlert(id, ev){
+  ev.stopPropagation();
+  fetch('/hd/api/v1/alerts/'+id+'/acknowledge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})
+    .then(r=>r.json())
+    .then(()=>{
+      const a = allAlerts.find(x=>x.id===id);
+      if(a) a.acknowledged = true;
+      updateCounts();
+      filterAlerts(document.querySelector('.filter-chip.active'), currentFilter);
+      showToast('รับทราบแจ้งเตือนแล้ว','success');
+    })
+    .catch(()=>showToast('ไม่สามารถรับทราบได้','danger'));
+}
+
+function updateCounts(){
+  const crit = allAlerts.filter(a=>a.severity==='critical').length;
+  const warn = allAlerts.filter(a=>a.severity==='warning').length;
+  const info = allAlerts.filter(a=>a.severity==='info').length;
+  const ack = allAlerts.filter(a=>a.acknowledged).length;
+  document.getElementById('critCount').textContent = crit;
+  document.getElementById('warnCount').textContent = warn;
+  document.getElementById('infoCount').textContent = info;
+  document.getElementById('ackCount').textContent = ack;
+  document.getElementById('countAll').textContent = allAlerts.length;
+}
+
+function fetchAlerts(){
+  fetch('/hd/api/v1/alerts')
+    .then(r=>r.json())
+    .then(data=>{
+      allAlerts = data.alerts || [];
+      updateCounts();
+      renderAlerts(allAlerts);
+    })
+    .catch(()=>{});
+}
+
+fetchAlerts();
+setInterval(fetchAlerts, 15000);
+</script>
+{% endblock %}

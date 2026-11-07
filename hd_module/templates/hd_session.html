@@ -1,0 +1,447 @@
+{% extends "hd_base.html" %}
+{% block title %}รอบฟอกเลือด{% endblock %}
+{% block nav_session %}active{% endblock %}
+{% block page_title %}💉 รอบฟอกเลือด{% endblock %}
+
+{% block extra_css %}
+<style>
+.session-header { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; margin-bottom: 20px; }
+.session-header .patient-info { flex: 1; }
+.session-header .patient-info h2 { font-size: 1.2rem; }
+.session-header .bed-badge { font-size: 2rem; font-weight: 800; background: var(--accent); color: #fff; width: 64px; height: 64px; border-radius: var(--radius); display: flex; align-items: center; justify-content: center; }
+.vital-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+@media (max-width: 600px) { .vital-grid { grid-template-columns: repeat(2, 1fr); } }
+.vital-input { text-align: center; }
+.vital-input label { font-size: .75rem; color: var(--fg-muted); display: block; margin-bottom: 4px; }
+.vital-input input { text-align: center; font-size: 1.3rem; font-weight: 700; padding: 14px; }
+.symptom-checks { display: flex; flex-wrap: wrap; gap: 10px; }
+.symptom-check { display: flex; align-items: center; gap: 6px; padding: 10px 14px; border: 2px solid var(--border); border-radius: var(--radius-sm); cursor: pointer; min-height: var(--touch-min); font-size: .9rem; background: var(--bg-card); }
+.symptom-check input { width: 20px; height: 20px; }
+.symptom-check.checked { border-color: var(--warning); background: rgba(243,156,18,.08); }
+.timeline { margin-top: 16px; }
+.timeline-entry { display: flex; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); align-items: flex-start; }
+.timeline-time { font-size: .8rem; color: var(--fg-muted); min-width: 50px; font-weight: 600; }
+.timeline-content { flex: 1; font-size: .85rem; }
+.timeline-badge { font-size: .7rem; padding: 2px 8px; border-radius: 10px; font-weight: 600; }
+.uf-progress-container { margin: 16px 0; }
+.uf-progress-label { display: flex; justify-content: space-between; font-size: .85rem; margin-bottom: 6px; }
+.idwg-calc { padding: 14px; background: rgba(52,152,219,.08); border-radius: var(--radius-sm); margin-top: 12px; font-size: .9rem; }
+.idwg-calc .value { font-size: 1.3rem; font-weight: 800; }
+.idwg-high { color: var(--danger); }
+.idwg-normal { color: var(--success); }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Session Header -->
+<div class="card session-header">
+  <div class="bed-badge" id="bedDisplay">-</div>
+  <div class="patient-info">
+    <h2 id="patientName">เลือกผู้ป่วย</h2>
+    <p style="color:var(--fg-muted);font-size:.85rem;" id="patientInfo">HN: - | ตาราง: -</p>
+  </div>
+  <div>
+    <span class="badge badge-info" id="sessionStatus">รอเริ่ม</span>
+  </div>
+</div>
+
+<!-- Tabs -->
+<div class="tabs" data-tab-group="session">
+  <button class="tab active" data-tab="pre" onclick="switchTab('session','pre')">📋 Pre-HD</button>
+  <button class="tab" data-tab="intra" onclick="switchTab('session','intra')">💉 Intra-HD</button>
+  <button class="tab" data-tab="post" onclick="switchTab('session','post')">✅ Post-HD</button>
+</div>
+
+<!-- ═══ PRE-HD TAB ═══ -->
+<div class="tab-content active" data-tab-content-group="session" data-tab-content="pre">
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">👤 ข้อมูลผู้ป่วยและเตียง</div>
+    <div class="grid-2">
+      <div class="form-group">
+        <label class="form-label">ผู้ป่วย</label>
+        <select class="form-control" id="patientSelect" onchange="onPatientSelect()">
+          <option value="">-- เลือกผู้ป่วย --</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label class="form-label">เตียง</label>
+        <select class="form-control" id="bedSelect">
+          <option value="">-- เลือกเตียง --</option>
+          {% for i in range(1,31) %}
+          <option value="{{ i }}">เตียง {{ i }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">❤️ Vital Signs (ก่อนฟอก)</div>
+    <div class="vital-grid">
+      <div class="vital-input">
+        <label>SBP (mmHg)</label>
+        <input type="number" class="form-control" id="preSbp" inputmode="numeric" placeholder="120">
+      </div>
+      <div class="vital-input">
+        <label>DBP (mmHg)</label>
+        <input type="number" class="form-control" id="preDbp" inputmode="numeric" placeholder="80">
+      </div>
+      <div class="vital-input">
+        <label>HR (bpm)</label>
+        <input type="number" class="form-control" id="preHr" inputmode="numeric" placeholder="80">
+      </div>
+      <div class="vital-input">
+        <label>Temp (°C)</label>
+        <input type="number" class="form-control" id="preTemp" inputmode="decimal" step="0.1" placeholder="36.5">
+      </div>
+      <div class="vital-input">
+        <label>SpO2 (%)</label>
+        <input type="number" class="form-control" id="preSpo2" inputmode="numeric" placeholder="98">
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">⚖️ น้ำหนัก</div>
+    <div class="grid-3">
+      <div class="vital-input">
+        <label>น้ำหนักก่อนฟอก (kg)</label>
+        <input type="number" class="form-control" id="preWeight" inputmode="decimal" step="0.1" placeholder="55.0" oninput="calcIDWG()">
+      </div>
+      <div class="vital-input">
+        <label>Dry Weight (kg)</label>
+        <input type="number" class="form-control" id="dryWeight" inputmode="decimal" step="0.1" placeholder="53.0" oninput="calcIDWG()">
+      </div>
+      <div class="vital-input">
+        <label>น้ำหนักหลังฟอกครั้งก่อน (kg)</label>
+        <input type="number" class="form-control" id="prevPostWeight" inputmode="decimal" step="0.1" placeholder="53.5">
+      </div>
+    </div>
+    <div class="idwg-calc" id="idwgCalc" style="display:none;">
+      IDWG: <span class="value" id="idwgValue">-</span> kg (<span id="idwgPct">-</span>% ของ DW)
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">📝 อาการก่อนฟอก</div>
+    <div class="symptom-checks">
+      <label class="symptom-check"><input type="checkbox" name="pre_symptom" value="ไข้" onchange="toggleCheck(this)"> 🤒 ไข้</label>
+      <label class="symptom-check"><input type="checkbox" name="pre_symptom" value="หน้ามืด" onchange="toggleCheck(this)"> 😵 หน้ามืด</label>
+      <label class="symptom-check"><input type="checkbox" name="pre_symptom" value="คลื่นไส้" onchange="toggleCheck(this)"> 🤢 คลื่นไส้</label>
+      <label class="symptom-check"><input type="checkbox" name="pre_symptom" value="บวม" onchange="toggleCheck(this)"> 💧 บวม</label>
+      <label class="symptom-check"><input type="checkbox" name="pre_symptom" value="เหนื่อย" onchange="toggleCheck(this)"> 😮‍💨 เหนื่อย</label>
+      <label class="symptom-check"><input type="checkbox" name="pre_symptom" value="เจ็บหน้าอก" onchange="toggleCheck(this)"> 💔 เจ็บหน้าอก</label>
+      <label class="symptom-check"><input type="checkbox" name="pre_symptom" value="อื่นๆ" onchange="toggleCheck(this)"> 📝 อื่นๆ</label>
+    </div>
+  </div>
+
+  <button class="btn btn-success btn-lg btn-block" onclick="startSession()">
+    ▶️ เริ่มฟอกเลือด
+  </button>
+</div>
+
+<!-- ═══ INTRA-HD TAB ═══ -->
+<div class="tab-content" data-tab-content-group="session" data-tab-content="intra">
+  <!-- Alert Banner -->
+  <div class="alert-banner alert-banner-danger" id="intraCriticalAlert" style="display:none;">
+    🚨 <span id="criticalAlertText">-</span>
+  </div>
+  <div class="alert-banner alert-banner-warning" id="intraWarningAlert" style="display:none;">
+    ⚠️ <span id="warningAlertText">-</span>
+  </div>
+
+  <!-- UF Progress -->
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">💧 UF Progress</div>
+    <div class="uf-progress-container">
+      <div class="uf-progress-label">
+        <span>UF Removed: <strong id="ufRemoved">0</strong> mL</span>
+        <span>UF Goal: <strong id="ufGoal">2000</strong> mL</span>
+      </div>
+      <div class="progress">
+        <div class="progress-bar" id="ufProgressBar" style="width:0%;background:var(--success);">0%</div>
+      </div>
+      <p style="font-size:.8rem;color:var(--fg-muted);margin-top:6px;">UF Rate: <strong id="ufRate">-</strong> mL/hr | Remaining: <strong id="ufRemaining">-</strong> mL</p>
+    </div>
+  </div>
+
+  <!-- Action Buttons -->
+  <div class="grid-2" style="margin-bottom:16px;">
+    <button class="btn btn-primary btn-lg" onclick="openModal('vitalModal')">
+      ❤️ บันทึก Vital Signs
+    </button>
+    <button class="btn btn-warning btn-lg" onclick="openModal('ufModal')">
+      💧 บันทึก UF
+    </button>
+  </div>
+
+  <!-- Timeline -->
+  <div class="card">
+    <div class="card-header">📜 บันทึกระหว่างฟอก</div>
+    <div class="timeline" id="intraTimeline">
+      <p style="color:var(--fg-muted);font-size:.9rem;text-align:center;padding:20px;">ยังไม่มีข้อมูล — กดปุ่มด้านบนเพื่อบันทึก</p>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ POST-HD TAB ═══ -->
+<div class="tab-content" data-tab-content-group="session" data-tab-content="post">
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">❤️ Vital Signs (หลังฟอก)</div>
+    <div class="vital-grid">
+      <div class="vital-input">
+        <label>SBP (mmHg)</label>
+        <input type="number" class="form-control" id="postSbp" inputmode="numeric" placeholder="120">
+      </div>
+      <div class="vital-input">
+        <label>DBP (mmHg)</label>
+        <input type="number" class="form-control" id="postDbp" inputmode="numeric" placeholder="80">
+      </div>
+      <div class="vital-input">
+        <label>HR (bpm)</label>
+        <input type="number" class="form-control" id="postHr" inputmode="numeric" placeholder="80">
+      </div>
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">⚖️ น้ำหนักหลังฟอก</div>
+    <div class="grid-2">
+      <div class="vital-input">
+        <label>น้ำหนักหลังฟอก (kg)</label>
+        <input type="number" class="form-control" id="postWeight" inputmode="decimal" step="0.1" placeholder="53.0" oninput="calcActualUF()">
+      </div>
+      <div class="vital-input">
+        <label>Actual UF (mL)</label>
+        <input type="number" class="form-control" id="actualUf" readonly style="background:var(--bg);font-weight:700;">
+      </div>
+    </div>
+    <div class="idwg-calc" id="postWeightCompare" style="display:none;">
+      Post Weight vs DW: <span class="value" id="postVsDw">-</span> kg
+    </div>
+  </div>
+
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">📝 อาการหลังฟอก</div>
+    <div class="symptom-checks">
+      <label class="symptom-check"><input type="checkbox" name="post_symptom" value="หน้ามืด" onchange="toggleCheck(this)"> 😵 หน้ามืด</label>
+      <label class="symptom-check"><input type="checkbox" name="post_symptom" value="ตะคริว" onchange="toggleCheck(this)"> 🦵 ตะคริว</label>
+      <label class="symptom-check"><input type="checkbox" name="post_symptom" value="คลื่นไส้" onchange="toggleCheck(this)"> 🤢 คลื่นไส้</label>
+      <label class="symptom-check"><input type="checkbox" name="post_symptom" value="เลือดออก" onchange="toggleCheck(this)"> 🩸 เลือดออก</label>
+      <label class="symptom-check"><input type="checkbox" name="post_symptom" value="ปกติ" onchange="toggleCheck(this)"> ✅ ปกติดี</label>
+    </div>
+    <div class="form-group" style="margin-top:12px;">
+      <label class="form-label">หมายเหตุ</label>
+      <textarea class="form-control" id="postNotes" rows="3" placeholder="บันทึกเพิ่มเติม (ถ้ามี)"></textarea>
+    </div>
+  </div>
+
+  <button class="btn btn-success btn-lg btn-block" onclick="endSession()">
+    ✅ เสร็จสิ้นรอบฟอก
+  </button>
+</div>
+
+<!-- ═══ MODALS ═══ -->
+
+<!-- Vital Signs Modal -->
+<div class="modal-overlay" id="vitalModal">
+  <div class="modal">
+    <div class="modal-title">❤️ บันทึก Vital Signs</div>
+    <div class="vital-grid">
+      <div class="vital-input">
+        <label>SBP</label>
+        <input type="number" class="form-control" id="modalSbp" inputmode="numeric">
+      </div>
+      <div class="vital-input">
+        <label>DBP</label>
+        <input type="number" class="form-control" id="modalDbp" inputmode="numeric">
+      </div>
+      <div class="vital-input">
+        <label>HR</label>
+        <input type="number" class="form-control" id="modalHr" inputmode="numeric">
+      </div>
+      <div class="vital-input">
+        <label>Temp</label>
+        <input type="number" class="form-control" id="modalTemp" inputmode="decimal" step="0.1">
+      </div>
+      <div class="vital-input">
+        <label>SpO2</label>
+        <input type="number" class="form-control" id="modalSpo2" inputmode="numeric">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal('vitalModal')">ยกเลิก</button>
+      <button class="btn btn-primary" onclick="saveIntraVital()">💾 บันทึก</button>
+    </div>
+  </div>
+</div>
+
+<!-- UF Modal -->
+<div class="modal-overlay" id="ufModal">
+  <div class="modal">
+    <div class="modal-title">💧 บันทึก UF</div>
+    <div class="vital-grid">
+      <div class="vital-input">
+        <label>UF Removed (mL)</label>
+        <input type="number" class="form-control" id="modalUfRemoved" inputmode="numeric">
+      </div>
+      <div class="vital-input">
+        <label>UF Remaining (mL)</label>
+        <input type="number" class="form-control" id="modalUfRemaining" inputmode="numeric">
+      </div>
+      <div class="vital-input">
+        <label>UF Rate (mL/hr)</label>
+        <input type="number" class="form-control" id="modalUfRate" inputmode="numeric">
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal('ufModal')">ยกเลิก</button>
+      <button class="btn btn-warning" onclick="saveUfRecord()">💾 บันทึก</button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let sessionData = {session_id: null, pre_weight: 0, dry_weight: 0};
+const timeline = [];
+
+/* URL params */
+const params = new URLSearchParams(window.location.search);
+if(params.get('bed')) document.getElementById('bedSelect').value = params.get('bed');
+
+/* Load patients */
+fetch('/hd/api/v1/patients').then(r=>r.json()).then(d=>{
+  const sel = document.getElementById('patientSelect');
+  (d.patients||[]).forEach(p=>{
+    const opt = document.createElement('option');
+    opt.value = p.hn; opt.textContent = p.hn + ' — ' + (p.name||'');
+    sel.appendChild(opt);
+  });
+}).catch(()=>{});
+
+function onPatientSelect(){
+  const hn = document.getElementById('patientSelect').value;
+  if(!hn) return;
+  fetch('/hd/api/v1/patients/'+hn).then(r=>r.json()).then(p=>{
+    document.getElementById('patientName').textContent = p.name || 'HN '+hn;
+    document.getElementById('patientInfo').textContent = 'HN: '+hn+' | '+( p.schedule_days||'-');
+    if(p.dry_weight) document.getElementById('dryWeight').value = p.dry_weight;
+  }).catch(()=>{});
+}
+
+function toggleCheck(el){ el.closest('.symptom-check').classList.toggle('checked', el.checked); }
+
+function calcIDWG(){
+  const w = parseFloat(document.getElementById('preWeight').value);
+  const dw = parseFloat(document.getElementById('dryWeight').value);
+  const el = document.getElementById('idwgCalc');
+  if(w && dw && dw > 0){
+    const idwg = w - dw;
+    const pct = ((idwg/dw)*100).toFixed(1);
+    document.getElementById('idwgValue').textContent = idwg.toFixed(1);
+    document.getElementById('idwgPct').textContent = pct;
+    const valEl = document.getElementById('idwgValue');
+    valEl.className = 'value ' + (pct > 4 ? 'idwg-high' : 'idwg-normal');
+    el.style.display = 'block';
+  } else { el.style.display = 'none'; }
+}
+
+function calcActualUF(){
+  const pre = parseFloat(document.getElementById('preWeight').value) || sessionData.pre_weight;
+  const post = parseFloat(document.getElementById('postWeight').value);
+  if(pre && post){
+    const uf = ((pre - post)*1000).toFixed(0);
+    document.getElementById('actualUf').value = uf;
+    const dw = parseFloat(document.getElementById('dryWeight').value) || sessionData.dry_weight;
+    if(dw){
+      const diff = (post - dw).toFixed(1);
+      document.getElementById('postVsDw').textContent = (diff>=0?'+':'')+diff;
+      document.getElementById('postWeightCompare').style.display = 'block';
+    }
+  }
+}
+
+function startSession(){
+  const hn = document.getElementById('patientSelect').value;
+  const bed = document.getElementById('bedSelect').value;
+  if(!hn){ showToast('กรุณาเลือกผู้ป่วย','warning'); return; }
+  if(!bed){ showToast('กรุณาเลือกเตียง','warning'); return; }
+  sessionData.pre_weight = parseFloat(document.getElementById('preWeight').value) || 0;
+  sessionData.dry_weight = parseFloat(document.getElementById('dryWeight').value) || 0;
+
+  const data = {
+    patient_hn: hn, bed_number: parseInt(bed),
+    pre_sbp: parseInt(document.getElementById('preSbp').value),
+    pre_dbp: parseInt(document.getElementById('preDbp').value),
+    pre_hr: parseInt(document.getElementById('preHr').value),
+    pre_weight: sessionData.pre_weight,
+    dry_weight: sessionData.dry_weight,
+  };
+  fetch('/hd/api/v1/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+    .then(r=>r.json())
+    .then(d=>{
+      sessionData.session_id = d.session_id || 1;
+      document.getElementById('bedDisplay').textContent = bed;
+      document.getElementById('sessionStatus').textContent = 'กำลังฟอก';
+      document.getElementById('sessionStatus').className = 'badge badge-success';
+      showToast('เริ่มฟอกเลือดสำเร็จ','success');
+      switchTab('session','intra');
+    })
+    .catch(()=>showToast('ไม่สามารถเริ่มรอบฟอกได้','danger'));
+}
+
+function saveIntraVital(){
+  const entry = {
+    time: new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}),
+    type: 'vital',
+    sbp: document.getElementById('modalSbp').value,
+    dbp: document.getElementById('modalDbp').value,
+    hr: document.getElementById('modalHr').value,
+  };
+  timeline.push(entry);
+  renderTimeline();
+  closeModal('vitalModal');
+  showToast('บันทึก Vital Signs สำเร็จ','success');
+  ['modalSbp','modalDbp','modalHr','modalTemp','modalSpo2'].forEach(id=>{document.getElementById(id).value='';});
+}
+
+function saveUfRecord(){
+  const removed = document.getElementById('modalUfRemoved').value;
+  const remaining = document.getElementById('modalUfRemaining').value;
+  const rate = document.getElementById('modalUfRate').value;
+  document.getElementById('ufRemoved').textContent = removed || '0';
+  document.getElementById('ufRemaining').textContent = remaining || '-';
+  document.getElementById('ufRate').textContent = rate || '-';
+  const goal = parseInt(document.getElementById('ufGoal').textContent) || 2000;
+  const pct = Math.min(100, Math.round((parseInt(removed)||0)/goal*100));
+  const bar = document.getElementById('ufProgressBar');
+  bar.style.width = pct+'%'; bar.textContent = pct+'%';
+  bar.style.background = pct > 90 ? 'var(--warning)' : 'var(--success)';
+
+  timeline.push({time: new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}), type:'uf', removed, remaining, rate});
+  renderTimeline();
+  closeModal('ufModal');
+  showToast('บันทึก UF สำเร็จ','success');
+}
+
+function renderTimeline(){
+  const el = document.getElementById('intraTimeline');
+  if(!timeline.length){ el.innerHTML='<p style="color:var(--fg-muted);text-align:center;padding:20px;">ยังไม่มีข้อมูล</p>'; return; }
+  el.innerHTML = timeline.slice().reverse().map(e=>{
+    if(e.type==='vital')
+      return `<div class="timeline-entry"><span class="timeline-time">${e.time}</span><span class="timeline-content">❤️ BP ${e.sbp}/${e.dbp} mmHg, HR ${e.hr} bpm</span><span class="timeline-badge badge-info">Vital</span></div>`;
+    if(e.type==='uf')
+      return `<div class="timeline-entry"><span class="timeline-time">${e.time}</span><span class="timeline-content">💧 UF removed ${e.removed} mL, remaining ${e.remaining} mL, rate ${e.rate} mL/hr</span><span class="timeline-badge badge-warning">UF</span></div>`;
+    return '';
+  }).join('');
+}
+
+function endSession(){
+  showToast('เสร็จสิ้นรอบฟอก — บันทึกสำเร็จ','success');
+  document.getElementById('sessionStatus').textContent = 'เสร็จแล้ว';
+  document.getElementById('sessionStatus').className = 'badge badge-muted';
+}
+</script>
+{% endblock %}
