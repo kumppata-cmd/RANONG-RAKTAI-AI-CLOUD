@@ -2841,6 +2841,293 @@ def api_dialysis_import():
     })
 
 
+# ─── Dialysis Import Page (Web UI) ──────────────────────────
+@app.route("/admin/dialysis-import")
+def admin_dialysis_import_page():
+    """หน้าเว็บสำหรับ Import ข้อมูลผู้ป่วยไตเทียมจาก Excel — Admin only"""
+    admin_secret = os.getenv("ADMIN_SECRET", "").strip()
+    if not admin_secret:
+        return "ADMIN_SECRET not configured", 500
+    auth = request.cookies.get("admin_token", "") or request.args.get("token", "")
+    if auth != admin_secret:
+        return "Unauthorized — กรุณาเข้าผ่าน Admin Portal", 401
+
+    current_count = master_registry.count() if master_registry else 0
+    html = f'''<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Import ข้อมูลผู้ป่วยไตเทียม — Ranong Raktai AI</title>
+<style>
+:root {{
+  --bg: #f5f7fa; --card: #fff; --fg: #1a1a2e; --muted: #6b7280;
+  --primary: #0d6efd; --primary-dark: #0b5ed7; --success: #198754;
+  --warning: #ffc107; --danger: #dc3545; --border: #dee2e6;
+  --radius: 12px; --shadow: 0 2px 12px rgba(0,0,0,.08);
+}}
+@media (prefers-color-scheme: dark) {{
+  :root {{ --bg: #111827; --card: #1f2937; --fg: #f3f4f6; --muted: #9ca3af;
+    --border: #374151; --shadow: 0 2px 12px rgba(0,0,0,.3); }}
+}}
+* {{ box-sizing: border-box; margin: 0; padding: 0; }}
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: var(--bg); color: var(--fg); padding: 20px; max-width: 960px; margin: 0 auto; }}
+h1 {{ font-size: 1.5rem; margin-bottom: 8px; }}
+.subtitle {{ color: var(--muted); font-size: .9rem; margin-bottom: 24px; }}
+.card {{ background: var(--card); border-radius: var(--radius); padding: 24px;
+  box-shadow: var(--shadow); margin-bottom: 20px; }}
+.stat {{ display: inline-block; background: var(--primary); color: #fff;
+  padding: 4px 12px; border-radius: 20px; font-size: .85rem; margin-bottom: 16px; }}
+.drop-zone {{ border: 2px dashed var(--border); border-radius: var(--radius);
+  padding: 40px 20px; text-align: center; cursor: pointer; transition: .2s; }}
+.drop-zone:hover, .drop-zone.drag-over {{ border-color: var(--primary);
+  background: rgba(13,110,253,.05); }}
+.drop-zone input {{ display: none; }}
+.drop-zone .icon {{ font-size: 3rem; margin-bottom: 8px; }}
+.btn {{ display: inline-flex; align-items: center; gap: 6px;
+  padding: 10px 24px; border-radius: 8px; border: none; cursor: pointer;
+  font-size: .95rem; font-weight: 600; transition: .2s; }}
+.btn-primary {{ background: var(--primary); color: #fff; }}
+.btn-primary:hover {{ background: var(--primary-dark); }}
+.btn-primary:disabled {{ opacity: .5; cursor: not-allowed; }}
+.btn-danger {{ background: var(--danger); color: #fff; }}
+.btn-danger:hover {{ opacity: .85; }}
+table {{ width: 100%; border-collapse: collapse; font-size: .85rem; }}
+th, td {{ padding: 8px 10px; text-align: left; border-bottom: 1px solid var(--border); }}
+th {{ background: rgba(13,110,253,.06); font-weight: 600; position: sticky; top: 0; }}
+.table-wrap {{ max-height: 400px; overflow-y: auto; border-radius: 8px;
+  border: 1px solid var(--border); }}
+.badge {{ display: inline-block; padding: 2px 8px; border-radius: 12px;
+  font-size: .75rem; font-weight: 600; }}
+.badge-new {{ background: #d1fae5; color: #065f46; }}
+.badge-update {{ background: #fef3c7; color: #92400e; }}
+.badge-skip {{ background: #fee2e2; color: #991b1b; }}
+.progress-bar {{ width: 100%; height: 8px; background: var(--border);
+  border-radius: 4px; overflow: hidden; margin: 12px 0; }}
+.progress-fill {{ height: 100%; background: var(--primary); transition: width .3s; }}
+.result {{ padding: 16px; border-radius: 8px; margin-top: 16px; }}
+.result-success {{ background: #d1fae5; color: #065f46; }}
+.result-error {{ background: #fee2e2; color: #991b1b; }}
+.hidden {{ display: none; }}
+.summary-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px; margin: 16px 0; }}
+.summary-item {{ text-align: center; padding: 12px; background: rgba(13,110,253,.04);
+  border-radius: 8px; }}
+.summary-item .num {{ font-size: 1.8rem; font-weight: 700; color: var(--primary); }}
+.summary-item .label {{ font-size: .8rem; color: var(--muted); }}
+</style>
+</head>
+<body>
+<h1>📥 Import ข้อมูลผู้ป่วยไตเทียม</h1>
+<p class="subtitle">อัปโหลดไฟล์ Excel ตารางฟอกเลือดและติดตามยา ESA</p>
+
+<div class="card">
+  <span class="stat">🏥 ผู้ป่วยในระบบปัจจุบัน: {current_count} คน</span>
+  <div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+    <div class="icon">📄</div>
+    <p><strong>คลิกเลือกไฟล์ หรือลากไฟล์มาวาง</strong></p>
+    <p style="color:var(--muted);font-size:.85rem;margin-top:8px">
+      รองรับ .xlsx, .xls — ตารางฟอกเลือด (คอลัมน์: ลำดับ, ชื่อ, HN รพ., HN คลินิก, รอบ, HD/สัปดาห์, ..., ESA)</p>
+    <input type="file" id="fileInput" accept=".xlsx,.xls">
+  </div>
+</div>
+
+<div id="previewSection" class="card hidden">
+  <h2 style="margin-bottom:12px">📋 ตรวจสอบข้อมูลก่อน Import</h2>
+  <div id="fileSummary"></div>
+  <div class="summary-grid" id="summaryGrid"></div>
+  <div class="table-wrap" id="tableWrap"></div>
+  <div style="margin-top:16px;display:flex;gap:12px">
+    <button class="btn btn-primary" id="btnImport" onclick="doImport()">
+      ✅ ยืนยัน Import
+    </button>
+    <button class="btn btn-danger" onclick="resetAll()">❌ ยกเลิก</button>
+  </div>
+</div>
+
+<div id="progressSection" class="card hidden">
+  <h2>⏳ กำลัง Import...</h2>
+  <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+  <p id="progressText" style="color:var(--muted);font-size:.9rem"></p>
+</div>
+
+<div id="resultSection" class="hidden"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script>
+const ADMIN_SECRET = document.cookie.split(';')
+  .map(c=>c.trim()).find(c=>c.startsWith('admin_token='));
+const AUTH_TOKEN = ADMIN_SECRET ? ADMIN_SECRET.split('=')[1] : '';
+const API_URL = '/admin/api/v2/dialysis/import';
+
+let parsedPatients = [];
+
+// Column mapping (0-indexed): ลำดับ(0), ชื่อ(1), HN รพ.(2), HN คลินิก(3),
+// รอบ(4), HD/สัปดาห์(5), col6-11=other, ESA(12), กะ(13), เตียง(14)
+function parseExcelRow(row) {{
+  const name = row[1];
+  if (!name || String(name).trim() === '') return null;
+  const clinicHn = cleanHn(row[3]);
+  const hospitalHn = cleanHn(row[2]);
+  if (!clinicHn && !hospitalHn) return null;
+  return {{
+    clinic_hn: clinicHn,
+    hospital_hn: hospitalHn,
+    patient_name: String(name).trim(),
+    dialysis_schedule: row[4] ? String(row[4]).trim() : '',
+    hd_per_week: parseInt(row[5]) || 0,
+    esa_code: row[12] ? String(row[12]).trim() : '',
+    vascular_access: ''
+  }};
+}}
+
+function cleanHn(val) {{
+  if (val == null) return '';
+  if (typeof val === 'number') return String(Math.floor(val));
+  return String(val).trim().split('.')[0];
+}}
+
+// Drag & drop
+const dz = document.getElementById('dropZone');
+dz.addEventListener('dragover', e => {{ e.preventDefault(); dz.classList.add('drag-over'); }});
+dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'));
+dz.addEventListener('drop', e => {{
+  e.preventDefault(); dz.classList.remove('drag-over');
+  if (e.dataTransfer.files.length) handleFile(e.dataTransfer.files[0]);
+}});
+document.getElementById('fileInput').addEventListener('change', e => {{
+  if (e.target.files.length) handleFile(e.target.files[0]);
+}});
+
+function handleFile(file) {{
+  if (!file.name.match(/\\.xlsx?$/i)) {{
+    alert('กรุณาเลือกไฟล์ Excel (.xlsx หรือ .xls)');
+    return;
+  }}
+  const reader = new FileReader();
+  reader.onload = function(e) {{
+    try {{
+      const wb = XLSX.read(e.target.result, {{type:'array'}});
+      const ws = wb.Sheets[wb.SheetNames[0]];
+      const rows = XLSX.utils.sheet_to_json(ws, {{header:1, defval:''}});
+      // Skip header row
+      parsedPatients = [];
+      for (let i = 1; i < rows.length; i++) {{
+        const p = parseExcelRow(rows[i]);
+        if (p) parsedPatients.push(p);
+      }}
+      showPreview(file.name);
+    }} catch(err) {{
+      alert('❌ อ่านไฟล์ไม่ได้: ' + err.message);
+    }}
+  }};
+  reader.readAsArrayBuffer(file);
+}}
+
+function showPreview(fileName) {{
+  document.getElementById('previewSection').classList.remove('hidden');
+
+  // ESA summary
+  const esaCounts = {{}};
+  const schedCounts = {{}};
+  parsedPatients.forEach(p => {{
+    if (p.esa_code) esaCounts[p.esa_code] = (esaCounts[p.esa_code]||0) + 1;
+    if (p.dialysis_schedule) schedCounts[p.dialysis_schedule] = (schedCounts[p.dialysis_schedule]||0) + 1;
+  }});
+
+  document.getElementById('fileSummary').innerHTML =
+    `<p>📄 <strong>${{fileName}}</strong></p>`;
+
+  const grid = document.getElementById('summaryGrid');
+  grid.innerHTML = `
+    <div class="summary-item"><div class="num">${{parsedPatients.length}}</div><div class="label">ผู้ป่วยทั้งหมด</div></div>
+    <div class="summary-item"><div class="num">${{Object.keys(esaCounts).length}}</div><div class="label">ชนิด ESA</div></div>
+    <div class="summary-item"><div class="num">${{Object.keys(schedCounts).length}}</div><div class="label">รูปแบบรอบฟอก</div></div>
+  `;
+
+  // Table
+  let tableHtml = '<table><thead><tr><th>#</th><th>HN คลินิก</th><th>HN รพ.</th><th>ชื่อ-สกุล</th><th>รอบฟอก</th><th>HD/wk</th><th>ESA</th></tr></thead><tbody>';
+  parsedPatients.forEach((p, i) => {{
+    tableHtml += `<tr>
+      <td>${{i+1}}</td>
+      <td>${{p.clinic_hn||'-'}}</td>
+      <td>${{p.hospital_hn||'-'}}</td>
+      <td>${{p.patient_name}}</td>
+      <td>${{p.dialysis_schedule||'-'}}</td>
+      <td>${{p.hd_per_week||'-'}}</td>
+      <td>${{p.esa_code||'-'}}</td>
+    </tr>`;
+  }});
+  tableHtml += '</tbody></table>';
+  document.getElementById('tableWrap').innerHTML = tableHtml;
+}}
+
+async function doImport() {{
+  if (!parsedPatients.length) return;
+  if (!confirm(`ยืนยัน Import ผู้ป่วย ${{parsedPatients.length}} คน?`)) return;
+
+  const btn = document.getElementById('btnImport');
+  btn.disabled = true;
+  document.getElementById('progressSection').classList.remove('hidden');
+  document.getElementById('progressFill').style.width = '30%';
+  document.getElementById('progressText').textContent = 'กำลังส่งข้อมูล...';
+
+  try {{
+    const resp = await fetch(API_URL, {{
+      method: 'POST',
+      headers: {{
+        'Content-Type': 'application/json',
+        'X-Admin-Secret': AUTH_TOKEN
+      }},
+      body: JSON.stringify({{ patients: parsedPatients }})
+    }});
+    document.getElementById('progressFill').style.width = '100%';
+    const data = await resp.json();
+
+    const rs = document.getElementById('resultSection');
+    rs.classList.remove('hidden');
+    if (data.success) {{
+      rs.innerHTML = `<div class="result result-success">
+        <h3>✅ Import สำเร็จ!</h3>
+        <div class="summary-grid" style="margin-top:12px">
+          <div class="summary-item"><div class="num">${{data.new}}</div><div class="label">เพิ่มใหม่</div></div>
+          <div class="summary-item"><div class="num">${{data.updated}}</div><div class="label">อัปเดต</div></div>
+          <div class="summary-item"><div class="num">${{data.skipped}}</div><div class="label">ข้าม</div></div>
+        </div>
+        <p style="margin-top:12px">${{(data.messages||[]).join('<br>')}}</p>
+      </div>`;
+      document.getElementById('progressSection').classList.add('hidden');
+    }} else {{
+      rs.innerHTML = `<div class="result result-error">
+        <h3>❌ Import ไม่สำเร็จ</h3>
+        <p>${{data.error || JSON.stringify(data)}}</p>
+      </div>`;
+    }}
+  }} catch(err) {{
+    const rs = document.getElementById('resultSection');
+    rs.classList.remove('hidden');
+    rs.innerHTML = `<div class="result result-error">
+      <h3>❌ เกิดข้อผิดพลาด</h3>
+      <p>${{err.message}}</p>
+    </div>`;
+  }}
+  btn.disabled = false;
+}}
+
+function resetAll() {{
+  parsedPatients = [];
+  document.getElementById('previewSection').classList.add('hidden');
+  document.getElementById('progressSection').classList.add('hidden');
+  document.getElementById('resultSection').classList.add('hidden');
+  document.getElementById('fileInput').value = '';
+}}
+</script>
+</body>
+</html>'''
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
 @app.route("/admin/api/v2/dialysis/profile", methods=["GET"])
 def api_dialysis_profile():
     """ดูข้อมูลไตเทียมของผู้ป่วยรายคน — Admin only"""
