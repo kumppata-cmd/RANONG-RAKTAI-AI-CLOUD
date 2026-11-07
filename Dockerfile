@@ -56,6 +56,8 @@ COPY database.py .
 COPY lab_intelligence_agent.py .
 COPY utils.py .
 COPY treatment_tracker.py .
+COPY ckd_knowledge.py .
+COPY patient_summary_agent.py .
 COPY patient_link_code.py .
 COPY appointment_reminder.py .
 

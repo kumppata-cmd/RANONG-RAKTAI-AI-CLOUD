@@ -8587,10 +8587,28 @@ def handle_search_command(
                     "urgency": esc["urgency"],
                     "category": esc["category"],
                 })
-                # Notify admin users via push_message
-                for admin_hash in ADMIN_USERS:
-                    # Cannot push to hash — admin notification handled via dashboard
-                    pass
+                # Push LINE ไปเจ้าหน้าที่ทุกคน
+                try:
+                    _staff_ids = _staff_line_ids()
+                    _patient_name = ""
+                    if master_registry:
+                        _pr = master_registry.find_by_line_hash(user_hash)
+                        if _pr:
+                            _patient_name = f" ({_pr.get('name', '')} HN {_pr.get('hn', '')})"
+                    _notif_text = (
+                        f"📢 ผู้ป่วยติดต่อ{_patient_name}\n"
+                        f"━━━━━━━━━━━━━━\n"
+                        f"เรื่อง: {msg}\n"
+                        f"ความเร่งด่วน: {esc.get('urgency', 'ปกติ')}\n"
+                        f"เวลา: {esc.get('created_at', '')[:16]}"
+                    )
+                    for _sid in _staff_ids:
+                        try:
+                            push_message(_sid, _notif_text)
+                        except Exception:
+                            pass
+                except Exception as _notif_err:
+                    logger.warning(f"Staff notification error: {_notif_err}")
                 return format_escalation_confirmation(esc)
         except ImportError:
             logger.warning("Feature 6: line_patient_assistant module not available")
@@ -10988,6 +11006,102 @@ def handle_search_command(
             return treatment_tracker.format_pending_for_line(_pending)
         except Exception:
             return "ขออภัย ไม่สามารถดึงรายการติดตามได้"
+
+    # ── ข้อ 3: Multi-Agent Patient Summary (สรุปทั้งหมด HN) ──
+    _summary_all_match = re.match(
+        r"^(?:สรุปทั้งหมด|สรุปครบ|summary)\s+(?:HN\s*)?(\d{3,10})$",
+        text_stripped, re.IGNORECASE)
+    if _summary_all_match:
+        _sa_hn = _summary_all_match.group(1)
+        try:
+            from patient_summary_agent import build_patient_summary_flex
+            _sa_flex = build_patient_summary_flex(
+                hn=_sa_hn,
+                master_registry=master_registry,
+                lab_agent=None,
+                treatment_tracker=treatment_tracker,
+                appointment_store=None,
+                storage=storage,
+            )
+            if _sa_flex:
+                return _sa_flex  # dict → webhook จะส่งเป็น Flex
+            return f"❌ ไม่พบ HN {_sa_hn} ในทะเบียน"
+        except Exception as _sa_err:
+            logger.warning(f"Patient summary error: {_sa_err}")
+            return f"❌ ไม่สามารถสร้างสรุปได้: {str(_sa_err)[:60]}"
+
+    # ── ข้อ 6: Lab Trend Chart (กราฟ HN) ──
+    _chart_match = re.match(
+        r"^(?:กราฟ|chart|graph|trend)\s+(?:HN\s*)?(\d{3,10})$",
+        text_stripped, re.IGNORECASE)
+    if _chart_match:
+        _ch_hn = _chart_match.group(1)
+        _ch_patient = master_registry.match_hn(_ch_hn) if master_registry else None
+        if not _ch_patient:
+            return f"❌ ไม่พบ HN {_ch_hn} ในทะเบียน"
+
+        _ch_real_hn = _ch_patient.clinic_hn or _ch_hn
+        _ch_name = _ch_patient.patient_name or f"HN {_ch_real_hn}"
+
+        # ดึง lab history
+        _ch_labs = []
+        try:
+            docs = _get_patient_lab_docs(_ch_patient, _ch_real_hn, limit=10)
+            for d in docs:
+                ext = d.get("extracted_text", "")
+                if ext:
+                    labs = _extract_latest_labs(ext)
+                    labs["date"] = d.get("upload_date", "")[:10]
+                    _ch_labs.append(labs)
+        except Exception:
+            pass
+
+        if not _ch_labs:
+            return (f"📊 {_ch_name} (HN {_ch_real_hn})\n"
+                    f"ยังไม่มีข้อมูลแล็บสำหรับสร้างกราฟ\n"
+                    f"💡 ลองพิมพ์ 'เปรียบเทียบ {_ch_real_hn}' เพื่อดูหน้าเปรียบเทียบ")
+
+        # สร้าง text-based trend
+        _ch_labs.sort(key=lambda x: x.get("date", ""))
+        lines = [
+            f"📈 กราฟแนวโน้ม {_ch_name}",
+            f"HN {_ch_real_hn} ({len(_ch_labs)} ครั้ง)",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ]
+
+        # Hb trend
+        hb_vals = [(l["date"], l.get("hb")) for l in _ch_labs if l.get("hb") and l["hb"] > 0]
+        if hb_vals:
+            lines.append("\n🔴 Hb (g/dL) เป้า 10-12:")
+            for date, val in hb_vals[-6:]:
+                bar_len = int(val * 2)
+                bar = "█" * min(bar_len, 24)
+                flag = " ⚠️" if val < 10 or val > 12 else " ✅"
+                lines.append(f"  {date[5:]} {bar} {val:.1f}{flag}")
+
+        # Cr trend
+        cr_vals = [(l["date"], l.get("cr")) for l in _ch_labs if l.get("cr") and l["cr"] > 0]
+        if cr_vals:
+            lines.append("\n🟡 Creatinine (mg/dL):")
+            for date, val in cr_vals[-6:]:
+                bar_len = int(val * 2)
+                bar = "█" * min(bar_len, 24)
+                lines.append(f"  {date[5:]} {bar} {val:.1f}")
+
+        # K trend
+        k_vals = [(l["date"], l.get("k")) for l in _ch_labs if l.get("k") and l["k"] > 0]
+        if k_vals:
+            lines.append("\n🟠 K+ (mEq/L) เป้า 3.5-5.5:")
+            for date, val in k_vals[-6:]:
+                bar_len = int(val * 4)
+                bar = "█" * min(bar_len, 24)
+                flag = " ⚠️" if val > 5.5 or val < 3.5 else " ✅"
+                lines.append(f"  {date[5:]} {bar} {val:.1f}{flag}")
+
+        _compare_url = f"https://ranong-raktai-ai-cloud.onrender.com/admin/compare/{_ch_real_hn}"
+        lines.append(f"\n🔗 ดูรายละเอียด: {_compare_url}")
+
+        return "\n".join(lines)
 
     # ── V5.0 Conversational Command Center ──────────────────
     # ถึงจุดนี้ = ผู้ใช้ได้รับอนุญาตแล้ว แต่คำสั่งเดิม (legacy) ไม่รู้จัก
@@ -18124,16 +18238,45 @@ def webhook():
                             f"ลองพิมพ์ 'ทะเบียนผู้ป่วย' เพื่อดูรายชื่อ")
 
                 else:
-                    reply_message(
-                        reply_token,
-                        "📄 ส่งภาพหรือไฟล์เพื่อจำแนกประเภทอัตโนมัติ\n\n"
-                        "คำสั่งที่ใช้บ่อย:\n"
-                        "  ค้นหา [คำค้น] — ค้นหาเอกสาร\n"
-                        "  ผลแล็บล่าสุด — ดูผลตรวจล่าสุด\n"
-                        "  สถิติ — ดูสถิติเอกสาร\n"
-                        "  ช่วยเหลือ — ดูคำสั่งทั้งหมด\n"
-                        "\n💡 พิมพ์แค่เลข HN (เช่น 69453) → ดูข้อมูลผู้ป่วย",
-                    )
+                    # ── Smart Auto-Reply: ลอง match CKD Knowledge ก่อน ──
+                    try:
+                        from ckd_knowledge import get_ckd_response, get_ckd_flex_response
+                        _ckd_resp = get_ckd_response(text)
+                        if _ckd_resp == "__REDIRECT_SCHEDULE__":
+                            # redirect ไปคำสั่ง รอบฟอก
+                            reply_message(reply_token, "💡 พิมพ์ 'รอบฟอก' เพื่อดูตารางฟอกวันนี้")
+                        elif _ckd_resp == "__REDIRECT_LAB__":
+                            reply_message(reply_token, "💡 พิมพ์ 'ผลแล็บ' หรือ 'ผลแล็บ HN xxxxx' เพื่อดูผลตรวจ")
+                        elif _ckd_resp:
+                            _ckd_flex = get_ckd_flex_response(text)
+                            if _ckd_flex:
+                                reply_line_message(reply_token, _ckd_flex)
+                            else:
+                                reply_message(reply_token, _ckd_resp)
+                        else:
+                            # ไม่ match CKD → default help
+                            reply_message(
+                                reply_token,
+                                "📄 ส่งภาพหรือไฟล์เพื่อจำแนกประเภทอัตโนมัติ\n\n"
+                                "คำสั่งที่ใช้บ่อย:\n"
+                                "  ค้นหา [คำค้น] — ค้นหาเอกสาร\n"
+                                "  ผลแล็บล่าสุด — ดูผลตรวจล่าสุด\n"
+                                "  สถิติ — ดูสถิติเอกสาร\n"
+                                "  ช่วยเหลือ — ดูคำสั่งทั้งหมด\n"
+                                "\n💡 พิมพ์แค่เลข HN (เช่น 69453) → ดูข้อมูลผู้ป่วย\n"
+                                "\n🧠 ถามเกี่ยวกับโรคไตได้เลย เช่น:\n"
+                                "  'กินอะไรได้บ้าง' 'จำกัดน้ำเท่าไหร่' 'ยาโรคไต'",
+                            )
+                    except Exception as _ckd_err:
+                        logger.warning(f"CKD auto-reply error: {_ckd_err}")
+                        reply_message(
+                            reply_token,
+                            "📄 ส่งภาพหรือไฟล์เพื่อจำแนกประเภทอัตโนมัติ\n\n"
+                            "คำสั่งที่ใช้บ่อย:\n"
+                            "  ค้นหา [คำค้น] — ค้นหาเอกสาร\n"
+                            "  ผลแล็บล่าสุด — ดูผลตรวจล่าสุด\n"
+                            "  ช่วยเหลือ — ดูคำสั่งทั้งหมด",
+                        )
             else:
                 logger.info(f"ข้าม message type: {msg_type}")
 
