@@ -1,0 +1,171 @@
+{% extends "hd_base.html" %}
+{% block title %}แดชบอร์ด 30 เตียง{% endblock %}
+{% block nav_dashboard %}active{% endblock %}
+{% block page_title %}📊 แดชบอร์ด 30 เตียง{% endblock %}
+{% block topbar_extra %}
+<button class="btn btn-outline" onclick="toggleTheme()" style="font-size:.85rem;">🌓 โหมด</button>
+<a href="/hd/alerts" class="alert-badge" id="alertBadge" style="display:none;">
+  🔔 <span id="alertCount">0</span> แจ้งเตือน
+</a>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+.bed-grid {
+  display: grid; gap: 12px;
+  grid-template-columns: repeat(6, 1fr);
+}
+@media (max-width: 1024px) { .bed-grid { grid-template-columns: repeat(5, 1fr); } }
+@media (max-width: 768px) { .bed-grid { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 480px) { .bed-grid { grid-template-columns: repeat(2, 1fr); } }
+.bed-card {
+  border-radius: var(--radius); padding: 14px; cursor: pointer;
+  border: 2px solid var(--border); transition: transform .1s, box-shadow .2s;
+  min-height: 120px; display: flex; flex-direction: column; gap: 6px;
+  position: relative; background: var(--bg-card);
+}
+.bed-card:active { transform: scale(.97); }
+.bed-card:hover { box-shadow: 0 4px 16px var(--shadow); }
+.bed-card .bed-num { font-size: 1.4rem; font-weight: 800; }
+.bed-card .bed-patient { font-size: .8rem; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bed-card .bed-status { font-size: .75rem; font-weight: 600; margin-top: auto; display: flex; align-items: center; gap: 4px; }
+.bed-card .bed-time { font-size: .7rem; color: var(--fg-muted); }
+.bed-card .bed-vitals { font-size: .7rem; color: var(--fg-muted); margin-top: 2px; }
+/* Status colors with icons (color blind safe) */
+.bed-available { border-color: #bdc3c7; opacity: .6; }
+.bed-available .bed-status::before { content: '⬜'; }
+.bed-pre { border-color: var(--info); background: rgba(52,152,219,.05); }
+.bed-pre .bed-status::before { content: '🔵'; }
+.bed-active { border-color: var(--success); background: rgba(39,174,96,.05); }
+.bed-active .bed-status::before { content: '🟢'; }
+.bed-post { border-color: #8e44ad; background: rgba(142,68,173,.05); }
+.bed-post .bed-status::before { content: '🟣'; }
+.bed-warning { border-color: var(--warning); background: rgba(243,156,18,.08); }
+.bed-warning .bed-status::before { content: '🟡'; }
+.bed-critical { border-color: var(--danger); background: rgba(231,76,60,.08); animation: pulse 1.5s infinite; }
+.bed-critical .bed-status::before { content: '🔴'; }
+@keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(231,76,60,.3); } 50% { box-shadow: 0 0 0 8px rgba(231,76,60,0); } }
+.bed-done { border-color: #95a5a6; opacity: .5; }
+.bed-done .bed-status::before { content: '✅'; }
+/* Stats bar */
+.stats-bar { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
+.stat-item { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--bg-card); border-radius: var(--radius-sm); border: 1px solid var(--border); font-size: .85rem; }
+.stat-num { font-size: 1.3rem; font-weight: 800; }
+.stat-label { color: var(--fg-muted); }
+/* Shift selector */
+.shift-selector { display: flex; gap: 8px; margin-bottom: 16px; }
+.shift-btn { padding: 10px 20px; border: 2px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-card); cursor: pointer; font-weight: 600; min-height: var(--touch-min); color: var(--fg); }
+.shift-btn.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Stats Bar -->
+<div class="stats-bar" id="statsBar">
+  <div class="stat-item"><span class="stat-num" id="statActive" style="color:var(--success);">0</span><span class="stat-label">กำลังฟอก</span></div>
+  <div class="stat-item"><span class="stat-num" id="statPre" style="color:var(--info);">0</span><span class="stat-label">รอเริ่ม</span></div>
+  <div class="stat-item"><span class="stat-num" id="statAvailable" style="color:var(--fg-muted);">30</span><span class="stat-label">ว่าง</span></div>
+  <div class="stat-item"><span class="stat-num" id="statWarning" style="color:var(--warning);">0</span><span class="stat-label">⚠️ เฝ้าระวัง</span></div>
+  <div class="stat-item"><span class="stat-num" id="statCritical" style="color:var(--danger);">0</span><span class="stat-label">🚨 วิกฤต</span></div>
+</div>
+
+<!-- Shift selector -->
+<div class="shift-selector">
+  <button class="shift-btn active" onclick="selectShift(this,'morning')">🌅 เช้า (07:00-15:00)</button>
+  <button class="shift-btn" onclick="selectShift(this,'afternoon')">☀️ บ่าย (13:00-21:00)</button>
+  <button class="shift-btn" onclick="selectShift(this,'evening')">🌙 ค่ำ (17:00-01:00)</button>
+  <a href="/hd/session/new" class="btn btn-success btn-lg" style="margin-left:auto;">➕ เริ่มรอบฟอกใหม่</a>
+</div>
+
+<!-- 30-Bed Grid -->
+<div class="bed-grid" id="bedGrid">
+  <!-- Rendered by JS -->
+</div>
+
+<!-- Last updated -->
+<p style="text-align:center;margin-top:16px;font-size:.8rem;color:var(--fg-muted);">
+  อัปเดตล่าสุด: <span id="lastUpdated">-</span> | รีเฟรชอัตโนมัติทุก 30 วินาที
+</p>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const STATUS_MAP = {
+  available: {label:'ว่าง', cls:'bed-available'},
+  pre_hd:    {label:'Pre-HD', cls:'bed-pre'},
+  active:    {label:'กำลังฟอก', cls:'bed-active'},
+  post_hd:   {label:'Post-HD', cls:'bed-post'},
+  warning:   {label:'เฝ้าระวัง', cls:'bed-warning'},
+  critical:  {label:'วิกฤต!', cls:'bed-critical'},
+  done:      {label:'เสร็จแล้ว', cls:'bed-done'},
+};
+
+function renderBeds(beds){
+  const grid = document.getElementById('bedGrid');
+  grid.innerHTML = '';
+  let counts = {active:0, pre:0, available:0, warning:0, critical:0};
+  beds.forEach(b => {
+    const s = STATUS_MAP[b.status] || STATUS_MAP.available;
+    const card = document.createElement('div');
+    card.className = 'bed-card ' + s.cls;
+    card.onclick = () => {
+      if(b.session_id) window.location.href='/hd/session/'+b.session_id;
+      else if(b.status!=='available') window.location.href='/hd/session/new?bed='+b.bed_number;
+      else window.location.href='/hd/session/new?bed='+b.bed_number;
+    };
+    let vitals = '';
+    if(b.current_vitals){
+      const v = b.current_vitals;
+      vitals = `<div class="bed-vitals">${v.sbp||'-'}/${v.dbp||'-'} HR:${v.hr||'-'}</div>`;
+    }
+    let timeLeft = '';
+    if(b.time_remaining) timeLeft = `<div class="bed-time">⏱ เหลือ ${b.time_remaining}</div>`;
+
+    card.innerHTML = `
+      <div class="bed-num">${b.bed_number}</div>
+      <div class="bed-patient">${b.patient_name || ''}</div>
+      ${vitals}
+      ${timeLeft}
+      <div class="bed-status">${s.label}</div>
+    `;
+    grid.appendChild(card);
+
+    if(b.status==='active') counts.active++;
+    else if(b.status==='pre_hd') counts.pre++;
+    else if(b.status==='available'||b.status==='done') counts.available++;
+    if(b.status==='warning') counts.warning++;
+    if(b.status==='critical') counts.critical++;
+  });
+  document.getElementById('statActive').textContent = counts.active;
+  document.getElementById('statPre').textContent = counts.pre;
+  document.getElementById('statAvailable').textContent = counts.available;
+  document.getElementById('statWarning').textContent = counts.warning;
+  document.getElementById('statCritical').textContent = counts.critical;
+}
+
+function fetchBeds(){
+  fetch('/hd/api/v1/dashboard/beds')
+    .then(r=>r.json())
+    .then(data=>{
+      renderBeds(data.beds || []);
+      document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('th-TH');
+    })
+    .catch(()=>{
+      /* Fallback: show empty 30 beds */
+      const beds = [];
+      for(let i=1;i<=30;i++) beds.push({bed_number:i, status:'available', patient_name:''});
+      renderBeds(beds);
+    });
+}
+
+function selectShift(el, shift){
+  document.querySelectorAll('.shift-btn').forEach(b=>b.classList.remove('active'));
+  el.classList.add('active');
+  fetchBeds();
+}
+
+/* Initial load + auto refresh */
+fetchBeds();
+setInterval(fetchBeds, 30000);
+</script>
+{% endblock %}

@@ -1,0 +1,139 @@
+{% extends "hd_base.html" %}
+{% block title %}เข้าสู่ระบบ{% endblock %}
+{% block extra_css %}
+<style>
+body { justify-content: center; align-items: center; }
+.sidebar, .topbar { display: none !important; }
+.main { margin-left: 0; justify-content: center; align-items: center; }
+.login-box { width: 100%; max-width: 400px; padding: 20px; }
+.login-logo { text-align: center; margin-bottom: 32px; }
+.login-logo .icon { font-size: 3rem; }
+.login-logo h2 { font-size: 1.3rem; margin-top: 8px; }
+.login-logo p { color: var(--fg-muted); font-size: .9rem; }
+.pin-pad { display: grid; grid-template-columns: repeat(3,1fr); gap: 10px; margin-top: 20px; }
+.pin-btn {
+  padding: 18px; font-size: 1.5rem; font-weight: 700; border: 2px solid var(--border);
+  border-radius: var(--radius-sm); background: var(--bg-card); color: var(--fg);
+  cursor: pointer; min-height: 64px; transition: background .1s;
+}
+.pin-btn:active { background: var(--accent); color: #fff; }
+.pin-btn.clear { font-size: 1rem; }
+.pin-display { display: flex; gap: 12px; justify-content: center; margin: 16px 0; }
+.pin-dot { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border); transition: background .2s; }
+.pin-dot.filled { background: var(--accent); border-color: var(--accent); }
+.login-divider { text-align: center; margin: 24px 0; color: var(--fg-muted); font-size: .85rem; position: relative; }
+.login-divider::before, .login-divider::after { content: ''; position: absolute; top: 50%; width: 40%; height: 1px; background: var(--border); }
+.login-divider::before { left: 0; }
+.login-divider::after { right: 0; }
+.login-error { background: #f8d7da; color: #721c24; padding: 12px; border-radius: var(--radius-sm); margin-bottom: 16px; display: none; font-size: .9rem; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="login-box">
+  <div class="login-logo">
+    <div class="icon">🏥</div>
+    <h2>HD Smart Monitoring</h2>
+    <p>คลินิกระนอง รักษ์ไต</p>
+  </div>
+
+  <div class="login-error" id="loginError"></div>
+
+  <!-- PIN Login -->
+  <div class="card" id="pinSection">
+    <div class="card-header">🔢 เข้าสู่ระบบด้วย PIN</div>
+    <div class="pin-display" id="pinDisplay">
+      <div class="pin-dot"></div><div class="pin-dot"></div>
+      <div class="pin-dot"></div><div class="pin-dot"></div>
+      <div class="pin-dot"></div><div class="pin-dot"></div>
+    </div>
+    <div class="pin-pad">
+      <button class="pin-btn" onclick="addPin('1')">1</button>
+      <button class="pin-btn" onclick="addPin('2')">2</button>
+      <button class="pin-btn" onclick="addPin('3')">3</button>
+      <button class="pin-btn" onclick="addPin('4')">4</button>
+      <button class="pin-btn" onclick="addPin('5')">5</button>
+      <button class="pin-btn" onclick="addPin('6')">6</button>
+      <button class="pin-btn" onclick="addPin('7')">7</button>
+      <button class="pin-btn" onclick="addPin('8')">8</button>
+      <button class="pin-btn" onclick="addPin('9')">9</button>
+      <button class="pin-btn clear" onclick="clearPin()">ลบ</button>
+      <button class="pin-btn" onclick="addPin('0')">0</button>
+      <button class="pin-btn clear" onclick="submitPin()">OK</button>
+    </div>
+  </div>
+
+  <div class="login-divider">หรือ</div>
+
+  <!-- Username/Password Login -->
+  <div class="card">
+    <div class="card-header">👤 เข้าสู่ระบบด้วยรหัสผ่าน</div>
+    <form id="loginForm" onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label class="form-label">ชื่อผู้ใช้</label>
+        <input type="text" class="form-control" id="username" placeholder="พิมพ์ชื่อผู้ใช้" autocomplete="username" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">รหัสผ่าน</label>
+        <input type="password" class="form-control" id="password" placeholder="พิมพ์รหัสผ่าน" autocomplete="current-password" required>
+      </div>
+      <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="remember" style="width:20px;height:20px;">
+        <label for="remember" style="font-size:.9rem;">จดจำอุปกรณ์นี้</label>
+      </div>
+      <button type="submit" class="btn btn-primary btn-block btn-lg">เข้าสู่ระบบ</button>
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let pin = '';
+function addPin(n){
+  if(pin.length>=6) return;
+  pin += n;
+  updatePinDots();
+  if(pin.length===6) setTimeout(submitPin, 200);
+}
+function clearPin(){ pin=''; updatePinDots(); }
+function updatePinDots(){
+  document.querySelectorAll('#pinDisplay .pin-dot').forEach((d,i)=>{
+    d.classList.toggle('filled', i < pin.length);
+  });
+}
+function submitPin(){
+  if(pin.length<4){ showError('กรุณากรอก PIN อย่างน้อย 4 หลัก'); return; }
+  doLogin({pin: pin});
+}
+function handleLogin(e){
+  e.preventDefault();
+  const u = document.getElementById('username').value;
+  const p = document.getElementById('password').value;
+  doLogin({username: u, password: p});
+}
+function doLogin(data){
+  fetch('/hd/api/v1/auth/login', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(data)
+  })
+  .then(r=>r.json().then(d=>({status:r.status,data:d})))
+  .then(({status,data})=>{
+    if(status===200 && data.token){
+      try{ sessionStorage.setItem('hd_token', data.token); }catch(e){}
+      window.location.href = '/hd/dashboard';
+    } else {
+      showError(data.error || 'เข้าสู่ระบบไม่สำเร็จ');
+      clearPin();
+    }
+  })
+  .catch(()=>showError('ไม่สามารถเชื่อมต่อระบบได้'));
+}
+function showError(msg){
+  const el = document.getElementById('loginError');
+  el.textContent = '❌ ' + msg;
+  el.style.display = 'block';
+  setTimeout(()=>{ el.style.display='none'; }, 5000);
+}
+</script>
+{% endblock %}
