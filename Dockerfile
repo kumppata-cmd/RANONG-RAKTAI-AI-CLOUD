@@ -99,6 +99,9 @@ COPY epo_response_tracker.py .
 COPY hd_schedule_reminder.py .
 COPY ckd_staging.py .
 
+# HD Smart Monitoring Module (Phase 1)
+COPY hd_module/ ./hd_module/
+
 # Rich Menu icons (Staff/Patient/Sub + legacy v2)
 COPY rich_menu_v2.png .
 COPY rich_menu_staff.png .

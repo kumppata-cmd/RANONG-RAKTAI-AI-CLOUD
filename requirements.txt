@@ -85,3 +85,9 @@ matplotlib==3.9.3
 
 # NOTE: Tesseract OCR binary ต้องติดตั้งผ่าน apt (ดู Dockerfile)
 # NOTE: ไม่ใช้ python-dotenv บน cloud — ตั้ง ENV ผ่าน Render Dashboard
+
+# HD Smart Monitoring — Phase 1 dependencies
+SQLAlchemy==2.0.36
+PyJWT==2.10.1
+bcrypt==4.2.1
+pyotp==2.9.0
