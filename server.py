@@ -427,6 +427,9 @@ logger = logging.getLogger(__name__)
 # ─── Flask App ───────────────────────────────────────────
 app = Flask(__name__)
 
+# ─── HD Smart Monitoring Module (Feature Flag) ─────────────────
+from hd_module import register_hd_module
+register_hd_module(app)
 
 # ─── CORS for Admin API (เฉพาะ /admin/api/ endpoints) ──────────
 # อนุญาตเฉพาะ claude.ai artifact เรียกใช้งาน admin API ได้
