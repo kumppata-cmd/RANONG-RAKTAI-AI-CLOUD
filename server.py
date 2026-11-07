@@ -11014,18 +11014,138 @@ def handle_search_command(
     if _summary_all_match:
         _sa_hn = _summary_all_match.group(1)
         try:
-            from patient_summary_agent import build_patient_summary_flex
-            _sa_flex = build_patient_summary_flex(
-                hn=_sa_hn,
-                master_registry=master_registry,
-                lab_agent=None,
-                treatment_tracker=treatment_tracker,
-                appointment_store=None,
-                storage=storage,
-            )
-            if _sa_flex:
-                return _sa_flex  # dict → webhook จะส่งเป็น Flex
-            return f"❌ ไม่พบ HN {_sa_hn} ในทะเบียน"
+            _sa_p = master_registry.match_hn(_sa_hn) if master_registry else None
+            if not _sa_p:
+                return f"❌ ไม่พบ HN {_sa_hn} ในทะเบียน"
+
+            _sa_real_hn = getattr(_sa_p, 'clinic_hn', _sa_hn) or _sa_hn
+            _sa_name = getattr(_sa_p, 'patient_name', f"HN {_sa_real_hn}")
+            _sa_esa = getattr(_sa_p, 'esa_drug', '') or "ไม่ระบุ"
+            _sa_dose = getattr(_sa_p, 'esa_dose', '') or ""
+            _sa_sched = getattr(_sa_p, 'schedule_days', '') or "ไม่ระบุ"
+            _sa_vasc = getattr(_sa_p, 'vascular_access', '') or "ไม่ระบุ"
+            _sa_dw = getattr(_sa_p, 'dry_weight', '') or ""
+
+            # Agent 1: Lab data — ดึงจาก doc_index จริง
+            _sa_lab_text = "ยังไม่มีผลแล็บ"
+            try:
+                _sa_docs = _get_patient_lab_docs(_sa_p, _sa_real_hn, limit=1)
+                if _sa_docs:
+                    _sa_labs = _extract_latest_labs(
+                        _sa_docs[-1].get("extracted_text", ""))
+                    _sa_parts = []
+                    if _sa_labs.get("hb") and _sa_labs["hb"] > 0:
+                        _hb_flag = "⚠️" if _sa_labs["hb"] < 10 else "✅"
+                        _sa_parts.append(f"Hb {_sa_labs['hb']:.1f} {_hb_flag}")
+                    if _sa_labs.get("cr") and _sa_labs["cr"] > 0:
+                        _sa_parts.append(f"Cr {_sa_labs['cr']:.1f}")
+                    if _sa_labs.get("k") and _sa_labs["k"] > 0:
+                        _k_flag = "⚠️" if _sa_labs["k"] > 5.5 else ""
+                        _sa_parts.append(f"K {_sa_labs['k']:.1f} {_k_flag}")
+                    if _sa_labs.get("po4") and _sa_labs["po4"] > 0:
+                        _sa_parts.append(f"PO4 {_sa_labs['po4']:.1f}")
+                    if _sa_labs.get("albumin") and _sa_labs["albumin"] > 0:
+                        _sa_parts.append(f"Alb {_sa_labs['albumin']:.1f}")
+                    if _sa_parts:
+                        _sa_date = _sa_docs[-1].get("upload_date", "")[:10]
+                        _sa_lab_text = f"({_sa_date}) " + " | ".join(_sa_parts)
+            except Exception as _lab_err:
+                logger.warning(f"Summary lab error: {_lab_err}")
+
+            # Agent 2: Treatment data
+            _sa_tx_text = "ยังไม่มีประวัติปรับยา"
+            _sa_pending = 0
+            try:
+                _sa_hist = treatment_tracker.get_history(_sa_real_hn, limit=3)
+                if _sa_hist:
+                    _tx_lines = []
+                    for _ch in _sa_hist:
+                        _tx_lines.append(
+                            f"• {_ch.get('change_date', '')[:10]} "
+                            f"{_ch.get('action', '')} {_ch.get('drug_name', '')}")
+                    _sa_tx_text = "\n".join(_tx_lines)
+                _sa_pend = treatment_tracker.get_pending_followups(_sa_real_hn)
+                _sa_pending = len(_sa_pend) if _sa_pend else 0
+            except Exception:
+                pass
+
+            # Agent 3: Appointment
+            _sa_appt = "ไม่มีนัดหมาย"
+            try:
+                if appointment_store and hasattr(appointment_store, 'list_for_hn'):
+                    _sa_appts = appointment_store.list_for_hn(_sa_real_hn, limit=1)
+                    if _sa_appts:
+                        _a = _sa_appts[0]
+                        _sa_appt = f"{_a.get('date', '')} {_a.get('type', '')}"
+            except Exception:
+                pass
+
+            # Build Flex
+            def _sa_row(label, value, color="#555555"):
+                return {"type": "box", "layout": "horizontal", "spacing": "sm",
+                        "contents": [
+                            {"type": "text", "text": label, "size": "sm",
+                             "color": "#999999", "flex": 2},
+                            {"type": "text", "text": str(value), "size": "sm",
+                             "color": color, "flex": 3, "wrap": True}]}
+
+            _sa_body = [
+                {"type": "text", "text": f"📋 {_sa_name}", "weight": "bold",
+                 "size": "lg", "color": "#1E88E5"},
+                {"type": "text", "text": f"HN {_sa_real_hn}", "size": "sm",
+                 "color": "#999999"},
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": "🏥 ข้อมูลไตเทียม", "weight": "bold",
+                 "size": "sm", "color": "#2E8B57", "margin": "md"},
+                _sa_row("ตารางฟอก", _sa_sched),
+                _sa_row("ESA", f"{_sa_esa} {_sa_dose}".strip()),
+                _sa_row("Vascular", _sa_vasc),
+            ]
+            if _sa_dw:
+                _sa_body.append(_sa_row("DW", f"{_sa_dw} kg"))
+
+            _sa_body.extend([
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": "🔬 ผลแล็บล่าสุด", "weight": "bold",
+                 "size": "sm", "color": "#E65100", "margin": "md"},
+                {"type": "text", "text": _sa_lab_text, "size": "sm",
+                 "color": "#555555", "wrap": True},
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": "💊 ปรับยาล่าสุด", "weight": "bold",
+                 "size": "sm", "color": "#6735B7", "margin": "md"},
+                {"type": "text", "text": _sa_tx_text, "size": "sm",
+                 "color": "#555555", "wrap": True},
+            ])
+            if _sa_pending > 0:
+                _sa_body.append({"type": "text",
+                    "text": f"⏳ รอติดตามผล: {_sa_pending} รายการ",
+                    "size": "xs", "color": "#C62828", "margin": "xs"})
+
+            _sa_body.extend([
+                {"type": "separator", "margin": "md"},
+                {"type": "text", "text": "📅 นัดหมายถัดไป", "weight": "bold",
+                 "size": "sm", "color": "#00796B", "margin": "md"},
+                {"type": "text", "text": _sa_appt, "size": "sm",
+                 "color": "#555555"},
+            ])
+
+            _sa_qr = [
+                {"type": "action", "action": {"type": "message",
+                 "label": f"วิเคราะห์ {_sa_real_hn}", "text": f"วิเคราะห์ {_sa_real_hn}"}},
+                {"type": "action", "action": {"type": "message",
+                 "label": f"กราฟ {_sa_real_hn}", "text": f"กราฟ {_sa_real_hn}"}},
+                {"type": "action", "action": {"type": "message",
+                 "label": f"เปรียบเทียบ {_sa_real_hn}", "text": f"เปรียบเทียบ {_sa_real_hn}"}},
+            ]
+
+            return {
+                "type": "flex",
+                "altText": f"📋 สรุป {_sa_name} (HN {_sa_real_hn})",
+                "quickReply": {"items": _sa_qr},
+                "contents": {"type": "bubble", "body": {
+                    "type": "box", "layout": "vertical", "spacing": "sm",
+                    "paddingAll": "16px", "contents": _sa_body}},
+            }
         except Exception as _sa_err:
             logger.warning(f"Patient summary error: {_sa_err}")
             return f"❌ ไม่สามารถสร้างสรุปได้: {str(_sa_err)[:60]}"
