@@ -102,6 +102,9 @@ COPY ckd_staging.py .
 # HD Smart Monitoring Module (Phase 1)
 COPY hd_module/ ./hd_module/
 
+# Dialysis seed data (one-time import 141 patients)
+COPY dialysis_seed_data.json .
+
 # Rich Menu icons (Staff/Patient/Sub + legacy v2)
 COPY rich_menu_v2.png .
 COPY rich_menu_staff.png .

@@ -1360,6 +1360,30 @@ if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
     master_registry.set_storage(storage._bucket)
     logger.info("MasterPatientRegistry initialized with GCS bucket")
 
+# ─── One-time Dialysis Seed Import (141 patients from Excel) ─────
+# รันครั้งเดียวตอน boot: ถ้าผู้ป่วยยังไม่มี dialysis_schedule → import จากไฟล์ seed
+_SEED_FILE = os.path.join(os.path.dirname(__file__), "dialysis_seed_data.json")
+if master_registry and os.path.exists(_SEED_FILE):
+    _summ = master_registry.get_dialysis_summary()
+    if _summ.get("with_schedule", 0) == 0:
+        try:
+            with open(_SEED_FILE, encoding="utf-8") as _sf:
+                _seed = json.load(_sf)
+            _seed_pts = _seed.get("patients", [])
+            if _seed_pts:
+                _new, _upd, _skip, _msgs = master_registry.import_dialysis_batch(
+                    _seed_pts, registered_by="excel_seed"
+                )
+                logger.info(
+                    "Dialysis seed import: new=%d updated=%d skipped=%d — %s",
+                    _new, _upd, _skip, _msgs,
+                )
+        except Exception as _e:
+            logger.error("Dialysis seed import failed: %s", _e)
+    else:
+        logger.info("Dialysis seed: skipped — %d patients already have schedule",
+                     _summ["with_schedule"])
+
 # ─── PostgreSQL Database (Phase 1.1 Foundation) ──────────
 from database import Database
 db = Database(os.getenv("DATABASE_URL", "") or os.getenv("HD_DATABASE_URL", ""))
