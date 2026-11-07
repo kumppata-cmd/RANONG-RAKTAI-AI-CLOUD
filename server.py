@@ -1362,7 +1362,7 @@ if STORAGE_BACKEND == "gcs" and hasattr(storage, '_bucket'):
 
 # ─── PostgreSQL Database (Phase 1.1 Foundation) ──────────
 from database import Database
-db = Database(os.getenv("DATABASE_URL", ""))
+db = Database(os.getenv("DATABASE_URL", "") or os.getenv("HD_DATABASE_URL", ""))
 if db.is_ready:
     logger.info("PostgreSQL: เชื่อมต่อสำเร็จ — structured queries พร้อมใช้")
 elif db.status == "not_configured":
