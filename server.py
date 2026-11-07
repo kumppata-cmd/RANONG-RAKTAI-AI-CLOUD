@@ -8609,6 +8609,18 @@ def handle_search_command(
         _dial_summ = master_registry.get_dialysis_summary() if master_registry else {}
         _with_sched = _dial_summ.get("with_schedule", 0)
 
+        # HD Module status
+        _hd_enabled = os.environ.get("HD_MODULE_ENABLED", "false").lower() == "true"
+        _hd_db_url = bool(os.environ.get("HD_DATABASE_URL", ""))
+
+        # Dialysis detail: count patients with dialysis_schedule text
+        _with_sched_text = 0
+        if master_registry:
+            _with_sched_text = sum(
+                1 for p in master_registry.list_all()
+                if getattr(p, 'dialysis_schedule', '')
+            )
+
         _status_msg = (
             f"🖥️ สถานะระบบ RANONG RAKTAI AI\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -8617,9 +8629,12 @@ def handle_search_command(
             f"📦 Storage: {'✅ GCS' if _gcs_ok else '❌ GCS'}\n"
             f"🗄️ Database: {_db_st}\n"
             f"🔄 Redis: {_redis_st}\n"
+            f"🏥 HD Module: {'✅ เปิด' if _hd_enabled else '❌ ปิด'}"
+            f"{' (DB URL ✅)' if _hd_db_url else ''}\n"
             f"\n"
             f"👥 ผู้ป่วยทะเบียน: {_pt_total} คน\n"
-            f"🏥 มีตารางฟอก: {_with_sched} คน\n"
+            f"🏥 มีตารางฟอก: {_with_sched} คน"
+            f" (มี schedule text: {_with_sched_text})\n"
             f"📄 เอกสารรวม: {_doc_total} ฉบับ\n"
             f"📄 วันนี้: {_today_docs} ฉบับ\n"
         )
