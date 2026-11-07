@@ -61,15 +61,30 @@ THAI_DAY_DISPLAY = {
 
 
 def parse_schedule_text(schedule_text: str) -> list[str]:
-    """แปลงข้อความตารางฟอก เช่น 'จ/พ/ศ' → ['mon','wed','fri']"""
+    """แปลงข้อความตารางฟอก เช่น 'จ/พ/ศ' → ['mon','wed','fri']
+
+    รองรับหลายรูปแบบ:
+      'จ/พ/ศ'  'จ,พ,ศ'  'จ พ ศ'  'จ-พ-ศ'  'จ.พ.ศ'
+      'จันทร์ พุธ ศุกร์'  'วันจันทร์ วันพุธ วันศุกร์'
+      '1,3,5' (จ=1, อ=2, พ=3, พฤ=4, ศ=5, ส=6)
+    """
     if not schedule_text:
         return []
-    parts = re.split(r"[/,\s]+", schedule_text.strip())
+    text = str(schedule_text).strip()
+    # ลบคำนำหน้า "วัน"
+    text = re.sub(r"วัน", "", text)
+    parts = re.split(r"[/,\-.\s]+", text)
     days = []
     for p in parts:
         p = p.strip()
+        if not p:
+            continue
         if p in THAI_DAY_MAP:
             days.append(THAI_DAY_MAP[p])
+        elif p.isdigit() and 1 <= int(p) <= 6:
+            # 1=จ, 2=อ, 3=พ, 4=พฤ, 5=ศ, 6=ส
+            num_map = {1: "mon", 2: "tue", 3: "wed", 4: "thu", 5: "fri", 6: "sat"}
+            days.append(num_map[int(p)])
     return days
 
 
@@ -281,6 +296,10 @@ class MasterPatientRegistry:
                 )
                 self._loaded = True
                 self._loaded_at = time.monotonic()
+                # Auto-parse dialysis_days (versioned path)
+                for p in self._patients:
+                    if p.dialysis_schedule and not p.dialysis_days:
+                        p.dialysis_days = parse_schedule_text(p.dialysis_schedule)
                 return
 
             # fallback: legacy path
@@ -300,6 +319,20 @@ class MasterPatientRegistry:
                 logger.info("MasterPatientRegistry: no registry file — starting empty")
             self._loaded = True
             self._loaded_at = time.monotonic()
+
+            # ── Auto-parse: dialysis_schedule → dialysis_days ──
+            # กรณีข้อมูลเก่าที่มี schedule text แต่ยังไม่ได้ parse เป็น day codes
+            _fixed = 0
+            for p in self._patients:
+                if p.dialysis_schedule and not p.dialysis_days:
+                    p.dialysis_days = parse_schedule_text(p.dialysis_schedule)
+                    if p.dialysis_days:
+                        _fixed += 1
+            if _fixed:
+                logger.info(
+                    "MasterPatientRegistry: auto-parsed dialysis_days for %d patients",
+                    _fixed,
+                )
         except Exception as e:
             logger.error("MasterPatientRegistry: load failed: %s", e)
 
