@@ -91,7 +91,10 @@ def hd_health():
 @hd_bp.route("/auth/login", methods=["POST"])
 def hd_login():
     """Login and receive JWT token."""
-    from .auth import verify_password, create_token  # noqa: F401
+    import os
+    from .auth import verify_password, create_token
+    from .config import HdConfig
+
     data = request.get_json(silent=True) or {}
     username = data.get("username", "")
     password = data.get("password", "")
@@ -99,16 +102,85 @@ def hd_login():
     if not username or not password:
         return jsonify({"error": "Username and password required"}), 400
 
-    # In production: look up user from PostgreSQL
-    # For now: return structure showing the API contract
-    return jsonify({
-        "error": "Database not connected — login disabled in development",
-        "api_contract": {
-            "request": {"username": "string", "password": "string"},
-            "response": {"token": "jwt_string", "expires_in": 28800,
-                         "user": {"id": 1, "username": "...", "role": "nurse"}},
-        },
-    }), 503
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 503
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, username, password_hash, full_name, role,
+                       is_active, failed_attempts, locked_until
+                FROM hd_users WHERE username = %s
+            """, (username,))
+            row = cur.fetchone()
+
+        if not row:
+            conn.close()
+            log_action(action="login.failed", resource_type="auth",
+                       new_values={"username": username, "reason": "not_found"},
+                       ip_address=request.remote_addr or "")
+            return jsonify({"error": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"}), 401
+
+        user_id, uname, pw_hash, full_name, role, is_active, failed_attempts, locked_until = row
+
+        if not is_active:
+            conn.close()
+            return jsonify({"error": "บัญชีถูกระงับ"}), 403
+
+        # Check lockout
+        from datetime import datetime, timezone
+        if locked_until and locked_until > datetime.now(timezone.utc):
+            conn.close()
+            return jsonify({"error": "บัญชีถูกล็อกชั่วคราว กรุณาลองใหม่ภายหลัง"}), 403
+
+        if not verify_password(password, pw_hash):
+            # Increment failed attempts
+            with conn.cursor() as cur:
+                new_fails = (failed_attempts or 0) + 1
+                lock_until = None
+                if new_fails >= 5:
+                    lock_until = datetime.now(timezone.utc) + __import__('datetime').timedelta(minutes=15)
+                cur.execute("""
+                    UPDATE hd_users SET failed_attempts = %s, locked_until = %s
+                    WHERE id = %s
+                """, (new_fails, lock_until, user_id))
+                conn.commit()
+            conn.close()
+            log_action(action="login.failed", resource_type="auth",
+                       new_values={"username": username, "reason": "bad_password"},
+                       ip_address=request.remote_addr or "")
+            return jsonify({"error": "ชื่อผู้ใช้หรือรหัสผ่านไม่ถูกต้อง"}), 401
+
+        # Success — reset failed attempts, update last_login
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE hd_users SET failed_attempts = 0, locked_until = NULL,
+                       last_login = NOW() WHERE id = %s
+            """, (user_id,))
+            conn.commit()
+        conn.close()
+
+        token = create_token(user_id, uname, role)
+        log_action(user_id=user_id, action="login.success", resource_type="auth",
+                   ip_address=request.remote_addr or "")
+
+        return jsonify({
+            "token": token,
+            "expires_in": HdConfig.JWT_EXPIRY_MINUTES * 60,
+            "user": {
+                "id": user_id,
+                "username": uname,
+                "full_name": full_name,
+                "role": role,
+            },
+        })
+
+    except Exception as e:
+        logger.error("HD login error: %s", e)
+        return jsonify({"error": "ระบบขัดข้อง กรุณาลองใหม่"}), 500
 
 
 # ── Sessions ──────────────────────────────────────────────
@@ -298,15 +370,84 @@ def acknowledge_alert(alert_id):
 @hd_bp.route("/patients", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def list_patients():
-    """List HD patients."""
-    return jsonify({"patients": [], "total": 0})
+    """List HD patients from PostgreSQL."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"patients": [], "total": 0})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        search = request.args.get("q", "").strip()
+        schedule = request.args.get("schedule", "").strip()
+        with conn.cursor() as cur:
+            sql = """SELECT id, hn, hospital_hn, patient_name, vascular_access,
+                            dry_weight, schedule_days, esa_drug, esa_dose,
+                            primary_diagnosis, is_active
+                     FROM hd_patient_mapping WHERE is_active = TRUE"""
+            params = []
+            if search:
+                sql += " AND (patient_name ILIKE %s OR hn ILIKE %s)"
+                params.extend([f"%{search}%", f"%{search}%"])
+            if schedule:
+                sql += " AND schedule_days ILIKE %s"
+                params.append(f"%{schedule}%")
+            sql += " ORDER BY hn LIMIT 200"
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        conn.close()
+        patients = []
+        for r in rows:
+            patients.append({
+                "id": r[0], "hn": r[1], "hospital_hn": r[2],
+                "patient_name": r[3], "vascular_access": r[4],
+                "dry_weight": float(r[5]) if r[5] else None,
+                "schedule_days": r[6], "esa_drug": r[7], "esa_dose": r[8],
+                "primary_diagnosis": r[9], "is_active": r[10],
+            })
+        return jsonify({"patients": patients, "total": len(patients)})
+    except Exception as e:
+        logger.error("list_patients error: %s", e)
+        return jsonify({"patients": [], "total": 0, "error": str(e)})
 
 
 @hd_bp.route("/patients/<hn>", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def get_patient(hn):
-    """Get HD patient details."""
-    return jsonify({"hn": hn, "status": "not_found"}), 404
+    """Get HD patient details from PostgreSQL."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"hn": hn, "status": "not_found"}), 404
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, hn, hospital_hn, patient_name, date_of_birth,
+                       gender, blood_type, allergies, vascular_access,
+                       dry_weight, schedule_days, esa_drug, esa_dose,
+                       primary_diagnosis, is_active, created_at
+                FROM hd_patient_mapping WHERE hn = %s
+            """, (hn,))
+            row = cur.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"hn": hn, "status": "not_found"}), 404
+        return jsonify({
+            "id": row[0], "hn": row[1], "hospital_hn": row[2],
+            "patient_name": row[3],
+            "date_of_birth": row[4].isoformat() if row[4] else None,
+            "gender": row[5], "blood_type": row[6], "allergies": row[7],
+            "vascular_access": row[8],
+            "dry_weight": float(row[9]) if row[9] else None,
+            "schedule_days": row[10], "esa_drug": row[11], "esa_dose": row[12],
+            "primary_diagnosis": row[13], "is_active": row[14],
+            "created_at": row[15].isoformat() if row[15] else None,
+        })
+    except Exception as e:
+        logger.error("get_patient error: %s", e)
+        return jsonify({"hn": hn, "error": str(e)}), 500
 
 
 # ── Dashboard ─────────────────────────────────────────────
@@ -314,8 +455,11 @@ def get_patient(hn):
 @hd_bp.route("/dashboard/beds", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def bed_dashboard():
-    """30-bed real-time dashboard."""
+    """30-bed real-time dashboard with active sessions."""
+    import os
     from .config import HdConfig
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+
     beds = []
     for i in range(1, HdConfig.TOTAL_BEDS + 1):
         beds.append({
@@ -325,6 +469,44 @@ def bed_dashboard():
             "current_vitals": None,
             "alerts": [],
         })
+
+    # Fill beds from active sessions
+    if db_url:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT s.bed_number, s.id as session_id, s.status,
+                           p.hn, p.patient_name, p.vascular_access,
+                           p.dry_weight, p.esa_drug
+                    FROM hd_sessions s
+                    JOIN hd_patient_mapping p ON p.id = s.patient_id
+                    WHERE s.session_date = CURRENT_DATE
+                      AND s.status IN ('scheduled', 'in_progress')
+                    ORDER BY s.bed_number
+                """)
+                for row in cur.fetchall():
+                    bed_num = row[0]
+                    if 1 <= bed_num <= HdConfig.TOTAL_BEDS:
+                        beds[bed_num - 1] = {
+                            "bed_number": bed_num,
+                            "status": row[2],
+                            "session_id": row[1],
+                            "patient": {
+                                "hn": row[3],
+                                "name": row[4],
+                                "vascular_access": row[5],
+                                "dry_weight": float(row[6]) if row[6] else None,
+                                "esa_drug": row[7],
+                            },
+                            "current_vitals": None,
+                            "alerts": [],
+                        }
+            conn.close()
+        except Exception as e:
+            logger.warning("bed_dashboard DB error: %s", e)
+
     return jsonify({"beds": beds, "total": HdConfig.TOTAL_BEDS})
 
 
