@@ -560,6 +560,62 @@ def hd_monthly_report():
     return jsonify(report)
 
 
+# ── BI Reports ────────────────────────────────────────────
+
+@hd_bp.route("/report/ha", methods=["GET"])
+@require_role("physician", "admin")
+def hd_ha_report():
+    """HA Quality Indicators report."""
+    import os
+    from .bi_reporting import BiReportEngine
+
+    month = request.args.get("month", type=int, default=0)
+    year = request.args.get("year", type=int, default=0)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    registry = current_app.config.get("MASTER_REGISTRY")
+
+    engine = BiReportEngine(master_registry=registry, db_url=db_url)
+    report = engine.generate_ha_report(month, year)
+
+    log_action(user_id=g.get("hd_user_id"), action="report.ha",
+               resource_type="report", ip_address=request.remote_addr or "")
+    return jsonify(report.to_dict())
+
+
+@hd_bp.route("/report/trt", methods=["GET"])
+@require_role("physician", "admin")
+def hd_trt_report():
+    """TRT Registry export (anonymized)."""
+    import os
+    from .bi_reporting import BiReportEngine
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    registry = current_app.config.get("MASTER_REGISTRY")
+    engine = BiReportEngine(master_registry=registry, db_url=db_url)
+    records = engine.generate_trt_records()
+
+    log_action(user_id=g.get("hd_user_id"), action="report.trt",
+               resource_type="report", ip_address=request.remote_addr or "")
+    return jsonify({"records": records, "total": len(records), "format": "TRT_Registry"})
+
+
+@hd_bp.route("/export/patients", methods=["GET"])
+@require_role("physician", "admin")
+def hd_export_patients():
+    """Export patient list as JSON (for Excel/CSV conversion)."""
+    import os
+    from .bi_reporting import BiReportEngine
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    registry = current_app.config.get("MASTER_REGISTRY")
+    engine = BiReportEngine(master_registry=registry, db_url=db_url)
+    rows = engine.export_patient_list_json()
+
+    log_action(user_id=g.get("hd_user_id"), action="export.patients",
+               resource_type="export", ip_address=request.remote_addr or "")
+    return jsonify({"patients": rows, "total": len(rows)})
+
+
 # ── HIS Integration Webhook ──────────────────────────────
 
 @hd_bp.route("/his/webhook", methods=["POST"])

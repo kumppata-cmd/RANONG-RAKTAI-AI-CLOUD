@@ -8723,6 +8723,19 @@ def handle_search_command(
             logger.error("KPI HD error: %s", _kpi_err)
             return f"❌ ไม่สามารถสร้างรายงาน KPI ได้: {type(_kpi_err).__name__}"
 
+    # ── HA Quality Report (Phase 8) ─────────────────────────
+    if text_stripped in ("ha report", "ha", "คุณภาพhd", "คุณภาพ hd",
+                          "quality", "ตัวชี้วัด", "ตัวชี้วัดhd"):
+        try:
+            from hd_module.bi_reporting import BiReportEngine, format_ha_report_for_line
+            _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+            engine = BiReportEngine(master_registry=master_registry, db_url=_hd_db)
+            report = engine.generate_ha_report()
+            return format_ha_report_for_line(report)
+        except Exception as _ha_err:
+            logger.error("HA report error: %s", _ha_err)
+            return f"❌ ไม่สามารถสร้างรายงาน HA ได้: {type(_ha_err).__name__}"
+
     # ── รายงาน HD ประจำเดือน (Phase 7.2) ───────────────────
     if text_stripped in ("รายงานhd", "รายงาน hd", "hd report", "สรุปเดือน",
                           "สรุปเดือนhd", "monthly report"):
