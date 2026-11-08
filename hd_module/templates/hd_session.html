@@ -50,8 +50,9 @@
     <h2 id="patientName">เลือกผู้ป่วย</h2>
     <p style="color:var(--fg-muted);font-size:.85rem;" id="patientInfo">HN: - | ตาราง: -</p>
   </div>
-  <div>
+  <div style="display:flex;flex-direction:column;gap:6px;align-items:flex-end;">
     <span class="badge badge-info" id="sessionStatus">รอเริ่ม</span>
+    <button class="btn btn-outline" id="cancelBtn" onclick="cancelSession()" style="display:none;font-size:.75rem;padding:6px 12px;color:var(--danger);border-color:var(--danger);">❌ ยกเลิก</button>
   </div>
 </div>
 
@@ -95,23 +96,23 @@
     <div class="vital-grid">
       <div class="vital-input">
         <label>SBP (mmHg)</label>
-        <input type="number" class="form-control" id="preSbp" inputmode="numeric" placeholder="120">
+        <input type="number" class="form-control" id="preSbp" inputmode="numeric" placeholder="-">
       </div>
       <div class="vital-input">
         <label>DBP (mmHg)</label>
-        <input type="number" class="form-control" id="preDbp" inputmode="numeric" placeholder="80">
+        <input type="number" class="form-control" id="preDbp" inputmode="numeric" placeholder="-">
       </div>
       <div class="vital-input">
         <label>HR (bpm)</label>
-        <input type="number" class="form-control" id="preHr" inputmode="numeric" placeholder="80">
+        <input type="number" class="form-control" id="preHr" inputmode="numeric" placeholder="-">
       </div>
       <div class="vital-input">
         <label>Temp (°C)</label>
-        <input type="number" class="form-control" id="preTemp" inputmode="decimal" step="0.1" placeholder="36.5">
+        <input type="number" class="form-control" id="preTemp" inputmode="decimal" step="0.1" placeholder="-">
       </div>
       <div class="vital-input">
         <label>SpO2 (%)</label>
-        <input type="number" class="form-control" id="preSpo2" inputmode="numeric" placeholder="98">
+        <input type="number" class="form-control" id="preSpo2" inputmode="numeric" placeholder="-">
       </div>
     </div>
   </div>
@@ -121,15 +122,15 @@
     <div class="grid-3">
       <div class="vital-input">
         <label>น้ำหนักก่อนฟอก (kg)</label>
-        <input type="number" class="form-control" id="preWeight" inputmode="decimal" step="0.1" placeholder="55.0" oninput="calcIDWG()">
+        <input type="number" class="form-control" id="preWeight" inputmode="decimal" step="0.1" placeholder="-" oninput="calcIDWG()">
       </div>
       <div class="vital-input">
         <label>Dry Weight (kg)</label>
-        <input type="number" class="form-control" id="dryWeight" inputmode="decimal" step="0.1" placeholder="53.0" oninput="calcIDWG()">
+        <input type="number" class="form-control" id="dryWeight" inputmode="decimal" step="0.1" placeholder="-" oninput="calcIDWG()">
       </div>
       <div class="vital-input">
         <label>น้ำหนักหลังฟอกครั้งก่อน (kg)</label>
-        <input type="number" class="form-control" id="prevPostWeight" inputmode="decimal" step="0.1" placeholder="53.5">
+        <input type="number" class="form-control" id="prevPostWeight" inputmode="decimal" step="0.1" placeholder="-">
       </div>
     </div>
     <div class="idwg-calc" id="idwgCalc" style="display:none;">
@@ -150,9 +151,10 @@
     </div>
   </div>
 
-  <button class="btn btn-success btn-lg btn-block" onclick="startSession()">
-    ▶️ เริ่มฟอกเลือด
-  </button>
+  <div class="grid-2">
+    <button class="btn btn-success btn-lg" onclick="startSession()">▶️ เริ่มฟอกเลือด</button>
+    <button class="btn btn-outline btn-lg" onclick="scheduleSession()" style="color:var(--info);border-color:var(--info);">📅 จองรอบถัดไป</button>
+  </div>
 </div>
 
 <!-- ═══ INTRA-HD TAB ═══ -->
@@ -214,15 +216,15 @@
     <div class="vital-grid">
       <div class="vital-input">
         <label>SBP (mmHg)</label>
-        <input type="number" class="form-control" id="postSbp" inputmode="numeric" placeholder="120">
+        <input type="number" class="form-control" id="postSbp" inputmode="numeric" placeholder="-">
       </div>
       <div class="vital-input">
         <label>DBP (mmHg)</label>
-        <input type="number" class="form-control" id="postDbp" inputmode="numeric" placeholder="80">
+        <input type="number" class="form-control" id="postDbp" inputmode="numeric" placeholder="-">
       </div>
       <div class="vital-input">
         <label>HR (bpm)</label>
-        <input type="number" class="form-control" id="postHr" inputmode="numeric" placeholder="80">
+        <input type="number" class="form-control" id="postHr" inputmode="numeric" placeholder="-">
       </div>
     </div>
   </div>
@@ -232,7 +234,7 @@
     <div class="grid-2">
       <div class="vital-input">
         <label>น้ำหนักหลังฟอก (kg)</label>
-        <input type="number" class="form-control" id="postWeight" inputmode="decimal" step="0.1" placeholder="53.0" oninput="calcActualUF()">
+        <input type="number" class="form-control" id="postWeight" inputmode="decimal" step="0.1" placeholder="-" oninput="calcActualUF()">
       </div>
       <div class="vital-input">
         <label>Actual UF (mL)</label>
@@ -512,9 +514,98 @@ function startSession(){
       showToast('เริ่มฟอกเลือดสำเร็จ','success');
       startTimer();
       switchTab('session','intra');
+      document.getElementById('cancelBtn').style.display = 'inline-flex';
     })
     .catch(()=>showToast('ไม่สามารถเริ่มรอบฟอกได้','danger'));
 }
+
+function scheduleSession(){
+  const hn = document.getElementById('patientSelect').value;
+  const bed = document.getElementById('bedSelect').value;
+  if(!hn){ showToast('กรุณาเลือกผู้ป่วย','warning'); return; }
+  if(!bed){ showToast('กรุณาเลือกเตียง','warning'); return; }
+  const data = { patient_hn: hn, bed_number: parseInt(bed), schedule_only: true };
+  hdFetch('/hd/api/v1/sessions',{method:'POST',body:JSON.stringify(data)})
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.error){ showToast(d.error,'danger'); return; }
+      showToast('จองเตียง '+bed+' สำเร็จ — รอเริ่มฟอกรอบถัดไป','success');
+      /* Reset form for next patient */
+      document.getElementById('patientSelect').value = '';
+      document.getElementById('bedSelect').value = '';
+      document.getElementById('patientName').textContent = 'เลือกผู้ป่วย';
+      document.getElementById('patientInfo').textContent = 'HN: - | ตาราง: -';
+    })
+    .catch(()=>showToast('ไม่สามารถจองเตียงได้','danger'));
+}
+
+function cancelSession(){
+  if(!sessionData.session_id){ showToast('ไม่มี session ที่จะยกเลิก','warning'); return; }
+  if(!confirm('ยืนยันยกเลิกรอบฟอกนี้?')) return;
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id,{
+    method:'PUT',
+    body:JSON.stringify({status:'cancelled'})
+  }).then(r=>r.json()).then(d=>{
+    showToast('ยกเลิกรอบฟอกสำเร็จ — เตียงว่างแล้ว','success');
+    document.getElementById('sessionStatus').textContent = 'ยกเลิกแล้ว';
+    document.getElementById('sessionStatus').className = 'badge badge-muted';
+    document.getElementById('cancelBtn').style.display = 'none';
+    if(timerInterval) clearInterval(timerInterval);
+    document.getElementById('sessionTimer').style.display = 'none';
+    sessionData.session_id = null;
+  }).catch(()=>showToast('ไม่สามารถยกเลิกได้','danger'));
+}
+
+/* Load existing session when coming from dashboard */
+function loadExistingSession(sid){
+  const token = getHdToken();
+  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
+  fetch('/hd/api/v1/sessions/'+sid+'/detail', {headers})
+    .then(r=>r.ok?r.json():Promise.reject())
+    .then(d=>{
+      sessionData.session_id = d.session_id || sid;
+      sessionData.pre_weight = d.pre_weight || 0;
+      sessionData.dry_weight = d.dry_weight || 0;
+      /* Fill header */
+      document.getElementById('patientName').textContent = d.patient_name || 'ผู้ป่วย';
+      document.getElementById('patientInfo').textContent = 'HN: '+(d.patient_hn||'-')+' | ตาราง: '+(d.schedule_days||'-')+' | Access: '+(d.vascular_access||'-');
+      document.getElementById('bedDisplay').textContent = d.bed_number || '-';
+      if(d.patient_hn) document.getElementById('patientSelect').value = d.patient_hn;
+      if(d.bed_number) document.getElementById('bedSelect').value = d.bed_number;
+      /* Fill Pre-HD vitals if available */
+      if(d.pre_weight) document.getElementById('preWeight').value = d.pre_weight;
+      if(d.dry_weight) document.getElementById('dryWeight').value = d.dry_weight;
+      /* Status */
+      if(d.status==='in_progress'){
+        document.getElementById('sessionStatus').textContent = 'กำลังฟอก';
+        document.getElementById('sessionStatus').className = 'badge badge-success';
+        document.getElementById('cancelBtn').style.display = 'inline-flex';
+        /* Start timer from actual start time */
+        if(d.started_at){
+          let st = d.started_at;
+          if(!st.endsWith('Z')&&!st.includes('+')) st+='Z';
+          sessionData.start_time = new Date(st);
+          sessionData.duration_hours = d.duration_hours || 4;
+          document.getElementById('sessionTimer').style.display = 'block';
+          document.getElementById('timerStartTime').textContent = sessionData.start_time.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+          const endTime = new Date(sessionData.start_time.getTime()+sessionData.duration_hours*3600000);
+          document.getElementById('timerEndTime').textContent = endTime.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+          updateTimer();
+          timerInterval = setInterval(updateTimer, 1000);
+        }
+        switchTab('session','intra');
+      } else if(d.status==='scheduled'){
+        document.getElementById('sessionStatus').textContent = 'จองไว้ — รอเริ่ม';
+        document.getElementById('sessionStatus').className = 'badge badge-info';
+        document.getElementById('cancelBtn').style.display = 'inline-flex';
+      }
+    })
+    .catch(e=>console.warn('loadExistingSession:', e));
+}
+
+/* Check URL for existing session */
+const sessionIdParam = params.get('session') || window.location.pathname.match(/\/session\/(\d+)/)?.[1];
+if(sessionIdParam) loadExistingSession(sessionIdParam);
 
 function saveIntraVital(){
   const sbp = document.getElementById('modalSbp').value;

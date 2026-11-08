@@ -80,8 +80,23 @@ def hd_session_new():
 
 @hd_web.route("/session/<int:session_id>")
 def hd_session_detail(session_id):
-    """Render existing HD session."""
-    return render_template("hd_session.html", session_id=session_id)
+    """Render existing HD session — loads data via JS."""
+    # Pre-load patients for dropdown
+    patients = []
+    try:
+        import os, psycopg2
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        if db_url:
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("SELECT hn, patient_name, vascular_access, schedule_days FROM hd_patient_mapping WHERE is_active=TRUE ORDER BY patient_name LIMIT 200")
+                patients = [{"hn": r[0], "name": r[1] or "", "va": r[2] or "", "sched": r[3] or ""} for r in cur.fetchall()]
+            conn.close()
+    except Exception:
+        pass
+    resp = make_response(render_template("hd_session.html", session_id=session_id, server_patients=patients, db_err=""))
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return resp
 
 
 @hd_web.route("/patients")
@@ -279,15 +294,18 @@ def create_session():
                 conn.close()
                 return jsonify({"error": f"Bed {bed} is already occupied today"}), 409
 
-            # Insert session
-            cur.execute("""
+            # Insert session (schedule_only → 'scheduled', else 'in_progress')
+            is_schedule = data.get("schedule_only", False)
+            init_status = "scheduled" if is_schedule else "in_progress"
+            started = "NULL" if is_schedule else "NOW()"
+            cur.execute(f"""
                 INSERT INTO hd_sessions
                     (patient_id, bed_number, session_date, status,
                      pre_weight, post_weight, uf_goal,
                      started_at, nurse_id)
-                VALUES (%s, %s, CURRENT_DATE, 'in_progress',
+                VALUES (%s, %s, CURRENT_DATE, '{init_status}',
                         %s, NULL, %s,
-                        NOW(), %s)
+                        {started}, %s)
                 RETURNING id
             """, (
                 patient_id, bed,
@@ -324,7 +342,52 @@ def create_session():
 @require_role("physician", "nurse", "admin", "auditor")
 def get_session(session_id):
     """Get details of a specific HD session."""
-    return jsonify({"session_id": session_id, "status": "not_found"}), 404
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"session_id": session_id, "status": "not_found"}), 404
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.id, s.bed_number, s.session_date, s.status,
+                       s.pre_weight, s.post_weight, s.actual_uf, s.uf_goal,
+                       s.started_at, s.ended_at, s.notes,
+                       p.hn, p.patient_name, p.vascular_access, p.schedule_days,
+                       p.dry_weight, p.esa_drug
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE s.id = %s
+            """, (session_id,))
+            row = cur.fetchone()
+        conn.close()
+        if not row:
+            return jsonify({"session_id": session_id, "status": "not_found"}), 404
+        return jsonify({
+            "session_id": row[0], "bed_number": row[1],
+            "session_date": row[2].isoformat() if row[2] else None,
+            "status": row[3], "pre_weight": float(row[4]) if row[4] else None,
+            "post_weight": float(row[5]) if row[5] else None,
+            "actual_uf": float(row[6]) if row[6] else None,
+            "uf_goal": float(row[7]) if row[7] else 2000,
+            "started_at": (row[8].isoformat() + "Z") if row[8] else None,
+            "ended_at": (row[9].isoformat() + "Z") if row[9] else None,
+            "notes": row[10],
+            "patient_hn": row[11], "patient_name": row[12],
+            "vascular_access": row[13], "schedule_days": row[14],
+            "dry_weight": float(row[15]) if row[15] else None,
+            "esa_drug": row[16], "duration_hours": 4,
+        })
+    except Exception as e:
+        logger.error("get_session error: %s", e)
+        return jsonify({"session_id": session_id, "error": str(e)}), 500
+
+@hd_bp.route("/sessions/<int:session_id>/detail", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def get_session_detail(session_id):
+    """Alias for get_session — used by JS loadExistingSession."""
+    return get_session(session_id)
 
 
 @hd_bp.route("/sessions/<int:session_id>", methods=["PUT"])
@@ -344,6 +407,9 @@ def update_session(session_id):
                 params = []
                 if data.get("status") == "completed":
                     updates.append("status = 'completed'")
+                    updates.append("ended_at = NOW()")
+                elif data.get("status") == "cancelled":
+                    updates.append("status = 'cancelled'")
                     updates.append("ended_at = NOW()")
                 if data.get("post_weight") is not None:
                     updates.append("post_weight = %s")
