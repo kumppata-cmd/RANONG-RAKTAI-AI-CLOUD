@@ -530,7 +530,8 @@ def _build_session_summary(session_id, post_data):
             # Get vital records
             cur.execute("""
                 SELECT phase, sbp, dbp, heart_rate, temperature, spo2, recorded_at
-                FROM hd_vital_signs WHERE session_id = %s ORDER BY recorded_at
+                FROM hd_vital_signs WHERE session_id = %s AND sbp IS NOT NULL
+                ORDER BY recorded_at
             """, (session_id,))
             vitals = cur.fetchall()
 
@@ -671,13 +672,31 @@ def record_vital(session_id):
         ip_address=request.remote_addr or "",
     )
 
+    # Get patient_id from session
+    patient_id = data.get("patient_id", 0)
+    if not patient_id:
+        import os
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        if db_url:
+            try:
+                import psycopg2
+                conn = psycopg2.connect(db_url, connect_timeout=5)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT patient_id FROM hd_sessions WHERE id = %s", (session_id,))
+                    row = cur.fetchone()
+                    if row:
+                        patient_id = row[0]
+                conn.close()
+            except Exception:
+                pass
+
     # Use VitalRecorder for real-time recording + alert evaluation
     from flask import current_app
     recorder = current_app.config.get("HD_VITAL_RECORDER")
     if recorder:
         result = recorder.record_vitals(
             session_id=session_id,
-            patient_id=data.get("patient_id", 0),
+            patient_id=patient_id,
             phase=phase,
             sbp=data.get("sbp"),
             dbp=data.get("dbp"),
@@ -698,6 +717,28 @@ def record_vital(session_id):
             "alert_count": result.get("alert_count", 0),
         }), 201
 
+    # Fallback: direct INSERT if no VitalRecorder
+    import os
+    db_url_fb = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if db_url_fb:
+        try:
+            import psycopg2
+            conn_fb = psycopg2.connect(db_url_fb, connect_timeout=5)
+            with conn_fb.cursor() as cur_fb:
+                cur_fb.execute("""
+                    INSERT INTO hd_vital_signs
+                        (session_id, phase, sbp, dbp, heart_rate, temperature, spo2, recorded_at)
+                    VALUES (%s, %s::hd_vital_phase, %s, %s, %s, %s, %s, NOW())
+                    RETURNING id
+                """, (session_id, phase,
+                      data.get("sbp"), data.get("dbp"), data.get("hr"),
+                      data.get("temp"), data.get("spo2")))
+                vid = cur_fb.fetchone()[0]
+                conn_fb.commit()
+            conn_fb.close()
+            return jsonify({"session_id": session_id, "phase": phase, "recorded": True, "vital_id": vid}), 201
+        except Exception as ve:
+            logger.error("vital fallback error: %s", ve)
     return jsonify({"session_id": session_id, "phase": phase, "recorded": True}), 201
 
 
@@ -705,7 +746,30 @@ def record_vital(session_id):
 @require_role("physician", "nurse", "admin", "auditor")
 def list_vitals(session_id):
     """List vital signs for a session."""
-    return jsonify({"session_id": session_id, "vitals": []})
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"session_id": session_id, "vitals": []})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, phase, sbp, dbp, heart_rate, temperature, spo2, recorded_at
+                FROM hd_vital_signs WHERE session_id = %s
+                ORDER BY recorded_at
+            """, (session_id,))
+            vitals = [{
+                "id": r[0], "phase": r[1],
+                "sbp": r[2], "dbp": r[3], "heart_rate": r[4], "hr": r[4],
+                "temp": float(r[5]) if r[5] else None, "spo2": r[6],
+                "recorded_at": r[7].isoformat() if r[7] else None,
+            } for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"session_id": session_id, "vitals": vitals, "count": len(vitals)})
+    except Exception as e:
+        logger.error("list_vitals error: %s", e)
+        return jsonify({"session_id": session_id, "vitals": [], "error": str(e)})
 
 
 # ── UF Records ────────────────────────────────────────────
@@ -903,9 +967,9 @@ def bed_dashboard():
                 for sid, bnum in session_ids:
                     try:
                         cur.execute("""
-                            SELECT sbp, dbp, heart_rate, temperature, spo2
+                            SELECT sbp, dbp, heart_rate, temperature, spo2, recorded_at
                             FROM hd_vital_signs
-                            WHERE session_id = %s
+                            WHERE session_id = %s AND sbp IS NOT NULL
                             ORDER BY recorded_at DESC LIMIT 1
                         """, (sid,))
                         vrow = cur.fetchone()

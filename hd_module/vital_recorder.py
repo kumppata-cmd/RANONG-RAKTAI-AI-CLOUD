@@ -61,12 +61,12 @@ class VitalRecorder:
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO hd_vital_signs
-                        (session_id, phase, systolic_bp, diastolic_bp,
-                         heart_rate, temperature, spo2, notes, recorded_by,
+                        (session_id, phase, sbp, dbp,
+                         heart_rate, temperature, spo2,
                          recorded_at)
-                    VALUES (%s, %s::hd_vital_phase, %s, %s, %s, %s, %s, %s, %s, NOW())
+                    VALUES (%s, %s::hd_vital_phase, %s, %s, %s, %s, %s, NOW())
                     RETURNING id
-                """, (session_id, phase, sbp, dbp, hr, temp, spo2, notes, recorded_by))
+                """, (session_id, phase, sbp, dbp, hr, temp, spo2))
                 vital_id = cur.fetchone()[0]
                 conn.commit()
 
@@ -74,8 +74,8 @@ class VitalRecorder:
             previous_sbps = []
             with conn.cursor() as cur:
                 cur.execute("""
-                    SELECT recorded_at, systolic_bp FROM hd_vital_signs
-                    WHERE session_id = %s AND systolic_bp IS NOT NULL
+                    SELECT recorded_at, sbp FROM hd_vital_signs
+                    WHERE session_id = %s AND sbp IS NOT NULL
                       AND recorded_at > NOW() - INTERVAL '%s minutes'
                       AND id != %s
                     ORDER BY recorded_at DESC

@@ -609,6 +609,18 @@ function loadExistingSession(sid){
           timerInterval = setInterval(updateTimer, 1000);
         }
         switchTab('session','intra');
+        /* Load existing vitals from DB */
+        fetch('/hd/api/v1/sessions/'+sid+'/vitals', {headers})
+          .then(r=>r.ok?r.json():Promise.reject())
+          .then(vd=>{
+            (vd.vitals||[]).forEach(v=>{
+              timeline.push({
+                time: v.recorded_at ? new Date(v.recorded_at+'Z').toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) : '-',
+                type:'vital', sbp:v.sbp, dbp:v.dbp, hr:v.hr||v.heart_rate
+              });
+            });
+            if(timeline.length) renderTimeline();
+          }).catch(()=>{});
       } else if(d.status==='scheduled'){
         document.getElementById('sessionStatus').textContent = 'จองไว้ — รอเริ่ม';
         document.getElementById('sessionStatus').className = 'badge badge-info';
