@@ -1369,7 +1369,7 @@ if master_registry and os.path.exists(_SEED_FILE):
         try:
             with open(_SEED_FILE, encoding="utf-8") as _sf:
                 _seed = json.load(_sf)
-            _seed_pts = _seed.get("patients", [])
+            _seed_pts = _seed if isinstance(_seed, list) else _seed.get("patients", [])
             if _seed_pts:
                 _new, _upd, _skip, _msgs = master_registry.import_dialysis_batch(
                     _seed_pts, registered_by="excel_seed"

@@ -92,14 +92,6 @@ def sync_patients_to_hd_db(master_registry):
 
     try:
         conn = psycopg2.connect(db_url, connect_timeout=10)
-        with conn.cursor() as cur:
-            cur.execute("SELECT COUNT(*) FROM hd_patient_mapping")
-            count = cur.fetchone()[0]
-            if count > 0:
-                logger.info("HD patient sync: skipped — %d patients already in DB", count)
-                conn.close()
-                return
-
         # Read from registry via bridge
         from .patient_bridge import PatientBridge
         bridge = PatientBridge(master_registry)
@@ -110,8 +102,9 @@ def sync_patients_to_hd_db(master_registry):
             conn.close()
             return
 
-        # Insert into hd_patient_mapping
+        # Upsert into hd_patient_mapping (insert new + update existing)
         inserted = 0
+        updated = 0
         with conn.cursor() as cur:
             for p in patients:
                 try:
@@ -121,7 +114,13 @@ def sync_patients_to_hd_db(master_registry):
                              dry_weight, schedule_days, esa_drug, esa_dose,
                              primary_diagnosis, source_registry_hash, is_active)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, TRUE)
-                        ON CONFLICT (hn) DO NOTHING
+                        ON CONFLICT (hn) DO UPDATE SET
+                            patient_name = EXCLUDED.patient_name,
+                            vascular_access = CASE WHEN EXCLUDED.vascular_access != '' THEN EXCLUDED.vascular_access ELSE hd_patient_mapping.vascular_access END,
+                            schedule_days = CASE WHEN EXCLUDED.schedule_days != '' THEN EXCLUDED.schedule_days ELSE hd_patient_mapping.schedule_days END,
+                            esa_drug = CASE WHEN EXCLUDED.esa_drug != '' THEN EXCLUDED.esa_drug ELSE hd_patient_mapping.esa_drug END,
+                            esa_dose = CASE WHEN EXCLUDED.esa_dose != '' THEN EXCLUDED.esa_dose ELSE hd_patient_mapping.esa_dose END,
+                            is_active = TRUE
                     """, (
                         p.get("hn", ""),
                         p.get("hospital_hn", ""),
@@ -129,19 +128,22 @@ def sync_patients_to_hd_db(master_registry):
                         p.get("vascular_access", ""),
                         p.get("dry_weight"),
                         p.get("schedule_days", ""),
-                        p.get("esa_drug", ""),
+                        p.get("esa_drug", "") or p.get("esa_code", ""),
                         p.get("esa_dose", ""),
                         p.get("primary_diagnosis", "CKD-G5 on HD"),
                         p.get("source_registry_hash", ""),
                     ))
-                    inserted += 1
+                    if cur.statusmessage and 'UPDATE' in cur.statusmessage:
+                        updated += 1
+                    else:
+                        inserted += 1
                 except Exception as row_err:
                     logger.warning("HD patient sync: skip row %s — %s",
                                    p.get("hn"), row_err)
             conn.commit()
         conn.close()
-        logger.info("HD patient sync: imported %d patients into hd_patient_mapping",
-                     inserted)
+        logger.info("HD patient sync: inserted=%d updated=%d into hd_patient_mapping",
+                     inserted, updated)
     except Exception as e:
         logger.error("HD patient sync failed: %s", e)
 

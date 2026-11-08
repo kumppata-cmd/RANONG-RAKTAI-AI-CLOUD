@@ -227,6 +227,16 @@ CREATE TABLE IF NOT EXISTS hd_schema_version (
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.0.0', 'Initial HD Smart Monitoring schema')
 ON CONFLICT (version) DO NOTHING;
+
+-- v1.1.0: Add bfr + hd_per_week to patient_mapping
+DO $$ BEGIN
+    ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS bfr INTEGER DEFAULT 0;
+    ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS hd_per_week INTEGER DEFAULT 3;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+INSERT INTO hd_schema_version (version, description)
+VALUES ('1.1.0', 'Add bfr and hd_per_week to hd_patient_mapping')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────

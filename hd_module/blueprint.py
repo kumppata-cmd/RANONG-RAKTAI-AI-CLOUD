@@ -487,7 +487,7 @@ def bed_dashboard():
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
                            p.dry_weight, p.esa_drug,
-                           s.start_time, s.duration_hours
+                           s.started_at, 4 as duration_hours
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.session_date = CURRENT_DATE
