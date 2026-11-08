@@ -27,7 +27,10 @@ class TestDailyDigest(unittest.TestCase):
     def test_digest_contains_sections(self):
         from server import _build_daily_digest
         result = _build_daily_digest()
-        self.assertIn("ฟอกเลือดวันนี้", result)
+        self.assertTrue(
+            "ฟอกเลือดวันนี้" in result
+            or "ไม่มีรอบฟอก" in result  # วันอาทิตย์
+        )
         self.assertIn("เอกสารใหม่เมื่อวาน", result)
         # ค่าวิกฤต section
         self.assertTrue(
