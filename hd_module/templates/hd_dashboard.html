@@ -27,10 +27,12 @@
 .bed-card:active { transform: scale(.97); }
 .bed-card:hover { box-shadow: 0 4px 16px var(--shadow); }
 .bed-card .bed-num { font-size: 1.4rem; font-weight: 800; }
-.bed-card .bed-patient { font-size: .8rem; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bed-card .bed-status { font-size: .75rem; font-weight: 600; margin-top: auto; display: flex; align-items: center; gap: 4px; }
-.bed-card .bed-time { font-size: .7rem; color: var(--fg-muted); }
-.bed-card .bed-time-urgent { color: var(--danger); font-weight: 700; animation: pulse-text 1s infinite; }
+.bed-card .bed-patient { font-size: .78rem; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bed-card .bed-hn { font-size: .65rem; color: var(--fg-muted); }
+.bed-card .bed-access { font-size: .6rem; padding: 1px 6px; border-radius: 8px; background: rgba(52,152,219,.12); color: var(--info); font-weight: 600; display: inline-block; margin-left: 4px; }
+.bed-card .bed-status { font-size: .7rem; font-weight: 600; margin-top: auto; display: flex; align-items: center; gap: 4px; }
+.bed-card .bed-time { font-size: .75rem; color: var(--success); font-weight: 700; font-variant-numeric: tabular-nums; }
+.bed-card .bed-time-urgent { color: var(--danger) !important; animation: pulse-text 1s infinite; }
 @keyframes pulse-text { 0%,100%{opacity:1;} 50%{opacity:.5;} }
 .bed-card .bed-vitals { font-size: .7rem; color: var(--fg-muted); margin-top: 2px; }
 /* Status colors with icons (color blind safe) */
@@ -178,25 +180,37 @@ function renderBeds(beds){
         window.location.href = url;
       }
     };
+    /* Patient details */
+    const pName = b.patient_name || (b.patient && b.patient.name) || '';
+    const pHn = hn;
+    const va = b.vascular_access || (b.patient && b.patient.vascular_access) || '';
+
     let vitals = '';
     if(b.current_vitals){
       const v = b.current_vitals;
       vitals = `<div class="bed-vitals">BP ${v.sbp||'-'}/${v.dbp||'-'} HR:${v.hr||'-'}</div>`;
     }
-    /* Timer countdown */
+    /* Timer: fix UTC by appending Z if no timezone info */
     let timeLeft = '';
-    if(b.start_time && b.status==='active'){
-      const elapsed = calcElapsed(b.start_time, b.duration_hours || 4);
+    if(b.start_time && (b.status==='active'||b.status==='warning'||b.status==='critical')){
+      let st = b.start_time;
+      if(st && !st.endsWith('Z') && !st.includes('+')) st += 'Z'; /* treat as UTC */
+      const elapsed = calcElapsed(st, b.duration_hours || 4);
       timeLeft = `<div class="bed-time ${elapsed.urgent?'bed-time-urgent':''}">⏱ ${elapsed.text}</div>`;
     } else if(b.time_remaining){
       timeLeft = `<div class="bed-time">⏱ เหลือ ${b.time_remaining}</div>`;
     }
 
-    const pName = b.patient_name || (b.patient && b.patient.name) || '';
-    const pHn = hn;
+    /* HN + VA badge */
+    let hnLine = '';
+    if(pHn || va){
+      hnLine = `<div class="bed-hn">${pHn ? 'HN '+pHn : ''}${va ? '<span class="bed-access">'+va+'</span>' : ''}</div>`;
+    }
+
     card.innerHTML = `
       <div class="bed-num">${b.bed_number}</div>
-      <div class="bed-patient">${pName || (pHn ? 'HN '+pHn : '')}</div>
+      <div class="bed-patient">${pName}</div>
+      ${hnLine}
       ${vitals}
       ${timeLeft}
       <div class="bed-status">${s.label}</div>

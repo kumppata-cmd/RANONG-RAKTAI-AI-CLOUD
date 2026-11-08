@@ -603,16 +603,19 @@ def bed_dashboard():
                       AND s.status IN ('scheduled', 'in_progress')
                     ORDER BY s.bed_number
                 """)
+                session_ids = []
                 for row in cur.fetchall():
                     bed_num = row[0]
                     if 1 <= bed_num <= HdConfig.TOTAL_BEDS:
-                        # Map DB status → JS status
                         db_status = row[2]
                         js_status = {"in_progress": "active", "scheduled": "pre_hd", "completed": "done"}.get(db_status, db_status)
                         beds[bed_num - 1] = {
                             "bed_number": bed_num,
                             "status": js_status,
                             "session_id": row[1],
+                            "patient_name": row[4],
+                            "patient_hn": row[3],
+                            "vascular_access": row[5],
                             "patient": {
                                 "hn": row[3],
                                 "name": row[4],
@@ -620,11 +623,30 @@ def bed_dashboard():
                                 "dry_weight": float(row[6]) if row[6] else None,
                                 "esa_drug": row[7],
                             },
-                            "start_time": row[8].isoformat() if row[8] else None,
+                            "start_time": (row[8].isoformat() + "Z") if row[8] else None,
                             "duration_hours": float(row[9]) if row[9] else 4,
                             "current_vitals": None,
                             "alerts": [],
                         }
+                        session_ids.append((row[1], bed_num))
+
+                # Fetch latest vitals for active sessions
+                for sid, bnum in session_ids:
+                    try:
+                        cur.execute("""
+                            SELECT sbp, dbp, heart_rate, temperature, spo2
+                            FROM hd_vital_signs
+                            WHERE session_id = %s
+                            ORDER BY recorded_at DESC LIMIT 1
+                        """, (sid,))
+                        vrow = cur.fetchone()
+                        if vrow and 1 <= bnum <= len(beds):
+                            beds[bnum - 1]["current_vitals"] = {
+                                "sbp": vrow[0], "dbp": vrow[1],
+                                "hr": vrow[2], "temp": vrow[3], "spo2": vrow[4],
+                            }
+                    except Exception:
+                        pass
             conn.close()
         except Exception as e:
             logger.warning("bed_dashboard DB error: %s", e)
