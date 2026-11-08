@@ -165,6 +165,9 @@
     <div class="timer-value" id="timerDisplay">4:00:00</div>
     <div class="timer-bar"><div class="timer-bar-fill" id="timerBarFill" style="width:0%;"></div></div>
     <div class="timer-label" style="margin-top:6px;">เริ่ม: <span id="timerStartTime">-</span> | สิ้นสุดโดยประมาณ: <span id="timerEndTime">-</span></div>
+    <button class="btn btn-success" id="completeBtn" style="display:none;margin-top:12px;width:100%;" onclick="switchTab('session','post')">
+      ✅ ฟอกครบแล้ว — กรอก Post-HD
+    </button>
   </div>
 
   <!-- Alert Banner -->
@@ -264,6 +267,17 @@
   <button class="btn btn-success btn-lg btn-block" onclick="endSession()">
     ✅ เสร็จสิ้นรอบฟอก
   </button>
+
+  <!-- Session Summary (shown after completion) -->
+  <div class="card" id="sessionSummaryCard" style="display:none;margin-top:16px;border:2px solid var(--success);">
+    <div class="card-header">📋 สรุปผลการฟอกเลือด</div>
+    <div id="summaryContent"></div>
+    <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
+      <button class="btn btn-success" onclick="sendSummaryToPatient()">📱 ส่ง LINE ผู้ป่วย</button>
+      <button class="btn btn-primary" onclick="sendSummaryToDoctor()">👨‍⚕️ ส่ง LINE หมอ</button>
+    </div>
+    <div id="lineSendStatus" style="margin-top:8px;font-size:.8rem;"></div>
+  </div>
 </div>
 
 <!-- ═══ MODALS ═══ -->
@@ -390,6 +404,7 @@ function updateTimer(){
   if(remainMs <= 0){
     document.getElementById('timerDisplay').textContent = '0:00:00 ครบเวลา!';
     timerEl.classList.add('urgent');
+    document.getElementById('completeBtn').style.display = 'block';
     if(!_timerAlertedDone){ playAlertSound('critical'); vibrateAlert('critical'); _timerAlertedDone=true; }
     clearInterval(timerInterval);
     return;
@@ -689,6 +704,8 @@ function renderTimeline(){
   }).join('');
 }
 
+let _sessionSummary = null;
+
 function endSession(){
   const postWeight = parseFloat(document.getElementById('postWeight').value) || 0;
   const postSbp = parseInt(document.getElementById('postSbp').value) || 0;
@@ -699,36 +716,126 @@ function endSession(){
   document.querySelectorAll('input[name="post_symptom"]:checked').forEach(el=>postSymptoms.push(el.value));
   const notes = document.getElementById('postNotes').value;
 
+  const completionData = {
+    status:'completed',
+    post_weight: postWeight,
+    post_sbp: postSbp, post_dbp: postDbp, post_hr: postHr,
+    actual_uf: actualUf,
+    post_symptoms: postSymptoms,
+    notes: notes,
+    generate_summary: true,
+  };
+
   if(sessionData.session_id){
     hdFetch('/hd/api/v1/sessions/'+sessionData.session_id,{
-      method:'PUT',
-      body:JSON.stringify({
-        status:'completed',
-        post_weight: postWeight,
-        post_sbp: postSbp, post_dbp: postDbp, post_hr: postHr,
-        actual_uf: actualUf,
-        post_symptoms: postSymptoms,
-        notes: notes
-      })
+      method:'PUT', body:JSON.stringify(completionData)
     }).then(r=>r.json()).then(d=>{
       showToast('เสร็จสิ้นรอบฟอก — บันทึกสำเร็จ','success');
+      if(d.summary) showSessionSummary(d.summary);
     }).catch(()=>{
       showToast('เสร็จสิ้นรอบฟอก — บันทึก offline','warning');
+      showSessionSummary(buildLocalSummary(completionData));
     });
+    /* POST post-HD vitals */
+    if(postSbp){
+      hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
+        method:'POST', body:JSON.stringify({phase:'post', sbp:postSbp, dbp:postDbp, hr:postHr})
+      }).catch(()=>{});
+    }
   } else {
-    showToast('เสร็จสิ้นรอบฟอก — บันทึกสำเร็จ','success');
-  }
-
-  /* Also POST post-HD vitals */
-  if(sessionData.session_id && postSbp){
-    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
-      method:'POST',
-      body:JSON.stringify({phase:'post', sbp:postSbp, dbp:postDbp, hr:postHr})
-    }).catch(()=>{});
+    showToast('เสร็จสิ้นรอบฟอก','success');
+    showSessionSummary(buildLocalSummary(completionData));
   }
 
   document.getElementById('sessionStatus').textContent = 'เสร็จแล้ว';
   document.getElementById('sessionStatus').className = 'badge badge-muted';
+  document.getElementById('cancelBtn').style.display = 'none';
+}
+
+function buildLocalSummary(data){
+  const patientName = document.getElementById('patientName').textContent;
+  const patientInfo = document.getElementById('patientInfo').textContent;
+  const preW = parseFloat(document.getElementById('preWeight').value) || 0;
+  const dw = parseFloat(document.getElementById('dryWeight').value) || 0;
+  const postW = data.post_weight || 0;
+  const actualUf = data.actual_uf || (preW - postW) * 1000;
+  const idwg = preW - dw;
+  const duration = sessionData.duration_hours || 4;
+
+  /* Collect alerts from timeline */
+  const alerts = [];
+  if(data.post_sbp && data.post_sbp < 90) alerts.push('⚠️ Post-HD hypotension (SBP '+data.post_sbp+')');
+  if(data.post_symptoms && data.post_symptoms.length && !data.post_symptoms.includes('ปกติ'))
+    alerts.push('⚠️ อาการ: '+data.post_symptoms.join(', '));
+  if(idwg > dw * 0.05) alerts.push('⚠️ IDWG สูง: '+idwg.toFixed(1)+' kg (>5% DW)');
+  if(postW > dw + 0.5) alerts.push('ℹ️ น้ำหนักหลังฟอกยังมากกว่า DW: '+(postW-dw).toFixed(1)+' kg');
+
+  /* Assessment */
+  let assessment = '✅ ฟอกเลือดเสร็จสมบูรณ์';
+  if(alerts.length) assessment = '⚠️ ฟอกเลือดเสร็จ — มีข้อสังเกต '+alerts.length+' ข้อ';
+
+  return {
+    patient_name: patientName, patient_info: patientInfo,
+    duration_hours: duration, actual_uf: actualUf,
+    pre_weight: preW, post_weight: postW, dry_weight: dw,
+    idwg: idwg, post_sbp: data.post_sbp, post_dbp: data.post_dbp, post_hr: data.post_hr,
+    post_symptoms: data.post_symptoms || [],
+    alerts: alerts, assessment: assessment,
+    vital_records: timeline.filter(e=>e.type==='vital').length,
+    uf_records: timeline.filter(e=>e.type==='uf').length,
+    notes: data.notes || '',
+  };
+}
+
+function showSessionSummary(s){
+  _sessionSummary = s;
+  const el = document.getElementById('summaryContent');
+  const alertsHtml = s.alerts.length
+    ? s.alerts.map(a=>`<div style="padding:6px 10px;background:rgba(243,156,18,.1);border-radius:6px;margin:4px 0;font-size:.85rem;">${a}</div>`).join('')
+    : '<div style="padding:6px 10px;background:rgba(39,174,96,.1);border-radius:6px;font-size:.85rem;">✅ ไม่มีปัญหาระหว่างฟอก</div>';
+
+  el.innerHTML = `
+    <div style="font-size:.95rem;font-weight:600;margin-bottom:8px;">${s.assessment}</div>
+    <table style="width:100%;font-size:.85rem;border-collapse:collapse;">
+      <tr><td style="padding:4px 0;color:var(--fg-muted);">ผู้ป่วย</td><td style="padding:4px 0;font-weight:600;">${s.patient_name}</td></tr>
+      <tr><td style="padding:4px 0;color:var(--fg-muted);">ระยะเวลาฟอก</td><td style="padding:4px 0;">${s.duration_hours} ชม.</td></tr>
+      <tr><td style="padding:4px 0;color:var(--fg-muted);">น้ำหนักก่อน → หลัง</td><td style="padding:4px 0;">${s.pre_weight||'-'} → ${s.post_weight||'-'} kg</td></tr>
+      <tr><td style="padding:4px 0;color:var(--fg-muted);">IDWG</td><td style="padding:4px 0;${s.idwg>(s.dry_weight||53)*0.05?'color:var(--danger);font-weight:700;':''}">${s.idwg?s.idwg.toFixed(1):'-'} kg</td></tr>
+      <tr><td style="padding:4px 0;color:var(--fg-muted);">Actual UF</td><td style="padding:4px 0;font-weight:600;">${s.actual_uf||'-'} mL</td></tr>
+      <tr><td style="padding:4px 0;color:var(--fg-muted);">Post-HD BP</td><td style="padding:4px 0;">${s.post_sbp||'-'}/${s.post_dbp||'-'} mmHg</td></tr>
+      <tr><td style="padding:4px 0;color:var(--fg-muted);">อาการหลังฟอก</td><td style="padding:4px 0;">${s.post_symptoms&&s.post_symptoms.length?s.post_symptoms.join(', '):'ปกติ'}</td></tr>
+      <tr><td style="padding:4px 0;color:var(--fg-muted);">Vital บันทึก</td><td style="padding:4px 0;">${s.vital_records||0} ครั้ง</td></tr>
+    </table>
+    <div style="margin-top:12px;"><strong>ปัญหา/ข้อสังเกต:</strong></div>
+    ${alertsHtml}
+    ${s.notes ? '<div style="margin-top:8px;font-size:.85rem;color:var(--fg-muted);">📝 '+s.notes+'</div>' : ''}
+  `;
+  document.getElementById('sessionSummaryCard').style.display = 'block';
+  document.getElementById('sessionSummaryCard').scrollIntoView({behavior:'smooth'});
+}
+
+function sendSummaryToPatient(){
+  if(!_sessionSummary || !sessionData.session_id) return;
+  const el = document.getElementById('lineSendStatus');
+  el.textContent = '📤 กำลังส่ง LINE ให้ผู้ป่วย...';
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/send-summary',{
+    method:'POST', body:JSON.stringify({target:'patient'})
+  }).then(r=>r.json()).then(d=>{
+    if(d.sent) el.innerHTML = '✅ ส่ง LINE ให้ผู้ป่วยสำเร็จ';
+    else el.innerHTML = '⚠️ '+(d.message||'ผู้ป่วยยังไม่ได้ผูก LINE — ส่งไม่ได้');
+  }).catch(()=>{ el.innerHTML = '❌ ส่งไม่สำเร็จ'; });
+}
+
+function sendSummaryToDoctor(){
+  if(!_sessionSummary || !sessionData.session_id) return;
+  const el = document.getElementById('lineSendStatus');
+  el.textContent = '📤 กำลังส่ง LINE ให้หมอ...';
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/send-summary',{
+    method:'POST', body:JSON.stringify({target:'physician'})
+  }).then(r=>r.json()).then(d=>{
+    if(d.sent) el.innerHTML = '✅ ส่ง LINE สรุปรอบฟอกให้หมอสำเร็จ';
+    else el.innerHTML = '⚠️ '+(d.message||'ไม่พบ LINE ของหมอ');
+  }).catch(()=>{ el.innerHTML = '❌ ส่งไม่สำเร็จ'; });
 }
 </script>
 {% endblock %}

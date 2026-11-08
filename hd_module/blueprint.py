@@ -440,7 +440,210 @@ def update_session(session_id):
         new_values=data,
         ip_address=request.remote_addr or "",
     )
-    return jsonify({"session_id": session_id, "updated": True})
+    result = {"session_id": session_id, "updated": True}
+
+    # Generate summary if requested
+    if data.get("generate_summary") and data.get("status") == "completed":
+        result["summary"] = _build_session_summary(session_id, data)
+
+    return jsonify(result)
+
+
+@hd_bp.route("/sessions/<int:session_id>/send-summary", methods=["POST"])
+@require_role("physician", "nurse")
+def send_session_summary(session_id):
+    """Send session summary via LINE to patient or physician."""
+    data = request.get_json(silent=True) or {}
+    target = data.get("target", "physician")
+
+    summary = _build_session_summary(session_id, {})
+    if not summary:
+        return jsonify({"sent": False, "message": "ไม่พบข้อมูล session"}), 404
+
+    from flask import current_app
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    if not push_fn:
+        return jsonify({"sent": False, "message": "LINE Push ไม่พร้อมใช้งาน"})
+
+    if target == "patient":
+        # Find patient LINE ID from master registry
+        patient_line_id = None
+        reg = current_app.config.get("MASTER_REGISTRY")
+        if reg:
+            for p in reg.list_all():
+                if getattr(p, "hn", "") == summary.get("patient_hn") or \
+                   getattr(p, "clinic_hn", "") == summary.get("patient_hn"):
+                    patient_line_id = getattr(p, "line_user_id", None)
+                    break
+        if not patient_line_id:
+            return jsonify({"sent": False, "message": "ผู้ป่วยยังไม่ได้ผูก LINE"})
+        msg = _format_patient_summary_line(summary)
+        try:
+            push_fn(patient_line_id, msg)
+            return jsonify({"sent": True})
+        except Exception as e:
+            return jsonify({"sent": False, "message": str(e)})
+
+    else:
+        # Send to physician (from HD_ALERT_RECIPIENTS or PHYSICIAN_USERS)
+        import os
+        recipients = os.environ.get("HD_ALERT_RECIPIENTS", "").split(",")
+        if not recipients or not recipients[0]:
+            return jsonify({"sent": False, "message": "ไม่พบ LINE ของแพทย์ (ตั้ง HD_ALERT_RECIPIENTS)"})
+        msg = _format_doctor_summary_line(summary)
+        sent_count = 0
+        for r in recipients:
+            r = r.strip()
+            if r:
+                try:
+                    push_fn(r, msg)
+                    sent_count += 1
+                except Exception:
+                    pass
+        return jsonify({"sent": sent_count > 0, "count": sent_count})
+
+
+def _build_session_summary(session_id, post_data):
+    """Build a summary dict for a completed session."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return None
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.id, s.bed_number, s.pre_weight, s.post_weight,
+                       s.actual_uf, s.uf_goal, s.started_at, s.ended_at, s.notes,
+                       p.hn, p.patient_name, p.vascular_access, p.dry_weight,
+                       p.schedule_days, p.esa_drug
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE s.id = %s
+            """, (session_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return None
+
+            # Get vital records
+            cur.execute("""
+                SELECT phase, sbp, dbp, heart_rate, temperature, spo2, recorded_at
+                FROM hd_vital_signs WHERE session_id = %s ORDER BY recorded_at
+            """, (session_id,))
+            vitals = cur.fetchall()
+
+            # Get alerts
+            cur.execute("""
+                SELECT severity, title, message, created_at
+                FROM hd_clinical_alerts WHERE session_id = %s ORDER BY created_at
+            """, (session_id,))
+            alerts = cur.fetchall()
+        conn.close()
+
+        pre_w = float(row[2]) if row[2] else float(post_data.get("pre_weight", 0) or 0)
+        post_w = float(row[3]) if row[3] else float(post_data.get("post_weight", 0) or 0)
+        dry_w = float(row[12]) if row[12] else 0
+        actual_uf = float(row[4]) if row[4] else (pre_w - post_w) * 1000
+        duration_h = 4
+        if row[6] and row[7]:
+            duration_h = round((row[7] - row[6]).total_seconds() / 3600, 1)
+
+        alert_list = [{"severity": a[0], "title": a[1], "message": a[2]} for a in alerts]
+        vital_list = [{"phase": v[0], "sbp": v[1], "dbp": v[2], "hr": v[3]} for v in vitals]
+
+        # Build assessment
+        issues = []
+        if any(a[0] == "critical" for a in alerts):
+            issues.append("🔴 มี Critical Alert ระหว่างฟอก")
+        if any(a[0] == "warning" for a in alerts):
+            issues.append("🟡 มี Warning Alert ระหว่างฟอก")
+        if pre_w and dry_w and (pre_w - dry_w) > dry_w * 0.05:
+            issues.append(f"⚠️ IDWG สูง: {pre_w - dry_w:.1f} kg")
+        if post_w and dry_w and post_w > dry_w + 0.5:
+            issues.append(f"ℹ️ Post-weight ยังมากกว่า DW {post_w - dry_w:.1f} kg")
+
+        assessment = "✅ ฟอกเลือดเสร็จสมบูรณ์ ไม่มีปัญหา"
+        if issues:
+            assessment = f"⚠️ ฟอกเสร็จ — มีข้อสังเกต {len(issues)} ข้อ"
+
+        return {
+            "session_id": session_id,
+            "bed_number": row[1],
+            "patient_hn": row[9],
+            "patient_name": row[10],
+            "vascular_access": row[11],
+            "dry_weight": dry_w,
+            "schedule_days": row[13],
+            "esa_drug": row[14],
+            "pre_weight": pre_w,
+            "post_weight": post_w,
+            "actual_uf": actual_uf,
+            "uf_goal": float(row[5]) if row[5] else 2000,
+            "duration_hours": duration_h,
+            "vital_count": len(vitals),
+            "alert_count": len(alerts),
+            "alerts": alert_list,
+            "vitals": vital_list,
+            "issues": issues,
+            "assessment": assessment,
+            "notes": row[8] or post_data.get("notes", ""),
+        }
+    except Exception as e:
+        logger.error("_build_session_summary error: %s", e)
+        return None
+
+
+def _format_patient_summary_line(s):
+    """Format summary as LINE text message for patient."""
+    issues_text = "\n".join(s.get("issues", [])) or "✅ ไม่มีปัญหา"
+    return (
+        f"📋 สรุปผลฟอกเลือด\n"
+        f"🏥 คลินิกระนอง รักษ์ไต\n"
+        f"━━━━━━━━━━━━\n"
+        f"👤 {s['patient_name']}\n"
+        f"🛏 เตียง {s['bed_number']}\n"
+        f"⏱ ระยะเวลา: {s['duration_hours']} ชม.\n"
+        f"━━━━━━━━━━━━\n"
+        f"⚖️ น้ำหนัก: {s['pre_weight']:.1f} → {s['post_weight']:.1f} kg\n"
+        f"💧 UF: {s['actual_uf']:.0f} mL\n"
+        f"━━━━━━━━━━━━\n"
+        f"{s['assessment']}\n"
+        f"{issues_text}\n"
+        f"━━━━━━━━━━━━\n"
+        f"📞 หากมีอาการผิดปกติ โทร 077-812-XXX"
+    )
+
+
+def _format_doctor_summary_line(s):
+    """Format summary as LINE text message for physician."""
+    alert_text = ""
+    if s.get("alerts"):
+        alert_text = "\n🚨 Alerts:\n" + "\n".join(
+            f"  {'🔴' if a['severity']=='critical' else '🟡'} {a['title']}"
+            for a in s["alerts"]
+        )
+    issues_text = ""
+    if s.get("issues"):
+        issues_text = "\n📌 ข้อสังเกต:\n" + "\n".join(f"  {i}" for i in s["issues"])
+
+    return (
+        f"👨‍⚕️ สรุปรอบฟอก — เตียง {s['bed_number']}\n"
+        f"━━━━━━━━━━━━\n"
+        f"👤 {s['patient_name']} (HN {s['patient_hn']})\n"
+        f"🩸 VA: {s['vascular_access'] or '-'} | ESA: {s['esa_drug'] or '-'}\n"
+        f"⏱ {s['duration_hours']} ชม. | Vital บันทึก {s['vital_count']} ครั้ง\n"
+        f"━━━━━━━━━━━━\n"
+        f"⚖️ {s['pre_weight']:.1f} → {s['post_weight']:.1f} kg "
+        f"(DW {s['dry_weight']:.1f})\n"
+        f"💧 UF: {s['actual_uf']:.0f}/{s['uf_goal']:.0f} mL\n"
+        f"━━━━━━━━━━━━\n"
+        f"{s['assessment']}"
+        f"{alert_text}"
+        f"{issues_text}"
+        f"{chr(10)+'📝 '+s['notes'] if s.get('notes') else ''}"
+    )
 
 
 # ── Vital Signs ───────────────────────────────────────────

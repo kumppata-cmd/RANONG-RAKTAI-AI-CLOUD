@@ -12847,6 +12847,8 @@ def push_messages(user_id: str, messages: list[dict]) -> bool:
 
 
 # ─── HD Alert Push + Vital Recorder (init after push_message def) ──
+app.config["LINE_PUSH_FN"] = push_message  # For HD session summary LINE push
+
 try:
     from hd_module.alert_push import HdAlertPushService
     _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
