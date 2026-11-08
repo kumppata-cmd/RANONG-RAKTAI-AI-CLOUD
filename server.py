@@ -1388,6 +1388,27 @@ if master_registry and os.path.exists(_SEED_FILE):
 sync_patients_to_hd_db(master_registry)
 create_default_hd_users()
 
+# ─── HD Alert Push Service (Phase 3.1) ───────────────────
+hd_alert_push = None
+try:
+    from hd_module.alert_push import HdAlertPushService
+    _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    hd_alert_push = HdAlertPushService(push_fn=push_message, db_url=_hd_db)
+    logger.info("HD Alert Push: initialized (%d recipients)", hd_alert_push.recipient_count)
+except Exception as _hd_push_err:
+    logger.warning("HD Alert Push: init failed — %s", _hd_push_err)
+
+# ─── HD Vital Recorder (Phase 3.2) ───────────────────────
+hd_vital_recorder = None
+try:
+    from hd_module.vital_recorder import VitalRecorder
+    _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    hd_vital_recorder = VitalRecorder(db_url=_hd_db, alert_push_service=hd_alert_push)
+    app.config["HD_VITAL_RECORDER"] = hd_vital_recorder
+    logger.info("HD Vital Recorder: initialized")
+except Exception as _hd_vr_err:
+    logger.warning("HD Vital Recorder: init failed — %s", _hd_vr_err)
+
 # ─── PostgreSQL Database (Phase 1.1 Foundation) ──────────
 from database import Database
 db = Database(os.getenv("DATABASE_URL", "") or os.getenv("HD_DATABASE_URL", ""))
@@ -18357,6 +18378,60 @@ def webhook():
                             else:
                                 _msg_lines.append("📈 ยังไม่มีผลแล็บ Hb ในระบบ")
                             reply_message(reply_token, "\n".join(_msg_lines))
+
+                # ── พยากรณ์ Hb + แนะนำ ESA (Phase 3.3) ──
+                elif text.strip().startswith(("พยากรณ์Hb ", "พยากรณ์Hb", "พยากรณ์ Hb ", "predictHb ")):
+                    _pred_q = text.strip()
+                    for _pf in ("พยากรณ์Hb ", "พยากรณ์Hb", "พยากรณ์ Hb ", "predictHb "):
+                        if _pred_q.startswith(_pf):
+                            _pred_q = _pred_q[len(_pf):].strip()
+                            break
+                    if not _pred_q:
+                        reply_message(reply_token,
+                            "⚠️ กรุณาระบุ HN เช่น: พยากรณ์Hb 56001")
+                    else:
+                        _hp = master_registry.match_hn(_pred_q)
+                        if not _hp:
+                            reply_message(reply_token,
+                                f"❌ ไม่พบ HN: {_pred_q} ในทะเบียน")
+                        else:
+                            from hd_module.hb_predictor import (
+                                HbPredictor, HbDataPoint, format_hb_prediction_flex,
+                            )
+                            _hb_hist = _get_hb_history(_pred_q, limit=10)
+                            if len(_hb_hist) < 2:
+                                reply_message(reply_token,
+                                    f"⚠️ {_hp.patient_name} (HN {_pred_q})\n"
+                                    f"ต้องมีผล Hb อย่างน้อย 2 ครั้ง\n"
+                                    f"ปัจจุบันมี {len(_hb_hist)} ครั้ง")
+                            else:
+                                from datetime import datetime as _dt
+                                _data_pts = []
+                                for _h in _hb_hist:
+                                    try:
+                                        _d = _dt.strptime(_h["date"], "%Y-%m-%d")
+                                    except Exception:
+                                        continue
+                                    _data_pts.append(HbDataPoint(
+                                        date=_d,
+                                        hb=_h["value"],
+                                        esa_drug=getattr(_hp, 'esa_code', '') or '',
+                                        esa_dose=float(getattr(_hp, 'esa_dose', 0) or 0),
+                                    ))
+                                predictor = HbPredictor()
+                                prediction = predictor.predict(_data_pts)
+                                if prediction:
+                                    _flex = format_hb_prediction_flex(prediction)
+                                    _flex_msg = {
+                                        "type": "flex",
+                                        "altText": f"พยากรณ์ Hb — {_hp.patient_name}",
+                                        "contents": _flex,
+                                    }
+                                    push_messages(event_source_id, [_flex_msg])
+                                    already_replied = True
+                                else:
+                                    reply_message(reply_token,
+                                        "❌ ไม่สามารถพยากรณ์ได้ — ข้อมูลไม่เพียงพอ")
 
                 # ── ติดตาม eGFR / CKD Progression (เพิ่ม 2026-11-05) ──
                 elif text.strip().startswith(("ติดตามeGFR ", "ติดตามeGFR", "ติดตาม eGFR ", "egfr trend ")):

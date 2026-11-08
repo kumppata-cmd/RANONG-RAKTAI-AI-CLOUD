@@ -206,7 +206,6 @@ def record_vital(session_id):
     if phase not in ("pre", "intra", "post"):
         return jsonify({"error": "phase must be pre, intra, or post"}), 400
 
-    # Clinical alert check would go here
     log_action(
         user_id=g.get("hd_user_id"),
         action="vital.record",
@@ -214,6 +213,33 @@ def record_vital(session_id):
         new_values=data,
         ip_address=request.remote_addr or "",
     )
+
+    # Use VitalRecorder for real-time recording + alert evaluation
+    from flask import current_app
+    recorder = current_app.config.get("HD_VITAL_RECORDER")
+    if recorder:
+        result = recorder.record_vitals(
+            session_id=session_id,
+            patient_id=data.get("patient_id", 0),
+            phase=phase,
+            sbp=data.get("sbp"),
+            dbp=data.get("dbp"),
+            hr=data.get("hr"),
+            temp=data.get("temp"),
+            spo2=data.get("spo2"),
+            uf_rate=data.get("uf_rate"),
+            weight=data.get("weight"),
+            notes=data.get("notes", ""),
+            recorded_by=str(g.get("hd_user_id", "")),
+        )
+        return jsonify({
+            "session_id": session_id,
+            "phase": phase,
+            "recorded": True,
+            "vital_id": result.get("vital_id"),
+            "alerts": result.get("alerts", []),
+            "alert_count": result.get("alert_count", 0),
+        }), 201
 
     return jsonify({"session_id": session_id, "phase": phase, "recorded": True}), 201
 
