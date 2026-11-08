@@ -8627,16 +8627,18 @@ def handle_search_command(
         )
 
     # ── myid: แสดง LINE User ID + auto-register HD Alert Recipient ──
+    # ทุกคนพิมพ์ได้ (แสดงแค่ ID ตัวเอง) แต่ auto-register alert เฉพาะ staff
     if text_stripped in ("myid", "my id", "userid", "ไอดี"):
-        if not _is_staff:
-            return None
+        if not line_user_id:
+            return "❌ ไม่สามารถดึง User ID ได้"
         # Auto-register as HD alert recipient
         _auto_reg_msg = ""
-        if line_user_id and hd_alert_push is not None:
+        if hd_alert_push is not None:
             _already = any(r["line_user_id"] == line_user_id
                            for r in hd_alert_push._recipients)
             if not _already:
-                _role = "physician" if is_physician_user(user_hash) else "nurse"
+                _role = "physician" if is_physician_user(user_hash) else (
+                    "admin" if is_admin_user(user_hash) else "nurse")
                 hd_alert_push._recipients.append({
                     "line_user_id": line_user_id,
                     "role": _role,
@@ -8651,8 +8653,7 @@ def handle_search_command(
             f"{line_user_id}\n"
             f"{_auto_reg_msg}\n"
             f"\n"
-            f"📋 ถ้าต้องการรับแจ้งเตือนถาวร\n"
-            f"เพิ่มที่ Render ENV:\n"
+            f"📋 ตั้งค่าถาวรที่ Render ENV:\n"
             f"HD_ALERT_RECIPIENTS={line_user_id}:physician:DrKamphon"
         )
 
