@@ -223,9 +223,11 @@ tr:hover td { background: rgba(0,0,0,.02); }
     <a href="/hd/session/new" class="{% block nav_session %}{% endblock %}"><span class="icon">💉</span> เริ่มรอบฟอก</a>
     <a href="/hd/patients" class="{% block nav_patients %}{% endblock %}"><span class="icon">👥</span> รายชื่อผู้ป่วย</a>
     <a href="/hd/alerts" class="{% block nav_alerts %}{% endblock %}"><span class="icon">🔔</span> การแจ้งเตือน</a>
+    <a href="/hd/kpi" class="{% block nav_kpi %}{% endblock %}"><span class="icon">📈</span> KPI</a>
   </nav>
   <div class="sidebar-user">
-    👤 {{ (current_user.username if current_user is defined else 'พยาบาล') }} ({{ (current_user.role if current_user is defined else 'nurse') }})
+    👤 <span id="sidebarUsername">พยาบาล</span>
+    <a href="#" onclick="hdLogout();return false;" style="color:var(--danger);font-size:.8rem;margin-left:8px;">ออกจากระบบ</a>
   </div>
 </aside>
 
@@ -278,6 +280,52 @@ function toggleTheme(){
   try { localStorage.setItem('hd-theme', document.documentElement.dataset.theme); } catch(e){}
 }
 try { const t=localStorage.getItem('hd-theme'); if(t) document.documentElement.dataset.theme=t; } catch(e){}
+
+/* ── Auth helper: auto-attach JWT to every API call ── */
+function getHdToken(){
+  try { return sessionStorage.getItem('hd_token') || localStorage.getItem('hd_token') || ''; } catch(e){ return ''; }
+}
+function hdFetch(url, opts={}){
+  const token = getHdToken();
+  if(!token && !url.includes('/auth/')){
+    /* No token — redirect to login */
+    window.location.href='/hd/login';
+    return Promise.reject(new Error('no_token'));
+  }
+  opts.headers = Object.assign({'Authorization':'Bearer '+token, 'Content-Type':'application/json'}, opts.headers||{});
+  return fetch(url, opts).then(r=>{
+    if(r.status===401){
+      /* Token expired — redirect to login */
+      try{ sessionStorage.removeItem('hd_token'); localStorage.removeItem('hd_token'); }catch(e){}
+      window.location.href='/hd/login';
+      return Promise.reject(new Error('unauthorized'));
+    }
+    return r;
+  });
+}
+/* Logout */
+function hdLogout(){
+  try{ sessionStorage.removeItem('hd_token'); localStorage.removeItem('hd_token'); }catch(e){}
+  window.location.href='/hd/login';
+}
+/* Show username from JWT */
+function _showUsername(){
+  const token = getHdToken();
+  if(!token) return;
+  try{
+    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g,'+').replace(/_/g,'/')));
+    const el = document.getElementById('sidebarUsername');
+    if(el && payload.username) el.textContent = payload.username + ' (' + (payload.role||'') + ')';
+  }catch(e){}
+}
+_showUsername();
+/* Auth guard: redirect non-login pages if no token */
+(function(){
+  const isLoginPage = window.location.pathname==='/hd/login' || window.location.pathname==='/hd/';
+  if(!isLoginPage && !getHdToken()){
+    window.location.href='/hd/login';
+  }
+})();
 </script>
 {% block extra_js %}{% endblock %}
 </body>

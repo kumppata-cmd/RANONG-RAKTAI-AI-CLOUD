@@ -120,7 +120,7 @@ function doLogin(data){
   .then(r=>r.json().then(d=>({status:r.status,data:d})))
   .then(({status,data})=>{
     if(status===200 && data.token){
-      try{ sessionStorage.setItem('hd_token', data.token); }catch(e){}
+      try{ sessionStorage.setItem('hd_token', data.token); localStorage.setItem('hd_token', data.token); }catch(e){}
       window.location.href = '/hd/dashboard';
     } else {
       showError(data.error || 'เข้าสู่ระบบไม่สำเร็จ');

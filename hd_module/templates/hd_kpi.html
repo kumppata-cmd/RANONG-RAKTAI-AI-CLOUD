@@ -11,10 +11,7 @@
 async function loadKPI() {
   const grid = document.getElementById('kpiGrid');
   try {
-    const token = localStorage.getItem('hd_token') || '';
-    const resp = await fetch('/hd/api/v1/kpi?period=monthly', {
-      headers: {'Authorization': 'Bearer ' + token}
-    });
+    const resp = await hdFetch('/hd/api/v1/kpi?period=monthly');
     if (!resp.ok) {
       grid.innerHTML = '<div class="kpi-error">❌ ไม่สามารถโหลด KPI ได้ (กรุณา login ก่อน)</div>';
       return;
@@ -121,30 +118,26 @@ loadKPI();
 
 <style>
 .stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 16px; }
-.stat-card { background: var(--card-bg, #fff); border-radius: 12px; padding: 16px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+.stat-card { background: var(--bg-card); border-radius: var(--radius); padding: 16px; text-align: center; box-shadow: 0 2px 8px var(--shadow); border: 1px solid var(--border); }
 .stat-icon { font-size: 2rem; }
-.stat-value { font-size: 2rem; font-weight: 700; color: var(--primary, #0d6efd); }
-.stat-label { font-size: .8rem; color: var(--muted, #6b7280); }
-.kpi-card { background: var(--card-bg, #fff); border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+.stat-value { font-size: 2rem; font-weight: 700; color: var(--accent); }
+.stat-label { font-size: .8rem; color: var(--fg-muted); }
+.kpi-card { background: var(--bg-card); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 8px var(--shadow); border: 1px solid var(--border); }
 .kpi-card h3 { margin: 0 0 12px; font-size: 1rem; }
 .bar-chart { display: flex; flex-direction: column; gap: 8px; }
 .bar-item { display: grid; grid-template-columns: 80px 1fr 80px; gap: 8px; align-items: center; }
 .bar-label { font-size: .85rem; text-align: right; }
-.bar-track { height: 20px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
-.bar-fill { height: 100%; background: var(--primary, #0d6efd); border-radius: 4px; transition: width .5s; }
-.va-fill { background: #10b981; }
-.bar-value { font-size: .8rem; color: var(--muted); }
+.bar-track { height: 20px; background: var(--border); border-radius: 4px; overflow: hidden; }
+.bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width .5s; }
+.va-fill { background: var(--success); }
+.bar-value { font-size: .8rem; color: var(--fg-muted); }
 .alert-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; text-align: center; }
-.alert-stat { padding: 12px 8px; border-radius: 8px; font-size: 1.4rem; font-weight: 700; }
-.alert-stat.critical { background: #fee2e2; color: #991b1b; }
-.alert-stat.warning { background: #fef3c7; color: #92400e; }
-.alert-stat.info { background: #dbeafe; color: #1e40af; }
-.alert-stat.ack { background: #d1fae5; color: #065f46; }
+.alert-stat { padding: 12px 8px; border-radius: var(--radius-sm); font-size: 1.4rem; font-weight: 700; }
+.alert-stat.critical { background: rgba(231,76,60,.1); color: var(--danger); }
+.alert-stat.warning { background: rgba(243,156,18,.1); color: var(--warning); }
+.alert-stat.info { background: rgba(52,152,219,.1); color: var(--info); }
+.alert-stat.ack { background: rgba(39,174,96,.1); color: var(--success); }
 .alert-stat small { font-size: .7rem; font-weight: 400; }
-.kpi-loading, .kpi-error { text-align: center; padding: 40px; color: var(--muted); }
-@media (prefers-color-scheme: dark) {
-  .stat-card, .kpi-card { background: #1f2937; }
-  .bar-track { background: #374151; }
-}
+.kpi-loading, .kpi-error { text-align: center; padding: 40px; color: var(--fg-muted); }
 </style>
 {% endblock %}

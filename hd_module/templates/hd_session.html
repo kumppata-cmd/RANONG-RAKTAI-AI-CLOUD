@@ -312,7 +312,7 @@ const params = new URLSearchParams(window.location.search);
 if(params.get('bed')) document.getElementById('bedSelect').value = params.get('bed');
 
 /* Load patients */
-fetch('/hd/api/v1/patients').then(r=>r.json()).then(d=>{
+hdFetch('/hd/api/v1/patients').then(r=>r.json()).then(d=>{
   const sel = document.getElementById('patientSelect');
   (d.patients||[]).forEach(p=>{
     const opt = document.createElement('option');
@@ -324,7 +324,7 @@ fetch('/hd/api/v1/patients').then(r=>r.json()).then(d=>{
 function onPatientSelect(){
   const hn = document.getElementById('patientSelect').value;
   if(!hn) return;
-  fetch('/hd/api/v1/patients/'+hn).then(r=>r.json()).then(p=>{
+  hdFetch('/hd/api/v1/patients/'+hn).then(r=>r.json()).then(p=>{
     document.getElementById('patientName').textContent = p.name || 'HN '+hn;
     document.getElementById('patientInfo').textContent = 'HN: '+hn+' | '+( p.schedule_days||'-');
     if(p.dry_weight) document.getElementById('dryWeight').value = p.dry_weight;
@@ -379,7 +379,7 @@ function startSession(){
     pre_weight: sessionData.pre_weight,
     dry_weight: sessionData.dry_weight,
   };
-  fetch('/hd/api/v1/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+  hdFetch('/hd/api/v1/sessions',{method:'POST',body:JSON.stringify(data)})
     .then(r=>r.json())
     .then(d=>{
       sessionData.session_id = d.session_id || 1;
@@ -393,13 +393,37 @@ function startSession(){
 }
 
 function saveIntraVital(){
+  const sbp = document.getElementById('modalSbp').value;
+  const dbp = document.getElementById('modalDbp').value;
+  const hr = document.getElementById('modalHr').value;
+  const temp = document.getElementById('modalTemp').value;
+  const spo2 = document.getElementById('modalSpo2').value;
+
   const entry = {
     time: new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}),
-    type: 'vital',
-    sbp: document.getElementById('modalSbp').value,
-    dbp: document.getElementById('modalDbp').value,
-    hr: document.getElementById('modalHr').value,
+    type: 'vital', sbp, dbp, hr,
   };
+
+  /* POST to API if session exists */
+  if(sessionData.session_id){
+    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
+      method:'POST',
+      body:JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp), hr:parseInt(hr), temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null})
+    }).then(r=>r.json()).then(d=>{
+      if(d.alerts && d.alerts.length){
+        d.alerts.forEach(a=>{
+          if(a.severity==='critical'){
+            document.getElementById('intraCriticalAlert').style.display='flex';
+            document.getElementById('criticalAlertText').textContent=a.message||a.title;
+          } else {
+            document.getElementById('intraWarningAlert').style.display='flex';
+            document.getElementById('warningAlertText').textContent=a.message||a.title;
+          }
+        });
+      }
+    }).catch(()=>{});
+  }
+
   timeline.push(entry);
   renderTimeline();
   closeModal('vitalModal');
@@ -420,6 +444,14 @@ function saveUfRecord(){
   bar.style.width = pct+'%'; bar.textContent = pct+'%';
   bar.style.background = pct > 90 ? 'var(--warning)' : 'var(--success)';
 
+  /* POST UF to API */
+  if(sessionData.session_id){
+    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
+      method:'POST',
+      body:JSON.stringify({uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0})
+    }).catch(()=>{});
+  }
+
   timeline.push({time: new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}), type:'uf', removed, remaining, rate});
   renderTimeline();
   closeModal('ufModal');
@@ -439,7 +471,43 @@ function renderTimeline(){
 }
 
 function endSession(){
-  showToast('เสร็จสิ้นรอบฟอก — บันทึกสำเร็จ','success');
+  const postWeight = parseFloat(document.getElementById('postWeight').value) || 0;
+  const postSbp = parseInt(document.getElementById('postSbp').value) || 0;
+  const postDbp = parseInt(document.getElementById('postDbp').value) || 0;
+  const postHr = parseInt(document.getElementById('postHr').value) || 0;
+  const actualUf = parseInt(document.getElementById('actualUf').value) || 0;
+  const postSymptoms = [];
+  document.querySelectorAll('input[name="post_symptom"]:checked').forEach(el=>postSymptoms.push(el.value));
+  const notes = document.getElementById('postNotes').value;
+
+  if(sessionData.session_id){
+    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id,{
+      method:'PUT',
+      body:JSON.stringify({
+        status:'completed',
+        post_weight: postWeight,
+        post_sbp: postSbp, post_dbp: postDbp, post_hr: postHr,
+        actual_uf: actualUf,
+        post_symptoms: postSymptoms,
+        notes: notes
+      })
+    }).then(r=>r.json()).then(d=>{
+      showToast('เสร็จสิ้นรอบฟอก — บันทึกสำเร็จ','success');
+    }).catch(()=>{
+      showToast('เสร็จสิ้นรอบฟอก — บันทึก offline','warning');
+    });
+  } else {
+    showToast('เสร็จสิ้นรอบฟอก — บันทึกสำเร็จ','success');
+  }
+
+  /* Also POST post-HD vitals */
+  if(sessionData.session_id && postSbp){
+    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
+      method:'POST',
+      body:JSON.stringify({phase:'post', sbp:postSbp, dbp:postDbp, hr:postHr})
+    }).catch(()=>{});
+  }
+
   document.getElementById('sessionStatus').textContent = 'เสร็จแล้ว';
   document.getElementById('sessionStatus').className = 'badge badge-muted';
 }

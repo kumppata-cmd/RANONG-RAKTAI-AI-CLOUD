@@ -74,6 +74,12 @@ def hd_alerts_page():
     return render_template("hd_alerts.html")
 
 
+@hd_web.route("/kpi")
+def hd_kpi_page():
+    """Render KPI dashboard page."""
+    return render_template("hd_kpi.html")
+
+
 # ── Health / Status ───────────────────────────────────────
 
 @hd_bp.route("/health", methods=["GET"])
@@ -508,7 +514,26 @@ def bed_dashboard():
         except Exception as e:
             logger.warning("bed_dashboard DB error: %s", e)
 
-    return jsonify({"beds": beds, "total": HdConfig.TOTAL_BEDS})
+    # Count today's scheduled patients from registry
+    today_count = 0
+    if current_app.config.get("MASTER_REGISTRY"):
+        try:
+            import locale
+            day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
+            today_th = day_map.get(date.today().weekday(), "")
+            reg = current_app.config["MASTER_REGISTRY"]
+            for p in reg.list_all():
+                sched = getattr(p, "dialysis_schedule", "") or ""
+                if today_th and today_th in sched:
+                    today_count += 1
+        except Exception:
+            pass
+
+    return jsonify({
+        "beds": beds,
+        "total": HdConfig.TOTAL_BEDS,
+        "today_scheduled": today_count,
+    })
 
 
 # ── KPI Dashboard ─────────────────────────────────────────

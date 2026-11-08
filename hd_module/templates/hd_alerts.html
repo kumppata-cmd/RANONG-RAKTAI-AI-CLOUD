@@ -119,7 +119,7 @@ function filterAlerts(btn, filter){
 
 function acknowledgeAlert(id, ev){
   ev.stopPropagation();
-  fetch('/hd/api/v1/alerts/'+id+'/acknowledge',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})})
+  hdFetch('/hd/api/v1/alerts/'+id+'/acknowledge',{method:'POST',body:JSON.stringify({})})
     .then(r=>r.json())
     .then(()=>{
       const a = allAlerts.find(x=>x.id===id);
@@ -144,7 +144,7 @@ function updateCounts(){
 }
 
 function fetchAlerts(){
-  fetch('/hd/api/v1/alerts')
+  hdFetch('/hd/api/v1/alerts')
     .then(r=>r.json())
     .then(data=>{
       allAlerts = data.alerts || [];
