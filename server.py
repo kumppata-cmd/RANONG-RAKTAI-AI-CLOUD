@@ -8723,6 +8723,40 @@ def handle_search_command(
             logger.error("KPI HD error: %s", _kpi_err)
             return f"❌ ไม่สามารถสร้างรายงาน KPI ได้: {type(_kpi_err).__name__}"
 
+    # ── โภชนาการ HN (Phase 6.3) ────────────────────────────
+    if text_stripped.startswith(("โภชนาการ ", "อาหาร ", "nutrition ")):
+        _nutr_q = text_stripped
+        for _pf in ("โภชนาการ ", "อาหาร ", "nutrition "):
+            if _nutr_q.startswith(_pf):
+                _nutr_q = _nutr_q[len(_pf):].strip()
+                break
+        if not _nutr_q:
+            return "⚠️ กรุณาระบุ HN เช่น: โภชนาการ 56001"
+        _np = master_registry.match_hn(_nutr_q) if master_registry else None
+        if not _np:
+            return f"❌ ไม่พบ HN: {_nutr_q}"
+        try:
+            from hd_module.predictive_analytics import NutritionFluidAdvisor
+            # ดึงผลแล็บล่าสุด
+            _n_docs = _get_patient_lab_docs(_np, _nutr_q, limit=1)
+            _k, _po4, _ca, _alb = None, None, None, None
+            if _n_docs:
+                _n_labs = _extract_latest_labs(
+                    _n_docs[-1].get("extracted_text", ""))
+                _k = _n_labs.get("k") or _n_labs.get("potassium")
+                _po4 = _n_labs.get("po4") or _n_labs.get("phosphate")
+                _ca = _n_labs.get("ca") or _n_labs.get("calcium")
+                _alb = _n_labs.get("albumin")
+            advisor = NutritionFluidAdvisor()
+            result = advisor.advise(
+                potassium=_k, phosphate=_po4, calcium=_ca,
+                albumin=_alb, patient_name=_np.patient_name,
+            )
+            return result.overall_th
+        except Exception as _ne:
+            logger.error("Nutrition advisor error: %s", _ne)
+            return f"❌ ไม่สามารถวิเคราะห์ได้: {type(_ne).__name__}"
+
     if text_stripped in ("ตรวจแฟ้มย้อนหลัง", "จัดแฟ้มย้อนหลัง"):
         if not is_admin_user(user_hash):
             return None
