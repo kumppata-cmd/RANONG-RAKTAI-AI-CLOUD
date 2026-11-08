@@ -2,10 +2,10 @@
 {% block title %}เข้าสู่ระบบ{% endblock %}
 {% block extra_css %}
 <style>
-body { justify-content: center; align-items: center; }
+body { display: block !important; overflow-y: auto !important; }
 .sidebar, .topbar { display: none !important; }
-.main { margin-left: 0; justify-content: center; align-items: center; }
-.login-box { width: 100%; max-width: 400px; padding: 20px; }
+.main { margin-left: 0 !important; display: flex; justify-content: center; padding: 20px 16px; min-height: 100vh; }
+.login-box { width: 100%; max-width: 400px; padding: 0; }
 .login-logo { text-align: center; margin-bottom: 32px; }
 .login-logo .icon { font-size: 3rem; }
 .login-logo h2 { font-size: 1.3rem; margin-top: 8px; }
@@ -39,6 +39,28 @@ body { justify-content: center; align-items: center; }
 
   <div class="login-error" id="loginError"></div>
 
+  <!-- Username/Password Login (แสดงก่อน) -->
+  <div class="card">
+    <div class="card-header">👤 เข้าสู่ระบบ</div>
+    <form id="loginForm" onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label class="form-label">ชื่อผู้ใช้</label>
+        <input type="text" class="form-control" id="username" placeholder="พิมพ์ชื่อผู้ใช้" autocomplete="username" required>
+      </div>
+      <div class="form-group">
+        <label class="form-label">รหัสผ่าน</label>
+        <input type="password" class="form-control" id="password" placeholder="พิมพ์รหัสผ่าน" autocomplete="current-password" required>
+      </div>
+      <div class="form-group" style="display:flex;align-items:center;gap:8px;">
+        <input type="checkbox" id="remember" style="width:20px;height:20px;">
+        <label for="remember" style="font-size:.9rem;">จดจำอุปกรณ์นี้</label>
+      </div>
+      <button type="submit" class="btn btn-primary btn-block btn-lg">เข้าสู่ระบบ</button>
+    </form>
+  </div>
+
+  <div class="login-divider">หรือ</div>
+
   <!-- PIN Login -->
   <div class="card" id="pinSection">
     <div class="card-header">🔢 เข้าสู่ระบบด้วย PIN</div>
@@ -61,28 +83,6 @@ body { justify-content: center; align-items: center; }
       <button class="pin-btn" onclick="addPin('0')">0</button>
       <button class="pin-btn clear" onclick="submitPin()">OK</button>
     </div>
-  </div>
-
-  <div class="login-divider">หรือ</div>
-
-  <!-- Username/Password Login -->
-  <div class="card">
-    <div class="card-header">👤 เข้าสู่ระบบด้วยรหัสผ่าน</div>
-    <form id="loginForm" onsubmit="handleLogin(event)">
-      <div class="form-group">
-        <label class="form-label">ชื่อผู้ใช้</label>
-        <input type="text" class="form-control" id="username" placeholder="พิมพ์ชื่อผู้ใช้" autocomplete="username" required>
-      </div>
-      <div class="form-group">
-        <label class="form-label">รหัสผ่าน</label>
-        <input type="password" class="form-control" id="password" placeholder="พิมพ์รหัสผ่าน" autocomplete="current-password" required>
-      </div>
-      <div class="form-group" style="display:flex;align-items:center;gap:8px;">
-        <input type="checkbox" id="remember" style="width:20px;height:20px;">
-        <label for="remember" style="font-size:.9rem;">จดจำอุปกรณ์นี้</label>
-      </div>
-      <button type="submit" class="btn btn-primary btn-block btn-lg">เข้าสู่ระบบ</button>
-    </form>
   </div>
 </div>
 {% endblock %}
