@@ -18462,7 +18462,7 @@ def webhook():
                                         "altText": f"พยากรณ์ Hb — {_hp.patient_name}",
                                         "contents": _flex,
                                     }
-                                    push_messages(line_user_id, [_flex_msg])
+                                    push_messages(_line_user_id, [_flex_msg])
                                     already_replied = True
                                 else:
                                     reply_message(reply_token,
