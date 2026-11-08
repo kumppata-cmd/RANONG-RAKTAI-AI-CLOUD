@@ -7,7 +7,7 @@ import logging
 from datetime import date, datetime, timezone  # noqa: F401
 from flask import (  # noqa: F401
     Blueprint, request, jsonify, g, render_template, redirect, url_for,
-    current_app,
+    current_app, make_response,
 )
 
 from .auth import require_role  # noqa: F401
@@ -47,26 +47,35 @@ def hd_login_page():
 @hd_web.route("/dashboard")
 def hd_dashboard_page():
     """Render 30-bed dashboard."""
-    return render_template("hd_dashboard.html")
+    resp = make_response(render_template("hd_dashboard.html"))
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return resp
 
 
 @hd_web.route("/session/new")
 def hd_session_new():
     """Render new HD session form (Pre/Intra/Post tabs)."""
-    # Pre-load patients for dropdown (server-side fallback)
+    # Pre-load patients for dropdown (server-side)
     patients = []
+    db_err = ""
     try:
         import os, psycopg2
         db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
         if db_url:
             conn = psycopg2.connect(db_url, connect_timeout=5)
             with conn.cursor() as cur:
-                cur.execute("SELECT hn, patient_name FROM hd_patient_mapping WHERE is_active=TRUE ORDER BY hn LIMIT 200")
-                patients = [{"hn": r[0], "name": r[1] or ""} for r in cur.fetchall()]
+                cur.execute("SELECT hn, patient_name, vascular_access, schedule_days FROM hd_patient_mapping WHERE is_active=TRUE ORDER BY patient_name LIMIT 200")
+                patients = [{"hn": r[0], "name": r[1] or "", "va": r[2] or "", "sched": r[3] or ""} for r in cur.fetchall()]
             conn.close()
-    except Exception:
-        pass
-    return render_template("hd_session.html", server_patients=patients)
+        else:
+            db_err = "no_db_url"
+    except Exception as e:
+        db_err = str(e)
+        logger.warning("session_new patient preload error: %s", e)
+    resp = make_response(render_template("hd_session.html", server_patients=patients, db_err=db_err))
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    resp.headers['Pragma'] = 'no-cache'
+    return resp
 
 
 @hd_web.route("/session/<int:session_id>")

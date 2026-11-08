@@ -68,14 +68,14 @@
     <div class="card-header">👤 ข้อมูลผู้ป่วยและเตียง</div>
     <div class="grid-2">
       <div class="form-group">
-        <label class="form-label">ผู้ป่วย <small id="patientCount" style="color:var(--fg-muted);">กำลังโหลด...</small></label>
+        <label class="form-label">ผู้ป่วย <small id="patientCount" style="color:var(--fg-muted);">
+          {% if server_patients %}{{ server_patients|length }} คน{% elif db_err %}⚠️ DB: {{ db_err[:50] }}{% else %}กำลังโหลด...{% endif %}
+        </small></label>
         <select class="form-control" id="patientSelect" onchange="onPatientSelect()">
-          <option value="">-- เลือกผู้ป่วย --</option>
-          {% if server_patients %}
-          {% for p in server_patients %}
-          <option value="{{ p.hn }}">{{ p.hn }} — {{ p.name }}</option>
+          <option value="">-- เลือกผู้ป่วย ({{ server_patients|length if server_patients else 0 }} คน) --</option>
+          {% for p in (server_patients or []) %}
+          <option value="{{ p.hn }}">{{ p.hn }} — {{ p.name }}{% if p.va %} [{{ p.va }}]{% endif %}{% if p.sched %} ({{ p.sched }}){% endif %}</option>
           {% endfor %}
-          {% endif %}
         </select>
       </div>
       <div class="form-group">
