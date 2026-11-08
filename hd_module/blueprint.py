@@ -562,12 +562,6 @@ def hd_kpi():
     return jsonify(report.to_dict())
 
 
-@hd_web.route("/kpi")
-def hd_kpi_page():
-    """HD KPI Dashboard web page."""
-    return render_template("hd_kpi.html")
-
-
 # ── Monthly Report ────────────────────────────────────────
 
 @hd_bp.route("/report/monthly", methods=["GET"])
