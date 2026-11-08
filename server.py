@@ -1388,26 +1388,9 @@ if master_registry and os.path.exists(_SEED_FILE):
 sync_patients_to_hd_db(master_registry)
 create_default_hd_users()
 
-# ─── HD Alert Push Service (Phase 3.1) ───────────────────
+# ─── HD Alert Push + Vital Recorder: initialized later (after push_message def) ──
 hd_alert_push = None
-try:
-    from hd_module.alert_push import HdAlertPushService
-    _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    hd_alert_push = HdAlertPushService(push_fn=push_message, db_url=_hd_db)
-    logger.info("HD Alert Push: initialized (%d recipients)", hd_alert_push.recipient_count)
-except Exception as _hd_push_err:
-    logger.warning("HD Alert Push: init failed — %s", _hd_push_err)
-
-# ─── HD Vital Recorder (Phase 3.2) ───────────────────────
 hd_vital_recorder = None
-try:
-    from hd_module.vital_recorder import VitalRecorder
-    _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    hd_vital_recorder = VitalRecorder(db_url=_hd_db, alert_push_service=hd_alert_push)
-    app.config["HD_VITAL_RECORDER"] = hd_vital_recorder
-    logger.info("HD Vital Recorder: initialized")
-except Exception as _hd_vr_err:
-    logger.warning("HD Vital Recorder: init failed — %s", _hd_vr_err)
 
 # ─── PostgreSQL Database (Phase 1.1 Foundation) ──────────
 from database import Database
@@ -12789,6 +12772,25 @@ def push_messages(user_id: str, messages: list[dict]) -> bool:
         return False
 
 
+# ─── HD Alert Push + Vital Recorder (init after push_message def) ──
+try:
+    from hd_module.alert_push import HdAlertPushService
+    _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    hd_alert_push = HdAlertPushService(push_fn=push_message, db_url=_hd_db)
+    logger.info("HD Alert Push: initialized (%d recipients)", hd_alert_push.recipient_count)
+except Exception as _hd_push_err:
+    logger.warning("HD Alert Push: init failed — %s", _hd_push_err)
+
+try:
+    from hd_module.vital_recorder import VitalRecorder
+    _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    hd_vital_recorder = VitalRecorder(db_url=_hd_db, alert_push_service=hd_alert_push)
+    app.config["HD_VITAL_RECORDER"] = hd_vital_recorder
+    logger.info("HD Vital Recorder: initialized")
+except Exception as _hd_vr_err:
+    logger.warning("HD Vital Recorder: init failed — %s", _hd_vr_err)
+
+
 def reply_message(reply_token: str, text: str):
     """ส่งข้อความตอบกลับไปยัง LINE."""
     if IS_TESTING and not IS_TESTING_DOCS:
@@ -18460,7 +18462,7 @@ def webhook():
                                         "altText": f"พยากรณ์ Hb — {_hp.patient_name}",
                                         "contents": _flex,
                                     }
-                                    push_messages(event_source_id, [_flex_msg])
+                                    push_messages(line_user_id, [_flex_msg])
                                     already_replied = True
                                 else:
                                     reply_message(reply_token,
