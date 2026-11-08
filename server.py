@@ -8626,6 +8626,36 @@ def handle_search_command(
             "(เห็นเฉพาะของตัวเองเท่านั้น)"
         )
 
+    # ── myid: แสดง LINE User ID + auto-register HD Alert Recipient ──
+    if text_stripped in ("myid", "my id", "userid", "ไอดี"):
+        if not _is_staff:
+            return None
+        # Auto-register as HD alert recipient
+        _auto_reg_msg = ""
+        if line_user_id and hd_alert_push is not None:
+            _already = any(r["line_user_id"] == line_user_id
+                           for r in hd_alert_push._recipients)
+            if not _already:
+                _role = "physician" if is_physician_user(user_hash) else "nurse"
+                hd_alert_push._recipients.append({
+                    "line_user_id": line_user_id,
+                    "role": _role,
+                    "name": "auto-registered",
+                })
+                _auto_reg_msg = f"\n✅ ลงทะเบียนรับแจ้งเตือน HD ({_role}) แล้ว"
+            else:
+                _auto_reg_msg = "\n✅ คุณลงทะเบียนรับแจ้งเตือน HD แล้ว"
+        return (
+            f"🆔 LINE User ID:\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"{line_user_id}\n"
+            f"{_auto_reg_msg}\n"
+            f"\n"
+            f"📋 ถ้าต้องการรับแจ้งเตือนถาวร\n"
+            f"เพิ่มที่ Render ENV:\n"
+            f"HD_ALERT_RECIPIENTS={line_user_id}:physician:DrKamphon"
+        )
+
     # ── ตรวจสอบระบบ (Admin/Staff) — เพิ่ม 2026-11-05 ──
     if text_stripped in ("ตรวจสอบระบบ", "สถานะระบบ", "system status"):
         if not _is_staff:
