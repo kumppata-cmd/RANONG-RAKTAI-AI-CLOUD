@@ -12013,10 +12013,15 @@ def _build_daily_digest() -> str:
 
     lines = [f"📊 สรุปประจำวัน{_day_th}ที่ {_date_th}", "━━━━━━━━━━━━━━━━━━━━"]
 
-    # 1. ฟอกเลือดวันนี้
+    # 1. ฟอกเลือดวันนี้ (รายชื่อครบ — แทน dialysis_staff_summary แยก)
     if _day_en:
         _pts = master_registry.get_patients_by_day(_day_en)
         lines.append(f"🏥 ฟอกเลือดวันนี้: {len(_pts)} คน")
+        for _pi, _pp in enumerate(_pts[:20], 1):
+            _esa_t = getattr(_pp, 'esa_code', '') or '-'
+            lines.append(f"  {_pi}. {_pp.clinic_hn} {_pp.patient_name} | {_esa_t}")
+        if len(_pts) > 20:
+            lines.append(f"  ... อีก {len(_pts)-20} คน")
     else:
         lines.append("🏥 วันอาทิตย์ — ไม่มีรอบฟอก")
 
@@ -12107,12 +12112,9 @@ def job_daily_reminders() -> dict:
         )
     except Exception as _e:
         out["hd"] = {"error": type(_e).__name__}
-    # ── สรุปตารางฟอกวันนี้ → เจ้าหน้าที่ (เพิ่ม 2026-11-05) ──
-    try:
-        out["dialysis_staff_summary"] = _send_dialysis_staff_summary()
-    except Exception as _e:
-        out["dialysis_staff_summary"] = {"error": type(_e).__name__}
-        logger.warning("dialysis_staff_summary: %s", _e)
+    # ── สรุปตารางฟอกวันนี้: รวมอยู่ใน daily_digest แล้ว (ไม่ส่งแยก)
+    # _send_dialysis_staff_summary() ถูกรวมเข้า _build_daily_digest()
+    # เพื่อไม่ให้ staff ได้รับ 2 ข้อความซ้ำกัน
     # ── สรุปรายวันรวม → เจ้าหน้าที่ (เพิ่ม 2026-11-05) ──
     try:
         _digest = _build_daily_digest()
