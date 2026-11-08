@@ -29,6 +29,16 @@
 .idwg-calc .value { font-size: 1.3rem; font-weight: 800; }
 .idwg-high { color: var(--danger); }
 .idwg-normal { color: var(--success); }
+/* Timer */
+.session-timer { text-align: center; padding: 16px; background: var(--bg-card); border-radius: var(--radius); border: 2px solid var(--success); margin-bottom: 16px; }
+.session-timer .timer-value { font-size: 2.5rem; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: 2px; }
+.session-timer .timer-label { font-size: .8rem; color: var(--fg-muted); }
+.session-timer.urgent { border-color: var(--danger); }
+.session-timer.urgent .timer-value { color: var(--danger); animation: pulse-timer 1s infinite; }
+@keyframes pulse-timer { 0%,100%{opacity:1;} 50%{opacity:.4;} }
+.session-timer .timer-bar { height: 6px; background: var(--border); border-radius: 3px; margin-top: 8px; overflow: hidden; }
+.session-timer .timer-bar-fill { height: 100%; background: var(--success); border-radius: 3px; transition: width 1s linear; }
+.session-timer.urgent .timer-bar-fill { background: var(--danger); }
 </style>
 {% endblock %}
 
@@ -142,6 +152,14 @@
 
 <!-- ═══ INTRA-HD TAB ═══ -->
 <div class="tab-content" data-tab-content-group="session" data-tab-content="intra">
+  <!-- Timer Countdown -->
+  <div class="session-timer" id="sessionTimer" style="display:none;">
+    <div class="timer-label">⏱ เวลาฟอกเลือด</div>
+    <div class="timer-value" id="timerDisplay">4:00:00</div>
+    <div class="timer-bar"><div class="timer-bar-fill" id="timerBarFill" style="width:0%;"></div></div>
+    <div class="timer-label" style="margin-top:6px;">เริ่ม: <span id="timerStartTime">-</span> | สิ้นสุดโดยประมาณ: <span id="timerEndTime">-</span></div>
+  </div>
+
   <!-- Alert Banner -->
   <div class="alert-banner alert-banner-danger" id="intraCriticalAlert" style="display:none;">
     🚨 <span id="criticalAlertText">-</span>
@@ -304,30 +322,113 @@
 
 {% block extra_js %}
 <script>
-let sessionData = {session_id: null, pre_weight: 0, dry_weight: 0};
+let sessionData = {session_id: null, pre_weight: 0, dry_weight: 0, start_time: null, duration_hours: 4};
 const timeline = [];
+let timerInterval = null;
+
+/* ── Alert Sound (Web Audio beep) ── */
+let _audioCtx = null;
+function playAlertSound(type){
+  try{
+    if(!_audioCtx) _audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    const osc = _audioCtx.createOscillator();
+    const gain = _audioCtx.createGain();
+    osc.connect(gain); gain.connect(_audioCtx.destination);
+    if(type==='critical'){
+      osc.frequency.value = 880; gain.gain.value = 0.4;
+      osc.start(); osc.stop(_audioCtx.currentTime + 0.15);
+      setTimeout(()=>{
+        const o2 = _audioCtx.createOscillator();
+        const g2 = _audioCtx.createGain();
+        o2.connect(g2); g2.connect(_audioCtx.destination);
+        o2.frequency.value = 880; g2.gain.value = 0.4;
+        o2.start(); o2.stop(_audioCtx.currentTime + 0.15);
+      }, 200);
+    } else {
+      osc.frequency.value = 660; gain.gain.value = 0.25;
+      osc.start(); osc.stop(_audioCtx.currentTime + 0.12);
+    }
+  }catch(e){}
+}
+function vibrateAlert(type){
+  try{ if(navigator.vibrate){ navigator.vibrate(type==='critical'?[200,100,200,100,200]:[150,80,150]); } }catch(e){}
+}
+
+/* ── Timer Countdown ── */
+function startTimer(){
+  sessionData.start_time = new Date();
+  const timerEl = document.getElementById('sessionTimer');
+  timerEl.style.display = 'block';
+  document.getElementById('timerStartTime').textContent = sessionData.start_time.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+  const endTime = new Date(sessionData.start_time.getTime() + sessionData.duration_hours*3600000);
+  document.getElementById('timerEndTime').textContent = endTime.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+  updateTimer();
+  timerInterval = setInterval(updateTimer, 1000);
+}
+
+let _timerAlerted15 = false;
+let _timerAlertedDone = false;
+
+function updateTimer(){
+  if(!sessionData.start_time) return;
+  const now = new Date();
+  const totalMs = sessionData.duration_hours * 3600000;
+  const elapsedMs = now - sessionData.start_time;
+  const remainMs = totalMs - elapsedMs;
+  const pct = Math.min(100, (elapsedMs/totalMs)*100);
+
+  document.getElementById('timerBarFill').style.width = pct+'%';
+
+  const timerEl = document.getElementById('sessionTimer');
+  if(remainMs <= 0){
+    document.getElementById('timerDisplay').textContent = '0:00:00 ครบเวลา!';
+    timerEl.classList.add('urgent');
+    if(!_timerAlertedDone){ playAlertSound('critical'); vibrateAlert('critical'); _timerAlertedDone=true; }
+    clearInterval(timerInterval);
+    return;
+  }
+
+  const h = Math.floor(remainMs/3600000);
+  const m = Math.floor((remainMs%3600000)/60000);
+  const s = Math.floor((remainMs%60000)/1000);
+  document.getElementById('timerDisplay').textContent = `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+
+  /* Alert at 15 min remaining */
+  if(remainMs < 900000){
+    timerEl.classList.add('urgent');
+    if(!_timerAlerted15){ playAlertSound('warning'); vibrateAlert('warning'); _timerAlerted15=true; }
+  }
+}
 
 /* URL params */
 const params = new URLSearchParams(window.location.search);
 if(params.get('bed')) document.getElementById('bedSelect').value = params.get('bed');
 
-/* Load patients */
+/* Load patients + auto-select from URL */
 hdFetch('/hd/api/v1/patients').then(r=>r.json()).then(d=>{
   const sel = document.getElementById('patientSelect');
   (d.patients||[]).forEach(p=>{
     const opt = document.createElement('option');
-    opt.value = p.hn; opt.textContent = p.hn + ' — ' + (p.name||'');
+    const pName = p.patient_name || p.name || '';
+    opt.value = p.hn; opt.textContent = p.hn + ' — ' + pName;
     sel.appendChild(opt);
   });
+  /* Auto-select patient from URL param */
+  const hnParam = params.get('hn');
+  if(hnParam){
+    sel.value = hnParam;
+    onPatientSelect();
+  }
 }).catch(()=>{});
 
 function onPatientSelect(){
   const hn = document.getElementById('patientSelect').value;
   if(!hn) return;
   hdFetch('/hd/api/v1/patients/'+hn).then(r=>r.json()).then(p=>{
-    document.getElementById('patientName').textContent = p.name || 'HN '+hn;
-    document.getElementById('patientInfo').textContent = 'HN: '+hn+' | '+( p.schedule_days||'-');
+    document.getElementById('patientName').textContent = p.patient_name || p.name || 'HN '+hn;
+    document.getElementById('patientInfo').textContent = 'HN: '+hn+' | ตาราง: '+(p.schedule_days||'-')+' | Access: '+(p.vascular_access||'-');
     if(p.dry_weight) document.getElementById('dryWeight').value = p.dry_weight;
+    document.getElementById('bedDisplay').textContent = document.getElementById('bedSelect').value || '-';
   }).catch(()=>{});
 }
 
@@ -387,6 +488,7 @@ function startSession(){
       document.getElementById('sessionStatus').textContent = 'กำลังฟอก';
       document.getElementById('sessionStatus').className = 'badge badge-success';
       showToast('เริ่มฟอกเลือดสำเร็จ','success');
+      startTimer();
       switchTab('session','intra');
     })
     .catch(()=>showToast('ไม่สามารถเริ่มรอบฟอกได้','danger'));
@@ -415,9 +517,13 @@ function saveIntraVital(){
           if(a.severity==='critical'){
             document.getElementById('intraCriticalAlert').style.display='flex';
             document.getElementById('criticalAlertText').textContent=a.message||a.title;
+            playAlertSound('critical');
+            vibrateAlert('critical');
           } else {
             document.getElementById('intraWarningAlert').style.display='flex';
             document.getElementById('warningAlertText').textContent=a.message||a.title;
+            playAlertSound('warning');
+            vibrateAlert('warning');
           }
         });
       }

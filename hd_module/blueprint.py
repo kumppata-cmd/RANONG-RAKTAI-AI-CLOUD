@@ -486,7 +486,8 @@ def bed_dashboard():
                 cur.execute("""
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
-                           p.dry_weight, p.esa_drug
+                           p.dry_weight, p.esa_drug,
+                           s.start_time, s.duration_hours
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.session_date = CURRENT_DATE
@@ -507,6 +508,8 @@ def bed_dashboard():
                                 "dry_weight": float(row[6]) if row[6] else None,
                                 "esa_drug": row[7],
                             },
+                            "start_time": row[8].isoformat() if row[8] else None,
+                            "duration_hours": float(row[9]) if row[9] else 4,
                             "current_vitals": None,
                             "alerts": [],
                         }

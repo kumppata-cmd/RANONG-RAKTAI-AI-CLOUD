@@ -143,6 +143,26 @@ function updateCounts(){
   document.getElementById('countAll').textContent = allAlerts.length;
 }
 
+/* ── Alert Sound ── */
+let _audioCtx = null;
+function playAlertSound(type){
+  try{
+    if(!_audioCtx) _audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    const osc = _audioCtx.createOscillator();
+    const gain = _audioCtx.createGain();
+    osc.connect(gain); gain.connect(_audioCtx.destination);
+    if(type==='critical'){ osc.frequency.value=880; gain.gain.value=0.4; }
+    else { osc.frequency.value=660; gain.gain.value=0.25; }
+    osc.start(); osc.stop(_audioCtx.currentTime+0.15);
+    if(type==='critical') setTimeout(()=>{
+      const o2=_audioCtx.createOscillator(),g2=_audioCtx.createGain();
+      o2.connect(g2);g2.connect(_audioCtx.destination);o2.frequency.value=880;g2.gain.value=0.4;
+      o2.start();o2.stop(_audioCtx.currentTime+0.15);
+    },200);
+  }catch(e){}
+}
+let _prevAlertCount = 0;
+
 function fetchAlerts(){
   hdFetch('/hd/api/v1/alerts')
     .then(r=>r.json())
@@ -150,6 +170,14 @@ function fetchAlerts(){
       allAlerts = data.alerts || [];
       updateCounts();
       renderAlerts(allAlerts);
+      /* Sound on new unacknowledged alerts */
+      const unack = allAlerts.filter(a=>!a.acknowledged);
+      if(unack.length > _prevAlertCount){
+        const hasCrit = unack.some(a=>a.severity==='critical');
+        playAlertSound(hasCrit?'critical':'warning');
+        try{ if(navigator.vibrate) navigator.vibrate(hasCrit?[200,100,200,100,200]:[150,80,150]); }catch(e){}
+      }
+      _prevAlertCount = unack.length;
     })
     .catch(()=>{});
 }

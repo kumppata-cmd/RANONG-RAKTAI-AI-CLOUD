@@ -30,6 +30,8 @@
 .bed-card .bed-patient { font-size: .8rem; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bed-card .bed-status { font-size: .75rem; font-weight: 600; margin-top: auto; display: flex; align-items: center; gap: 4px; }
 .bed-card .bed-time { font-size: .7rem; color: var(--fg-muted); }
+.bed-card .bed-time-urgent { color: var(--danger); font-weight: 700; animation: pulse-text 1s infinite; }
+@keyframes pulse-text { 0%,100%{opacity:1;} 50%{opacity:.5;} }
 .bed-card .bed-vitals { font-size: .7rem; color: var(--fg-muted); margin-top: 2px; }
 /* Status colors with icons (color blind safe) */
 .bed-available { border-color: #bdc3c7; opacity: .6; }
@@ -91,6 +93,57 @@
 
 {% block extra_js %}
 <script>
+/* ── Timer countdown helper ── */
+function calcElapsed(startTime, durationHours){
+  const start = new Date(startTime);
+  const now = new Date();
+  const endMs = start.getTime() + (durationHours||4)*3600000;
+  const remainMs = endMs - now.getTime();
+  if(remainMs <= 0) return {text:'ครบเวลาแล้ว!', urgent:true, done:true};
+  const h = Math.floor(remainMs/3600000);
+  const m = Math.floor((remainMs%3600000)/60000);
+  const urgent = remainMs < 900000; /* < 15 min */
+  return {text: `เหลือ ${h}:${String(m).padStart(2,'0')} ชม.`, urgent, done:false};
+}
+
+/* ── Alert Sound (Web Audio beep) ── */
+let _audioCtx = null;
+function playAlertSound(type){
+  try{
+    if(!_audioCtx) _audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    const osc = _audioCtx.createOscillator();
+    const gain = _audioCtx.createGain();
+    osc.connect(gain); gain.connect(_audioCtx.destination);
+    if(type==='critical'){
+      osc.frequency.value = 880; gain.gain.value = 0.4;
+      osc.start(); osc.stop(_audioCtx.currentTime + 0.15);
+      /* Double beep */
+      setTimeout(()=>{
+        const o2 = _audioCtx.createOscillator();
+        const g2 = _audioCtx.createGain();
+        o2.connect(g2); g2.connect(_audioCtx.destination);
+        o2.frequency.value = 880; g2.gain.value = 0.4;
+        o2.start(); o2.stop(_audioCtx.currentTime + 0.15);
+      }, 200);
+    } else {
+      osc.frequency.value = 660; gain.gain.value = 0.25;
+      osc.start(); osc.stop(_audioCtx.currentTime + 0.12);
+    }
+  }catch(e){}
+}
+
+function vibrateAlert(type){
+  try{
+    if(navigator.vibrate){
+      if(type==='critical') navigator.vibrate([200,100,200,100,200]);
+      else navigator.vibrate([150,80,150]);
+    }
+  }catch(e){}
+}
+
+let _prevCriticalCount = 0;
+let _prevWarningCount = 0;
+
 const STATUS_MAP = {
   available: {label:'ว่าง', cls:'bed-available'},
   pre_hd:    {label:'Pre-HD', cls:'bed-pre'},
@@ -109,21 +162,32 @@ function renderBeds(beds){
     const s = STATUS_MAP[b.status] || STATUS_MAP.available;
     const card = document.createElement('div');
     card.className = 'bed-card ' + s.cls;
+    /* Quick-action: กดเตียง → เปิด session ทันที */
+    const hn = b.patient_hn || (b.patient && b.patient.hn) || '';
     card.onclick = () => {
       if(b.session_id) window.location.href='/hd/session/'+b.session_id;
-      else if(b.status!=='available') window.location.href='/hd/session/new?bed='+b.bed_number;
-      else window.location.href='/hd/session/new?bed='+b.bed_number;
+      else {
+        let url = '/hd/session/new?bed='+b.bed_number;
+        if(hn) url += '&hn='+encodeURIComponent(hn);
+        window.location.href = url;
+      }
     };
     let vitals = '';
     if(b.current_vitals){
       const v = b.current_vitals;
-      vitals = `<div class="bed-vitals">${v.sbp||'-'}/${v.dbp||'-'} HR:${v.hr||'-'}</div>`;
+      vitals = `<div class="bed-vitals">BP ${v.sbp||'-'}/${v.dbp||'-'} HR:${v.hr||'-'}</div>`;
     }
+    /* Timer countdown */
     let timeLeft = '';
-    if(b.time_remaining) timeLeft = `<div class="bed-time">⏱ เหลือ ${b.time_remaining}</div>`;
+    if(b.start_time && b.status==='active'){
+      const elapsed = calcElapsed(b.start_time, b.duration_hours || 4);
+      timeLeft = `<div class="bed-time ${elapsed.urgent?'bed-time-urgent':''}">⏱ ${elapsed.text}</div>`;
+    } else if(b.time_remaining){
+      timeLeft = `<div class="bed-time">⏱ เหลือ ${b.time_remaining}</div>`;
+    }
 
     const pName = b.patient_name || (b.patient && b.patient.name) || '';
-    const pHn = b.patient_hn || (b.patient && b.patient.hn) || '';
+    const pHn = hn;
     card.innerHTML = `
       <div class="bed-num">${b.bed_number}</div>
       <div class="bed-patient">${pName || (pHn ? 'HN '+pHn : '')}</div>
@@ -144,6 +208,17 @@ function renderBeds(beds){
   document.getElementById('statAvailable').textContent = counts.available;
   document.getElementById('statWarning').textContent = counts.warning;
   document.getElementById('statCritical').textContent = counts.critical;
+
+  /* Alert Sound + Vibration when new critical/warning appears */
+  if(counts.critical > _prevCriticalCount){
+    playAlertSound('critical');
+    vibrateAlert('critical');
+  } else if(counts.warning > _prevWarningCount){
+    playAlertSound('warning');
+    vibrateAlert('warning');
+  }
+  _prevCriticalCount = counts.critical;
+  _prevWarningCount = counts.warning;
 }
 
 function fetchBeds(){
