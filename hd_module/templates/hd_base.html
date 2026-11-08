@@ -40,7 +40,7 @@
 html { font-size: 16px; -webkit-tap-highlight-color: transparent; }
 body {
   font-family: var(--font); background: var(--bg); color: var(--fg);
-  min-height: 100dvh; display: flex; overflow: hidden;
+  min-height: 100dvh; display: flex;
 }
 /* === Sidebar Nav === */
 .sidebar {
@@ -63,7 +63,8 @@ body {
 /* === Main Content === */
 .main {
   flex: 1; margin-left: 240px; display: flex; flex-direction: column;
-  min-height: 100dvh; overflow-y: auto;
+  min-height: 100dvh; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  width: 0; /* prevent flex child from expanding beyond viewport */
 }
 .topbar {
   display: flex; align-items: center; gap: 12px; padding: 12px 20px;
@@ -186,7 +187,8 @@ select.form-control { appearance: none; background-image: url("data:image/svg+xm
 @media (max-width: 768px) {
   .sidebar { transform: translateX(-100%); width: 280px; }
   .sidebar.open { transform: translateX(0); }
-  .main { margin-left: 0; }
+  body { display: block; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+  .main { margin-left: 0; width: auto; min-height: auto; overflow-y: visible; }
   .topbar .menu-btn { display: flex; }
   .grid-2, .grid-3 { grid-template-columns: 1fr; }
   .content { padding: 12px; }
@@ -216,7 +218,7 @@ tr:hover td { background: rgba(0,0,0,.02); }
 <aside class="sidebar" id="sidebar">
   <div class="sidebar-brand">
     🏥 HD Smart Monitoring
-    <small>คลินิกระนอง รักษ์ไต</small>
+    <small>คลินิกระนอง รักษ์ไต <span style="opacity:.4;">v2.1</span></small>
   </div>
   <nav class="sidebar-nav">
     <a href="/hd/dashboard" class="{% block nav_dashboard %}{% endblock %}"><span class="icon">📊</span> แดชบอร์ด 30 เตียง</a>
