@@ -428,7 +428,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # ─── HD Smart Monitoring Module (Feature Flag) ─────────────────
-from hd_module import register_hd_module
+from hd_module import register_hd_module, sync_patients_to_hd_db, create_default_hd_users
 register_hd_module(app)
 
 # ─── CORS for Admin API (เฉพาะ /admin/api/ endpoints) ──────────
@@ -1383,6 +1383,10 @@ if master_registry and os.path.exists(_SEED_FILE):
     else:
         logger.info("Dialysis seed: skipped — %d patients already have schedule",
                      _summ["with_schedule"])
+
+# ─── HD Patient Sync: GCS Registry → PostgreSQL ─────────
+sync_patients_to_hd_db(master_registry)
+create_default_hd_users()
 
 # ─── PostgreSQL Database (Phase 1.1 Foundation) ──────────
 from database import Database

@@ -89,18 +89,23 @@ class PatientBridge:
             return list(SYNTHETIC_PATIENTS)
 
         try:
-            # Access internal patient store (read-only)
-            raw_patients = getattr(self._registry, '_patients', {})
-            for hn, p in raw_patients.items():
+            # Access internal patient store (read-only) — list of MasterPatient
+            raw_patients = getattr(self._registry, '_patients', [])
+            for p in raw_patients:
+                hn = getattr(p, 'clinic_hn', '') or getattr(p, 'hospital_hn', '')
+                if not hn:
+                    continue
+                schedule = getattr(p, 'dialysis_schedule', '') or ''
+                esa = getattr(p, 'esa_code', '') or ''
                 record = {
-                    "hn": getattr(p, 'clinic_hn', hn) or hn,
+                    "hn": hn,
                     "hospital_hn": getattr(p, 'hospital_hn', ''),
                     "patient_name": getattr(p, 'patient_name', ''),
                     "vascular_access": getattr(p, 'vascular_access', ''),
                     "dry_weight": getattr(p, 'dry_weight', None),
-                    "schedule_days": getattr(p, 'schedule_days', ''),
-                    "esa_drug": getattr(p, 'esa_drug', ''),
-                    "esa_dose": getattr(p, 'esa_dose', ''),
+                    "schedule_days": schedule,
+                    "esa_drug": esa,
+                    "esa_dose": '',
                     "primary_diagnosis": "CKD-G5 on HD",
                 }
                 record["source_registry_hash"] = _hash_record(record)
@@ -126,9 +131,9 @@ class PatientBridge:
                         "patient_name": getattr(p, 'patient_name', ''),
                         "vascular_access": getattr(p, 'vascular_access', ''),
                         "dry_weight": getattr(p, 'dry_weight', None),
-                        "schedule_days": getattr(p, 'schedule_days', ''),
-                        "esa_drug": getattr(p, 'esa_drug', ''),
-                        "esa_dose": getattr(p, 'esa_dose', ''),
+                        "schedule_days": getattr(p, 'dialysis_schedule', ''),
+                        "esa_drug": getattr(p, 'esa_code', ''),
+                        "esa_dose": '',
                     }
                     self._cache[hn] = record
                     return record
