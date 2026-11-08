@@ -630,8 +630,10 @@ function loadExistingSession(sid){
     .catch(e=>console.warn('loadExistingSession:', e));
 }
 
-/* Check URL for existing session */
-const sessionIdParam = params.get('session') || window.location.pathname.match(/\/session\/(\d+)/)?.[1];
+/* Check URL for existing session — from URL param, URL path, or Jinja */
+const sessionIdParam = params.get('session')
+  || window.location.pathname.match(/\/session\/(\d+)/)?.[1]
+  || {{ session_id|default('null') }};
 if(sessionIdParam) loadExistingSession(sessionIdParam);
 
 function saveIntraVital(){
@@ -646,35 +648,44 @@ function saveIntraVital(){
     type: 'vital', sbp, dbp, hr,
   };
 
-  /* POST to API if session exists */
-  if(sessionData.session_id){
-    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
-      method:'POST',
-      body:JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp), hr:parseInt(hr), temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null})
-    }).then(r=>r.json()).then(d=>{
-      if(d.alerts && d.alerts.length){
-        d.alerts.forEach(a=>{
-          if(a.severity==='critical'){
-            document.getElementById('intraCriticalAlert').style.display='flex';
-            document.getElementById('criticalAlertText').textContent=a.message||a.title;
-            playAlertSound('critical');
-            vibrateAlert('critical');
-          } else {
-            document.getElementById('intraWarningAlert').style.display='flex';
-            document.getElementById('warningAlertText').textContent=a.message||a.title;
-            playAlertSound('warning');
-            vibrateAlert('warning');
-          }
-        });
-      }
-    }).catch(()=>{});
-  }
+  /* Validate — ต้องมีอย่างน้อย SBP */
+  if(!sbp){ showToast('กรุณากรอก SBP','warning'); return; }
 
+  /* Push to timeline FIRST (always show locally) */
   timeline.push(entry);
   renderTimeline();
   closeModal('vitalModal');
   showToast('บันทึก Vital Signs สำเร็จ','success');
   ['modalSbp','modalDbp','modalHr','modalTemp','modalSpo2'].forEach(id=>{document.getElementById(id).value='';});
+
+  /* POST to API (non-blocking, don't redirect on fail) */
+  if(sessionData.session_id){
+    const token = getHdToken();
+    const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {'Content-Type':'application/json'};
+    fetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
+      method:'POST', headers,
+      body:JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null, temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null})
+    }).then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(e)))
+    .then(d=>{
+      if(d.vital_id) showToast('Vital #'+d.vital_id+' บันทึกลง DB สำเร็จ','info');
+      if(d.alerts && d.alerts.length){
+        d.alerts.forEach(a=>{
+          if(a.severity==='critical'){
+            document.getElementById('intraCriticalAlert').style.display='flex';
+            document.getElementById('criticalAlertText').textContent=a.message||a.title;
+            playAlertSound('critical'); vibrateAlert('critical');
+          } else {
+            document.getElementById('intraWarningAlert').style.display='flex';
+            document.getElementById('warningAlertText').textContent=a.message||a.title;
+            playAlertSound('warning'); vibrateAlert('warning');
+          }
+        });
+      }
+    }).catch(e=>{
+      console.warn('vital API error:', e);
+      showToast('Vital บันทึก local — DB: '+(e.error||'error'),'warning');
+    });
+  }
 }
 
 function saveUfRecord(){
@@ -690,12 +701,14 @@ function saveUfRecord(){
   bar.style.width = pct+'%'; bar.textContent = pct+'%';
   bar.style.background = pct > 90 ? 'var(--warning)' : 'var(--success)';
 
-  /* POST UF to API */
+  /* POST UF to API (non-blocking) */
   if(sessionData.session_id){
-    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
-      method:'POST',
+    const token = getHdToken();
+    const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {'Content-Type':'application/json'};
+    fetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
+      method:'POST', headers,
       body:JSON.stringify({uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0})
-    }).catch(()=>{});
+    }).catch(e=>console.warn('UF API:', e));
   }
 
   timeline.push({time: new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}), type:'uf', removed, remaining, rate});
