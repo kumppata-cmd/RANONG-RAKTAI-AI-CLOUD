@@ -7,6 +7,7 @@ import logging
 from datetime import date, datetime, timezone  # noqa: F401
 from flask import (  # noqa: F401
     Blueprint, request, jsonify, g, render_template, redirect, url_for,
+    current_app,
 )
 
 from .auth import require_role  # noqa: F401
@@ -508,6 +509,35 @@ def bed_dashboard():
             logger.warning("bed_dashboard DB error: %s", e)
 
     return jsonify({"beds": beds, "total": HdConfig.TOTAL_BEDS})
+
+
+# ── KPI Dashboard ─────────────────────────────────────────
+
+@hd_bp.route("/kpi", methods=["GET"])
+@require_role("physician", "admin", "auditor")
+def hd_kpi():
+    """HD KPI Dashboard API."""
+    import os
+    from .kpi_engine import KpiEngine
+
+    period = request.args.get("period", "monthly")
+    days = {"weekly": 7, "monthly": 30, "quarterly": 90}.get(period, 30)
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    registry = current_app.config.get("MASTER_REGISTRY")
+    engine = KpiEngine(master_registry=registry, db_url=db_url)
+    report = engine.generate_report(period=period, days=days)
+
+    log_action(user_id=g.get("hd_user_id"), action="kpi.view",
+               resource_type="kpi", ip_address=request.remote_addr or "")
+
+    return jsonify(report.to_dict())
+
+
+@hd_web.route("/kpi")
+def hd_kpi_page():
+    """HD KPI Dashboard web page."""
+    return render_template("hd_kpi.html")
 
 
 # ── Audit ─────────────────────────────────────────────────

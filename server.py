@@ -1384,6 +1384,9 @@ if master_registry and os.path.exists(_SEED_FILE):
         logger.info("Dialysis seed: skipped — %d patients already have schedule",
                      _summ["with_schedule"])
 
+# ─── Share master_registry with HD module via app config ──
+app.config["MASTER_REGISTRY"] = master_registry
+
 # ─── HD Patient Sync: GCS Registry → PostgreSQL ─────────
 sync_patients_to_hd_db(master_registry)
 create_default_hd_users()
@@ -8707,6 +8710,18 @@ def handle_search_command(
             _status_msg += f"\n✅ ไม่มีค่าวิกฤตค้าง\n"
 
         return _status_msg
+
+    # ── KPI HD Dashboard (Phase 5) ───────────────────────────
+    if text_stripped in ("kpihd", "kpi hd", "kpi ไตเทียม", "สถิติฟอก", "สถิติhd"):
+        try:
+            from hd_module.kpi_engine import KpiEngine, format_kpi_for_line
+            _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+            engine = KpiEngine(master_registry=master_registry, db_url=_hd_db)
+            report = engine.generate_report(period="monthly", days=30)
+            return format_kpi_for_line(report)
+        except Exception as _kpi_err:
+            logger.error("KPI HD error: %s", _kpi_err)
+            return f"❌ ไม่สามารถสร้างรายงาน KPI ได้: {type(_kpi_err).__name__}"
 
     if text_stripped in ("ตรวจแฟ้มย้อนหลัง", "จัดแฟ้มย้อนหลัง"):
         if not is_admin_user(user_hash):

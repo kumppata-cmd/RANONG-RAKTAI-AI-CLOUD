@@ -1,0 +1,150 @@
+{% extends "hd_base.html" %}
+{% block title %}KPI Dashboard{% endblock %}
+{% block page_title %}📊 KPI Dashboard{% endblock %}
+
+{% block content %}
+<div class="kpi-grid" id="kpiGrid">
+  <div class="kpi-loading">⏳ กำลังโหลดข้อมูล KPI...</div>
+</div>
+
+<script>
+async function loadKPI() {
+  const grid = document.getElementById('kpiGrid');
+  try {
+    const token = localStorage.getItem('hd_token') || '';
+    const resp = await fetch('/hd/api/v1/kpi?period=monthly', {
+      headers: {'Authorization': 'Bearer ' + token}
+    });
+    if (!resp.ok) {
+      grid.innerHTML = '<div class="kpi-error">❌ ไม่สามารถโหลด KPI ได้ (กรุณา login ก่อน)</div>';
+      return;
+    }
+    const data = await resp.json();
+    renderKPI(data);
+  } catch(e) {
+    grid.innerHTML = '<div class="kpi-error">❌ เชื่อมต่อไม่ได้: ' + e.message + '</div>';
+  }
+}
+
+function renderKPI(data) {
+  const grid = document.getElementById('kpiGrid');
+  const d = data.demographics || {};
+  const esa = data.esa || {};
+  const va = data.vascular_access || {};
+  const anemia = data.anemia || {};
+  const alerts = data.alerts || {};
+  const sessions = data.sessions || {};
+
+  let html = '';
+
+  // Stat cards row
+  html += '<div class="stat-row">';
+  html += statCard('👥', d.total_patients || 0, 'ผู้ป่วยทั้งหมด');
+  html += statCard('💊', esa.total_on_esa || 0, 'ใช้ ESA');
+  html += statCard('⚠️', alerts.total || 0, 'Alerts');
+  html += statCard('🏥', sessions.total || 0, 'Sessions');
+  html += '</div>';
+
+  // ESA Distribution
+  if (esa.distribution && Object.keys(esa.distribution).length > 0) {
+    html += '<div class="kpi-card"><h3>💊 ยา ESA</h3><div class="bar-chart">';
+    const total = esa.total_on_esa || 1;
+    for (const [name, count] of Object.entries(esa.distribution)) {
+      const pct = (count / total * 100).toFixed(0);
+      html += `<div class="bar-item">
+        <span class="bar-label">${name}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        <span class="bar-value">${count} (${pct}%)</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // Schedule Distribution
+  if (d.schedule_distribution && Object.keys(d.schedule_distribution).length > 0) {
+    html += '<div class="kpi-card"><h3>🗓️ ตารางฟอก</h3><div class="bar-chart">';
+    const total = d.total_patients || 1;
+    for (const [sched, count] of Object.entries(d.schedule_distribution)) {
+      const pct = (count / total * 100).toFixed(0);
+      html += `<div class="bar-item">
+        <span class="bar-label">${sched}</span>
+        <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+        <span class="bar-value">${count} (${pct}%)</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // Vascular Access
+  if (va && Object.keys(va).length > 0) {
+    html += '<div class="kpi-card"><h3>🩸 Vascular Access</h3><div class="bar-chart">';
+    const vaTotal = Object.values(va).reduce((a,b)=>a+b, 0);
+    for (const [type, count] of Object.entries(va)) {
+      const pct = (count / vaTotal * 100).toFixed(0);
+      html += `<div class="bar-item">
+        <span class="bar-label">${type}</span>
+        <div class="bar-track"><div class="bar-fill va-fill" style="width:${pct}%"></div></div>
+        <span class="bar-value">${count} (${pct}%)</span>
+      </div>`;
+    }
+    html += '</div></div>';
+  }
+
+  // Alert breakdown
+  if (alerts.total > 0) {
+    html += `<div class="kpi-card"><h3>⚠️ Alerts (เดือนนี้)</h3>
+      <div class="alert-grid">
+        <div class="alert-stat critical">🚨 ${alerts.critical || 0}<br><small>Critical</small></div>
+        <div class="alert-stat warning">⚠️ ${alerts.warning || 0}<br><small>Warning</small></div>
+        <div class="alert-stat info">ℹ️ ${alerts.info || 0}<br><small>Info</small></div>
+        <div class="alert-stat ack">✅ ${alerts.acknowledged || 0}<br><small>Ack'd</small></div>
+      </div>`;
+    if (alerts.avg_ack_time_min > 0) {
+      html += `<p style="text-align:center;color:var(--muted);margin-top:8px">⏱️ Avg ack: ${alerts.avg_ack_time_min.toFixed(0)} min</p>`;
+    }
+    html += '</div>';
+  }
+
+  grid.innerHTML = html;
+}
+
+function statCard(icon, value, label) {
+  return `<div class="stat-card">
+    <div class="stat-icon">${icon}</div>
+    <div class="stat-value">${value}</div>
+    <div class="stat-label">${label}</div>
+  </div>`;
+}
+
+loadKPI();
+</script>
+
+<style>
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.stat-card { background: var(--card-bg, #fff); border-radius: 12px; padding: 16px; text-align: center; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+.stat-icon { font-size: 2rem; }
+.stat-value { font-size: 2rem; font-weight: 700; color: var(--primary, #0d6efd); }
+.stat-label { font-size: .8rem; color: var(--muted, #6b7280); }
+.kpi-card { background: var(--card-bg, #fff); border-radius: 12px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+.kpi-card h3 { margin: 0 0 12px; font-size: 1rem; }
+.bar-chart { display: flex; flex-direction: column; gap: 8px; }
+.bar-item { display: grid; grid-template-columns: 80px 1fr 80px; gap: 8px; align-items: center; }
+.bar-label { font-size: .85rem; text-align: right; }
+.bar-track { height: 20px; background: #e5e7eb; border-radius: 4px; overflow: hidden; }
+.bar-fill { height: 100%; background: var(--primary, #0d6efd); border-radius: 4px; transition: width .5s; }
+.va-fill { background: #10b981; }
+.bar-value { font-size: .8rem; color: var(--muted); }
+.alert-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; text-align: center; }
+.alert-stat { padding: 12px 8px; border-radius: 8px; font-size: 1.4rem; font-weight: 700; }
+.alert-stat.critical { background: #fee2e2; color: #991b1b; }
+.alert-stat.warning { background: #fef3c7; color: #92400e; }
+.alert-stat.info { background: #dbeafe; color: #1e40af; }
+.alert-stat.ack { background: #d1fae5; color: #065f46; }
+.alert-stat small { font-size: .7rem; font-weight: 400; }
+.kpi-loading, .kpi-error { text-align: center; padding: 40px; color: var(--muted); }
+@media (prefers-color-scheme: dark) {
+  .stat-card, .kpi-card { background: #1f2937; }
+  .bar-track { background: #374151; }
+}
+</style>
+{% endblock %}
