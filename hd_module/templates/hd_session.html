@@ -68,9 +68,14 @@
     <div class="card-header">👤 ข้อมูลผู้ป่วยและเตียง</div>
     <div class="grid-2">
       <div class="form-group">
-        <label class="form-label">ผู้ป่วย</label>
+        <label class="form-label">ผู้ป่วย <small id="patientCount" style="color:var(--fg-muted);">กำลังโหลด...</small></label>
         <select class="form-control" id="patientSelect" onchange="onPatientSelect()">
           <option value="">-- เลือกผู้ป่วย --</option>
+          {% if server_patients %}
+          {% for p in server_patients %}
+          <option value="{{ p.hn }}">{{ p.hn }} — {{ p.name }}</option>
+          {% endfor %}
+          {% endif %}
         </select>
       </div>
       <div class="form-group">
@@ -405,26 +410,43 @@ const params = new URLSearchParams(window.location.search);
 if(params.get('bed')) document.getElementById('bedSelect').value = params.get('bed');
 
 /* Load patients + auto-select from URL */
-hdFetch('/hd/api/v1/patients').then(r=>r.json()).then(d=>{
-  const sel = document.getElementById('patientSelect');
-  (d.patients||[]).forEach(p=>{
-    const opt = document.createElement('option');
-    const pName = p.patient_name || p.name || '';
-    opt.value = p.hn; opt.textContent = p.hn + ' — ' + pName;
-    sel.appendChild(opt);
-  });
-  /* Auto-select patient from URL param */
-  const hnParam = params.get('hn');
-  if(hnParam){
-    sel.value = hnParam;
-    onPatientSelect();
-  }
-}).catch(()=>{});
+(function loadPatients(){
+  const token = getHdToken();
+  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
+  fetch('/hd/api/v1/patients', {headers})
+    .then(r=>{
+      if(!r.ok) throw new Error('API '+r.status);
+      return r.json();
+    })
+    .then(d=>{
+      const sel = document.getElementById('patientSelect');
+      const pts = d.patients || [];
+      pts.forEach(p=>{
+        const opt = document.createElement('option');
+        const pName = p.patient_name || p.name || '';
+        opt.value = p.hn; opt.textContent = p.hn + ' — ' + pName;
+        sel.appendChild(opt);
+      });
+      document.getElementById('patientCount').textContent = pts.length + ' คน';
+      /* Auto-select patient from URL param */
+      const hnParam = params.get('hn');
+      if(hnParam){
+        sel.value = hnParam;
+        onPatientSelect();
+      }
+    })
+    .catch(e=>{
+      console.warn('loadPatients error:', e);
+      document.getElementById('patientCount').textContent = 'โหลดไม่ได้ — ลอง login ใหม่';
+    });
+})();
 
 function onPatientSelect(){
   const hn = document.getElementById('patientSelect').value;
   if(!hn) return;
-  hdFetch('/hd/api/v1/patients/'+hn).then(r=>r.json()).then(p=>{
+  const token = getHdToken();
+  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
+  fetch('/hd/api/v1/patients/'+hn, {headers}).then(r=>r.ok?r.json():Promise.reject()).then(p=>{
     document.getElementById('patientName').textContent = p.patient_name || p.name || 'HN '+hn;
     document.getElementById('patientInfo').textContent = 'HN: '+hn+' | ตาราง: '+(p.schedule_days||'-')+' | Access: '+(p.vascular_access||'-');
     if(p.dry_weight) document.getElementById('dryWeight').value = p.dry_weight;

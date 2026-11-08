@@ -53,7 +53,20 @@ def hd_dashboard_page():
 @hd_web.route("/session/new")
 def hd_session_new():
     """Render new HD session form (Pre/Intra/Post tabs)."""
-    return render_template("hd_session.html")
+    # Pre-load patients for dropdown (server-side fallback)
+    patients = []
+    try:
+        import os, psycopg2
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        if db_url:
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("SELECT hn, patient_name FROM hd_patient_mapping WHERE is_active=TRUE ORDER BY hn LIMIT 200")
+                patients = [{"hn": r[0], "name": r[1] or ""} for r in cur.fetchall()]
+            conn.close()
+    except Exception:
+        pass
+    return render_template("hd_session.html", server_patients=patients)
 
 
 @hd_web.route("/session/<int:session_id>")
