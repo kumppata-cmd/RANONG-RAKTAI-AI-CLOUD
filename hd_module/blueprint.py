@@ -252,19 +252,72 @@ def create_session():
     if not isinstance(bed, int) or bed < 1 or bed > 50:
         return jsonify({"error": "bed_number must be 1-50"}), 400
 
-    log_action(
-        user_id=g.get("hd_user_id"),
-        action="session.create",
-        resource_type="session",
-        new_values=data,
-        ip_address=request.remote_addr or "",
-    )
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 500
 
-    return jsonify({
-        "status": "created",
-        "message": "Session created (database not connected)",
-        "data": data,
-    }), 201
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Find patient_id from HN
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (data["patient_hn"],))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": f"Patient HN {data['patient_hn']} not found"}), 404
+            patient_id = row[0]
+
+            # Check if bed is already occupied today
+            cur.execute("""
+                SELECT id FROM hd_sessions
+                WHERE bed_number = %s AND session_date = CURRENT_DATE
+                  AND status IN ('scheduled', 'in_progress')
+            """, (bed,))
+            if cur.fetchone():
+                conn.close()
+                return jsonify({"error": f"Bed {bed} is already occupied today"}), 409
+
+            # Insert session
+            cur.execute("""
+                INSERT INTO hd_sessions
+                    (patient_id, bed_number, session_date, status,
+                     pre_weight, post_weight, uf_goal,
+                     started_at, nurse_id)
+                VALUES (%s, %s, CURRENT_DATE, 'in_progress',
+                        %s, NULL, %s,
+                        NOW(), %s)
+                RETURNING id
+            """, (
+                patient_id, bed,
+                data.get("pre_weight"),
+                data.get("uf_goal", 2000),
+                g.get("hd_user_id"),
+            ))
+            session_id = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+
+        log_action(
+            user_id=g.get("hd_user_id"),
+            action="session.create",
+            resource_type="session",
+            resource_id=session_id,
+            new_values=data,
+            ip_address=request.remote_addr or "",
+        )
+
+        return jsonify({
+            "status": "created",
+            "session_id": session_id,
+            "bed_number": bed,
+            "patient_hn": data["patient_hn"],
+        }), 201
+
+    except Exception as e:
+        logger.error("create_session error: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 @hd_bp.route("/sessions/<int:session_id>", methods=["GET"])
@@ -279,6 +332,40 @@ def get_session(session_id):
 def update_session(session_id):
     """Update an HD session (e.g. end dialysis, record post-weight)."""
     data = request.get_json(silent=True) or {}
+
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if db_url:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                updates = []
+                params = []
+                if data.get("status") == "completed":
+                    updates.append("status = 'completed'")
+                    updates.append("ended_at = NOW()")
+                if data.get("post_weight") is not None:
+                    updates.append("post_weight = %s")
+                    params.append(data["post_weight"])
+                if data.get("actual_uf") is not None:
+                    updates.append("actual_uf = %s")
+                    params.append(data["actual_uf"])
+                if data.get("notes"):
+                    updates.append("notes = %s")
+                    params.append(data["notes"])
+                if updates:
+                    updates.append("updated_at = NOW()")
+                    params.append(session_id)
+                    cur.execute(
+                        f"UPDATE hd_sessions SET {', '.join(updates)} WHERE id = %s",
+                        params
+                    )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error("update_session error: %s", e)
+
     log_action(
         user_id=g.get("hd_user_id"),
         action="session.update",
@@ -519,9 +606,12 @@ def bed_dashboard():
                 for row in cur.fetchall():
                     bed_num = row[0]
                     if 1 <= bed_num <= HdConfig.TOTAL_BEDS:
+                        # Map DB status → JS status
+                        db_status = row[2]
+                        js_status = {"in_progress": "active", "scheduled": "pre_hd", "completed": "done"}.get(db_status, db_status)
                         beds[bed_num - 1] = {
                             "bed_number": bed_num,
-                            "status": row[2],
+                            "status": js_status,
                             "session_id": row[1],
                             "patient": {
                                 "hn": row[3],
