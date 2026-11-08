@@ -540,6 +540,60 @@ def hd_kpi_page():
     return render_template("hd_kpi.html")
 
 
+# ── Monthly Report ────────────────────────────────────────
+
+@hd_bp.route("/report/monthly", methods=["GET"])
+@require_role("physician", "admin")
+def hd_monthly_report():
+    """Generate monthly HD report."""
+    import os
+    from .monthly_report import generate_monthly_report
+
+    month = request.args.get("month", type=int)
+    year = request.args.get("year", type=int)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    registry = current_app.config.get("MASTER_REGISTRY")
+
+    report = generate_monthly_report(registry, db_url, month, year)
+    log_action(user_id=g.get("hd_user_id"), action="report.monthly",
+               resource_type="report", ip_address=request.remote_addr or "")
+    return jsonify(report)
+
+
+# ── HIS Integration Webhook ──────────────────────────────
+
+@hd_bp.route("/his/webhook", methods=["POST"])
+def his_webhook():
+    """Receive data push from Hospital HIS (FHIR R4)."""
+    import os
+    from .his_adapter import HisConfig, handle_his_webhook
+
+    config = HisConfig.from_env()
+    if not config.enabled:
+        return jsonify({"error": "HIS integration disabled"}), 503
+
+    # Verify webhook source (API key in header)
+    api_key = request.headers.get("X-HIS-API-Key", "")
+    if api_key != config.api_key:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    payload = request.get_json(silent=True)
+    if not payload:
+        return jsonify({"error": "Empty payload"}), 400
+
+    result = handle_his_webhook(payload, request.remote_addr or "")
+    return jsonify(result)
+
+
+@hd_bp.route("/his/status", methods=["GET"])
+@require_role("admin")
+def his_status():
+    """Check HIS integration status."""
+    from .his_adapter import HisAdapter
+    adapter = HisAdapter()
+    return jsonify(adapter.status)
+
+
 # ── Audit ─────────────────────────────────────────────────
 
 @hd_bp.route("/audit", methods=["GET"])

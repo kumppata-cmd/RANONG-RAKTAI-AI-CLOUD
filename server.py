@@ -8723,6 +8723,18 @@ def handle_search_command(
             logger.error("KPI HD error: %s", _kpi_err)
             return f"❌ ไม่สามารถสร้างรายงาน KPI ได้: {type(_kpi_err).__name__}"
 
+    # ── รายงาน HD ประจำเดือน (Phase 7.2) ───────────────────
+    if text_stripped in ("รายงานhd", "รายงาน hd", "hd report", "สรุปเดือน",
+                          "สรุปเดือนhd", "monthly report"):
+        try:
+            from hd_module.monthly_report import generate_monthly_report
+            _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+            report = generate_monthly_report(master_registry, _hd_db)
+            return report.get("text_th", "❌ สร้างรายงานไม่สำเร็จ")
+        except Exception as _mr_err:
+            logger.error("Monthly report error: %s", _mr_err)
+            return f"❌ ไม่สามารถสร้างรายงานได้: {type(_mr_err).__name__}"
+
     # ── โภชนาการ HN (Phase 6.3) ────────────────────────────
     if text_stripped.startswith(("โภชนาการ ", "อาหาร ", "nutrition ")):
         _nutr_q = text_stripped
