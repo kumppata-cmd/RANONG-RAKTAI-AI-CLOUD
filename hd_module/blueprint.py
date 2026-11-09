@@ -1055,7 +1055,7 @@ def acknowledge_alert(alert_id):
 @hd_bp.route("/patients", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def list_patients():
-    """List HD patients from PostgreSQL."""
+    """List HD patients with last HD date and alert count."""
     import os
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not db_url:
@@ -1065,32 +1065,58 @@ def list_patients():
         conn = psycopg2.connect(db_url, connect_timeout=5)
         search = request.args.get("q", "").strip()
         schedule = request.args.get("schedule", "").strip()
+        access = request.args.get("access", "").strip()
         with conn.cursor() as cur:
-            sql = """SELECT id, hn, hospital_hn, patient_name, vascular_access,
-                            dry_weight, schedule_days, esa_drug, esa_dose,
-                            primary_diagnosis, is_active
-                     FROM hd_patient_mapping WHERE is_active = TRUE"""
+            # Join with hd_sessions to get last_hd date + unacked alert count
+            sql = """SELECT p.id, p.hn, p.hospital_hn, p.patient_name,
+                            p.vascular_access, p.dry_weight, p.schedule_days,
+                            p.esa_drug, p.esa_dose, p.primary_diagnosis, p.is_active,
+                            MAX(s.start_time)::date AS last_hd,
+                            COALESCE(SUM(CASE WHEN a.acknowledged = FALSE THEN 1 ELSE 0 END), 0) AS unacked_alerts
+                     FROM hd_patient_mapping p
+                     LEFT JOIN hd_sessions s ON s.patient_id = p.id
+                     LEFT JOIN hd_alerts a ON a.session_id = s.id AND a.acknowledged = FALSE
+                     WHERE p.is_active = TRUE"""
             params = []
             if search:
-                sql += " AND (patient_name ILIKE %s OR hn ILIKE %s)"
-                params.extend([f"%{search}%", f"%{search}%"])
+                sql += " AND (p.patient_name ILIKE %s OR p.hn ILIKE %s OR p.hospital_hn ILIKE %s)"
+                params.extend([f"%{search}%", f"%{search}%", f"%{search}%"])
             if schedule:
-                sql += " AND schedule_days ILIKE %s"
+                sql += " AND p.schedule_days ILIKE %s"
                 params.append(f"%{schedule}%")
-            sql += " ORDER BY hn LIMIT 200"
+            if access:
+                sql += " AND UPPER(p.vascular_access) LIKE UPPER(%s)"
+                params.append(f"%{access}%")
+            sql += """ GROUP BY p.id, p.hn, p.hospital_hn, p.patient_name,
+                               p.vascular_access, p.dry_weight, p.schedule_days,
+                               p.esa_drug, p.esa_dose, p.primary_diagnosis, p.is_active
+                       ORDER BY p.hn LIMIT 300"""
             cur.execute(sql, params)
             rows = cur.fetchall()
         conn.close()
         patients = []
+        alert_count = 0
         for r in rows:
+            unacked = int(r[12]) if r[12] else 0
+            if unacked > 0:
+                alert_count += 1
             patients.append({
                 "id": r[0], "hn": r[1], "hospital_hn": r[2],
                 "patient_name": r[3], "vascular_access": r[4],
                 "dry_weight": float(r[5]) if r[5] else None,
                 "schedule_days": r[6], "esa_drug": r[7], "esa_dose": r[8],
                 "primary_diagnosis": r[9], "is_active": r[10],
+                "last_hd": str(r[11]) if r[11] else None,
+                "unacked_alerts": unacked,
             })
-        return jsonify({"patients": patients, "total": len(patients)})
+        # Collect unique schedule and access values for dynamic filters
+        schedules = sorted(set(p["schedule_days"] for p in patients if p.get("schedule_days")))
+        accesses = sorted(set(p["vascular_access"] for p in patients if p.get("vascular_access")))
+        return jsonify({
+            "patients": patients, "total": len(patients),
+            "alert_count": alert_count,
+            "filter_options": {"schedules": schedules, "accesses": accesses},
+        })
     except Exception as e:
         logger.error("list_patients error: %s", e)
         return jsonify({"patients": [], "total": 0, "error": str(e)})

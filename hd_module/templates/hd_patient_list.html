@@ -43,17 +43,12 @@
 
 <!-- Search -->
 <div class="search-bar">
-  <input type="text" class="form-control" id="searchInput" placeholder="🔍 ค้นหา HN, ชื่อ..." oninput="filterPatients()">
-  <select class="form-control" id="filterSchedule" onchange="filterPatients()">
+  <input type="search" class="form-control" id="searchInput" placeholder="🔍 ค้นหา HN, ชื่อ..." autocomplete="off">
+  <select class="form-control" id="filterSchedule">
     <option value="">ทุกตาราง</option>
-    <option value="จ-พ-ศ">จ-พ-ศ</option>
-    <option value="อ-พฤ-ส">อ-พฤ-ส</option>
   </select>
-  <select class="form-control" id="filterAccess" onchange="filterPatients()">
+  <select class="form-control" id="filterAccess">
     <option value="">ทุก Vascular Access</option>
-    <option value="AVF">AVF</option>
-    <option value="AVG">AVG</option>
-    <option value="CVC">CVC</option>
   </select>
 </div>
 
@@ -82,6 +77,7 @@
 {% block extra_js %}
 <script>
 let allPatients = [];
+let _filterTimer = null;
 
 function getInitials(name){
   if(!name) return '?';
@@ -94,8 +90,20 @@ function accessClass(a){
   const l = a.toUpperCase();
   if(l.includes('AVF')) return 'access-avf';
   if(l.includes('AVG')) return 'access-avg';
-  if(l.includes('CVC')) return 'access-cvc';
+  if(l.includes('CVC') || l.includes('CLC') || l.includes('DLC') || l.includes('PERM')) return 'access-cvc';
   return '';
+}
+
+function formatDate(d){
+  if(!d) return '-';
+  try {
+    const dt = new Date(d);
+    if(isNaN(dt)) return d;
+    const dd = String(dt.getDate()).padStart(2,'0');
+    const mm = String(dt.getMonth()+1).padStart(2,'0');
+    const yy = dt.getFullYear() + 543; /* พ.ศ. */
+    return dd+'/'+mm+'/'+(yy%100);
+  } catch(e){ return d; }
 }
 
 function renderPatients(patients){
@@ -106,27 +114,84 @@ function renderPatients(patients){
   }
   tbody.innerHTML = patients.map(p => {
     const name = p.patient_name || p.name || '-';
+    const alertDot = p.unacked_alerts > 0 ? ' <span style="color:var(--danger);font-weight:700;" title="'+p.unacked_alerts+' alerts">⚠️</span>' : '';
     return `
-    <tr onclick="window.location.href='/hd/patient/${p.hn}'">
-      <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(name)}</div><span>${name}</span></div></td>
+    <tr onclick="window.location.href='/hd/patient/${p.hn}'" ${p.unacked_alerts > 0 ? 'style="border-left:3px solid var(--danger);"' : ''}>
+      <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(name)}</div><span>${name}${alertDot}</span></div></td>
       <td><strong>${p.hn||'-'}</strong></td>
       <td>${p.schedule_days ? '<span class="schedule-badge">'+p.schedule_days+'</span>' : '-'}</td>
       <td>${p.vascular_access ? '<span class="access-badge '+accessClass(p.vascular_access)+'">'+p.vascular_access+'</span>' : '-'}</td>
       <td>${p.dry_weight||'-'}</td>
-      <td>${p.last_hd||'-'}</td>
+      <td>${formatDate(p.last_hd)}</td>
     </tr>`;
   }).join('');
 }
 
 function filterPatients(){
-  const q = (document.getElementById('searchInput').value||'').toLowerCase();
+  const q = (document.getElementById('searchInput').value||'').trim().toLowerCase();
   const sched = document.getElementById('filterSchedule').value;
   const access = document.getElementById('filterAccess').value;
   let filtered = allPatients;
-  if(q) filtered = filtered.filter(p => (p.patient_name||p.name||'').toLowerCase().includes(q) || (p.hn||'').toLowerCase().includes(q));
-  if(sched) filtered = filtered.filter(p => (p.schedule_days||'') === sched);
-  if(access) filtered = filtered.filter(p => (p.vascular_access||'').toUpperCase().includes(access));
+  if(q){
+    filtered = filtered.filter(p => {
+      const nm = (p.patient_name||p.name||'').toLowerCase();
+      const hn = (p.hn||'').toLowerCase();
+      const hhn = (p.hospital_hn||'').toLowerCase();
+      return nm.includes(q) || hn.includes(q) || hhn.includes(q);
+    });
+  }
+  if(sched){
+    filtered = filtered.filter(p => (p.schedule_days||'').includes(sched));
+  }
+  if(access){
+    filtered = filtered.filter(p => (p.vascular_access||'').toUpperCase().includes(access.toUpperCase()));
+  }
   renderPatients(filtered);
+  /* Update count display */
+  document.getElementById('totalPatients').textContent = filtered.length + '/' + allPatients.length;
+}
+
+function debounceFilter(){
+  clearTimeout(_filterTimer);
+  _filterTimer = setTimeout(filterPatients, 150);
+}
+
+function buildFilterOptions(data){
+  const schedSel = document.getElementById('filterSchedule');
+  const accSel = document.getElementById('filterAccess');
+  /* Populate schedule options from actual data */
+  const schedules = data.filter_options?.schedules || [];
+  if(schedules.length){
+    schedules.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s; opt.textContent = s;
+      schedSel.appendChild(opt);
+    });
+  } else {
+    /* Fallback: derive from data */
+    const unique = [...new Set(allPatients.map(p=>p.schedule_days).filter(Boolean))].sort();
+    unique.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s; opt.textContent = s;
+      schedSel.appendChild(opt);
+    });
+  }
+  /* Populate access options from actual data */
+  const accesses = data.filter_options?.accesses || [];
+  if(accesses.length){
+    accesses.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a; opt.textContent = a;
+      accSel.appendChild(opt);
+    });
+  } else {
+    const unique = [...new Set(allPatients.map(p=>p.vascular_access).filter(Boolean))].sort();
+    unique.forEach(a => {
+      const opt = document.createElement('option');
+      opt.value = a; opt.textContent = a;
+      accSel.appendChild(opt);
+    });
+  }
 }
 
 function getTodayThaiDay(){
@@ -144,13 +209,25 @@ function fetchPatients(){
       const todayDay = getTodayThaiDay();
       const todayCount = allPatients.filter(p=>(p.schedule_days||'').includes(todayDay)).length;
       document.getElementById('activeToday').textContent = todayCount;
+      /* Alert patients */
+      const alertCount = data.alert_count || allPatients.filter(p=>p.unacked_alerts>0).length;
+      document.getElementById('alertPatients').textContent = alertCount;
+      /* Build dynamic filter options */
+      buildFilterOptions(data);
       renderPatients(allPatients);
     })
-    .catch(()=>{
+    .catch(err=>{
+      console.error('fetchPatients error:', err);
       document.getElementById('patientTableBody').innerHTML =
         '<tr><td colspan="6" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่สามารถโหลดข้อมูลได้</td></tr>';
     });
 }
+
+/* Bind events */
+document.getElementById('searchInput').addEventListener('input', debounceFilter);
+document.getElementById('searchInput').addEventListener('change', filterPatients);
+document.getElementById('filterSchedule').addEventListener('change', filterPatients);
+document.getElementById('filterAccess').addEventListener('change', filterPatients);
 
 fetchPatients();
 </script>
