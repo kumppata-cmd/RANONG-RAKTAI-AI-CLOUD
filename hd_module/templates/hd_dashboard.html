@@ -79,7 +79,8 @@
   <button class="shift-btn active" onclick="selectShift(this,'morning')">🌅 เช้า (07:00-15:00)</button>
   <button class="shift-btn" onclick="selectShift(this,'afternoon')">☀️ บ่าย (13:00-21:00)</button>
   <button class="shift-btn" onclick="selectShift(this,'evening')">🌙 ค่ำ (17:00-01:00)</button>
-  <a href="/hd/session/new" class="btn btn-success btn-lg" style="margin-left:auto;">➕ เริ่มรอบฟอกใหม่</a>
+  <button class="btn btn-outline" onclick="autoAssignBeds()" style="margin-left:auto;color:var(--info);border-color:var(--info);font-size:.85rem;">🤖 จัดเตียงอัตโนมัติ</button>
+  <a href="/hd/session/new" class="btn btn-success btn-lg" style="margin-left:8px;">➕ เริ่มรอบฟอกใหม่</a>
 </div>
 
 <!-- 30-Bed Grid -->
@@ -247,6 +248,23 @@ function renderBeds(beds){
   }
   _prevCriticalCount = counts.critical;
   _prevWarningCount = counts.warning;
+}
+
+function autoAssignBeds(){
+  if(!confirm('จัดเตียงอัตโนมัติสำหรับผู้ป่วยนัดฟอกวันนี้?')) return;
+  const shift = document.querySelector('.shift-btn.active')?.dataset?.shift || 'morning';
+  const token = getHdToken();
+  fetch('/hd/api/v1/schedule/auto-assign', {
+    method:'POST',
+    headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body:JSON.stringify({shift:shift})
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){ alert('❌ '+d.error); return; }
+    let msg = `✅ จัดเตียงแล้ว ${d.assigned} คน`;
+    if(d.skipped) msg += ` (ข้าม ${d.skipped} คน)`;
+    alert(msg);
+    fetchBeds(); // refresh
+  }).catch(()=>alert('❌ ไม่สามารถจัดเตียงได้'));
 }
 
 function fetchBeds(){

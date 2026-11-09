@@ -1622,3 +1622,269 @@ def pdpa_patient_report(hn):
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     report = generate_data_access_report(db_url, hn)
     return jsonify(report)
+
+
+# ── N4: Lab Extract API ───────────────────────────────────
+
+@hd_bp.route("/lab/extract", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def extract_lab_from_text():
+    """ดึงค่าแล็บจาก OCR text อัตโนมัติ."""
+    from .lab_extractor import extract_lab_values, format_lab_summary_th, format_lab_summary_en
+    data = request.get_json(silent=True) or {}
+    text = data.get("text", "")
+    lang = data.get("lang", "th")
+    if not text:
+        return jsonify({"error": "text required"}), 400
+    lab_data = extract_lab_values(text)
+    summary = format_lab_summary_en(lab_data) if lang == "en" else format_lab_summary_th(lab_data)
+    return jsonify({**lab_data, "summary": summary, "lang": lang})
+
+
+# ── N5: Language API ──────────────────────────────────────
+
+@hd_bp.route("/i18n/translate", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def get_translations():
+    """ดึง translations ทั้งหมดสำหรับ frontend."""
+    from .i18n import TRANSLATIONS
+    lang = request.args.get("lang", "th")
+    result = {}
+    for key, entry in TRANSLATIONS.items():
+        result[key] = entry.get(lang, entry.get("th", key))
+    return jsonify({"lang": lang, "translations": result})
+
+
+# ── N1: Analytics API — UF goal vs actual, BP trend ───────
+
+@hd_bp.route("/analytics/clinic", methods=["GET"])
+@require_role("physician", "admin", "auditor")
+def clinic_analytics():
+    """Clinic-wide analytics: UF achievement, BP trends, session stats."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    days = int(request.args.get("days", "30"))
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        result = {}
+
+        # Session stats
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*), COUNT(CASE WHEN status='completed' THEN 1 END),
+                       AVG(actual_uf) FILTER (WHERE actual_uf > 0),
+                       AVG(uf_goal) FILTER (WHERE uf_goal > 0)
+                FROM hd_sessions
+                WHERE started_at > NOW() - INTERVAL '%s days'
+            """ % days)
+            r = cur.fetchone()
+            result["sessions"] = {
+                "total": r[0], "completed": r[1],
+                "avg_actual_uf": round(r[2] or 0), "avg_uf_goal": round(r[3] or 0),
+                "uf_achievement_pct": round((r[2] or 0) / (r[3] or 1) * 100, 1),
+            }
+
+        # Daily BP trends (avg SBP per day, last N days)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DATE(recorded_at) as d, AVG(sbp)::int, AVG(dbp)::int,
+                       AVG(heart_rate)::int, COUNT(*)
+                FROM hd_vital_signs
+                WHERE recorded_at > NOW() - INTERVAL '%s days' AND sbp > 0
+                GROUP BY DATE(recorded_at) ORDER BY d
+            """ % days)
+            bp_trend = []
+            for r in cur.fetchall():
+                bp_trend.append({
+                    "date": r[0].isoformat(), "avg_sbp": r[1],
+                    "avg_dbp": r[2], "avg_hr": r[3], "readings": r[4],
+                })
+            result["bp_trend"] = bp_trend
+
+        # UF goal vs actual per day
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT DATE(started_at) as d,
+                       AVG(uf_goal)::int, AVG(actual_uf)::int, COUNT(*)
+                FROM hd_sessions
+                WHERE started_at > NOW() - INTERVAL '%s days'
+                  AND status = 'completed' AND uf_goal > 0
+                GROUP BY DATE(started_at) ORDER BY d
+            """ % days)
+            uf_trend = []
+            for r in cur.fetchall():
+                uf_trend.append({
+                    "date": r[0].isoformat(), "avg_goal": r[1],
+                    "avg_actual": r[2], "sessions": r[3],
+                })
+            result["uf_trend"] = uf_trend
+
+        # Alert summary
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT severity, COUNT(*) FROM hd_clinical_alerts
+                WHERE created_at > NOW() - INTERVAL '%s days'
+                GROUP BY severity
+            """ % days)
+            alert_counts = {}
+            for r in cur.fetchall():
+                alert_counts[r[0]] = r[1]
+            result["alerts"] = alert_counts
+
+        conn.close()
+        return jsonify(result)
+    except Exception as e:
+        logger.error("clinic_analytics error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── N3: Auto-schedule — จัดคิวเตียงอัตโนมัติตามตาราง ──────
+
+@hd_bp.route("/schedule/auto-assign", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def auto_assign_beds():
+    """Auto-assign today's scheduled patients to beds.
+
+    ดึงผู้ป่วยที่มีตารางฟอกวันนี้ → จัดเตียงอัตโนมัติ → สร้าง scheduled sessions
+    Shift: "morning" (เช้า 07-15), "afternoon" (บ่าย 13-21), "evening" (ค่ำ 17-01)
+    """
+    import os
+    data = request.get_json(silent=True) or {}
+    shift = data.get("shift", "morning")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+
+        # วันนี้ภาษาไทย
+        day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
+        today_th = day_map.get(date.today().weekday(), "")
+        if not today_th:
+            conn.close()
+            return jsonify({"assigned": 0, "message": "ไม่มีรอบฟอกวันนี้"})
+
+        # ดึงผู้ป่วยที่มีตารางวันนี้
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, hn, patient_name, vascular_access
+                FROM hd_patient_mapping
+                WHERE is_active = TRUE AND schedule_days ILIKE %s
+                ORDER BY hn
+            """, (f"%{today_th}%",))
+            patients = cur.fetchall()
+
+        # ดึงเตียงที่ถูกใช้แล้ว
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT bed_number FROM hd_sessions
+                WHERE status IN ('scheduled', 'in_progress')
+            """)
+            used_beds = {r[0] for r in cur.fetchall()}
+
+        # จัดเตียง
+        available_beds = [b for b in range(1, HdConfig.TOTAL_BEDS + 1) if b not in used_beds]
+        assigned = []
+        skipped = []
+
+        for pid, hn, name, va in patients:
+            # เช็คว่ามี session อยู่แล้วหรือไม่
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id FROM hd_sessions
+                    WHERE patient_id = %s AND status IN ('scheduled', 'in_progress')
+                """, (pid,))
+                if cur.fetchone():
+                    skipped.append({"hn": hn, "name": name, "reason": "มี session อยู่แล้ว"})
+                    continue
+
+            if not available_beds:
+                skipped.append({"hn": hn, "name": name, "reason": "เตียงเต็ม"})
+                continue
+
+            bed = available_beds.pop(0)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    INSERT INTO hd_sessions (patient_id, bed_number, status,
+                                             session_date, shift, uf_goal)
+                    VALUES (%s, %s, 'scheduled', CURRENT_DATE, %s, 2000)
+                    RETURNING id
+                """, (pid, bed, shift))
+                sid = cur.fetchone()[0]
+                assigned.append({"hn": hn, "name": name, "bed": bed, "session_id": sid})
+
+        conn.commit()
+        conn.close()
+
+        return jsonify({
+            "assigned": len(assigned),
+            "skipped": len(skipped),
+            "shift": shift,
+            "today": today_th,
+            "patients": assigned,
+            "skipped_details": skipped,
+        })
+    except Exception as e:
+        logger.error("auto_assign_beds error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── N2: LINE Group Notify — ส่ง alert กลุ่มพยาบาล ────────
+
+@hd_bp.route("/alerts/notify-group", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def notify_nurse_group():
+    """Send alert summary to nurse LINE group.
+
+    ส่งสรุป alerts ไปยัง LINE group ของพยาบาล
+    ต้องตั้ง 'nurse_group_token' ใน hd_settings (LINE Notify token ของกลุ่ม)
+    """
+    import os, urllib.request, urllib.parse
+    data = request.get_json(silent=True) or {}
+    message = data.get("message", "")
+
+    if not message:
+        return jsonify({"error": "message required"}), 400
+
+    # ดึง LINE Notify token จาก settings
+    group_token = get_setting_value("nurse_group_token", "")
+    if not group_token:
+        # Fallback: ส่ง LINE push ไปหา alert_recipients ทุกคน
+        recipients = get_setting_value("alert_recipients", "")
+        if not recipients:
+            return jsonify({"sent": False, "message": "ไม่พบ token/recipients — ตั้งค่าที่ ⚙️"}), 400
+
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+        if not push_fn:
+            return jsonify({"sent": False, "message": "LINE push not configured"}), 500
+
+        sent_count = 0
+        for uid in recipients.split(","):
+            uid = uid.strip()
+            if uid:
+                try:
+                    push_fn(uid, f"🚨 แจ้งเตือน HD\n{message}")
+                    sent_count += 1
+                except Exception as e:
+                    logger.warning("notify_nurse_group push failed for %s: %s", uid[:8], e)
+
+        return jsonify({"sent": True, "method": "push", "count": sent_count})
+
+    # ใช้ LINE Notify API
+    try:
+        req = urllib.request.Request(
+            "https://notify-api.line.me/api/notify",
+            data=urllib.parse.urlencode({"message": f"\n🚨 HD Alert\n{message}"}).encode(),
+            headers={"Authorization": f"Bearer {group_token}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return jsonify({"sent": True, "method": "notify", "status": resp.status})
+    except Exception as e:
+        logger.error("LINE Notify failed: %s", e)
+        return jsonify({"sent": False, "error": str(e)}), 500
