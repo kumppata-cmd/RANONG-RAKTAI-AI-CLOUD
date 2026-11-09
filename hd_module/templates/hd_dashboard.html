@@ -79,7 +79,8 @@
   <button class="shift-btn active" onclick="selectShift(this,'morning')">🌅 เช้า (07:00-15:00)</button>
   <button class="shift-btn" onclick="selectShift(this,'afternoon')">☀️ บ่าย (13:00-21:00)</button>
   <button class="shift-btn" onclick="selectShift(this,'evening')">🌙 ค่ำ (17:00-01:00)</button>
-  <button class="btn btn-outline" onclick="autoAssignBeds()" style="margin-left:auto;color:var(--info);border-color:var(--info);font-size:.85rem;">🤖 จัดเตียงอัตโนมัติ</button>
+  <button class="btn btn-outline" onclick="shiftHandover()" style="margin-left:auto;color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่งเวร</button>
+  <button class="btn btn-outline" onclick="autoAssignBeds()" style="margin-left:8px;color:var(--info);border-color:var(--info);font-size:.8rem;">🤖 จัดเตียง</button>
   <a href="/hd/session/new" class="btn btn-success btn-lg" style="margin-left:8px;">➕ เริ่มรอบฟอกใหม่</a>
 </div>
 
@@ -248,6 +249,20 @@ function renderBeds(beds){
   }
   _prevCriticalCount = counts.critical;
   _prevWarningCount = counts.warning;
+}
+
+function shiftHandover(){
+  if(!confirm('สร้างสรุปส่งต่อเวรและส่ง LINE?')) return;
+  const shift = document.querySelector('.shift-btn.active')?.dataset?.shift || 'morning';
+  const token = getHdToken();
+  fetch('/hd/api/v1/shift/handover', {
+    method:'POST',
+    headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
+    body:JSON.stringify({shift:shift, send_line:true})
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){ alert('❌ '+d.error); return; }
+    alert('✅ ส่งสรุปเวรแล้ว\n\nกำลังฟอก: '+(d.active_beds||[]).length+' เตียง\nเสร็จแล้ว: '+(d.completed_beds||[]).length+' เตียง\nAlerts: '+(d.pending_alerts||[]).length+' รายการ');
+  }).catch(()=>alert('❌ ไม่สามารถสร้างสรุปได้'));
 }
 
 function autoAssignBeds(){

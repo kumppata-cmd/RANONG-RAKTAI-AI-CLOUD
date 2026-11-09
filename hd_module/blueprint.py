@@ -126,6 +126,23 @@ def hd_kpi_page():
     return render_template("hd_kpi.html")
 
 
+@hd_web.route("/checkin")
+def hd_checkin_page():
+    """QR Check-in handler — redirect to session."""
+    from .qr_checkin import verify_qr_token
+    bed = request.args.get("bed", type=int)
+    token = request.args.get("token", "")
+    if bed and token and verify_qr_token(bed, token):
+        return redirect(f"/hd/session/new?bed={bed}")
+    return "<h2>❌ QR Code ไม่ถูกต้องหรือหมดอายุ</h2><a href='/hd/dashboard'>กลับ Dashboard</a>", 400
+
+
+@hd_web.route("/calculator")
+def hd_calculator_page():
+    """Kt/V Calculator page."""
+    return render_template("hd_calculator.html")
+
+
 @hd_web.route("/analytics")
 def hd_analytics_page():
     """Render analytics dashboard."""
@@ -1894,3 +1911,226 @@ def notify_nurse_group():
     except Exception as e:
         logger.error("LINE Notify failed: %s", e)
         return jsonify({"sent": False, "error": str(e)}), 500
+
+
+# ── F2: Shift Handover ────────────────────────────────────
+
+@hd_bp.route("/shift/handover", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def shift_handover():
+    """สร้างสรุปส่งต่อเวร + ส่ง LINE (optional)."""
+    import os
+    from .shift_handover import generate_handover_summary
+    data = request.get_json(silent=True) or {}
+    shift = data.get("shift", "morning")
+    send_line = data.get("send_line", False)
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    summary = generate_handover_summary(db_url, shift)
+
+    if send_line and summary.get("line_message"):
+        recipients = get_setting_value("alert_recipients", "")
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+        if push_fn and recipients:
+            for uid in recipients.split(","):
+                uid = uid.strip()
+                if uid:
+                    try:
+                        push_fn(uid, summary["line_message"])
+                    except Exception as e:
+                        logger.warning("handover LINE push failed: %s", e)
+            summary["line_sent"] = True
+
+    return jsonify(summary)
+
+
+# ── F3: Kt/V Calculator ──────────────────────────────────
+
+@hd_bp.route("/calculator/kt-v", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def calculate_kt_v_endpoint():
+    """คำนวณ Kt/V + URR จาก Pre/Post BUN + weights."""
+    from .kt_v_calculator import calculate_kt_v
+    data = request.get_json(silent=True) or {}
+    result = calculate_kt_v(
+        pre_bun=float(data.get("pre_bun", 0)),
+        post_bun=float(data.get("post_bun", 0)),
+        duration_hours=float(data.get("duration_hours", 4)),
+        pre_weight=float(data.get("pre_weight", 0)),
+        post_weight=float(data.get("post_weight", 0)),
+    )
+    return jsonify(result)
+
+
+# ── F4: EPO Response Tracker ─────────────────────────────
+
+@hd_bp.route("/epo/response/<hn>", methods=["GET"])
+@require_role("physician", "admin")
+def epo_response(hn):
+    """ติดตามการตอบสนอง ESA — Hb trend vs ESA dose."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+
+        # Patient info + ESA
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT patient_name, esa_drug, vascular_access, dry_weight
+                FROM hd_patient_mapping WHERE hn = %s
+            """, (hn,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            patient = {"name": row[0], "esa": row[1], "va": row[2], "dw": float(row[3] or 0)}
+
+        # Try to get Hb from lab_extractor or GCS docs (future)
+        # For now, return patient info + ESA drug
+        conn.close()
+
+        return jsonify({
+            "patient": patient,
+            "hn": hn,
+            "esa_drug": patient["esa"],
+            "note": "Hb trend data will come from lab results once imported",
+        })
+    except Exception as e:
+        logger.error("epo_response error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── F5: QR Check-in ──────────────────────────────────────
+
+@hd_bp.route("/qr/beds", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def qr_all_beds():
+    """สร้างหน้าพิมพ์ QR Code ทุกเตียง."""
+    from .qr_checkin import generate_all_bed_qr_page
+    html = generate_all_bed_qr_page(HdConfig.TOTAL_BEDS)
+    return make_response(html)
+
+
+@hd_bp.route("/qr/bed/<int:bed_number>", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def qr_single_bed(bed_number):
+    """สร้าง QR data สำหรับเตียงเดียว."""
+    from .qr_checkin import generate_bed_qr_data
+    return jsonify(generate_bed_qr_data(bed_number))
+
+
+# ── F8: Monthly Report ───────────────────────────────────
+
+@hd_bp.route("/report/monthly-summary", methods=["GET"])
+@require_role("physician", "admin")
+def monthly_summary_report():
+    """สร้างรายงานประจำเดือน."""
+    import os
+    from datetime import timedelta
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+
+    month = request.args.get("month")  # YYYY-MM format
+    if not month:
+        # Default: last month
+        now = datetime.now(timezone.utc)
+        first_of_month = now.replace(day=1)
+        last_month = first_of_month - timedelta(days=1)
+        month = last_month.strftime("%Y-%m")
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        report = {"month": month}
+
+        # Total sessions
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(*),
+                       COUNT(CASE WHEN status='completed' THEN 1 END),
+                       COUNT(CASE WHEN status='cancelled' THEN 1 END),
+                       AVG(actual_uf) FILTER (WHERE actual_uf>0),
+                       COUNT(DISTINCT patient_id)
+                FROM hd_sessions
+                WHERE TO_CHAR(started_at, 'YYYY-MM') = %s
+            """, (month,))
+            r = cur.fetchone()
+            report["sessions"] = {
+                "total": r[0], "completed": r[1], "cancelled": r[2],
+                "avg_uf": round(r[3] or 0), "unique_patients": r[4],
+            }
+
+        # Alert stats
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT severity, COUNT(*)
+                FROM hd_clinical_alerts
+                WHERE TO_CHAR(created_at, 'YYYY-MM') = %s
+                GROUP BY severity
+            """, (month,))
+            alerts = {}
+            for r in cur.fetchall():
+                alerts[r[0]] = r[1]
+            report["alerts"] = alerts
+
+        # Vital signs summary
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT AVG(sbp)::int, AVG(dbp)::int, AVG(heart_rate)::int,
+                       MIN(sbp), MAX(sbp), COUNT(*)
+                FROM hd_vital_signs v
+                JOIN hd_sessions s ON s.id = v.session_id
+                WHERE TO_CHAR(s.started_at, 'YYYY-MM') = %s AND sbp > 0
+            """, (month,))
+            r = cur.fetchone()
+            report["vitals"] = {
+                "avg_sbp": r[0], "avg_dbp": r[1], "avg_hr": r[2],
+                "min_sbp": r[3], "max_sbp": r[4], "total_readings": r[5],
+            }
+
+        # IDH rate (SBP < 90 during session)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT COUNT(DISTINCT v.session_id)
+                FROM hd_vital_signs v
+                JOIN hd_sessions s ON s.id = v.session_id
+                WHERE TO_CHAR(s.started_at, 'YYYY-MM') = %s
+                  AND v.phase = 'intra' AND v.sbp < 90
+            """, (month,))
+            idh_sessions = cur.fetchone()[0]
+            total = report["sessions"]["total"] or 1
+            report["idh_rate"] = {
+                "sessions_with_idh": idh_sessions,
+                "rate_pct": round(idh_sessions / total * 100, 1),
+            }
+
+        conn.close()
+
+        # LINE message format
+        s = report["sessions"]
+        a = report["alerts"]
+        v = report["vitals"]
+        total_alerts = sum(a.values())
+        report["line_message"] = (
+            f"📊 รายงานประจำเดือน {month}\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"🏥 รอบฟอก: {s['total']} ({s['completed']} สำเร็จ)\n"
+            f"👥 ผู้ป่วย: {s['unique_patients']} คน\n"
+            f"💧 UF เฉลี่ย: {s['avg_uf']} mL\n"
+            f"❤️ BP เฉลี่ย: {v['avg_sbp']}/{v['avg_dbp']} mmHg\n"
+            f"🚨 Alerts: {total_alerts}"
+            f" (🔴{a.get('critical',0)} ⚠️{a.get('warning',0)})\n"
+            f"📉 IDH rate: {report['idh_rate']['rate_pct']}%"
+            f" ({idh_sessions} รอบ)\n"
+            f"━━━━━━━━━━━━━━━━\n"
+            f"HD Smart Monitoring — คลินิกระนอง รักษ์ไต"
+        )
+
+        return jsonify(report)
+    except Exception as e:
+        logger.error("monthly_summary error: %s", e)
+        return jsonify({"error": str(e)}), 500

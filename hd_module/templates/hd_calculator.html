@@ -1,0 +1,107 @@
+{% extends "hd_base.html" %}
+{% block title %}Kt/V Calculator{% endblock %}
+{% block page_title %}🧮 Kt/V Calculator{% endblock %}
+
+{% block extra_css %}
+<style>
+.calc-card { background: var(--bg-card); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; border: 1px solid var(--border); }
+.calc-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.result-box { text-align: center; padding: 20px; border-radius: var(--radius-sm); margin-top: 16px; }
+.result-value { font-size: 2.5rem; font-weight: 700; }
+.result-label { font-size: .85rem; color: var(--fg-muted); }
+.result-assessment { font-size: 1.1rem; font-weight: 600; margin-top: 8px; }
+.kdoqi-ref { font-size: .8rem; color: var(--fg-muted); margin-top: 12px; padding: 12px; background: rgba(52,152,219,.06); border-radius: var(--radius-sm); border-left: 3px solid var(--info); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="calc-card">
+  <h3 style="margin-top:0;font-size:1rem;">📋 ข้อมูลสำหรับคำนวณ</h3>
+  <div class="calc-grid">
+    <div class="form-group">
+      <label class="form-label">Pre-dialysis BUN (mg/dL)</label>
+      <input type="number" class="form-control" id="preBun" placeholder="60" step="0.1" inputmode="decimal">
+    </div>
+    <div class="form-group">
+      <label class="form-label">Post-dialysis BUN (mg/dL)</label>
+      <input type="number" class="form-control" id="postBun" placeholder="20" step="0.1" inputmode="decimal">
+    </div>
+    <div class="form-group">
+      <label class="form-label">น้ำหนักก่อนฟอก (kg)</label>
+      <input type="number" class="form-control" id="preWeight" placeholder="65.0" step="0.1" inputmode="decimal">
+    </div>
+    <div class="form-group">
+      <label class="form-label">น้ำหนักหลังฟอก (kg)</label>
+      <input type="number" class="form-control" id="postWeight" placeholder="62.5" step="0.1" inputmode="decimal">
+    </div>
+    <div class="form-group" style="grid-column:span 2;">
+      <label class="form-label">ระยะเวลาฟอก (ชั่วโมง)</label>
+      <input type="number" class="form-control" id="duration" value="4" step="0.5" inputmode="decimal">
+    </div>
+  </div>
+  <button class="btn btn-primary" onclick="calculateKtV()" style="width:100%;margin-top:16px;padding:14px;font-size:1rem;">🧮 คำนวณ Kt/V</button>
+</div>
+
+<div id="resultArea" style="display:none;">
+  <div class="calc-grid">
+    <div class="result-box" id="ktvBox" style="background:var(--bg-card);border:2px solid var(--border);">
+      <div class="result-label">Kt/V</div>
+      <div class="result-value" id="ktvValue">-</div>
+      <div class="result-assessment" id="ktvAssessment">-</div>
+    </div>
+    <div class="result-box" style="background:var(--bg-card);border:2px solid var(--border);">
+      <div class="result-label">URR</div>
+      <div class="result-value" id="urrValue">-</div>
+      <div class="result-assessment" id="urrAssessment">-</div>
+    </div>
+  </div>
+
+  <div class="calc-card" id="detailsCard" style="margin-top:12px;">
+    <div id="summaryText" style="font-size:.9rem;white-space:pre-line;"></div>
+  </div>
+
+  <div class="kdoqi-ref">
+    <strong>KDOQI Guidelines:</strong><br>
+    Kt/V ≥ 1.2 = adequate (เพียงพอ)<br>
+    Kt/V 1.0-1.19 = borderline (ควรปรับปรุง)<br>
+    Kt/V < 1.0 = inadequate (ต้องปรับการฟอก)<br>
+    URR ≥ 65% = adequate<br>
+    <em>Formula: Daugirdas 2nd generation</em>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function calculateKtV(){
+  const data = {
+    pre_bun: parseFloat(document.getElementById('preBun').value)||0,
+    post_bun: parseFloat(document.getElementById('postBun').value)||0,
+    pre_weight: parseFloat(document.getElementById('preWeight').value)||0,
+    post_weight: parseFloat(document.getElementById('postWeight').value)||0,
+    duration_hours: parseFloat(document.getElementById('duration').value)||4,
+  };
+  if(!data.pre_bun || !data.post_bun || !data.pre_weight || !data.post_weight){
+    showToast('กรุณากรอกข้อมูลให้ครบ','warning'); return;
+  }
+  hdFetch('/hd/api/v1/calculator/kt-v',{
+    method:'POST', body:JSON.stringify(data)
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){ showToast(d.error,'danger'); return; }
+    document.getElementById('resultArea').style.display='block';
+    document.getElementById('ktvValue').textContent = d.kt_v;
+    document.getElementById('ktvAssessment').textContent = d.emoji+' '+d.assessment_th;
+    document.getElementById('urrValue').textContent = d.urr+'%';
+    document.getElementById('urrAssessment').textContent = d.urr_adequate?'✅ เพียงพอ':'❌ ไม่เพียงพอ';
+
+    // Color
+    const box = document.getElementById('ktvBox');
+    const colors = {excellent:'var(--success)',adequate:'var(--success)',borderline:'var(--warning)',inadequate:'var(--danger)'};
+    box.style.borderColor = colors[d.assessment]||'var(--border)';
+    document.getElementById('ktvValue').style.color = colors[d.assessment]||'var(--fg)';
+
+    document.getElementById('summaryText').textContent = d.line_summary;
+  }).catch(()=>showToast('คำนวณไม่สำเร็จ','danger'));
+}
+</script>
+{% endblock %}
