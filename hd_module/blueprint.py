@@ -105,6 +105,12 @@ def hd_patient_list_page():
     return render_template("hd_patient_list.html")
 
 
+@hd_web.route("/patient/<hn>")
+def hd_patient_detail(hn):
+    """Patient detail page with history."""
+    return render_template("hd_patient_detail.html", patient_hn=hn)
+
+
 @hd_web.route("/alerts")
 def hd_alerts_page():
     """Render clinical alerts page."""
@@ -665,6 +671,118 @@ def _format_doctor_summary_line(s):
     )
 
 
+@hd_bp.route("/sessions/<int:session_id>/export-summary", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def export_session_summary(session_id):
+    """Export session summary as printable HTML (can Save-as-PDF from browser)."""
+    summary = _build_session_summary(session_id, {})
+    if not summary:
+        return jsonify({"error": "ไม่พบข้อมูล session"}), 404
+
+    # Build a self-contained printable HTML page
+    vitals_rows = ""
+    for i, v in enumerate(summary.get("vitals", []), 1):
+        vitals_rows += (
+            f"<tr><td>{i}</td><td>{v.get('phase','')}</td>"
+            f"<td>{v.get('sbp','')}/{v.get('dbp','')}</td>"
+            f"<td>{v.get('hr','')}</td></tr>\n"
+        )
+    alerts_html = ""
+    for a in summary.get("alerts", []):
+        color = "#e74c3c" if a.get("severity") == "critical" else "#f39c12"
+        alerts_html += f'<div style="padding:4px 8px;background:{color}22;border-left:3px solid {color};margin:4px 0;font-size:13px;">{a.get("title","")}</div>'
+    if not alerts_html:
+        alerts_html = '<div style="color:#27ae60;font-weight:600;">✅ ไม่มี alert ระหว่างฟอก</div>'
+
+    issues_html = ""
+    for iss in summary.get("issues", []):
+        issues_html += f"<div style='font-size:13px;margin:2px 0;'>{iss}</div>"
+    if not issues_html:
+        issues_html = '<div style="color:#27ae60;">✅ ไม่มีปัญหา</div>'
+
+    pre_w = summary.get("pre_weight", 0) or 0
+    post_w = summary.get("post_weight", 0) or 0
+    dry_w = summary.get("dry_weight", 0) or 0
+    idwg = pre_w - dry_w if pre_w and dry_w else 0
+    idwg_pct = (idwg / dry_w * 100) if dry_w else 0
+
+    html = f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>สรุปรอบฟอก — {summary.get('patient_name','')}</title>
+<style>
+@page {{ margin: 15mm; }}
+body {{ font-family: 'Sarabun', 'TH SarabunPSK', sans-serif; font-size: 14px; color: #333; max-width: 700px; margin: 0 auto; padding: 20px; }}
+h1 {{ font-size: 18px; margin: 0 0 4px 0; }}
+h2 {{ font-size: 15px; margin: 16px 0 8px 0; border-bottom: 1px solid #ccc; padding-bottom: 4px; }}
+.header {{ border-bottom: 2px solid #2980b9; padding-bottom: 12px; margin-bottom: 16px; }}
+.logo {{ color: #2980b9; font-weight: 700; }}
+table {{ width: 100%; border-collapse: collapse; font-size: 13px; }}
+th, td {{ padding: 6px 8px; border: 1px solid #ddd; text-align: left; }}
+th {{ background: #f8f9fa; font-weight: 600; }}
+.info-grid {{ display: grid; grid-template-columns: 1fr 1fr; gap: 4px 20px; font-size: 13px; }}
+.info-grid .label {{ color: #666; }}
+.info-grid .value {{ font-weight: 600; }}
+.assessment {{ font-size: 15px; font-weight: 700; margin: 12px 0; padding: 10px; background: #f8f9fa; border-radius: 6px; }}
+.footer {{ margin-top: 24px; border-top: 1px solid #ccc; padding-top: 8px; font-size: 11px; color: #999; text-align: center; }}
+@media print {{ body {{ padding: 0; }} .no-print {{ display: none !important; }} }}
+</style>
+</head>
+<body>
+<div class="no-print" style="text-align:right;margin-bottom:12px;">
+  <button onclick="window.print()" style="padding:10px 24px;background:#2980b9;color:#fff;border:none;border-radius:6px;font-size:14px;cursor:pointer;">🖨 พิมพ์ / บันทึก PDF</button>
+</div>
+<div class="header">
+  <h1 class="logo">🏥 HD Smart Monitoring — คลินิกระนอง รักษ์ไต</h1>
+  <div style="font-size:12px;color:#666;">สรุปผลฟอกเลือด | Session #{summary.get('session_id','')}</div>
+</div>
+
+<h2>👤 ข้อมูลผู้ป่วย</h2>
+<div class="info-grid">
+  <span class="label">ชื่อ-สกุล</span><span class="value">{summary.get('patient_name','')}</span>
+  <span class="label">HN</span><span class="value">{summary.get('patient_hn','')}</span>
+  <span class="label">Vascular Access</span><span class="value">{summary.get('vascular_access','') or '-'}</span>
+  <span class="label">ESA</span><span class="value">{summary.get('esa_drug','') or '-'}</span>
+  <span class="label">ตารางฟอก</span><span class="value">{summary.get('schedule_days','') or '-'}</span>
+  <span class="label">เตียง</span><span class="value">{summary.get('bed_number','')}</span>
+</div>
+
+<h2>📊 ผลการฟอกเลือด</h2>
+<div class="info-grid">
+  <span class="label">ระยะเวลาฟอก</span><span class="value">{summary.get('duration_hours',4)} ชม.</span>
+  <span class="label">Dry Weight</span><span class="value">{dry_w:.1f} kg</span>
+  <span class="label">น้ำหนักก่อนฟอก</span><span class="value">{pre_w:.1f} kg</span>
+  <span class="label">น้ำหนักหลังฟอก</span><span class="value">{post_w:.1f} kg</span>
+  <span class="label">IDWG</span><span class="value" style="{'color:#e74c3c;' if idwg_pct>4 else ''}">{idwg:.1f} kg ({idwg_pct:.1f}% DW)</span>
+  <span class="label">Actual UF</span><span class="value">{summary.get('actual_uf',0):.0f} mL (Goal: {summary.get('uf_goal',2000):.0f})</span>
+</div>
+
+<h2>❤️ Vital Signs ({summary.get('vital_count',0)} ครั้ง)</h2>
+<table>
+  <tr><th>#</th><th>Phase</th><th>BP (mmHg)</th><th>HR (bpm)</th></tr>
+  {vitals_rows if vitals_rows else '<tr><td colspan="4" style="text-align:center;color:#999;">ไม่มีข้อมูล</td></tr>'}
+</table>
+
+<h2>🚨 Alerts</h2>
+{alerts_html}
+
+<h2>📋 ประเมินผล</h2>
+<div class="assessment">{summary.get('assessment','')}</div>
+{issues_html}
+{'<h2>📝 หมายเหตุ</h2><div style="font-size:13px;">'+summary.get('notes','')+'</div>' if summary.get('notes') else ''}
+
+<div class="footer">
+  RANONG-RAKTAI-AI INTELLIGENT — HD Smart Monitoring v2.2<br>
+  เอกสารประกอบการพิจารณาทางการแพทย์ ไม่ใช่การวินิจฉัยหรือสั่งการรักษา
+</div>
+</body>
+</html>"""
+    resp = make_response(html)
+    resp.headers["Content-Type"] = "text/html; charset=utf-8"
+    return resp
+
+
 # ── Vital Signs ───────────────────────────────────────────
 
 @hd_bp.route("/sessions/<int:session_id>/vitals", methods=["POST"])
@@ -928,6 +1046,73 @@ def get_patient(hn):
         return jsonify({"hn": hn, "error": str(e)}), 500
 
 
+@hd_bp.route("/patients/<hn>/history", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def get_patient_history(hn):
+    """Get patient's HD session history + vital trends."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"sessions": [], "vitals": []})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"sessions": [], "vitals": [],
+                                "error": "patient not found"}), 404
+            pid = row[0]
+
+        # Last 30 sessions
+        sessions = []
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, bed_number, status, started_at, ended_at,
+                       pre_weight, post_weight, actual_uf, notes
+                FROM hd_sessions
+                WHERE patient_id = %s
+                ORDER BY started_at DESC LIMIT 30
+            """, (pid,))
+            for r in cur.fetchall():
+                sessions.append({
+                    "id": r[0], "bed": r[1], "status": r[2],
+                    "started_at": (r[3].isoformat() + "Z") if r[3] else None,
+                    "ended_at": (r[4].isoformat() + "Z") if r[4] else None,
+                    "pre_weight": float(r[5]) if r[5] else None,
+                    "post_weight": float(r[6]) if r[6] else None,
+                    "actual_uf": float(r[7]) if r[7] else None,
+                    "notes": r[8],
+                })
+
+        # Last 100 vital signs across all sessions
+        vitals = []
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT v.id, v.session_id, v.phase, v.sbp, v.dbp,
+                       v.heart_rate, v.temperature, v.spo2, v.recorded_at
+                FROM hd_vital_signs v
+                JOIN hd_sessions s ON s.id = v.session_id
+                WHERE s.patient_id = %s AND v.sbp IS NOT NULL
+                ORDER BY v.recorded_at DESC LIMIT 100
+            """, (pid,))
+            for r in cur.fetchall():
+                vitals.append({
+                    "id": r[0], "session_id": r[1], "phase": r[2],
+                    "sbp": r[3], "dbp": r[4], "hr": r[5],
+                    "temp": float(r[6]) if r[6] else None,
+                    "spo2": r[7],
+                    "recorded_at": (r[8].isoformat() + "Z") if r[8] else None,
+                })
+        conn.close()
+        return jsonify({"sessions": sessions, "vitals": vitals})
+    except Exception as e:
+        logger.error("patient_history error: %s", e)
+        return jsonify({"sessions": [], "vitals": [], "error": str(e)})
+
+
 # ── Dashboard ─────────────────────────────────────────────
 
 @hd_bp.route("/dashboard/beds", methods=["GET"])
@@ -1014,11 +1199,36 @@ def bed_dashboard():
         except Exception as e:
             logger.warning("bed_dashboard DB error: %s", e)
 
-    # Count today's scheduled patients from registry
+    # Get today's scheduled patients from DB
     today_count = 0
-    if current_app.config.get("MASTER_REGISTRY"):
+    today_patients = []
+    if db_url:
         try:
-            import locale
+            import psycopg2
+            day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
+            today_th = day_map.get(date.today().weekday(), "")
+            if today_th:
+                conn2 = psycopg2.connect(db_url, connect_timeout=5)
+                with conn2.cursor() as cur:
+                    cur.execute("""
+                        SELECT hn, patient_name, vascular_access, schedule_days
+                        FROM hd_patient_mapping
+                        WHERE is_active = TRUE AND schedule_days ILIKE %s
+                        ORDER BY hn
+                    """, (f"%{today_th}%",))
+                    for row in cur.fetchall():
+                        today_patients.append({
+                            "hn": row[0], "name": row[1],
+                            "va": row[2], "schedule": row[3],
+                        })
+                conn2.close()
+                today_count = len(today_patients)
+        except Exception as e:
+            logger.warning("today_patients query error: %s", e)
+
+    # Fallback: count from master registry if DB had no results
+    if not today_patients and current_app.config.get("MASTER_REGISTRY"):
+        try:
             day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
             today_th = day_map.get(date.today().weekday(), "")
             reg = current_app.config["MASTER_REGISTRY"]
@@ -1033,6 +1243,7 @@ def bed_dashboard():
         "beds": beds,
         "total": HdConfig.TOTAL_BEDS,
         "today_scheduled": today_count,
+        "today_patients": today_patients,
     })
 
 

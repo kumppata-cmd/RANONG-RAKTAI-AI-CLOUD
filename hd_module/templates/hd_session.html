@@ -43,6 +43,11 @@
 {% endblock %}
 
 {% block content %}
+<!-- Offline Banner -->
+<div class="alert-banner alert-banner-warning" id="offlineBanner" style="display:none;">
+  📡 ออฟไลน์ — ข้อมูลจะถูกบันทึกไว้ในเครื่องและ sync อัตโนมัติเมื่อกลับมาออนไลน์
+  <span id="offlineQueueCount" style="margin-left:auto;font-weight:700;"></span>
+</div>
 <!-- Session Header -->
 <div class="card session-header">
   <div class="bed-badge" id="bedDisplay">-</div>
@@ -275,6 +280,7 @@
     <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
       <button class="btn btn-success" onclick="sendSummaryToPatient()">📱 ส่ง LINE ผู้ป่วย</button>
       <button class="btn btn-primary" onclick="sendSummaryToDoctor()">👨‍⚕️ ส่ง LINE หมอ</button>
+      <button class="btn btn-outline" onclick="exportPDF()" style="color:var(--accent);border-color:var(--accent);">📄 พิมพ์ / PDF</button>
     </div>
     <div id="lineSendStatus" style="margin-top:8px;font-size:.8rem;"></div>
   </div>
@@ -346,6 +352,62 @@
 let sessionData = {session_id: null, pre_weight: 0, dry_weight: 0, start_time: null, duration_hours: 4};
 const timeline = [];
 let timerInterval = null;
+
+/* ── Offline Queue (localStorage) ── */
+function _getOfflineQueue(){
+  try{ return JSON.parse(localStorage.getItem('hd_offline_queue')||'[]'); }catch(e){ return []; }
+}
+function _saveOfflineQueue(q){
+  try{ localStorage.setItem('hd_offline_queue', JSON.stringify(q)); }catch(e){}
+  _updateOfflineBadge();
+}
+function _pushOffline(url, method, body){
+  const q = _getOfflineQueue();
+  q.push({url:url, method:method, body:body, timestamp:new Date().toISOString()});
+  _saveOfflineQueue(q);
+}
+function _updateOfflineBadge(){
+  try{
+    const q = _getOfflineQueue();
+    const el = document.getElementById('offlineQueueCount');
+    if(el) el.textContent = q.length ? ('รอ sync: '+q.length+' รายการ') : '';
+  }catch(e){}
+}
+async function _offlineSync(){
+  const q = _getOfflineQueue();
+  if(!q.length) return;
+  const token = getHdToken();
+  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {'Content-Type':'application/json'};
+  let synced = 0;
+  const remaining = [];
+  for(const item of q){
+    try{
+      const r = await fetch(item.url, {method:item.method, headers:headers, body:item.body});
+      if(r.ok){ synced++; }
+      else if(r.status >= 500){ remaining.push(item); } /* server error — retry later */
+      else { synced++; } /* 4xx — drop, data was accepted or invalid */
+    }catch(e){
+      remaining.push(item); /* network error — keep for next sync */
+    }
+  }
+  _saveOfflineQueue(remaining);
+  if(synced > 0) showToast('Sync สำเร็จ '+synced+' รายการ','success');
+  if(remaining.length) showToast('ยังเหลือ '+remaining.length+' รายการรอ sync','warning');
+}
+/* Online/Offline event listeners */
+window.addEventListener('online', function(){
+  try{ document.getElementById('offlineBanner').style.display='none'; }catch(e){}
+  _offlineSync();
+});
+window.addEventListener('offline', function(){
+  try{ document.getElementById('offlineBanner').style.display='flex'; }catch(e){}
+});
+if(typeof navigator!=='undefined' && !navigator.onLine){
+  try{ document.getElementById('offlineBanner').style.display='flex'; }catch(e){}
+}
+/* Sync any pending items on page load */
+_offlineSync();
+_updateOfflineBadge();
 
 /* ── Alert Sound (Web Audio beep) ── */
 let _audioCtx = null;
@@ -683,7 +745,12 @@ function saveIntraVital(){
       }
     }).catch(e=>{
       console.warn('vital API error:', e);
-      showToast('Vital บันทึก local — DB: '+(e.error||'error'),'warning');
+      _pushOffline(
+        '/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',
+        'POST',
+        JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null, temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null})
+      );
+      showToast('บันทึก offline — จะ sync เมื่อ online','warning');
     });
   }
 }
@@ -705,10 +772,14 @@ function saveUfRecord(){
   if(sessionData.session_id){
     const token = getHdToken();
     const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {'Content-Type':'application/json'};
+    const ufBody = JSON.stringify({uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0});
     fetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
-      method:'POST', headers,
-      body:JSON.stringify({uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0})
-    }).catch(e=>console.warn('UF API:', e));
+      method:'POST', headers, body:ufBody
+    }).catch(e=>{
+      console.warn('UF API:', e);
+      _pushOffline('/hd/api/v1/sessions/'+sessionData.session_id+'/uf', 'POST', ufBody);
+      showToast('UF บันทึก offline — จะ sync เมื่อ online','warning');
+    });
   }
 
   timeline.push({time: new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}), type:'uf', removed, remaining, rate});
@@ -752,20 +823,25 @@ function endSession(){
   };
 
   if(sessionData.session_id){
+    const completionBody = JSON.stringify(completionData);
     hdFetch('/hd/api/v1/sessions/'+sessionData.session_id,{
-      method:'PUT', body:JSON.stringify(completionData)
+      method:'PUT', body:completionBody
     }).then(r=>r.json()).then(d=>{
       showToast('เสร็จสิ้นรอบฟอก — บันทึกสำเร็จ','success');
       if(d.summary) showSessionSummary(d.summary);
     }).catch(()=>{
-      showToast('เสร็จสิ้นรอบฟอก — บันทึก offline','warning');
+      _pushOffline('/hd/api/v1/sessions/'+sessionData.session_id, 'PUT', completionBody);
+      showToast('เสร็จสิ้นรอบฟอก — บันทึก offline จะ sync เมื่อ online','warning');
       showSessionSummary(buildLocalSummary(completionData));
     });
     /* POST post-HD vitals */
     if(postSbp){
+      const postVitalBody = JSON.stringify({phase:'post', sbp:postSbp, dbp:postDbp, hr:postHr});
       hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
-        method:'POST', body:JSON.stringify({phase:'post', sbp:postSbp, dbp:postDbp, hr:postHr})
-      }).catch(()=>{});
+        method:'POST', body:postVitalBody
+      }).catch(()=>{
+        _pushOffline('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals', 'POST', postVitalBody);
+      });
     }
   } else {
     showToast('เสร็จสิ้นรอบฟอก','success');
@@ -861,6 +937,11 @@ function sendSummaryToDoctor(){
     if(d.sent) el.innerHTML = '✅ ส่ง LINE สรุปรอบฟอกให้หมอสำเร็จ';
     else el.innerHTML = '⚠️ '+(d.message||'ไม่พบ LINE ของหมอ');
   }).catch(()=>{ el.innerHTML = '❌ ส่งไม่สำเร็จ'; });
+}
+
+function exportPDF(){
+  if(!sessionData.session_id){ showToast('ยังไม่มี session','warning'); return; }
+  window.open('/hd/api/v1/sessions/'+sessionData.session_id+'/export-summary','_blank');
 }
 </script>
 {% endblock %}

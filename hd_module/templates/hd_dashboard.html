@@ -261,6 +261,23 @@ function fetchBeds(){
       }
       document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('th-TH');
       if(data.today_scheduled !== undefined) document.getElementById('statScheduled').textContent = data.today_scheduled;
+      /* Show today's scheduled patients */
+      if(data.today_patients && data.today_patients.length){
+        let el = document.getElementById('todayPatientsList');
+        if(!el){
+          el = document.createElement('div');
+          el.id = 'todayPatientsList';
+          el.style.cssText = 'margin-bottom:16px;background:var(--bg-card);border-radius:var(--radius-sm);border:1px solid var(--border);padding:12px;';
+          document.getElementById('statsBar').after(el);
+        }
+        el.innerHTML = '<div style="font-weight:600;margin-bottom:8px;font-size:.9rem;">📋 ผู้ป่วยนัดฟอกวันนี้ ('+data.today_patients.length+' คน)</div>'
+          + data.today_patients.map(p=>
+            '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:.85rem;">'
+            + '<span>'+p.hn+' — '+p.name+(p.va?' <span style="font-size:.7rem;padding:1px 6px;background:rgba(52,152,219,.12);border-radius:8px;color:var(--info);font-weight:600;">'+p.va+'</span>':'')+'</span>'
+            + '<a href="/hd/session/new?hn='+encodeURIComponent(p.hn)+'" style="font-size:.8rem;color:var(--success);font-weight:600;text-decoration:none;">▶ เริ่มฟอก</a>'
+            + '</div>'
+          ).join('');
+      }
     })
     .catch(e=>{
       console.warn('fetchBeds error:', e);

@@ -107,7 +107,7 @@ function renderPatients(patients){
   tbody.innerHTML = patients.map(p => {
     const name = p.patient_name || p.name || '-';
     return `
-    <tr onclick="window.location.href='/hd/session/new?hn=${p.hn}'">
+    <tr onclick="window.location.href='/hd/patient/${p.hn}'">
       <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(name)}</div><span>${name}</span></div></td>
       <td><strong>${p.hn||'-'}</strong></td>
       <td>${p.schedule_days ? '<span class="schedule-badge">'+p.schedule_days+'</span>' : '-'}</td>

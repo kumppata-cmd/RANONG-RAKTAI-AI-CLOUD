@@ -1,0 +1,247 @@
+{% extends "hd_base.html" %}
+{% block title %}ข้อมูลผู้ป่วย{% endblock %}
+{% block nav_patients %}active{% endblock %}
+{% block page_title %}👤 ข้อมูลผู้ป่วย{% endblock %}
+
+{% block extra_css %}
+<style>
+.info-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+@media (max-width: 768px) { .info-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 480px) { .info-grid { grid-template-columns: 1fr; } }
+.info-item { padding: 12px; background: var(--bg); border-radius: var(--radius-sm); }
+.info-item .label { font-size: .75rem; color: var(--fg-muted); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .5px; font-weight: 600; }
+.info-item .value { font-size: 1.1rem; font-weight: 700; }
+.chart-container { position: relative; width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.chart-container svg { display: block; }
+.history-table { width: 100%; border-collapse: collapse; font-size: .85rem; }
+.history-table th { padding: 10px 12px; text-align: left; font-size: .75rem; color: var(--fg-muted); font-weight: 700; text-transform: uppercase; letter-spacing: .5px; border-bottom: 2px solid var(--border); }
+.history-table td { padding: 10px 12px; border-bottom: 1px solid var(--border); }
+.history-table tr:hover td { background: rgba(52,152,219,.04); }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-completed { background: var(--success); }
+.status-in_progress { background: var(--warning); }
+.status-cancelled { background: var(--fg-muted); }
+.back-link { display: inline-flex; align-items: center; gap: 6px; color: var(--accent); text-decoration: none; font-size: .9rem; font-weight: 600; margin-bottom: 16px; }
+.back-link:hover { text-decoration: underline; }
+.access-badge { font-size: .8rem; padding: 4px 10px; border-radius: 10px; font-weight: 600; background: rgba(39,174,96,.1); color: var(--success); }
+.detail-header { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.detail-header .avatar { width: 60px; height: 60px; border-radius: 50%; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 1.3rem; font-weight: 800; flex-shrink: 0; }
+.detail-header .name-block { flex: 1; }
+.detail-header .name-block h2 { font-size: 1.2rem; margin-bottom: 2px; }
+.detail-header .name-block .sub { font-size: .85rem; color: var(--fg-muted); }
+.no-data { text-align: center; color: var(--fg-muted); padding: 30px; font-size: .9rem; }
+@media (max-width: 600px) {
+  .history-table th:nth-child(5), .history-table td:nth-child(5),
+  .history-table th:nth-child(6), .history-table td:nth-child(6) { display: none; }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<a href="/hd/patients" class="back-link">← กลับรายชื่อผู้ป่วย</a>
+
+<!-- Patient Info Card -->
+<div class="card" style="margin-bottom:20px;">
+  <div class="detail-header">
+    <div class="avatar" id="patientAvatar">?</div>
+    <div class="name-block">
+      <h2 id="pName">กำลังโหลด...</h2>
+      <div class="sub" id="pSub">HN: {{ patient_hn }}</div>
+    </div>
+    <a href="/hd/session/new?hn={{ patient_hn }}" class="btn btn-success">💉 เริ่มฟอก</a>
+  </div>
+  <div class="info-grid" style="margin-top:16px;" id="infoGrid">
+    <div class="info-item"><div class="label">HN</div><div class="value" id="pHn">{{ patient_hn }}</div></div>
+    <div class="info-item"><div class="label">Vascular Access</div><div class="value" id="pVa">-</div></div>
+    <div class="info-item"><div class="label">ตารางฟอก</div><div class="value" id="pSched">-</div></div>
+    <div class="info-item"><div class="label">Dry Weight</div><div class="value" id="pDw">- kg</div></div>
+    <div class="info-item"><div class="label">ยา ESA</div><div class="value" id="pEsa">-</div></div>
+    <div class="info-item"><div class="label">การวินิจฉัย</div><div class="value" id="pDx">-</div></div>
+  </div>
+</div>
+
+<!-- BP Trend Chart -->
+<div class="card" style="margin-bottom:20px;">
+  <div class="card-header">📈 แนวโน้ม BP (ย้อนหลัง)</div>
+  <div class="chart-container" id="bpChartContainer">
+    <p class="no-data">กำลังโหลดข้อมูล...</p>
+  </div>
+</div>
+
+<!-- Session History -->
+<div class="card">
+  <div class="card-header">📋 ประวัติการฟอกเลือด</div>
+  <div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+    <table class="history-table">
+      <thead>
+        <tr>
+          <th>วันที่</th>
+          <th>เตียง</th>
+          <th>สถานะ</th>
+          <th>น้ำหนัก (ก่อน→หลัง)</th>
+          <th>UF (mL)</th>
+          <th>หมายเหตุ</th>
+        </tr>
+      </thead>
+      <tbody id="historyBody">
+        <tr><td colspan="6" class="no-data">กำลังโหลด...</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const HN = '{{ patient_hn }}';
+
+/* Load patient info */
+(function(){
+  const token = getHdToken();
+  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
+  fetch('/hd/api/v1/patients/'+HN, {headers})
+    .then(r=>r.ok?r.json():Promise.reject())
+    .then(p=>{
+      const name = p.patient_name||'ไม่ทราบชื่อ';
+      document.getElementById('pName').textContent = name;
+      document.getElementById('pSub').textContent = 'HN: '+p.hn+(p.vascular_access?' | '+p.vascular_access:'');
+      document.getElementById('pHn').textContent = p.hn||'-';
+      document.getElementById('pVa').innerHTML = p.vascular_access ? '<span class="access-badge">'+p.vascular_access+'</span>' : '-';
+      document.getElementById('pSched').textContent = p.schedule_days||'-';
+      document.getElementById('pDw').textContent = p.dry_weight ? p.dry_weight+' kg' : '-';
+      document.getElementById('pEsa').textContent = p.esa_drug||'-';
+      document.getElementById('pDx').textContent = p.primary_diagnosis||'-';
+      /* Avatar initials */
+      const parts = name.trim().split(/\s+/);
+      document.getElementById('patientAvatar').textContent = parts.length>1?(parts[0][0]||'')+(parts[1][0]||''):name.substring(0,2);
+    }).catch(()=>{
+      document.getElementById('pName').textContent = 'ไม่พบผู้ป่วย HN: '+HN;
+    });
+})();
+
+/* Load history + vitals */
+(function(){
+  const token = getHdToken();
+  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
+  fetch('/hd/api/v1/patients/'+HN+'/history', {headers})
+    .then(r=>r.ok?r.json():Promise.reject())
+    .then(data=>{
+      renderSessions(data.sessions||[]);
+      renderBpChart(data.vitals||[]);
+    }).catch(()=>{
+      document.getElementById('historyBody').innerHTML = '<tr><td colspan="6" class="no-data">ไม่สามารถโหลดประวัติได้</td></tr>';
+      document.getElementById('bpChartContainer').innerHTML = '<p class="no-data">ไม่สามารถโหลดข้อมูลได้</p>';
+    });
+})();
+
+function renderSessions(sessions){
+  const tbody = document.getElementById('historyBody');
+  if(!sessions.length){
+    tbody.innerHTML = '<tr><td colspan="6" class="no-data">ยังไม่มีประวัติการฟอก</td></tr>';
+    return;
+  }
+  tbody.innerHTML = sessions.map(s=>{
+    const d = s.started_at ? new Date(s.started_at) : null;
+    const dateStr = d ? d.toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'})+' '+d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) : '-';
+    const statusMap = {completed:'เสร็จ',in_progress:'กำลังฟอก',cancelled:'ยกเลิก',scheduled:'จองไว้'};
+    const statusCls = 'status-'+(s.status||'completed');
+    const preW = s.pre_weight ? s.pre_weight.toFixed(1) : '-';
+    const postW = s.post_weight ? s.post_weight.toFixed(1) : '-';
+    const uf = s.actual_uf ? Math.round(s.actual_uf) : '-';
+    return `<tr onclick="window.location.href='/hd/session/${s.id}'" style="cursor:pointer;">
+      <td>${dateStr}</td>
+      <td>${s.bed||'-'}</td>
+      <td><span class="status-dot ${statusCls}"></span>${statusMap[s.status]||s.status||'-'}</td>
+      <td>${preW} → ${postW}</td>
+      <td>${uf}</td>
+      <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${s.notes||'-'}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderBpChart(vitals){
+  const container = document.getElementById('bpChartContainer');
+  if(!vitals.length){
+    container.innerHTML = '<p class="no-data">ยังไม่มีข้อมูล Vital Signs</p>';
+    return;
+  }
+
+  /* Take last 20 in chronological order */
+  const pts = vitals.slice(0, 20).reverse();
+
+  const W = Math.max(360, Math.min(pts.length * 40 + 80, 800));
+  const H = 220;
+  const padL = 45, padR = 15, padT = 20, padB = 40;
+  const chartW = W - padL - padR;
+  const chartH = H - padT - padB;
+
+  /* Determine Y scale */
+  const sbps = pts.map(v=>v.sbp).filter(Boolean);
+  const dbps = pts.map(v=>v.dbp).filter(Boolean);
+  const allVals = [...sbps, ...dbps, 90, 180];
+  const yMin = Math.floor((Math.min(...allVals) - 10) / 10) * 10;
+  const yMax = Math.ceil((Math.max(...allVals) + 10) / 10) * 10;
+
+  function yPos(val){ return padT + chartH - ((val - yMin) / (yMax - yMin)) * chartH; }
+  function xPos(i){ return padL + (i / Math.max(1, pts.length - 1)) * chartW; }
+
+  /* Build SVG */
+  let svg = `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" style="max-width:100%;height:auto;" xmlns="http://www.w3.org/2000/svg">`;
+
+  /* Grid lines */
+  const gridSteps = [yMin, 90, 120, 140, 160, yMax].filter((v,i,a)=>a.indexOf(v)===i).sort((a,b)=>a-b);
+  gridSteps.forEach(v=>{
+    const y = yPos(v);
+    const isDanger = v === 90;
+    svg += `<line x1="${padL}" y1="${y}" x2="${W-padR}" y2="${y}" stroke="${isDanger?'var(--danger)':'var(--border)'}" stroke-width="${isDanger?1.5:0.5}" ${isDanger?'stroke-dasharray="4,3"':''}/>`;
+    svg += `<text x="${padL-6}" y="${y+4}" text-anchor="end" fill="var(--fg-muted)" font-size="10">${v}</text>`;
+  });
+
+  /* DBP line (lighter) */
+  if(dbps.length > 1){
+    let path = '';
+    pts.forEach((v,i)=>{
+      if(v.dbp){ path += (path?'L':'M')+xPos(i).toFixed(1)+','+yPos(v.dbp).toFixed(1)+' '; }
+    });
+    if(path) svg += `<path d="${path}" fill="none" stroke="var(--info)" stroke-width="1.5" stroke-opacity="0.5"/>`;
+  }
+
+  /* SBP line (bold) */
+  if(sbps.length > 1){
+    let path = '';
+    pts.forEach((v,i)=>{
+      if(v.sbp){ path += (path?'L':'M')+xPos(i).toFixed(1)+','+yPos(v.sbp).toFixed(1)+' '; }
+    });
+    if(path) svg += `<path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2.5"/>`;
+  }
+
+  /* Data points */
+  pts.forEach((v,i)=>{
+    if(v.sbp){
+      const color = v.sbp < 90 ? 'var(--danger)' : v.sbp > 160 ? 'var(--warning)' : 'var(--accent)';
+      svg += `<circle cx="${xPos(i).toFixed(1)}" cy="${yPos(v.sbp).toFixed(1)}" r="4" fill="${color}" stroke="var(--bg-card)" stroke-width="1.5"/>`;
+    }
+    if(v.dbp){
+      svg += `<circle cx="${xPos(i).toFixed(1)}" cy="${yPos(v.dbp).toFixed(1)}" r="3" fill="var(--info)" fill-opacity="0.5" stroke="var(--bg-card)" stroke-width="1"/>`;
+    }
+    /* X label (time) */
+    if(v.recorded_at && (pts.length <= 10 || i % 2 === 0)){
+      const t = new Date(v.recorded_at);
+      const label = t.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+      svg += `<text x="${xPos(i).toFixed(1)}" y="${H-8}" text-anchor="middle" fill="var(--fg-muted)" font-size="9">${label}</text>`;
+    }
+  });
+
+  /* Legend */
+  svg += `<circle cx="${padL+10}" cy="${H-6}" r="4" fill="var(--accent)"/>`;
+  svg += `<text x="${padL+18}" y="${H-3}" fill="var(--fg-muted)" font-size="10">SBP</text>`;
+  svg += `<circle cx="${padL+55}" cy="${H-6}" r="3" fill="var(--info)" fill-opacity="0.5"/>`;
+  svg += `<text x="${padL+62}" y="${H-3}" fill="var(--fg-muted)" font-size="10">DBP</text>`;
+  svg += `<line x1="${padL+100}" y1="${H-6}" x2="${padL+118}" y2="${H-6}" stroke="var(--danger)" stroke-width="1.5" stroke-dasharray="4,3"/>`;
+  svg += `<text x="${padL+122}" y="${H-3}" fill="var(--fg-muted)" font-size="10">IDH 90</text>`;
+
+  svg += '</svg>';
+  container.innerHTML = svg;
+}
+</script>
+{% endblock %}
