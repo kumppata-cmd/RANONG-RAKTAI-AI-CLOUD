@@ -1,0 +1,173 @@
+{% extends "hd_base.html" %}
+{% block title %}ตั้งค่าระบบ{% endblock %}
+{% block nav_settings %}active{% endblock %}
+{% block page_title %}⚙️ ตั้งค่าระบบ{% endblock %}
+
+{% block extra_css %}
+<style>
+.setting-card { margin-bottom: 16px; }
+.setting-card .card-header { display: flex; justify-content: space-between; align-items: center; }
+.setting-card .save-btn { font-size: .8rem; padding: 6px 16px; }
+.setting-desc { font-size: .8rem; color: var(--fg-muted); margin-top: 4px; }
+.setting-status { font-size: .75rem; margin-top: 6px; }
+.how-to { font-size: .85rem; line-height: 1.6; padding: 14px; background: rgba(52,152,219,.06); border-radius: var(--radius-sm); border-left: 3px solid var(--info); margin-top: 12px; }
+.how-to ol { padding-left: 20px; margin: 8px 0 0 0; }
+.how-to li { margin-bottom: 4px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Alert Recipients -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>📱 LINE Alert Recipients (แพทย์)</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('alert_recipients')">💾 บันทึก</button>
+  </div>
+  <div class="form-group" style="margin-top:12px;">
+    <label class="form-label">LINE User ID ของแพทย์ผู้รับ alert</label>
+    <input type="text" class="form-control" id="setting_alert_recipients" placeholder="Uxxxxxxxxxxxxxxxxx">
+    <div class="setting-desc">ใส่ LINE userId จริงของแพทย์ (เริ่มต้นด้วย U) — เมื่อมี critical/warning alert ระบบจะ push LINE ไปหาทันที</div>
+    <div class="setting-status" id="status_alert_recipients"></div>
+  </div>
+  <div class="how-to">
+    <strong>วิธีหา LINE User ID ของตัวเอง:</strong>
+    <ol>
+      <li>เปิด LINE OA ของคลินิก (RANONG-RAKTAI-AI)</li>
+      <li>พิมพ์ <code>myid</code> ในแชท</li>
+      <li>ระบบจะตอบกลับ LINE User ID ของคุณ (เช่น U1234567890abcdef)</li>
+      <li>คัดลอก ID นั้นมาวางที่นี่แล้วกด 💾 บันทึก</li>
+    </ol>
+  </div>
+</div>
+
+<!-- Physician LINE ID -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>👨‍⚕️ LINE ID แพทย์ (สำหรับส่งสรุปรอบฟอก)</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('physician_line_id')">💾 บันทึก</button>
+  </div>
+  <div class="form-group" style="margin-top:12px;">
+    <label class="form-label">LINE User ID ของแพทย์</label>
+    <input type="text" class="form-control" id="setting_physician_line_id" placeholder="Uxxxxxxxxxxxxxxxxx">
+    <div class="setting-desc">เมื่อพยาบาลกด "ส่ง LINE หมอ" หลังฟอกเสร็จ ระบบจะส่งสรุปไปที่ ID นี้</div>
+    <div class="setting-status" id="status_physician_line_id"></div>
+  </div>
+</div>
+
+<!-- Clinic Name -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🏥 ชื่อคลินิก</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('clinic_name')">💾 บันทึก</button>
+  </div>
+  <div class="form-group" style="margin-top:12px;">
+    <label class="form-label">ชื่อคลินิกที่จะแสดงในรายงาน</label>
+    <input type="text" class="form-control" id="setting_clinic_name" placeholder="คลินิกระนอง รักษ์ไต" value="คลินิกระนอง รักษ์ไต">
+    <div class="setting-status" id="status_clinic_name"></div>
+  </div>
+</div>
+
+<!-- Default Duration -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>⏱ ระยะเวลาฟอกเลือดเริ่มต้น</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('default_duration_hours')">💾 บันทึก</button>
+  </div>
+  <div class="form-group" style="margin-top:12px;">
+    <label class="form-label">ชั่วโมง (ค่าเริ่มต้น 4)</label>
+    <input type="number" class="form-control" id="setting_default_duration_hours" value="4" min="1" max="8" step="0.5" inputmode="decimal">
+    <div class="setting-status" id="status_default_duration_hours"></div>
+  </div>
+</div>
+
+<!-- Alert Thresholds -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🚨 ค่า Alert Thresholds</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('alert_sbp_drop');saveSetting('alert_severe_sbp');">💾 บันทึกทั้งหมด</button>
+  </div>
+  <div class="grid-2" style="margin-top:12px;">
+    <div class="form-group">
+      <label class="form-label">IDH SBP Drop (mmHg) — ค่า default: 20</label>
+      <input type="number" class="form-control" id="setting_alert_sbp_drop" placeholder="20" inputmode="numeric">
+      <div class="setting-status" id="status_alert_sbp_drop"></div>
+    </div>
+    <div class="form-group">
+      <label class="form-label">Severe IDH SBP (mmHg) — ค่า default: 90</label>
+      <input type="number" class="form-control" id="setting_alert_severe_sbp" placeholder="90" inputmode="numeric">
+      <div class="setting-status" id="status_alert_severe_sbp"></div>
+    </div>
+  </div>
+</div>
+
+<!-- System Info -->
+<div class="card" style="opacity:.7;">
+  <div class="card-header">📋 ข้อมูลระบบ</div>
+  <div style="font-size:.85rem;">
+    <p>Version: <strong>v2.2</strong></p>
+    <p>Module: HD Smart Monitoring — RANONG-RAKTAI-AI INTELLIGENT</p>
+    <p>DB Schema: v1.2.0</p>
+    <p id="healthInfo">กำลังตรวจสอบ...</p>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+/* Load current settings */
+(function loadSettings(){
+  const token = getHdToken();
+  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
+  fetch('/hd/api/v1/settings', {headers})
+    .then(r=>r.ok?r.json():Promise.reject())
+    .then(d=>{
+      const s = d.settings || {};
+      Object.keys(s).forEach(key=>{
+        const el = document.getElementById('setting_'+key);
+        if(el && s[key].value) el.value = s[key].value;
+        const st = document.getElementById('status_'+key);
+        if(st && s[key].updated_at){
+          st.innerHTML = '✅ อัปเดตล่าสุด: '+new Date(s[key].updated_at).toLocaleString('th-TH');
+          st.style.color = 'var(--success)';
+        }
+      });
+    })
+    .catch(e=>console.warn('loadSettings:', e));
+
+  /* Health check */
+  fetch('/hd/api/v1/health', {headers})
+    .then(r=>r.json())
+    .then(d=>{
+      document.getElementById('healthInfo').innerHTML =
+        'สถานะ: <strong style="color:var(--success);">'+d.status+'</strong>'
+        + (d.database ? ' | DB: ✅' : ' | DB: ❌');
+    })
+    .catch(()=>{
+      document.getElementById('healthInfo').innerHTML = 'สถานะ: <strong style="color:var(--danger);">ไม่สามารถเชื่อมต่อ</strong>';
+    });
+})();
+
+function saveSetting(key){
+  const el = document.getElementById('setting_'+key);
+  if(!el) return;
+  const value = el.value.trim();
+  const st = document.getElementById('status_'+key);
+
+  hdFetch('/hd/api/v1/settings', {
+    method:'POST',
+    body:JSON.stringify({key:key, value:value})
+  }).then(r=>r.json()).then(d=>{
+    if(d.status==='saved'){
+      if(st){ st.innerHTML = '✅ บันทึกสำเร็จ'; st.style.color = 'var(--success)'; }
+      showToast('บันทึก '+key+' สำเร็จ','success');
+    } else {
+      if(st){ st.innerHTML = '❌ '+d.error; st.style.color = 'var(--danger)'; }
+      showToast(d.error||'ไม่สามารถบันทึกได้','danger');
+    }
+  }).catch(()=>{
+    if(st){ st.innerHTML = '❌ ไม่สามารถบันทึกได้'; st.style.color = 'var(--danger)'; }
+    showToast('ไม่สามารถบันทึกได้','danger');
+  });
+}
+</script>
+{% endblock %}

@@ -123,17 +123,60 @@ def hd_kpi_page():
     return render_template("hd_kpi.html")
 
 
+@hd_web.route("/settings")
+def hd_settings_page():
+    """Render admin settings page."""
+    return render_template("hd_settings.html")
+
+
 # ── Health / Status ───────────────────────────────────────
 
 @hd_bp.route("/health", methods=["GET"])
 def hd_health():
-    """HD module health check."""
+    """HD module health check — checks DB connectivity."""
+    import os
+    from .config import HdConfig
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    db_ok = False
+    db_patients = 0
+    db_active_sessions = 0
+    if db_url:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url, connect_timeout=3)
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM hd_patient_mapping WHERE is_active=TRUE")
+                db_patients = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM hd_sessions WHERE status='in_progress'")
+                db_active_sessions = cur.fetchone()[0]
+            conn.close()
+            db_ok = True
+        except Exception as e:
+            logger.warning("health check DB error: %s", e)
+
+    alert_configured = bool(
+        get_setting_value("alert_recipients", "")
+        or get_setting_value("physician_line_id", "")
+    )
+
+    status = "ok" if db_ok else "degraded"
+    code = 200 if db_ok else 503
     return jsonify({
         "module": "hd_smart_monitoring",
-        "status": "ok",
-        "version": "1.0.0",
+        "status": status,
+        "version": "2.2.0",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-    })
+        "database": db_ok,
+        "patients": db_patients,
+        "active_sessions": db_active_sessions,
+        "total_beds": HdConfig.TOTAL_BEDS,
+        "alert_configured": alert_configured,
+        "checklist": {
+            "database": "✅" if db_ok else "❌ ไม่สามารถเชื่อมต่อ DB",
+            "patients_imported": "✅" if db_patients > 0 else "⚠️ ยังไม่มีผู้ป่วย",
+            "alert_recipients": "✅" if alert_configured else "⚠️ ยังไม่ตั้ง LINE alert → ตั้งค่าที่ ⚙️",
+        },
+    }), code
 
 
 # ── Auth ──────────────────────────────────────────────────
@@ -519,11 +562,13 @@ def send_session_summary(session_id):
             return jsonify({"sent": False, "message": str(e)})
 
     else:
-        # Send to physician (from HD_ALERT_RECIPIENTS or PHYSICIAN_USERS)
-        import os
-        recipients = os.environ.get("HD_ALERT_RECIPIENTS", "").split(",")
-        if not recipients or not recipients[0]:
-            return jsonify({"sent": False, "message": "ไม่พบ LINE ของแพทย์ (ตั้ง HD_ALERT_RECIPIENTS)"})
+        # Send to physician — check DB settings first, then ENV fallback
+        alert_ids = get_setting_value("alert_recipients", "")
+        if not alert_ids:
+            alert_ids = get_setting_value("physician_line_id", "")
+        recipients = [r.strip() for r in alert_ids.split(",") if r.strip()] if alert_ids else []
+        if not recipients:
+            return jsonify({"sent": False, "message": "ไม่พบ LINE ของแพทย์ — ตั้งค่าที่ ⚙️ ตั้งค่าระบบ"})
         msg = _format_doctor_summary_line(summary)
         sent_count = 0
         for r in recipients:
@@ -1417,3 +1462,117 @@ def list_audit_logs():
         limit=request.args.get("limit", 50, type=int),
     )
     return jsonify({"logs": logs, "total": len(logs)})
+
+
+# ── Settings (runtime configuration via DB) ──────────────
+
+@hd_bp.route("/settings", methods=["GET"])
+@require_role("physician", "admin")
+def get_settings():
+    """Get all HD settings from database."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"settings": {}})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT key, value, description, updated_at
+                FROM hd_settings ORDER BY key
+            """)
+            settings = {}
+            for r in cur.fetchall():
+                settings[r[0]] = {
+                    "value": r[1], "description": r[2],
+                    "updated_at": r[3].isoformat() if r[3] else None,
+                }
+        conn.close()
+        # Merge with ENV fallbacks
+        env_alert = os.environ.get("HD_ALERT_RECIPIENTS", "")
+        if "alert_recipients" not in settings and env_alert:
+            settings["alert_recipients"] = {
+                "value": env_alert, "description": "จาก ENV",
+                "updated_at": None,
+            }
+        return jsonify({"settings": settings})
+    except Exception as e:
+        logger.error("get_settings error: %s", e)
+        return jsonify({"settings": {}, "error": str(e)})
+
+
+@hd_bp.route("/settings", methods=["POST"])
+@require_role("physician", "admin")
+def update_settings():
+    """Update HD settings in database."""
+    import os
+    data = request.get_json(silent=True) or {}
+    key = data.get("key", "").strip()
+    value = data.get("value", "").strip()
+
+    allowed_keys = [
+        "alert_recipients",        # LINE userId for alerts
+        "physician_line_id",       # physician LINE userId (raw, for push)
+        "clinic_name",             # clinic display name
+        "default_duration_hours",  # default dialysis duration
+        "alert_sbp_drop",          # IDH SBP drop threshold
+        "alert_severe_sbp",        # severe IDH threshold
+    ]
+    if key not in allowed_keys:
+        return jsonify({"error": f"Invalid setting key: {key}"}), 400
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 500
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO hd_settings (key, value, description, updated_at, updated_by)
+                VALUES (%s, %s, %s, NOW(), %s)
+                ON CONFLICT (key) DO UPDATE SET
+                    value = EXCLUDED.value,
+                    updated_at = NOW(),
+                    updated_by = EXCLUDED.updated_by
+            """, (key, value, data.get("description", ""), g.get("hd_user_id")))
+        conn.commit()
+        conn.close()
+        log_action(
+            user_id=g.get("hd_user_id"), action="settings.update",
+            resource_type="settings", new_values={"key": key, "value": value},
+            ip_address=request.remote_addr or "",
+        )
+        return jsonify({"status": "saved", "key": key})
+    except Exception as e:
+        logger.error("update_settings error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+def get_setting_value(key, default=""):
+    """Helper: get a setting from DB, fallback to ENV, then default."""
+    import os
+    env_map = {
+        "alert_recipients": "HD_ALERT_RECIPIENTS",
+        "physician_line_id": "HD_PHYSICIAN_LINE_ID",
+    }
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if db_url:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url, connect_timeout=3)
+            with conn.cursor() as cur:
+                cur.execute("SELECT value FROM hd_settings WHERE key = %s", (key,))
+                row = cur.fetchone()
+            conn.close()
+            if row and row[0]:
+                return row[0]
+        except Exception:
+            pass
+    # Fallback to ENV
+    env_key = env_map.get(key)
+    if env_key:
+        return os.environ.get(env_key, default)
+    return default

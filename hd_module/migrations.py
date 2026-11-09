@@ -237,6 +237,18 @@ END $$;
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.1.0', 'Add bfr and hd_per_week to hd_patient_mapping')
 ON CONFLICT (version) DO NOTHING;
+
+-- v1.2.0: Settings table for runtime configuration (alert recipients etc.)
+CREATE TABLE IF NOT EXISTS hd_settings (
+    key VARCHAR(100) PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT '',
+    description TEXT,
+    updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    updated_by INTEGER REFERENCES hd_users(id)
+);
+INSERT INTO hd_schema_version (version, description)
+VALUES ('1.2.0', 'Add hd_settings key-value table')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────
