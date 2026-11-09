@@ -264,6 +264,21 @@ END $$;
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.3.0', 'Add ESA injection tracking and Hb/Hct to hd_sessions')
 ON CONFLICT (version) DO NOTHING;
+
+-- v1.4.0: needs_review flag for incomplete patient data
+DO $$ BEGIN
+    ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS needs_review BOOLEAN DEFAULT FALSE;
+    ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS registered_by VARCHAR(50);
+    -- Mark auto-registered patients missing schedule as needs_review
+    UPDATE hd_patient_mapping SET needs_review = TRUE
+    WHERE is_active = TRUE
+      AND (schedule_days IS NULL OR schedule_days = '')
+      AND needs_review IS NOT TRUE;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+INSERT INTO hd_schema_version (version, description)
+VALUES ('1.4.0', 'Add needs_review flag for incomplete patient data')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────

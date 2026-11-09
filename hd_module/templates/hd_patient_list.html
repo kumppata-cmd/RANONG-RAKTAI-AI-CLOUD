@@ -22,9 +22,17 @@
 .access-avg { background: rgba(243,156,18,.1); color: var(--warning); }
 .access-cvc { background: rgba(231,76,60,.1); color: var(--danger); }
 .stat-row { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
-.stat-card { padding: 14px 20px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 10px; }
+.stat-card { padding: 14px 20px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 10px; cursor: pointer; }
 .stat-card .num { font-size: 1.5rem; font-weight: 800; }
 .stat-card .lbl { font-size: .8rem; color: var(--fg-muted); }
+.needs-review { border-left: 3px solid var(--warning); }
+.edit-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 999; align-items: flex-end; justify-content: center; }
+.edit-overlay.open { display: flex; }
+.edit-sheet { background: var(--bg-card); border-radius: 16px 16px 0 0; width: 100%; max-width: 420px; padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); max-height: 80vh; overflow-y: auto; }
+.edit-sheet h3 { margin: 0 0 12px; font-size: 1rem; }
+.edit-field { margin-bottom: 12px; }
+.edit-field label { font-size: .8rem; color: var(--fg-muted); display: block; margin-bottom: 4px; }
+.edit-field input, .edit-field select { width: 100%; padding: 10px; font-size: .95rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); }
 .table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 @media (max-width: 600px) {
   .patient-table th:nth-child(4), .patient-table td:nth-child(4),
@@ -39,6 +47,7 @@
   <div class="stat-card"><span class="num" id="totalPatients" style="color:var(--accent);">0</span><span class="lbl">ผู้ป่วยทั้งหมด</span></div>
   <div class="stat-card"><span class="num" id="activeToday" style="color:var(--success);">0</span><span class="lbl">ฟอกวันนี้</span></div>
   <div class="stat-card"><span class="num" id="alertPatients" style="color:var(--danger);">0</span><span class="lbl">ต้องเฝ้าระวัง</span></div>
+  <div class="stat-card" onclick="filterIncomplete()" title="คลิกเพื่อดูรายชื่อ"><span class="num" id="incompletePatients" style="color:var(--warning);">0</span><span class="lbl">ข้อมูลไม่ครบ</span></div>
 </div>
 
 <!-- Search -->
@@ -70,6 +79,51 @@
         <tr><td colspan="6" style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</td></tr>
       </tbody>
     </table>
+  </div>
+</div>
+
+<!-- Patient Edit Modal -->
+<div class="edit-overlay" id="editOverlay" onclick="if(event.target===this)closeEditModal()">
+  <div class="edit-sheet">
+    <h3>✏️ แก้ไขข้อมูล — <span id="editHN">-</span> <span id="editName" style="font-weight:400;font-size:.85rem;"></span></h3>
+    <div class="edit-field"><label>ชื่อ-นามสกุล</label><input type="text" id="editPatientName"></div>
+    <div class="edit-field">
+      <label>ตารางฟอก</label>
+      <select id="editSchedule">
+        <option value="">ไม่ระบุ</option>
+        <option value="จ/พ/ศ">จ/พ/ศ</option>
+        <option value="อ/พฤ/ส">อ/พฤ/ส</option>
+        <option value="จ/พ/ศ (เช้า)">จ/พ/ศ (เช้า)</option>
+        <option value="จ/พ/ศ (บ่าย)">จ/พ/ศ (บ่าย)</option>
+        <option value="อ/พฤ/ส (เช้า)">อ/พฤ/ส (เช้า)</option>
+        <option value="อ/พฤ/ส (บ่าย)">อ/พฤ/ส (บ่าย)</option>
+      </select>
+    </div>
+    <div class="edit-field">
+      <label>Vascular Access</label>
+      <select id="editVA">
+        <option value="">ไม่ระบุ</option>
+        <option value="AVF">AVF</option>
+        <option value="AVG">AVG</option>
+        <option value="DLC">DLC (Double Lumen Catheter)</option>
+        <option value="Perm Cath">Perm Cath</option>
+      </select>
+    </div>
+    <div class="edit-field"><label>Dry Weight (kg)</label><input type="number" id="editDW" step="0.1" inputmode="decimal"></div>
+    <div class="edit-field">
+      <label>ESA Drug</label>
+      <select id="editESA">
+        <option value="">ไม่มี ESA</option>
+        <option value="Epiao">Epiao</option>
+        <option value="Hemax">Hemax</option>
+        <option value="Hema-plus">Hema-plus</option>
+        <option value="Darbepoetin">Darbepoetin</option>
+        <option value="Other">อื่นๆ</option>
+      </select>
+    </div>
+    <div class="edit-field"><label>ESA Dose</label><input type="text" id="editESADose" placeholder="เช่น 4000 IU/wk"></div>
+    <button class="btn btn-success" onclick="savePatientEdit()" style="width:100%;padding:14px;font-size:1rem;margin-top:4px;">💾 บันทึก</button>
+    <button class="btn" onclick="closeEditModal()" style="width:100%;margin-top:8px;padding:10px;">ยกเลิก</button>
   </div>
 </div>
 {% endblock %}
@@ -106,6 +160,10 @@ function formatDate(d){
   } catch(e){ return d; }
 }
 
+function isIncomplete(p){
+  return !p.schedule_days || !p.vascular_access;
+}
+
 function renderPatients(patients){
   const tbody = document.getElementById('patientTableBody');
   if(!patients.length){
@@ -115,12 +173,18 @@ function renderPatients(patients){
   tbody.innerHTML = patients.map(p => {
     const name = p.patient_name || p.name || '-';
     const alertDot = p.unacked_alerts > 0 ? ' <span style="color:var(--danger);font-weight:700;" title="'+p.unacked_alerts+' alerts">⚠️</span>' : '';
+    const incomplete = isIncomplete(p);
+    const rowClass = incomplete ? 'needs-review' : '';
+    const rowAlert = p.unacked_alerts > 0 ? 'style="border-left:3px solid var(--danger);"' : '';
+    const editBtn = `<button class="btn" onclick="event.stopPropagation();openEditModal('${p.hn}')" style="font-size:.7rem;padding:2px 8px;margin-left:4px;" title="แก้ไข">✏️</button>`;
+    const schedCell = p.schedule_days ? '<span class="schedule-badge">'+p.schedule_days+'</span>' : '<span style="color:var(--warning);font-size:.8rem;">⚠️ ไม่ระบุ</span>';
+    const vaCell = p.vascular_access ? '<span class="access-badge '+accessClass(p.vascular_access)+'">'+p.vascular_access+'</span>' : '<span style="color:var(--warning);font-size:.8rem;">⚠️ ไม่ระบุ</span>';
     return `
-    <tr onclick="window.location.href='/hd/patient/${p.hn}'" ${p.unacked_alerts > 0 ? 'style="border-left:3px solid var(--danger);"' : ''}>
-      <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(name)}</div><span>${name}${alertDot}</span></div></td>
+    <tr class="${rowClass}" onclick="window.location.href='/hd/patient/${p.hn}'" ${rowAlert}>
+      <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(name)}</div><span>${name}${alertDot}${editBtn}</span></div></td>
       <td><strong>${p.hn||'-'}</strong></td>
-      <td>${p.schedule_days ? '<span class="schedule-badge">'+p.schedule_days+'</span>' : '-'}</td>
-      <td>${p.vascular_access ? '<span class="access-badge '+accessClass(p.vascular_access)+'">'+p.vascular_access+'</span>' : '-'}</td>
+      <td>${schedCell}</td>
+      <td>${vaCell}</td>
       <td>${p.dry_weight||'-'}</td>
       <td>${formatDate(p.last_hd)}</td>
     </tr>`;
@@ -212,6 +276,9 @@ function fetchPatients(){
       /* Alert patients */
       const alertCount = data.alert_count || allPatients.filter(p=>p.unacked_alerts>0).length;
       document.getElementById('alertPatients').textContent = alertCount;
+      /* Incomplete patients */
+      const incompleteCount = allPatients.filter(isIncomplete).length;
+      document.getElementById('incompletePatients').textContent = incompleteCount;
       /* Build dynamic filter options */
       buildFilterOptions(data);
       renderPatients(allPatients);
@@ -221,6 +288,57 @@ function fetchPatients(){
       document.getElementById('patientTableBody').innerHTML =
         '<tr><td colspan="6" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่สามารถโหลดข้อมูลได้</td></tr>';
     });
+}
+
+/* ── Edit Modal ── */
+let _editHN = null;
+function openEditModal(hn){
+  _editHN = hn;
+  const p = allPatients.find(x=>x.hn===hn);
+  if(!p) return;
+  document.getElementById('editHN').textContent = hn;
+  document.getElementById('editName').textContent = p.patient_name||'';
+  document.getElementById('editPatientName').value = p.patient_name||'';
+  document.getElementById('editSchedule').value = p.schedule_days||'';
+  document.getElementById('editVA').value = p.vascular_access||'';
+  document.getElementById('editDW').value = p.dry_weight||'';
+  document.getElementById('editESA').value = p.esa_drug||'';
+  document.getElementById('editESADose').value = p.esa_dose||'';
+  document.getElementById('editOverlay').classList.add('open');
+}
+function closeEditModal(){
+  document.getElementById('editOverlay').classList.remove('open');
+  _editHN = null;
+}
+function savePatientEdit(){
+  if(!_editHN) return;
+  const data = {
+    patient_name: document.getElementById('editPatientName').value,
+    schedule_days: document.getElementById('editSchedule').value,
+    vascular_access: document.getElementById('editVA').value,
+    dry_weight: parseFloat(document.getElementById('editDW').value)||null,
+    esa_drug: document.getElementById('editESA').value,
+    esa_dose: document.getElementById('editESADose').value,
+  };
+  hdFetch('/hd/api/v1/patients/'+_editHN,{method:'PUT',body:JSON.stringify(data)})
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.error){ showToast(d.error,'danger'); return; }
+      showToast('บันทึกสำเร็จ — '+_editHN,'success');
+      closeEditModal();
+      fetchPatients(); /* Reload */
+    })
+    .catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
+
+function filterIncomplete(){
+  const incomplete = allPatients.filter(isIncomplete);
+  renderPatients(incomplete);
+  document.getElementById('totalPatients').textContent = incomplete.length + '/' + allPatients.length;
+  /* Clear other filters */
+  document.getElementById('searchInput').value = '';
+  document.getElementById('filterSchedule').value = '';
+  document.getElementById('filterAccess').value = '';
 }
 
 /* Bind events */

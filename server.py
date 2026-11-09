@@ -8763,6 +8763,8 @@ def handle_search_command(
             f"👥 ผู้ป่วยทะเบียน: {_pt_total} คน\n"
             f"🏥 มีตารางฟอก: {_with_sched} คน"
             f" (มี schedule text: {_with_sched_text})\n"
+            f"⚠️ ข้อมูลไม่ครบ: {_pt_total - _with_sched_text} คน"
+            f"{' ← กรุณาเพิ่มตารางฟอก' if _pt_total > _with_sched_text else ''}\n"
             f"📄 เอกสารรวม: {_doc_total} ฉบับ\n"
             f"📄 วันนี้: {_today_docs} ฉบับ\n"
         )

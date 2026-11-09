@@ -2070,6 +2070,117 @@ def shift_handover():
     return jsonify(summary)
 
 
+# ── Patient Edit (update info) ────────────────────────────
+
+@hd_bp.route("/patients/<hn>", methods=["PUT", "PATCH"])
+@require_role("physician", "nurse", "admin")
+def update_patient(hn):
+    """Update patient info (schedule, VA, dry weight, ESA, etc.)."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    data = request.get_json(silent=True) or {}
+    if not data:
+        return jsonify({"error": "No data"}), 400
+
+    allowed = {"patient_name", "schedule_days", "vascular_access", "dry_weight",
+               "esa_drug", "esa_dose", "primary_diagnosis", "needs_review", "is_active"}
+    updates = []
+    params = []
+    for key in allowed:
+        if key in data:
+            if key == "dry_weight":
+                updates.append(f"{key} = %s")
+                params.append(float(data[key]) if data[key] else None)
+            elif key in ("needs_review", "is_active"):
+                updates.append(f"{key} = %s")
+                params.append(bool(data[key]))
+            else:
+                updates.append(f"{key} = %s")
+                params.append(data[key])
+
+    if not updates:
+        return jsonify({"error": "No valid fields to update"}), 400
+
+    # If schedule_days is being set, clear needs_review
+    if "schedule_days" in data and data["schedule_days"]:
+        if "needs_review" not in data:
+            updates.append("needs_review = FALSE")
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            sql = f"UPDATE hd_patient_mapping SET {', '.join(updates)} WHERE hn = %s RETURNING id"
+            params.append(hn)
+            cur.execute(sql, params)
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+        conn.commit()
+        conn.close()
+
+        log_action(user_id=g.get("hd_user_id"), action="patient.update",
+                   resource_type="patient", resource_id=hn,
+                   ip_address=request.remote_addr or "")
+        return jsonify({"success": True, "hn": hn, "updated": list(data.keys())})
+    except Exception as e:
+        logger.error("update_patient error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/patients/needs-review", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patients_needs_review():
+    """List patients that need data review (incomplete info)."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"patients": []})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT hn, patient_name, schedule_days, vascular_access,
+                       dry_weight, esa_drug, registered_by, needs_review
+                FROM hd_patient_mapping
+                WHERE is_active = TRUE
+                  AND (needs_review = TRUE
+                       OR schedule_days IS NULL OR schedule_days = ''
+                       OR vascular_access IS NULL OR vascular_access = '')
+                ORDER BY hn
+            """)
+            rows = cur.fetchall()
+        conn.close()
+
+        patients = []
+        for r in rows:
+            missing = []
+            if not r[2]:
+                missing.append("ตารางฟอก")
+            if not r[3]:
+                missing.append("Vascular Access")
+            if not r[4]:
+                missing.append("Dry Weight")
+            if not r[5]:
+                missing.append("ESA")
+            patients.append({
+                "hn": r[0], "name": r[1],
+                "schedule_days": r[2], "vascular_access": r[3],
+                "dry_weight": float(r[4]) if r[4] else None,
+                "esa_drug": r[5],
+                "registered_by": r[6],
+                "missing_fields": missing,
+            })
+        return jsonify({"patients": patients, "total": len(patients)})
+    except Exception as e:
+        logger.error("patients_needs_review error: %s", e)
+        return jsonify({"patients": [], "error": str(e)})
+
+
 # ── ESA History for Patient ───────────────────────────────
 
 @hd_bp.route("/patients/<hn>/esa-history", methods=["GET"])
