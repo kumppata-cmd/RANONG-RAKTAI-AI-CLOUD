@@ -8637,7 +8637,7 @@ def handle_search_command(
     if text_stripped in ("myid", "my id", "userid", "ไอดี"):
         if not line_user_id:
             return "❌ ไม่สามารถดึง User ID ได้"
-        # Auto-register as HD alert recipient
+        # Auto-register as HD alert recipient (in-memory)
         _auto_reg_msg = ""
         if hd_alert_push is not None:
             _already = any(r["line_user_id"] == line_user_id
@@ -8653,14 +8653,56 @@ def handle_search_command(
                 _auto_reg_msg = f"\n✅ ลงทะเบียนรับแจ้งเตือน HD ({_role}) แล้ว"
             else:
                 _auto_reg_msg = "\n✅ คุณลงทะเบียนรับแจ้งเตือน HD แล้ว"
+        # Auto-save to DB hd_settings (persistent across restarts)
+        _db_save_msg = ""
+        _db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        if _db_url and _is_staff:
+            try:
+                import psycopg2 as _pg
+                _conn = _pg.connect(_db_url, connect_timeout=5)
+                with _conn.cursor() as _cur:
+                    # Ensure settings table exists
+                    _cur.execute("""
+                        CREATE TABLE IF NOT EXISTS hd_settings (
+                            key VARCHAR(100) PRIMARY KEY,
+                            value TEXT NOT NULL DEFAULT '',
+                            description TEXT,
+                            updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                            updated_by INTEGER
+                        )
+                    """)
+                    # Save alert_recipients
+                    _cur.execute("""
+                        INSERT INTO hd_settings (key, value, updated_at)
+                        VALUES ('alert_recipients', %s, NOW())
+                        ON CONFLICT (key) DO UPDATE SET
+                            value = CASE
+                                WHEN hd_settings.value = '' OR hd_settings.value IS NULL
+                                THEN EXCLUDED.value
+                                WHEN hd_settings.value LIKE %s THEN hd_settings.value
+                                ELSE hd_settings.value || ',' || EXCLUDED.value
+                            END,
+                            updated_at = NOW()
+                    """, (line_user_id, f"%{line_user_id}%"))
+                    # Also save physician_line_id if physician
+                    if is_physician_user(user_hash) or is_admin_user(user_hash):
+                        _cur.execute("""
+                            INSERT INTO hd_settings (key, value, updated_at)
+                            VALUES ('physician_line_id', %s, NOW())
+                            ON CONFLICT (key) DO UPDATE SET
+                                value = EXCLUDED.value, updated_at = NOW()
+                        """, (line_user_id,))
+                _conn.commit()
+                _conn.close()
+                _db_save_msg = "\n💾 บันทึกลงฐานข้อมูลแล้ว (ถาวร)"
+            except Exception as _db_err:
+                logger.warning("myid DB save failed: %s", _db_err)
         return (
             f"🆔 LINE User ID:\n"
             f"━━━━━━━━━━━━━━━━\n"
             f"{line_user_id}\n"
-            f"{_auto_reg_msg}\n"
-            f"\n"
-            f"📋 ตั้งค่าถาวรที่ Render ENV:\n"
-            f"HD_ALERT_RECIPIENTS={line_user_id}:physician:DrKamphon"
+            f"{_auto_reg_msg}"
+            f"{_db_save_msg}"
         )
 
     # ── ตรวจสอบระบบ (Admin/Staff) — เพิ่ม 2026-11-05 ──

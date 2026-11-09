@@ -47,7 +47,7 @@ def hd_login_page():
 @hd_web.route("/dashboard")
 def hd_dashboard_page():
     """Render 30-bed dashboard."""
-    resp = make_response(render_template("hd_dashboard.html"))
+    resp = make_response(render_template("hd_dashboard.html", config=HdConfig))
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return resp
 
@@ -159,6 +159,14 @@ def hd_health():
         or get_setting_value("physician_line_id", "")
     )
 
+    # Check Anthropic API Key expiry (hardcoded warning for 12 Nov 2026)
+    api_key_warning = ""
+    _api_key = os.environ.get("ANTHROPIC_API_KEY", "")
+    if _api_key:
+        _days_left = (datetime(2026, 11, 12, tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
+        if _days_left <= 7:
+            api_key_warning = f"⚠️ Anthropic API Key หมดอายุใน {_days_left} วัน (12 พ.ย.)"
+
     # ok: DB connected or not configured (standalone); degraded: configured but unreachable
     status = "ok" if (db_ok or not db_url) else "degraded"
     return jsonify({
@@ -174,7 +182,8 @@ def hd_health():
         "checklist": {
             "database": "✅" if db_ok else "❌ ไม่สามารถเชื่อมต่อ DB",
             "patients_imported": "✅" if db_patients > 0 else "⚠️ ยังไม่มีผู้ป่วย",
-            "alert_recipients": "✅" if alert_configured else "⚠️ ยังไม่ตั้ง LINE alert → ตั้งค่าที่ ⚙️",
+            "alert_recipients": "✅" if alert_configured else "⚠️ ยังไม่ตั้ง LINE alert → พิมพ์ myid ใน LINE",
+            "api_key": api_key_warning or "✅",
         },
     })
 

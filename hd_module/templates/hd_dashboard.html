@@ -1,7 +1,7 @@
 {% extends "hd_base.html" %}
-{% block title %}แดชบอร์ด 30 เตียง{% endblock %}
+{% block title %}แดชบอร์ด 25 เตียง{% endblock %}
 {% block nav_dashboard %}active{% endblock %}
-{% block page_title %}📊 แดชบอร์ด 30 เตียง{% endblock %}
+{% block page_title %}📊 แดชบอร์ด 25 เตียง{% endblock %}
 {% block topbar_extra %}
 <button class="btn btn-outline" onclick="toggleTheme()" style="font-size:.85rem;">🌓 โหมด</button>
 <a href="/hd/alerts" class="alert-badge" id="alertBadge" style="display:none;">
@@ -84,7 +84,7 @@
 
 <!-- 30-Bed Grid -->
 <div class="bed-grid" id="bedGrid">
-  {% for i in range(1,31) %}
+  {% for i in range(1, config.TOTAL_BEDS + 1 if config else 26) %}
   <div class="bed-card bed-available" onclick="window.location.href='/hd/session/new?bed={{ i }}'">
     <div class="bed-num">{{ i }}</div>
     <div class="bed-patient"></div>

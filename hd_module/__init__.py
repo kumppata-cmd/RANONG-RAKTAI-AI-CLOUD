@@ -39,6 +39,9 @@ def register_hd_module(app):
         # Auto-complete stale sessions from previous day (safety reset)
         _auto_complete_stale_sessions()
 
+        # Auto-backup HD tables to GCS (daily on boot)
+        _auto_backup_hd_tables()
+
         return True
     except Exception as e:
         logger.error(f"Failed to register HD module: {e}")
@@ -275,3 +278,78 @@ def _auto_complete_stale_sessions():
             logger.info("HD auto-complete: no stale sessions found")
     except Exception as e:
         logger.error("HD auto-complete stale sessions failed: %s", e)
+
+
+def _auto_backup_hd_tables():
+    """Backup HD tables to GCS as JSON on every boot.
+
+    Lightweight backup: exports key tables as JSON to GCS bucket.
+    Runs on every server start — safe and idempotent.
+    Keeps last 7 days of backups automatically.
+    """
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    bucket_name = os.environ.get("GCS_BUCKET_NAME", "")
+    if not db_url or not bucket_name:
+        return
+
+    try:
+        import psycopg2
+        import json
+        from datetime import datetime, timezone
+
+        conn = psycopg2.connect(db_url, connect_timeout=10)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        backup_data = {"date": today, "tables": {}}
+
+        tables = [
+            "hd_patient_mapping", "hd_sessions", "hd_vital_signs",
+            "hd_clinical_alerts", "hd_users", "hd_settings",
+        ]
+        for table in tables:
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(f"SELECT COUNT(*) FROM {table}")  # noqa: S608
+                    count = cur.fetchone()[0]
+                    cur.execute(
+                        f"SELECT row_to_json(t) FROM {table} t "  # noqa: S608
+                        f"ORDER BY 1 LIMIT 10000"
+                    )
+                    rows = [r[0] for r in cur.fetchall()]
+                    backup_data["tables"][table] = {
+                        "count": count, "rows": rows,
+                    }
+            except Exception:
+                backup_data["tables"][table] = {"count": 0, "error": "table not found"}
+        conn.close()
+
+        # Upload to GCS
+        try:
+            from google.cloud import storage as gcs_storage
+            client = gcs_storage.Client()
+            bucket = client.bucket(bucket_name)
+            blob_path = f"backups/hd_backup_{today}.json"
+            blob = bucket.blob(blob_path)
+            blob.upload_from_string(
+                json.dumps(backup_data, default=str, ensure_ascii=False),
+                content_type="application/json",
+            )
+            logger.info("HD backup: saved %d tables to gs://%s/%s",
+                        len(tables), bucket_name, blob_path)
+
+            # Cleanup old backups (keep last 7)
+            prefix = "backups/hd_backup_"
+            blobs = sorted(bucket.list_blobs(prefix=prefix),
+                           key=lambda b: b.name, reverse=True)
+            for old_blob in blobs[7:]:
+                old_blob.delete()
+                logger.info("HD backup: deleted old backup %s", old_blob.name)
+        except Exception as gcs_err:
+            logger.warning("HD backup: GCS upload failed: %s", gcs_err)
+            # Fallback: save to /tmp
+            _tmp_path = f"/tmp/hd_backup_{today}.json"
+            with open(_tmp_path, "w") as f:
+                json.dump(backup_data, f, default=str, ensure_ascii=False)
+            logger.info("HD backup: saved to %s (GCS failed)", _tmp_path)
+
+    except Exception as e:
+        logger.error("HD backup failed: %s", e)
