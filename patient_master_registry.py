@@ -1386,20 +1386,51 @@ _HN_PATTERNS = [
 def extract_hn_from_document(text: str) -> list[str]:
     """ดึง HN ทั้งหมดจากข้อความ OCR ของเอกสารทางการแพทย์
 
-    Returns: list of HN strings (unique, sorted)
+    Returns: list of HN strings — priority order:
+      1. HN ที่ match pattern "HN" โดยตรง (HN:, H.N., HN 60139)
+      2. HN ที่ match pattern อื่น (เลขที่ผู้ป่วย, Patient ID, etc.)
+    ภายในแต่ละกลุ่ม เรียงตามตำแหน่งที่ปรากฏในเอกสาร (ต้นเอกสารก่อน)
     """
     if not text:
         return []
 
-    found: set[str] = set()
-    for pattern in _HN_PATTERNS:
+    # กลุ่ม 1: HN patterns ที่ระบุ "HN" ชัดเจน
+    # [0] HN:  [1] H N  [2] H.N  [3] HIN/HM  [5] รหัส HN
+    # [9] HN I/l  [10] HD No  [11] Age...HN
+    _HN_EXPLICIT_IDX = {0, 1, 2, 3, 5, 9, 10, 11}
+    _HN_EXPLICIT_PATTERNS = [_HN_PATTERNS[i] for i in range(len(_HN_PATTERNS)) if i in _HN_EXPLICIT_IDX]
+    # กลุ่ม 2: patterns อื่น (เลขที่, Patient ID, AN, VN, No.)
+    _HN_OTHER_PATTERNS = [_HN_PATTERNS[i] for i in range(len(_HN_PATTERNS)) if i not in _HN_EXPLICIT_IDX]
+
+    # เก็บ (position, hn) เพื่อเรียงตามตำแหน่ง
+    explicit_hits: list[tuple[int, str]] = []
+    other_hits: list[tuple[int, str]] = []
+    seen: set[str] = set()
+
+    for pattern in _HN_EXPLICIT_PATTERNS:
         for match in pattern.finditer(text):
             hn = match.group(1).strip()
-            # กรองตัวเลขที่ไม่น่าจะเป็น HN (เช่น ปี พ.ศ., ค่าแล็บ)
-            if _is_likely_hn(hn, text, match.start()):
-                found.add(hn)
+            if hn not in seen and _is_likely_hn(hn, text, match.start()):
+                explicit_hits.append((match.start(), hn))
+                seen.add(hn)
 
-    return sorted(found)
+    for pattern in _HN_OTHER_PATTERNS:
+        for match in pattern.finditer(text):
+            hn = match.group(1).strip()
+            if hn not in seen and _is_likely_hn(hn, text, match.start()):
+                other_hits.append((match.start(), hn))
+                seen.add(hn)
+
+    # เรียงตามตำแหน่ง (ต้นเอกสารก่อน) ภายในแต่ละกลุ่ม
+    explicit_hits.sort(key=lambda x: x[0])
+    other_hits.sort(key=lambda x: x[0])
+
+    # Explicit HN ก่อน → Other HN ตามหลัง
+    # เมื่อมี explicit HN (จาก pattern "HN 60139" ชัดเจน) แล้ว →
+    # ไม่ส่ง other HN ที่อาจเป็นเลข dose/code → ป้องกัน match ผิดคน
+    if explicit_hits:
+        return [hn for _, hn in explicit_hits]
+    return [hn for _, hn in other_hits]
 
 
 def _is_likely_hn(hn: str, text: str, pos: int) -> bool:
