@@ -49,6 +49,9 @@ def register_hd_module(app):
             start_self_ping(_render_url, interval=300)
             logger.info("HD self-ping started for %s", _render_url)
 
+        # Start daily pre-HD reminder scheduler (18:00 daily)
+        _start_daily_reminder_scheduler(app)
+
         return True
     except Exception as e:
         logger.error(f"Failed to register HD module: {e}")
@@ -360,3 +363,36 @@ def _auto_backup_hd_tables():
 
     except Exception as e:
         logger.error("HD backup failed: %s", e)
+
+
+def _start_daily_reminder_scheduler(app):
+    """Start background thread that sends pre-HD reminders daily at 18:00."""
+    import threading
+    import time
+    from datetime import datetime
+
+    def _reminder_loop():
+        last_sent_date = None
+        while True:
+            try:
+                now = datetime.now()
+                # Send at 18:00 Thai time (UTC+7), check every 5 minutes
+                if now.hour == 11 and now.minute < 5 and last_sent_date != now.date():
+                    # 18:00 Thai time ≈ 11:00 UTC
+                    with app.app_context():
+                        import os
+                        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+                        push_fn = app.config.get("LINE_PUSH_FN")
+                        registry = app.config.get("MASTER_REGISTRY")
+                        if db_url and push_fn:
+                            from .pre_hd_reminder import send_pre_hd_reminders
+                            result = send_pre_hd_reminders(push_fn, db_url, registry)
+                            logger.info("Daily pre-HD reminder: %s", result)
+                    last_sent_date = now.date()
+            except Exception as e:
+                logger.error("Reminder scheduler error: %s", e)
+            time.sleep(300)  # Check every 5 minutes
+
+    t = threading.Thread(target=_reminder_loop, daemon=True, name="hd-reminder")
+    t.start()
+    logger.info("HD daily reminder scheduler started (18:00 Thai time)")

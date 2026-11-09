@@ -60,6 +60,18 @@
 .shift-selector { display: flex; gap: 8px; margin-bottom: 16px; }
 .shift-btn { padding: 10px 20px; border: 2px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-card); cursor: pointer; font-weight: 600; min-height: var(--touch-min); color: var(--fg); }
 .shift-btn.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+/* Quick Vital button on bed card */
+.quick-vital-btn { font-size: .7rem; padding: 4px 10px; border: 1px solid var(--accent); border-radius: 12px; background: rgba(52,152,219,.1); color: var(--accent); font-weight: 600; cursor: pointer; margin-top: 4px; min-height: 28px; }
+.quick-vital-btn:active { background: var(--accent); color: #fff; }
+/* Quick Vital Modal */
+.qv-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 999; align-items: flex-end; justify-content: center; }
+.qv-overlay.open { display: flex; }
+.qv-sheet { background: var(--bg-card); border-radius: 16px 16px 0 0; width: 100%; max-width: 420px; padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
+.qv-sheet h3 { margin: 0 0 12px; font-size: 1rem; }
+.qv-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+.qv-grid input { padding: 12px; font-size: 1.1rem; text-align: center; border: 2px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); }
+.qv-grid input:focus { border-color: var(--accent); outline: none; }
+.qv-grid label { font-size: .75rem; color: var(--fg-muted); text-align: center; display: block; margin-bottom: 2px; }
 </style>
 {% endblock %}
 
@@ -99,6 +111,20 @@
 <p style="text-align:center;margin-top:16px;font-size:.8rem;color:var(--fg-muted);">
   อัปเดตล่าสุด: <span id="lastUpdated">-</span> | รีเฟรชอัตโนมัติทุก 30 วินาที
 </p>
+
+<!-- Quick Vital Modal -->
+<div class="qv-overlay" id="qvOverlay" onclick="if(event.target===this)closeQuickVital()">
+  <div class="qv-sheet">
+    <h3>❤️ บันทึก Vital — เตียง <span id="qvBed">-</span> <span id="qvName" style="font-weight:400;font-size:.85rem;color:var(--fg-muted);"></span></h3>
+    <div class="qv-grid">
+      <div><label>SBP</label><input type="number" id="qvSbp" inputmode="numeric" placeholder="120"></div>
+      <div><label>DBP</label><input type="number" id="qvDbp" inputmode="numeric" placeholder="80"></div>
+      <div><label>HR</label><input type="number" id="qvHr" inputmode="numeric" placeholder="80"></div>
+    </div>
+    <button class="btn btn-success" onclick="submitQuickVital()" style="width:100%;padding:14px;font-size:1rem;">✅ บันทึก</button>
+    <button class="btn" onclick="closeQuickVital()" style="width:100%;margin-top:8px;padding:10px;">ยกเลิก</button>
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -216,6 +242,12 @@ function renderBeds(beds){
       nextBadge = `<div style="font-size:.65rem;color:var(--info);margin-top:2px;">📅 ถัดไป: ${b.next_scheduled}</div>`;
     }
 
+    /* Quick vital button for active beds */
+    let quickBtn = '';
+    if(b.session_id && b.status === 'active'){
+      quickBtn = `<button class="quick-vital-btn" onclick="event.stopPropagation();openQuickVital(${b.session_id},${b.bed_number},'${pName}')">❤️ วัด BP</button>`;
+    }
+
     card.innerHTML = `
       <div class="bed-num">${b.bed_number}</div>
       <div class="bed-patient">${pName}</div>
@@ -224,6 +256,7 @@ function renderBeds(beds){
       ${timeLeft}
       <div class="bed-status">${s.label}</div>
       ${nextBadge}
+      ${quickBtn}
     `;
     grid.appendChild(card);
 
@@ -329,6 +362,41 @@ function selectShift(el, shift){
   document.querySelectorAll('.shift-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
   fetchBeds();
+}
+
+/* ── Quick Vital Entry ── */
+let _qvSessionId = null;
+function openQuickVital(sessionId, bedNum, patientName){
+  _qvSessionId = sessionId;
+  document.getElementById('qvBed').textContent = bedNum;
+  document.getElementById('qvName').textContent = patientName;
+  document.getElementById('qvSbp').value = '';
+  document.getElementById('qvDbp').value = '';
+  document.getElementById('qvHr').value = '';
+  document.getElementById('qvOverlay').classList.add('open');
+  setTimeout(()=>document.getElementById('qvSbp').focus(), 100);
+}
+function closeQuickVital(){
+  document.getElementById('qvOverlay').classList.remove('open');
+  _qvSessionId = null;
+}
+function submitQuickVital(){
+  const sbp = parseInt(document.getElementById('qvSbp').value);
+  if(!sbp){ showToast('กรุณากรอก SBP','warning'); return; }
+  const data = {
+    sbp: sbp,
+    dbp: parseInt(document.getElementById('qvDbp').value) || null,
+    hr: parseInt(document.getElementById('qvHr').value) || null,
+  };
+  hdFetch('/hd/api/v1/sessions/'+_qvSessionId+'/quick-vital',{
+    method:'POST', body:JSON.stringify(data)
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){ showToast(d.error,'danger'); return; }
+    showToast(d.message,'success');
+    if(d.alert) showToast('⚠️ '+d.alert.title,'danger');
+    closeQuickVital();
+    fetchBeds(); /* Refresh to show new vitals */
+  }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
 }
 
 /* Initial load + auto refresh */

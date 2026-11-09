@@ -1,0 +1,138 @@
+{% extends "hd_base.html" %}
+{% block title %}EPO Response — {{ patient_hn }}{% endblock %}
+{% block page_title %}📈 EPO Response Dashboard{% endblock %}
+
+{% block extra_css %}
+<style>
+.epo-card { background: var(--bg-card); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; border: 1px solid var(--border); }
+.epo-stat { display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }
+.epo-stat-item { flex: 1; min-width: 100px; text-align: center; padding: 12px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); }
+.epo-stat-item .num { font-size: 1.6rem; font-weight: 800; }
+.epo-stat-item .lbl { font-size: .75rem; color: var(--fg-muted); }
+.esa-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: .85rem; }
+.esa-row:last-child { border: none; }
+.esa-badge-given { background: rgba(39,174,96,.1); color: var(--success); padding: 2px 8px; border-radius: 8px; font-size: .75rem; font-weight: 600; }
+.esa-badge-skip { background: rgba(231,76,60,.1); color: var(--danger); padding: 2px 8px; border-radius: 8px; font-size: .75rem; font-weight: 600; }
+.skip-reasons { margin-top: 8px; }
+.skip-reason-bar { display: flex; align-items: center; gap: 8px; margin: 4px 0; font-size: .85rem; }
+.skip-reason-bar .bar { height: 8px; border-radius: 4px; background: var(--warning); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="epoContent">
+  <p style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const HN = '{{ patient_hn }}';
+
+function buildHbChart(hbTrend){
+  if(!hbTrend.length) return '<p style="color:var(--fg-muted);text-align:center;padding:20px;">ยังไม่มีข้อมูล Hb</p>';
+  const w=360, h=180, ml=40, mr=10, mt=20, mb=35;
+  const pw=w-ml-mr, ph=h-mt-mb;
+  const vals = hbTrend.map(d=>d.hb);
+  const minV = Math.min(Math.min(...vals)-1, 8);
+  const maxV = Math.max(Math.max(...vals)+1, 14);
+  const rng = maxV-minV||1;
+
+  const y10 = mt+ph-((10-minV)/rng*ph);
+  const y12 = mt+ph-((12-minV)/rng*ph);
+
+  let pts=[], dots=[];
+  hbTrend.forEach((d,i)=>{
+    const x = ml + (i/(Math.max(hbTrend.length-1,1)))*pw;
+    const y = mt + ph - ((d.hb-minV)/rng*ph);
+    pts.push(x.toFixed(1)+','+y.toFixed(1));
+    const c = (d.hb>=10&&d.hb<=12)?'var(--success)':(d.hb<10?'var(--danger)':'var(--warning)');
+    dots.push(`<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4" fill="${c}" stroke="var(--bg-card)" stroke-width="1.5"/>`);
+    if(i%Math.max(1,Math.floor(hbTrend.length/6))===0||i===hbTrend.length-1){
+      dots.push(`<text x="${x.toFixed(1)}" y="${h-5}" text-anchor="middle" font-size="8" fill="var(--fg-muted)">${d.date.substring(5)}</text>`);
+      dots.push(`<text x="${x.toFixed(1)}" y="${(y-8).toFixed(1)}" text-anchor="middle" font-size="8" fill="${c}" font-weight="600">${d.hb}</text>`);
+    }
+  });
+
+  let yLabels='';
+  for(let v=Math.ceil(minV);v<=Math.floor(maxV);v+=2){
+    const y=mt+ph-((v-minV)/rng*ph);
+    yLabels+=`<text x="${ml-5}" y="${y+3}" text-anchor="end" font-size="9" fill="var(--fg-muted)">${v}</text>`;
+    yLabels+=`<line x1="${ml}" y1="${y}" x2="${w-mr}" y2="${y}" stroke="var(--border)" stroke-dasharray="3"/>`;
+  }
+
+  return `<svg viewBox="0 0 ${w} ${h}" style="width:100%;height:auto;">
+    ${yLabels}
+    <rect x="${ml}" y="${y12.toFixed(1)}" width="${pw}" height="${(y10-y12).toFixed(1)}" fill="rgba(39,174,96,0.06)" rx="2"/>
+    <line x1="${ml}" y1="${y10.toFixed(1)}" x2="${w-mr}" y2="${y10.toFixed(1)}" stroke="var(--success)" stroke-dasharray="4" opacity=".3"/>
+    <line x1="${ml}" y1="${y12.toFixed(1)}" x2="${w-mr}" y2="${y12.toFixed(1)}" stroke="var(--success)" stroke-dasharray="4" opacity=".3"/>
+    <text x="${w-mr}" y="${y10.toFixed(1)-2}" text-anchor="end" font-size="8" fill="var(--success)">Hb 10</text>
+    <text x="${w-mr}" y="${y12.toFixed(1)-2}" text-anchor="end" font-size="8" fill="var(--success)">Hb 12</text>
+    <polyline points="${pts.join(' ')}" fill="none" stroke="var(--accent)" stroke-width="2" stroke-linejoin="round"/>
+    ${dots.join('')}
+  </svg>`;
+}
+
+function loadEpoDashboard(){
+  hdFetch('/hd/api/v1/epo/dashboard/'+HN)
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.error){ document.getElementById('epoContent').innerHTML='<p style="color:var(--danger);">'+d.error+'</p>'; return; }
+      const p = d.patient;
+      const s = d.stats;
+      const esaHistory = d.esa_history || [];
+
+      let esaRows = '';
+      esaHistory.slice().reverse().forEach(e=>{
+        const badge = e.given
+          ? `<span class="esa-badge-given">💉 ${e.drug||'ESA'} ${e.dose||''} ${e.route||''}</span>`
+          : `<span class="esa-badge-skip">❌ ${e.skip_reason||'ไม่ระบุ'}</span>`;
+        esaRows += `<div class="esa-row"><span style="min-width:60px;">${e.date||'-'}</span>${badge}</div>`;
+      });
+
+      /* Skip reason bars */
+      let skipBars = '';
+      const topSkip = s.top_skip_reasons||[];
+      const maxSkip = topSkip.length ? topSkip[0][1] : 1;
+      topSkip.forEach(([reason,count])=>{
+        const w = Math.max(10, count/maxSkip*100);
+        skipBars += `<div class="skip-reason-bar"><div class="bar" style="width:${w}%;"></div><span>${reason} (${count})</span></div>`;
+      });
+
+      document.getElementById('epoContent').innerHTML = `
+        <div class="epo-card">
+          <h3 style="margin:0 0 8px;">${p.name} — HN ${p.hn}</h3>
+          <div style="font-size:.85rem;color:var(--fg-muted);">
+            💊 ESA สั่ง: <strong>${p.prescribed_esa||'ไม่มี'}</strong> ${p.prescribed_dose||''}
+            | VA: ${p.va||'-'} | DW: ${p.dw||'-'} kg
+          </div>
+        </div>
+
+        <div class="epo-stat">
+          <div class="epo-stat-item"><div class="num" style="color:var(--accent);">${s.avg_hb||'-'}</div><div class="lbl">Hb เฉลี่ย (g/dL)</div></div>
+          <div class="epo-stat-item"><div class="num" style="color:${s.hb_in_target_pct>=50?'var(--success)':'var(--danger)'};">${s.hb_in_target_pct}%</div><div class="lbl">Hb ในเป้า (10-12)</div></div>
+          <div class="epo-stat-item"><div class="num" style="color:var(--success);">${s.esa_given}</div><div class="lbl">ฉีด ESA</div></div>
+          <div class="epo-stat-item"><div class="num" style="color:var(--danger);">${s.esa_skipped}</div><div class="lbl">งด ESA</div></div>
+        </div>
+
+        <div class="epo-card">
+          <h4 style="margin:0 0 8px;">📈 Hb Trend (6 เดือน)</h4>
+          ${buildHbChart(d.hb_trend||[])}
+        </div>
+
+        <div class="epo-card">
+          <h4 style="margin:0 0 8px;">💉 ประวัติ ESA</h4>
+          ${esaRows || '<p style="color:var(--fg-muted);text-align:center;">ยังไม่มีข้อมูล</p>'}
+        </div>
+
+        ${skipBars ? '<div class="epo-card"><h4 style="margin:0 0 8px;">📌 เหตุผลงด ESA</h4><div class="skip-reasons">'+skipBars+'</div></div>' : ''}
+      `;
+    })
+    .catch(e=>{
+      document.getElementById('epoContent').innerHTML='<p style="color:var(--danger);">โหลดข้อมูลไม่สำเร็จ</p>';
+    });
+}
+
+loadEpoDashboard();
+</script>
+{% endblock %}

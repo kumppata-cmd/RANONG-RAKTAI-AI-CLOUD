@@ -1,0 +1,113 @@
+{% extends "hd_base.html" %}
+{% block title %}ตัวชี้วัดคุณภาพ HD{% endblock %}
+{% block page_title %}📊 ตัวชี้วัดคุณภาพ HA/สปสช{% endblock %}
+
+{% block extra_css %}
+<style>
+.qi-card { background: var(--bg-card); border-radius: var(--radius); padding: 16px; margin-bottom: 12px; border: 1px solid var(--border); }
+.qi-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; flex-wrap: wrap; gap: 8px; }
+.qi-period { display: flex; gap: 8px; align-items: center; }
+.qi-grid { display: grid; gap: 12px; }
+.qi-item { padding: 16px; border-radius: var(--radius-sm); border: 2px solid var(--border); }
+.qi-item.pass { border-color: var(--success); background: rgba(39,174,96,.03); }
+.qi-item.fail { border-color: var(--danger); background: rgba(231,76,60,.03); }
+.qi-name { font-size: .85rem; font-weight: 600; margin-bottom: 8px; }
+.qi-value { font-size: 2rem; font-weight: 800; }
+.qi-bar { height: 8px; background: var(--border); border-radius: 4px; margin: 8px 0; overflow: hidden; }
+.qi-bar-fill { height: 100%; border-radius: 4px; transition: width .5s; }
+.qi-meta { display: flex; justify-content: space-between; font-size: .75rem; color: var(--fg-muted); }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="qi-header">
+  <div class="qi-period">
+    <select class="form-control" id="qiMonth" style="width:auto;">
+      <option value="1">ม.ค.</option><option value="2">ก.พ.</option><option value="3">มี.ค.</option>
+      <option value="4">เม.ย.</option><option value="5">พ.ค.</option><option value="6">มิ.ย.</option>
+      <option value="7">ก.ค.</option><option value="8">ส.ค.</option><option value="9">ก.ย.</option>
+      <option value="10">ต.ค.</option><option value="11">พ.ย.</option><option value="12">ธ.ค.</option>
+    </select>
+    <select class="form-control" id="qiYear" style="width:auto;"></select>
+    <button class="btn btn-primary" onclick="loadQI()">แสดงผล</button>
+  </div>
+  <button class="btn" onclick="sendQILine()">📱 ส่ง LINE</button>
+</div>
+
+<div class="qi-card" style="text-align:center;margin-bottom:16px;">
+  <span style="font-size:.85rem;color:var(--fg-muted);">ผู้ป่วย</span>
+  <span id="qiPatients" style="font-size:1.2rem;font-weight:800;margin:0 8px;">-</span>
+  <span style="font-size:.85rem;color:var(--fg-muted);">คน</span>
+  <span style="margin:0 8px;color:var(--border);">|</span>
+  <span style="font-size:.85rem;color:var(--fg-muted);">Sessions</span>
+  <span id="qiSessions" style="font-size:1.2rem;font-weight:800;margin:0 8px;">-</span>
+  <span style="font-size:.85rem;color:var(--fg-muted);">รอบ</span>
+</div>
+
+<div class="qi-grid" id="qiGrid">
+  <p style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+/* Set default month/year */
+const now = new Date();
+document.getElementById('qiMonth').value = now.getMonth()+1;
+const yearSel = document.getElementById('qiYear');
+for(let y=now.getFullYear();y>=now.getFullYear()-2;y--){
+  const opt = document.createElement('option');
+  opt.value=y; opt.textContent=y+543;
+  yearSel.appendChild(opt);
+}
+
+function loadQI(){
+  const m = document.getElementById('qiMonth').value;
+  const y = document.getElementById('qiYear').value;
+  document.getElementById('qiGrid').innerHTML='<p style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</p>';
+  hdFetch(`/hd/api/v1/report/quality-indicators?month=${m}&year=${y}`)
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.error){ document.getElementById('qiGrid').innerHTML='<p style="color:var(--danger);">'+d.error+'</p>'; return; }
+      document.getElementById('qiPatients').textContent = d.unique_patients;
+      document.getElementById('qiSessions').textContent = d.total_sessions;
+
+      const grid = document.getElementById('qiGrid');
+      grid.innerHTML = '';
+      (d.indicators||[]).forEach(ind=>{
+        const lower = ind.lower_is_better;
+        const pass = ind.status === 'pass';
+        const icon = pass ? '✅' : '❌';
+        const color = pass ? 'var(--success)' : 'var(--danger)';
+        const targetLabel = lower ? '≤'+ind.target_pct+'%' : '≥'+ind.target_pct+'%';
+        const barW = Math.min(100, ind.value_pct);
+
+        grid.innerHTML += `
+          <div class="qi-item ${ind.status}">
+            <div class="qi-name">${icon} ${ind.name}</div>
+            <div class="qi-value" style="color:${color};">${ind.value_pct}%</div>
+            <div class="qi-bar"><div class="qi-bar-fill" style="width:${barW}%;background:${color};"></div></div>
+            <div class="qi-meta">
+              <span>${ind.numerator}/${ind.denominator}</span>
+              <span>เป้า: ${targetLabel}</span>
+            </div>
+          </div>`;
+      });
+    })
+    .catch(()=>{ document.getElementById('qiGrid').innerHTML='<p style="color:var(--danger);">โหลดไม่สำเร็จ</p>'; });
+}
+
+function sendQILine(){
+  const m = document.getElementById('qiMonth').value;
+  const y = document.getElementById('qiYear').value;
+  hdFetch(`/hd/api/v1/report/quality-indicators?month=${m}&year=${y}&send_line=true`)
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.line_sent) showToast('ส่ง LINE สำเร็จ','success');
+      else showToast('ส่ง LINE ไม่สำเร็จ — ตรวจสอบ Physician LINE ID','warning');
+    }).catch(()=>showToast('เกิดข้อผิดพลาด','danger'));
+}
+
+loadQI();
+</script>
+{% endblock %}

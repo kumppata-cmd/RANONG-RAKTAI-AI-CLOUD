@@ -155,6 +155,18 @@ def hd_settings_page():
     return render_template("hd_settings.html")
 
 
+@hd_web.route("/epo-dashboard/<hn>")
+def hd_epo_dashboard_page(hn):
+    """EPO Response Dashboard page."""
+    return render_template("hd_epo_dashboard.html", patient_hn=hn)
+
+
+@hd_web.route("/quality")
+def hd_quality_page():
+    """Quality indicators page."""
+    return render_template("hd_quality.html")
+
+
 # ── Health / Status ───────────────────────────────────────
 
 @hd_bp.route("/health", methods=["GET"])
@@ -2302,3 +2314,815 @@ def monthly_summary_report():
     except Exception as e:
         logger.error("monthly_summary error: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════
+# F9: Pre-HD LINE Reminder
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/reminder/pre-hd", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def trigger_pre_hd_reminder():
+    """Manually trigger pre-HD reminders (also called by daily scheduler)."""
+    import os
+    from .pre_hd_reminder import send_pre_hd_reminders, format_nurse_summary
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    registry = current_app.config.get("MASTER_REGISTRY")
+
+    result = send_pre_hd_reminders(push_fn, db_url, registry)
+
+    # Also send nurse group summary
+    if result.get("total_scheduled", 0) > 0:
+        nurse_msg = format_nurse_summary(result)
+        try:
+            from .blueprint import notify_nurse_group as _nng
+        except ImportError:
+            pass
+        # Use LINE Notify if available
+        notify_token = None
+        if db_url:
+            try:
+                import psycopg2
+                conn = psycopg2.connect(db_url, connect_timeout=5)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT value FROM hd_settings WHERE key='line_notify_token'")
+                    r = cur.fetchone()
+                    if r:
+                        notify_token = r[0]
+                conn.close()
+            except Exception:
+                pass
+        if notify_token:
+            try:
+                import requests as req
+                req.post("https://notify-api.line.me/api/notify",
+                         headers={"Authorization": f"Bearer {notify_token}"},
+                         data={"message": "\n" + nurse_msg}, timeout=10)
+            except Exception as e:
+                logger.warning("Nurse summary notify failed: %s", e)
+
+    log_action(user_id=g.get("hd_user_id"), action="reminder.pre_hd",
+               resource_type="reminder", ip_address=request.remote_addr or "")
+    return jsonify(result)
+
+
+@hd_bp.route("/reminder/pre-hd/preview", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def preview_pre_hd_reminder():
+    """Preview tomorrow's scheduled patients without sending."""
+    import os
+    from .pre_hd_reminder import get_tomorrow_patients
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"patients": [], "error": "No database"})
+
+    try:
+        patients, tomorrow = get_tomorrow_patients(db_url)
+        return jsonify({"patients": patients, "tomorrow": str(tomorrow),
+                        "total": len(patients)})
+    except Exception as e:
+        return jsonify({"patients": [], "error": str(e)})
+
+
+# ══════════════════════════════════════════════════════════
+# F10: EPO Response Dashboard
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/epo/dashboard/<hn>", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def epo_dashboard(hn):
+    """Hb/Hct trend + ESA dose history for a patient (last 6 months)."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Patient info
+            cur.execute("""
+                SELECT patient_name, esa_drug, esa_dose, vascular_access, dry_weight
+                FROM hd_patient_mapping WHERE hn = %s
+            """, (hn,))
+            prow = cur.fetchone()
+            if not prow:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+
+            # Last 6 months of sessions with Hb/Hct + ESA
+            cur.execute("""
+                SELECT session_date, hb_value, hct_value,
+                       esa_given, esa_drug_given, esa_dose_given,
+                       esa_route, esa_skip_reason, shift
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE p.hn = %s AND s.status = 'completed'
+                  AND s.session_date >= CURRENT_DATE - INTERVAL '180 days'
+                ORDER BY s.session_date, s.started_at
+            """, (hn,))
+            rows = cur.fetchall()
+        conn.close()
+
+        # Build trend data
+        hb_trend = []
+        esa_history = []
+        for r in rows:
+            entry = {"date": str(r[0]) if r[0] else None, "shift": r[8]}
+            if r[1]:
+                hb_trend.append({
+                    "date": entry["date"], "hb": float(r[1]),
+                    "hct": float(r[2]) if r[2] else None,
+                })
+            if r[3] is not None:
+                esa_history.append({
+                    "date": entry["date"], "given": r[3],
+                    "drug": r[4], "dose": r[5], "route": r[6],
+                    "skip_reason": r[7],
+                })
+
+        # Calculate stats
+        hb_values = [h["hb"] for h in hb_trend]
+        avg_hb = round(sum(hb_values) / len(hb_values), 1) if hb_values else None
+        in_target = sum(1 for h in hb_values if 10 <= h <= 12)
+        target_pct = round(in_target / len(hb_values) * 100) if hb_values else 0
+
+        esa_given_count = sum(1 for e in esa_history if e["given"])
+        esa_skip_count = sum(1 for e in esa_history if not e["given"])
+        skip_reasons = {}
+        for e in esa_history:
+            if not e["given"] and e.get("skip_reason"):
+                skip_reasons[e["skip_reason"]] = skip_reasons.get(e["skip_reason"], 0) + 1
+
+        return jsonify({
+            "patient": {
+                "hn": hn, "name": prow[0],
+                "prescribed_esa": prow[1], "prescribed_dose": prow[2],
+                "va": prow[3], "dw": float(prow[4]) if prow[4] else None,
+            },
+            "hb_trend": hb_trend,
+            "esa_history": esa_history,
+            "stats": {
+                "avg_hb": avg_hb,
+                "hb_in_target_pct": target_pct,
+                "total_sessions": len(rows),
+                "esa_given": esa_given_count,
+                "esa_skipped": esa_skip_count,
+                "top_skip_reasons": sorted(skip_reasons.items(), key=lambda x: -x[1])[:3],
+            },
+        })
+    except Exception as e:
+        logger.error("epo_dashboard error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════
+# F11: Monthly ESA Report
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/report/esa-monthly", methods=["GET"])
+@require_role("physician", "admin")
+def esa_monthly_report():
+    """Monthly ESA usage and Hb summary."""
+    import os
+    from datetime import date as dt_date
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+
+    month = request.args.get("month", type=int, default=dt_date.today().month)
+    year = request.args.get("year", type=int, default=dt_date.today().year)
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Sessions in month with ESA data
+            cur.execute("""
+                SELECT p.hn, p.patient_name, p.esa_drug, p.esa_dose,
+                       s.esa_given, s.esa_drug_given, s.esa_dose_given,
+                       s.esa_skip_reason, s.hb_value, s.hct_value,
+                       s.session_date
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE s.status = 'completed'
+                  AND EXTRACT(MONTH FROM s.session_date) = %s
+                  AND EXTRACT(YEAR FROM s.session_date) = %s
+                ORDER BY p.hn, s.session_date
+            """, (month, year))
+            rows = cur.fetchall()
+
+            # Count active patients with ESA prescribed
+            cur.execute("""
+                SELECT COUNT(*) FROM hd_patient_mapping
+                WHERE is_active = TRUE AND esa_drug IS NOT NULL AND esa_drug != ''
+            """)
+            total_esa_patients = cur.fetchone()[0]
+        conn.close()
+
+        # Aggregate per patient
+        patient_data = {}
+        all_hb = []
+        skip_reasons_all = {}
+        total_given = 0
+        total_skipped = 0
+        total_no_record = 0
+
+        for r in rows:
+            hn = r[0]
+            if hn not in patient_data:
+                patient_data[hn] = {
+                    "hn": hn, "name": r[1],
+                    "prescribed": r[2], "prescribed_dose": r[3],
+                    "sessions": 0, "esa_given": 0, "esa_skipped": 0,
+                    "no_record": 0, "hb_values": [], "hb_latest": None,
+                }
+            pd = patient_data[hn]
+            pd["sessions"] += 1
+            if r[4] is True:
+                pd["esa_given"] += 1
+                total_given += 1
+            elif r[4] is False:
+                pd["esa_skipped"] += 1
+                total_skipped += 1
+                reason = r[7] or "ไม่ระบุเหตุผล"
+                skip_reasons_all[reason] = skip_reasons_all.get(reason, 0) + 1
+            else:
+                pd["no_record"] += 1
+                total_no_record += 1
+            if r[8]:
+                hb = float(r[8])
+                pd["hb_values"].append(hb)
+                pd["hb_latest"] = hb
+                all_hb.append(hb)
+
+        # Summary
+        avg_hb = round(sum(all_hb) / len(all_hb), 1) if all_hb else None
+        hb_in_target = sum(1 for h in all_hb if 10 <= h <= 12)
+        hb_target_pct = round(hb_in_target / len(all_hb) * 100) if all_hb else 0
+
+        # Per-patient summary
+        patients_list = []
+        for pd in sorted(patient_data.values(), key=lambda x: x["hn"]):
+            avg = round(sum(pd["hb_values"]) / len(pd["hb_values"]), 1) if pd["hb_values"] else None
+            patients_list.append({
+                "hn": pd["hn"], "name": pd["name"],
+                "prescribed_esa": pd["prescribed"],
+                "sessions": pd["sessions"],
+                "esa_given": pd["esa_given"],
+                "esa_skipped": pd["esa_skipped"],
+                "no_record": pd["no_record"],
+                "avg_hb": avg,
+                "latest_hb": pd["hb_latest"],
+            })
+
+        top_skip = sorted(skip_reasons_all.items(), key=lambda x: -x[1])[:5]
+
+        report = {
+            "month": month, "year": year,
+            "total_esa_patients": total_esa_patients,
+            "patients_with_sessions": len(patient_data),
+            "summary": {
+                "total_sessions": len(rows),
+                "esa_given": total_given,
+                "esa_skipped": total_skipped,
+                "no_esa_record": total_no_record,
+                "avg_hb": avg_hb,
+                "hb_in_target_pct": hb_target_pct,
+                "top_skip_reasons": top_skip,
+            },
+            "patients": patients_list,
+        }
+
+        # Generate LINE message if requested
+        if request.args.get("send_line") == "true":
+            line_msg = _format_esa_monthly_line(report)
+            push_fn = current_app.config.get("LINE_PUSH_FN")
+            physician_id = _get_physician_line_id(db_url)
+            if push_fn and physician_id:
+                try:
+                    push_fn(physician_id, line_msg)
+                    report["line_sent"] = True
+                except Exception as e:
+                    report["line_sent"] = False
+                    report["line_error"] = str(e)
+
+        return jsonify(report)
+    except Exception as e:
+        logger.error("esa_monthly_report error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+def _format_esa_monthly_line(report):
+    """Format ESA monthly report for LINE."""
+    s = report["summary"]
+    thai_months = ["", "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+                   "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
+    month_name = thai_months[report["month"]] if 1 <= report["month"] <= 12 else str(report["month"])
+
+    # Top skip reasons text
+    skip_text = ""
+    if s["top_skip_reasons"]:
+        skip_text = "\n".join(f"  • {r}: {c} ครั้ง" for r, c in s["top_skip_reasons"][:3])
+
+    return (
+        f"📊 รายงาน ESA ประจำเดือน {month_name} {report['year'] + 543}\n"
+        f"━━━━━━━━━━━━\n"
+        f"👥 ผู้ป่วยมี ESA: {report['total_esa_patients']} คน\n"
+        f"📋 Sessions ทั้งหมด: {s['total_sessions']} รอบ\n"
+        f"━━━━━━━━━━━━\n"
+        f"💉 ฉีด ESA: {s['esa_given']} ครั้ง\n"
+        f"❌ งด ESA: {s['esa_skipped']} ครั้ง\n"
+        f"⚠️ ไม่บันทึก: {s['no_esa_record']} ครั้ง\n"
+        f"━━━━━━━━━━━━\n"
+        f"🔬 Hb เฉลี่ย: {s['avg_hb'] or '-'} g/dL\n"
+        f"🎯 Hb ในเป้า (10-12): {s['hb_in_target_pct']}%\n"
+        f"━━━━━━━━━━━━\n"
+        f"📌 เหตุผลงด ESA:\n{skip_text or '  ไม่มี'}\n"
+        f"━━━━━━━━━━━━\n"
+        f"HD Smart Monitoring — คลินิกระนอง รักษ์ไต"
+    )
+
+
+def _get_physician_line_id(db_url):
+    """Get physician LINE ID from settings."""
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT value FROM hd_settings WHERE key='physician_line_id'")
+            r = cur.fetchone()
+        conn.close()
+        return r[0] if r else None
+    except Exception:
+        return None
+
+
+# ══════════════════════════════════════════════════════════
+# F12: Quick Vital Entry from Dashboard
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/sessions/<int:session_id>/quick-vital", methods=["POST"])
+@require_role("physician", "nurse")
+def quick_vital_entry(session_id):
+    """Quick BP/HR entry without opening the full session page."""
+    data = request.get_json(silent=True) or {}
+    sbp = data.get("sbp")
+    dbp = data.get("dbp")
+    hr = data.get("hr")
+
+    if not sbp:
+        return jsonify({"error": "ต้องระบุ SBP"}), 400
+
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Verify session exists and is active
+            cur.execute("SELECT status FROM hd_sessions WHERE id = %s", (session_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบ session"}), 404
+            if row[0] != "in_progress":
+                conn.close()
+                return jsonify({"error": "Session ไม่อยู่ระหว่างฟอก"}), 400
+
+            cur.execute("""
+                INSERT INTO hd_vital_signs (session_id, phase, sbp, dbp, heart_rate, recorded_at)
+                VALUES (%s, 'intra', %s, %s, %s, NOW())
+                RETURNING id
+            """, (session_id, sbp, dbp, hr))
+            vital_id = cur.fetchone()[0]
+
+            # Check alert thresholds
+            alert = None
+            if sbp and (int(sbp) < 90 or int(sbp) > 180):
+                severity = "critical" if int(sbp) < 80 or int(sbp) > 200 else "warning"
+                title = f"BP ผิดปกติ: {sbp}/{dbp or '-'} mmHg"
+                msg = f"BP {sbp}/{dbp or '-'} mmHg (Quick Entry)"
+                cur.execute("""
+                    INSERT INTO hd_clinical_alerts (session_id, severity, title, message, acknowledged)
+                    VALUES (%s, %s, %s, %s, FALSE) RETURNING id
+                """, (session_id, severity, title, msg))
+                alert = {"severity": severity, "title": title}
+
+        conn.commit()
+        conn.close()
+
+        log_action(user_id=g.get("hd_user_id"), action="vital.quick_entry",
+                   resource_type="vital", resource_id=vital_id,
+                   ip_address=request.remote_addr or "")
+
+        return jsonify({
+            "vital_id": vital_id,
+            "sbp": sbp, "dbp": dbp, "hr": hr,
+            "alert": alert,
+            "message": f"บันทึก BP {sbp}/{dbp or '-'} HR {hr or '-'} สำเร็จ",
+        })
+    except Exception as e:
+        logger.error("quick_vital_entry error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════
+# F13: HA/สปสช Quality Indicators
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/report/quality-indicators", methods=["GET"])
+@require_role("physician", "admin")
+def quality_indicators_report():
+    """Auto-generate HA/สปสช quality indicators."""
+    import os
+    from datetime import date as dt_date
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+
+    month = request.args.get("month", type=int, default=dt_date.today().month)
+    year = request.args.get("year", type=int, default=dt_date.today().year)
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # 1. Kt/V adequacy (≥1.2)
+            cur.execute("""
+                SELECT COUNT(*) FILTER (WHERE kt_v >= 1.2),
+                       COUNT(*) FILTER (WHERE kt_v IS NOT NULL AND kt_v > 0),
+                       COUNT(*)
+                FROM hd_sessions
+                WHERE status = 'completed'
+                  AND EXTRACT(MONTH FROM session_date) = %s
+                  AND EXTRACT(YEAR FROM session_date) = %s
+            """, (month, year))
+            kt_row = cur.fetchone()
+            ktv_adequate = kt_row[0] or 0
+            ktv_measured = kt_row[1] or 0
+            total_sessions = kt_row[2] or 0
+
+            # 2. Hb in target (10-12 g/dL)
+            cur.execute("""
+                SELECT COUNT(*) FILTER (WHERE hb_value >= 10 AND hb_value <= 12),
+                       COUNT(*) FILTER (WHERE hb_value IS NOT NULL)
+                FROM hd_sessions
+                WHERE status = 'completed'
+                  AND EXTRACT(MONTH FROM session_date) = %s
+                  AND EXTRACT(YEAR FROM session_date) = %s
+            """, (month, year))
+            hb_row = cur.fetchone()
+            hb_target = hb_row[0] or 0
+            hb_measured = hb_row[1] or 0
+
+            # 3. ESA coverage
+            cur.execute("""
+                SELECT COUNT(DISTINCT s.patient_id)
+                       FILTER (WHERE s.esa_given = TRUE),
+                       COUNT(DISTINCT s.patient_id)
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE s.status = 'completed'
+                  AND p.esa_drug IS NOT NULL AND p.esa_drug != ''
+                  AND EXTRACT(MONTH FROM s.session_date) = %s
+                  AND EXTRACT(YEAR FROM s.session_date) = %s
+            """, (month, year))
+            esa_row = cur.fetchone()
+            esa_received = esa_row[0] or 0
+            esa_prescribed = esa_row[1] or 0
+
+            # 4. Intradialytic Hypotension (SBP < 90)
+            cur.execute("""
+                SELECT COUNT(DISTINCT v.session_id), %s
+                FROM hd_vital_signs v
+                JOIN hd_sessions s ON s.id = v.session_id
+                WHERE s.status = 'completed'
+                  AND v.phase = 'intra' AND v.sbp < 90
+                  AND EXTRACT(MONTH FROM s.session_date) = %s
+                  AND EXTRACT(YEAR FROM s.session_date) = %s
+            """, (total_sessions, month, year))
+            idh_row = cur.fetchone()
+            idh_sessions = idh_row[0] or 0
+
+            # 5. VA infection (from alerts with infection keyword)
+            cur.execute("""
+                SELECT COUNT(DISTINCT a.session_id)
+                FROM hd_clinical_alerts a
+                JOIN hd_sessions s ON s.id = a.session_id
+                WHERE s.status = 'completed'
+                  AND (a.title ILIKE '%%infection%%' OR a.title ILIKE '%%ติดเชื้อ%%'
+                       OR a.message ILIKE '%%infection%%')
+                  AND EXTRACT(MONTH FROM s.session_date) = %s
+                  AND EXTRACT(YEAR FROM s.session_date) = %s
+            """, (month, year))
+            infection_row = cur.fetchone()
+            infection_count = infection_row[0] or 0
+
+            # 6. Unique patients
+            cur.execute("""
+                SELECT COUNT(DISTINCT patient_id) FROM hd_sessions
+                WHERE status = 'completed'
+                  AND EXTRACT(MONTH FROM session_date) = %s
+                  AND EXTRACT(YEAR FROM session_date) = %s
+            """, (month, year))
+            unique_patients = cur.fetchone()[0] or 0
+
+        conn.close()
+
+        def pct(a, b):
+            return round(a / b * 100, 1) if b > 0 else 0
+
+        indicators = {
+            "month": month, "year": year,
+            "total_sessions": total_sessions,
+            "unique_patients": unique_patients,
+            "indicators": [
+                {
+                    "code": "HD-KTV",
+                    "name": "Kt/V Adequacy (≥1.2)",
+                    "numerator": ktv_adequate, "denominator": ktv_measured,
+                    "value_pct": pct(ktv_adequate, ktv_measured),
+                    "target_pct": 65, "unit": "%",
+                    "status": "pass" if pct(ktv_adequate, ktv_measured) >= 65 else "fail",
+                },
+                {
+                    "code": "HD-HB",
+                    "name": "Hb in Target (10-12 g/dL)",
+                    "numerator": hb_target, "denominator": hb_measured,
+                    "value_pct": pct(hb_target, hb_measured),
+                    "target_pct": 50, "unit": "%",
+                    "status": "pass" if pct(hb_target, hb_measured) >= 50 else "fail",
+                },
+                {
+                    "code": "HD-ESA",
+                    "name": "ESA Coverage",
+                    "numerator": esa_received, "denominator": esa_prescribed,
+                    "value_pct": pct(esa_received, esa_prescribed),
+                    "target_pct": 80, "unit": "%",
+                    "status": "pass" if pct(esa_received, esa_prescribed) >= 80 else "fail",
+                },
+                {
+                    "code": "HD-IDH",
+                    "name": "Intradialytic Hypotension Rate",
+                    "numerator": idh_sessions, "denominator": total_sessions,
+                    "value_pct": pct(idh_sessions, total_sessions),
+                    "target_pct": 10, "unit": "%",
+                    "status": "pass" if pct(idh_sessions, total_sessions) <= 10 else "fail",
+                    "lower_is_better": True,
+                },
+                {
+                    "code": "HD-INF",
+                    "name": "VA Infection Rate",
+                    "numerator": infection_count, "denominator": total_sessions,
+                    "value_pct": pct(infection_count, total_sessions),
+                    "target_pct": 2, "unit": "%",
+                    "status": "pass" if pct(infection_count, total_sessions) <= 2 else "fail",
+                    "lower_is_better": True,
+                },
+            ],
+        }
+
+        # LINE summary if requested
+        if request.args.get("send_line") == "true":
+            line_msg = _format_qi_line(indicators)
+            push_fn = current_app.config.get("LINE_PUSH_FN")
+            physician_id = _get_physician_line_id(db_url)
+            if push_fn and physician_id:
+                try:
+                    push_fn(physician_id, line_msg)
+                    indicators["line_sent"] = True
+                except Exception:
+                    indicators["line_sent"] = False
+
+        return jsonify(indicators)
+    except Exception as e:
+        logger.error("quality_indicators error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+def _format_qi_line(qi):
+    """Format quality indicators for LINE."""
+    thai_months = ["", "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+                   "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
+    month_name = thai_months[qi["month"]] if 1 <= qi["month"] <= 12 else str(qi["month"])
+    lines = [
+        f"📊 ตัวชี้วัดคุณภาพ HD — {month_name} {qi['year'] + 543}",
+        "━━━━━━━━━━━━",
+        f"👥 ผู้ป่วย: {qi['unique_patients']} คน | Sessions: {qi['total_sessions']} รอบ",
+        "━━━━━━━━━━━━",
+    ]
+    for ind in qi["indicators"]:
+        icon = "✅" if ind["status"] == "pass" else "❌"
+        lower = ind.get("lower_is_better", False)
+        target_label = f"≤{ind['target_pct']}%" if lower else f"≥{ind['target_pct']}%"
+        lines.append(f"{icon} {ind['name']}: {ind['value_pct']}% (เป้า {target_label})")
+        lines.append(f"   ({ind['numerator']}/{ind['denominator']})")
+    lines.extend([
+        "━━━━━━━━━━━━",
+        "HD Smart Monitoring — คลินิกระนอง รักษ์ไต",
+    ])
+    return "\n".join(lines)
+
+
+# ══════════════════════════════════════════════════════════
+# F14: Patient Self-View (ผลฟอก + Hb trend)
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/my-results/<token>", methods=["GET"])
+def patient_self_view(token):
+    """Patient-facing page to view own HD results.
+
+    Token = HN encrypted or simple HMAC-based token linked to LINE userId.
+    For now: token = HN (will be upgraded to HMAC in production).
+    """
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return "<h2>ระบบไม่พร้อมใช้งาน</h2>", 503
+
+    # Decode token → HN (simple for now, upgrade to HMAC later)
+    hn = token
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Patient info
+            cur.execute("""
+                SELECT patient_name, vascular_access, schedule_days, dry_weight
+                FROM hd_patient_mapping WHERE hn = %s AND is_active = TRUE
+            """, (hn,))
+            prow = cur.fetchone()
+            if not prow:
+                conn.close()
+                return "<h2>ไม่พบข้อมูล</h2>", 404
+
+            # Last 10 sessions
+            cur.execute("""
+                SELECT session_date, pre_weight, post_weight, actual_uf,
+                       hb_value, hct_value, esa_given, esa_drug_given,
+                       notes, started_at, ended_at
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE p.hn = %s AND s.status = 'completed'
+                ORDER BY s.session_date DESC, s.started_at DESC
+                LIMIT 10
+            """, (hn,))
+            sessions = cur.fetchall()
+
+            # Hb trend (last 6 months)
+            cur.execute("""
+                SELECT session_date, hb_value
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE p.hn = %s AND s.status = 'completed' AND s.hb_value IS NOT NULL
+                ORDER BY s.session_date
+                LIMIT 20
+            """, (hn,))
+            hb_data = cur.fetchall()
+        conn.close()
+
+        # Build SVG Hb trend chart
+        hb_svg = _build_hb_trend_svg(hb_data)
+
+        # Session rows
+        session_rows = ""
+        for s in sessions:
+            dt = s[0].strftime("%d/%m") if s[0] else "-"
+            duration = "-"
+            if s[9] and s[10]:
+                h = (s[10] - s[9]).total_seconds() / 3600
+                duration = f"{h:.1f} ชม."
+            uf = f"{int(s[3])} mL" if s[3] else "-"
+            hb_str = f"{float(s[4]):.1f}" if s[4] else "-"
+            esa_str = "💉" if s[6] else ("❌" if s[6] is False else "-")
+            session_rows += f"""
+            <tr>
+              <td>{dt}</td>
+              <td>{s[1] or '-'}→{s[2] or '-'}</td>
+              <td>{uf}</td>
+              <td>{hb_str}</td>
+              <td>{esa_str}</td>
+            </tr>"""
+
+        return f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ผลฟอกเลือด — {prow[0]}</title>
+<style>
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:-apple-system,sans-serif;background:#f5f7fa;color:#2c3e50;padding:16px;max-width:480px;margin:0 auto}}
+  .card{{background:#fff;border-radius:12px;padding:16px;margin-bottom:12px;box-shadow:0 1px 3px rgba(0,0,0,.08)}}
+  .header{{text-align:center;padding:20px 0;}}
+  .header h1{{font-size:1.2rem;color:#2980b9}}
+  .header .name{{font-size:1.4rem;font-weight:800;margin-top:4px}}
+  .info-row{{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #eee;font-size:.9rem}}
+  .info-row:last-child{{border:none}}
+  .label{{color:#7f8c8d}}.value{{font-weight:600}}
+  table{{width:100%;border-collapse:collapse;font-size:.8rem}}
+  th{{background:#2980b9;color:#fff;padding:8px 6px;text-align:left}}
+  td{{padding:8px 6px;border-bottom:1px solid #eee}}
+  .chart-title{{font-size:.9rem;font-weight:700;margin-bottom:8px;color:#2c3e50}}
+  .target-band{{font-size:.75rem;color:#27ae60;margin-top:4px}}
+  .footer{{text-align:center;font-size:.75rem;color:#bdc3c7;margin-top:20px;padding:12px}}
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>🏥 คลินิกระนอง รักษ์ไต</h1>
+    <div class="name">{prow[0]}</div>
+  </div>
+
+  <div class="card">
+    <div class="info-row"><span class="label">HN</span><span class="value">{hn}</span></div>
+    <div class="info-row"><span class="label">ตารางฟอก</span><span class="value">{prow[2] or '-'}</span></div>
+    <div class="info-row"><span class="label">Vascular Access</span><span class="value">{prow[1] or '-'}</span></div>
+    <div class="info-row"><span class="label">Dry Weight</span><span class="value">{float(prow[3]):.1f} kg</span></div>
+  </div>
+
+  <div class="card">
+    <div class="chart-title">📈 Hb Trend (เป้าหมาย 10-12 g/dL)</div>
+    {hb_svg}
+    <div class="target-band">🟢 เขียว = อยู่ในเป้าหมาย KDOQI</div>
+  </div>
+
+  <div class="card">
+    <div class="chart-title">📋 ผลฟอกเลือดล่าสุด</div>
+    <table>
+      <tr><th>วันที่</th><th>น้ำหนัก</th><th>UF</th><th>Hb</th><th>ESA</th></tr>
+      {session_rows}
+    </table>
+  </div>
+
+  <div class="footer">
+    HD Smart Monitoring v2.3<br>
+    ข้อมูลนี้เป็นข้อมูลส่วนบุคคล กรุณาไม่เผยแพร่
+  </div>
+</body>
+</html>"""
+    except Exception as e:
+        logger.error("patient_self_view error: %s", e)
+        return f"<h2>เกิดข้อผิดพลาด</h2><p>{e}</p>", 500
+
+
+def _build_hb_trend_svg(hb_data):
+    """Build inline SVG Hb trend chart."""
+    if not hb_data:
+        return '<p style="color:#bdc3c7;text-align:center;padding:20px;">ยังไม่มีข้อมูล Hb</p>'
+
+    w, h = 340, 160
+    margin = {"t": 20, "r": 10, "b": 30, "l": 35}
+    pw = w - margin["l"] - margin["r"]
+    ph = h - margin["t"] - margin["b"]
+
+    values = [float(r[1]) for r in hb_data]
+    dates = [r[0].strftime("%d/%m") for r in hb_data]
+    min_v = min(min(values) - 1, 8)
+    max_v = max(max(values) + 1, 14)
+    rng = max_v - min_v or 1
+
+    # Target band (10-12)
+    y_10 = margin["t"] + ph - ((10 - min_v) / rng * ph)
+    y_12 = margin["t"] + ph - ((12 - min_v) / rng * ph)
+
+    points = []
+    dots = []
+    for i, v in enumerate(values):
+        x = margin["l"] + (i / max(len(values) - 1, 1)) * pw
+        y = margin["t"] + ph - ((v - min_v) / rng * ph)
+        points.append(f"{x:.1f},{y:.1f}")
+        color = "#27ae60" if 10 <= v <= 12 else ("#e74c3c" if v < 10 else "#f39c12")
+        dots.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="4" fill="{color}" stroke="#fff" stroke-width="1.5"/>')
+        if i % max(1, len(values) // 5) == 0 or i == len(values) - 1:
+            dots.append(f'<text x="{x:.1f}" y="{h - 5}" text-anchor="middle" font-size="9" fill="#7f8c8d">{dates[i]}</text>')
+            dots.append(f'<text x="{x:.1f}" y="{y - 8:.1f}" text-anchor="middle" font-size="9" fill="{color}" font-weight="600">{v:.1f}</text>')
+
+    polyline = " ".join(points)
+
+    # Y-axis labels
+    y_labels = ""
+    for v in range(int(min_v), int(max_v) + 1, 2):
+        y = margin["t"] + ph - ((v - min_v) / rng * ph)
+        y_labels += f'<text x="{margin["l"]-5}" y="{y + 3:.1f}" text-anchor="end" font-size="9" fill="#7f8c8d">{v}</text>'
+        y_labels += f'<line x1="{margin["l"]}" y1="{y:.1f}" x2="{w-margin["r"]}" y2="{y:.1f}" stroke="#ecf0f1" stroke-dasharray="3"/>'
+
+    return f"""<svg viewBox="0 0 {w} {h}" style="width:100%;height:auto;">
+  {y_labels}
+  <rect x="{margin["l"]}" y="{y_12:.1f}" width="{pw}" height="{y_10 - y_12:.1f}" fill="rgba(39,174,96,0.08)" rx="2"/>
+  <line x1="{margin["l"]}" y1="{y_10:.1f}" x2="{w-margin["r"]}" y2="{y_10:.1f}" stroke="#27ae60" stroke-dasharray="4" opacity=".4"/>
+  <line x1="{margin["l"]}" y1="{y_12:.1f}" x2="{w-margin["r"]}" y2="{y_12:.1f}" stroke="#27ae60" stroke-dasharray="4" opacity=".4"/>
+  <polyline points="{polyline}" fill="none" stroke="#3498db" stroke-width="2" stroke-linejoin="round"/>
+  {"".join(dots)}
+</svg>"""
