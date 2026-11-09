@@ -13672,6 +13672,17 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
              # ── Medication Record (ใบบันทึกยาผู้ป่วยไตเทียม) ──
              "medication record", "medication list",
              "แพทย์ผู้สั่ง", "วันที่สั่ง",
+             # ── HD Prescription Form (ใบสั่งยาฟอกเลือด) ──
+             # OCR อ่านลายมือ/ภาพเบลอ — เพิ่ม partial matches
+             "hemodialysis", "dialyzer", "dry weight",
+             "anticoagulant", "heparin", "allergies",
+             "progress note", "physician",
+             "bfr", "dfr", "qb(ml/min)", "nacl",
+             "hco3", "k(meq/l)", "ca(meq/l)",
+             "variation", "program",
+             "1x1", "2x2", "3x1", "4x2",
+             "p.o.", "i.v.", "s.c.",
+             "epoetin", "darbepoetin",
              ],
             2,
         ),
@@ -15316,7 +15327,7 @@ def process_file_async(
 
             # ── Interactive Classification: ถามผู้ใช้เมื่อ OCR ล้มเหลว ──
             if category == "review" and line_user_id:
-                # OCR ไม่สามารถจำแนกได้ → ถามผู้ใช้ผ่าน LINE
+                # OCR ไม่สามารถจำแนกได้ → ตั้ง pending + ถามผู้ใช้ผ่าน LINE
                 _pending_user_hash = owner_hash or ""
                 if _pending_user_hash and dest:
                     _set_pending_classification(
@@ -15327,21 +15338,8 @@ def process_file_async(
                         line_user_id,
                         sha256_hex or "",
                     )
-                    _ask_text = (
-                        "📋 ระบบไม่สามารถจำแนกเอกสารอัตโนมัติได้\n"
-                        "กรุณาเลือกประเภทเอกสาร:\n\n"
-                        "ตอบ 1 = ใบสั่งยา 💊\n"
-                        "ตอบ 2 = ผลตรวจแล็บ 🔬\n"
-                        "ตอบ 3 = เอกสารฟอกเลือด 🩸\n"
-                        "ตอบ 4 = ใบเสร็จ/บิล 🧾\n\n"
-                        "⏱️ กรุณาตอบภายใน 5 นาที"
-                    )
-                    if reply_token:
-                        reply_message(reply_token, _ask_text)
-                    else:
-                        push_message(line_user_id, _ask_text)
-                elif _in_batch:
-                    pass  # อยู่ในสรุปชุดแล้ว
+                if _in_batch:
+                    pass  # สรุปชุดจะส่งคำถามรวมใน _batch_flush
                 else:
                     # ไม่มี owner_hash หรือ dest → ส่ง reply ปกติ
                     if reply_token:
@@ -15788,13 +15786,14 @@ def _set_pending_classification(
     user_hash: str, doc_id: str, gcs_path: str,
     owner_hash: str, line_user_id: str, sha256_hex: str,
 ):
-    """บันทึก pending classification ไปยัง GCS (shared across workers)"""
-    data = {
-        "timestamp": time.time(),
+    """บันทึก pending classification ไปยัง GCS (shared across workers)
+
+    รองรับหลายเอกสาร — เพิ่มเข้า list "docs" แทนที่จะเขียนทับ
+    ตอบ "1" ครั้งเดียว → ย้ายทุกใบที่ pending
+    """
+    entry = {
         "doc_id": doc_id,
         "gcs_path": gcs_path,
-        "owner_hash": owner_hash,
-        "line_user_id": line_user_id,
         "sha256_hex": sha256_hex,
     }
     try:
@@ -15803,6 +15802,31 @@ def _set_pending_classification(
             return
         blob_path = f"{_PENDING_CLASS_GCS_PREFIX}{user_hash}.json"
         blob = storage._bucket.blob(blob_path)
+        # อ่าน existing pending (ถ้ามี) เพื่อ append
+        data = None
+        if blob.exists():
+            try:
+                data = json.loads(blob.download_as_text())
+            except Exception:
+                data = None
+        if data and not data.get("expired") and \
+                (time.time() - data.get("timestamp", 0)) < _PENDING_CLASS_TIMEOUT:
+            # Append doc to existing pending
+            docs = data.get("docs", [])
+            # Migrate old format (single doc) → list
+            if "doc_id" in data and not docs:
+                docs = [{"doc_id": data["doc_id"], "gcs_path": data["gcs_path"],
+                         "sha256_hex": data.get("sha256_hex", "")}]
+            docs.append(entry)
+            data["docs"] = docs
+            data["timestamp"] = time.time()  # refresh timeout
+        else:
+            data = {
+                "timestamp": time.time(),
+                "docs": [entry],
+                "owner_hash": owner_hash,
+                "line_user_id": line_user_id,
+            }
         blob.upload_from_string(
             json.dumps(data), content_type="application/json"
         )
@@ -18033,17 +18057,34 @@ def webhook():
                     }
                     _new_cat = _class_map[text.strip()]
                     _clear_pending_classification(user_hash)
+                    # รองรับหลายเอกสาร (batch) — ย้ายทุกใบ
+                    _pending_docs = _pending.get("docs", [])
+                    # Migrate old format (single doc)
+                    if not _pending_docs and _pending.get("doc_id"):
+                        _pending_docs = [_pending]
+                    _doc_count = len(_pending_docs)
+                    _cat_name = {"rx": "ใบสั่งยา", "lab": "ผลแล็บ",
+                                 "dialysis": "ฟอกเลือด", "bills": "บิล"
+                                 }.get(_new_cat, _new_cat)
                     reply_message(
                         reply_token,
-                        f"⏳ กำลังย้ายเอกสาร...",
+                        f"⏳ กำลังย้ายเอกสาร {_doc_count} ใบ → {_cat_name}...",
                     )
-                    # รัน reclassify ใน thread แยก
                     _reclass_uid = _pending.get("line_user_id", "")
-                    threading.Thread(
-                        target=_reclassify_document,
-                        args=(_pending, _new_cat, _reclass_uid),
-                        daemon=True,
-                    ).start()
+                    for _pdoc in _pending_docs:
+                        # สร้าง pending-like dict สำหรับแต่ละ doc
+                        _single = {
+                            "doc_id": _pdoc.get("doc_id", ""),
+                            "gcs_path": _pdoc.get("gcs_path", ""),
+                            "owner_hash": _pending.get("owner_hash", ""),
+                            "line_user_id": _reclass_uid,
+                            "sha256_hex": _pdoc.get("sha256_hex", ""),
+                        }
+                        threading.Thread(
+                            target=_reclassify_document,
+                            args=(_single, _new_cat, _reclass_uid),
+                            daemon=True,
+                        ).start()
                     continue
 
                 # ── Document Search V1: ตรวจคำสั่งค้นหาก่อน ──
