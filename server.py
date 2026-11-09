@@ -12162,16 +12162,11 @@ def job_daily_reminders() -> dict:
             appointment_store, _patient_line_id_for_hn, _patient_name_for_hn,
             push_message, _staff_line_ids(),
         )
-    try:
-        import hd_schedule_reminder
-        out["hd"] = hd_schedule_reminder.send_reminders(
-            storage, master_registry, hn_registry, push_messages,
-        )
-    except Exception as _e:
-        out["hd"] = {"error": type(_e).__name__}
-    # ── สรุปตารางฟอกวันนี้: รวมอยู่ใน daily_digest แล้ว (ไม่ส่งแยก)
-    # _send_dialysis_staff_summary() ถูกรวมเข้า _build_daily_digest()
-    # เพื่อไม่ให้ staff ได้รับ 2 ข้อความซ้ำกัน
+    # ── hd_schedule_reminder ปิดแล้ว — รวมอยู่ใน _build_daily_digest() ──
+    # เดิม hd_schedule_reminder.send_reminders() ส่งรายชื่อฟอกแยก
+    # ทำให้ staff ได้รับ 2 ข้อความซ้ำ (ข้อความ hd_schedule + daily_digest)
+    # ตอนนี้ _build_daily_digest() มีรายชื่อฟอกครบแล้ว ไม่ต้องส่งแยก
+    out["hd"] = {"skipped": "merged into daily_digest"}
     # ── สรุปรายวันรวม → เจ้าหน้าที่ (เพิ่ม 2026-11-05) ──
     try:
         _digest = _build_daily_digest()
