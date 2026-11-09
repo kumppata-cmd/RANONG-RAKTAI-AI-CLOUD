@@ -12,6 +12,7 @@ from flask import (  # noqa: F401
 
 from .auth import require_role  # noqa: F401
 from .audit import log_action
+from .config import HdConfig
 
 logger = logging.getLogger(__name__)
 
