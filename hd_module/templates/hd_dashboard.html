@@ -71,10 +71,7 @@
 .qv-overlay.open { display: flex; }
 .qv-sheet { background: var(--bg-card); border-radius: 16px 16px 0 0; width: 100%; max-width: 420px; padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
 .qv-sheet h3 { margin: 0 0 12px; font-size: 1rem; }
-.qv-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 16px; }
-.qv-grid input { padding: 12px; font-size: 1.1rem; text-align: center; border: 2px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); }
-.qv-grid input:focus { border-color: var(--accent); outline: none; }
-.qv-grid label { font-size: .75rem; color: var(--fg-muted); text-align: center; display: block; margin-bottom: 2px; }
+.qv-sheet input:focus { border-color: var(--accent); outline: none; }
 </style>
 {% endblock %}
 
@@ -118,14 +115,26 @@
 <!-- Quick Vital Modal -->
 <div class="qv-overlay" id="qvOverlay" onclick="if(event.target===this)closeQuickVital()">
   <div class="qv-sheet">
-    <h3>❤️ บันทึก Vital — เตียง <span id="qvBed">-</span> <span id="qvName" style="font-weight:400;font-size:.85rem;color:var(--fg-muted);"></span></h3>
-    <div class="qv-grid">
-      <div><label>SBP</label><input type="number" id="qvSbp" inputmode="numeric" placeholder="120"></div>
-      <div><label>DBP</label><input type="number" id="qvDbp" inputmode="numeric" placeholder="80"></div>
-      <div><label>HR</label><input type="number" id="qvHr" inputmode="numeric" placeholder="80"></div>
+    <h3>❤️ วัด BP — เตียง <span id="qvBed">-</span></h3>
+    <div id="qvName" style="font-size:.9rem;color:var(--fg-muted);margin-bottom:12px;"></div>
+    <div style="display:flex;gap:10px;margin-bottom:16px;">
+      <div style="flex:1;text-align:center;">
+        <div style="font-size:.75rem;color:var(--fg-muted);margin-bottom:4px;font-weight:600;">SBP</div>
+        <input type="number" id="qvSbp" inputmode="numeric" placeholder="—" style="width:100%;padding:16px 8px;font-size:1.4rem;text-align:center;border:2px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--fg);font-weight:700;">
+      </div>
+      <div style="display:flex;align-items:center;font-size:1.2rem;color:var(--fg-muted);padding-top:20px;">/</div>
+      <div style="flex:1;text-align:center;">
+        <div style="font-size:.75rem;color:var(--fg-muted);margin-bottom:4px;font-weight:600;">DBP</div>
+        <input type="number" id="qvDbp" inputmode="numeric" placeholder="—" style="width:100%;padding:16px 8px;font-size:1.4rem;text-align:center;border:2px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--fg);font-weight:700;">
+      </div>
+      <div style="flex:1;text-align:center;">
+        <div style="font-size:.75rem;color:var(--fg-muted);margin-bottom:4px;font-weight:600;">PR</div>
+        <input type="number" id="qvHr" inputmode="numeric" placeholder="—" style="width:100%;padding:16px 8px;font-size:1.4rem;text-align:center;border:2px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--fg);font-weight:700;">
+      </div>
     </div>
-    <button class="btn btn-success" onclick="submitQuickVital()" style="width:100%;padding:14px;font-size:1rem;">✅ บันทึก</button>
-    <button class="btn" onclick="closeQuickVital()" style="width:100%;margin-top:8px;padding:10px;">ยกเลิก</button>
+    <div id="qvResult" style="display:none;padding:10px;border-radius:var(--radius-sm);margin-bottom:12px;font-size:.9rem;font-weight:600;text-align:center;"></div>
+    <button class="btn btn-success" id="qvSubmitBtn" onclick="submitQuickVital()" style="width:100%;padding:16px;font-size:1.1rem;font-weight:700;">✅ บันทึก</button>
+    <button class="btn" onclick="closeQuickVital()" style="width:100%;margin-top:8px;padding:12px;">ยกเลิก</button>
   </div>
 </div>
 {% endblock %}
@@ -385,30 +394,84 @@ function openQuickVital(sessionId, bedNum, patientName){
   document.getElementById('qvSbp').value = '';
   document.getElementById('qvDbp').value = '';
   document.getElementById('qvHr').value = '';
+  document.getElementById('qvResult').style.display = 'none';
+  document.getElementById('qvSubmitBtn').disabled = false;
+  document.getElementById('qvSubmitBtn').textContent = '✅ บันทึก';
   document.getElementById('qvOverlay').classList.add('open');
-  setTimeout(()=>document.getElementById('qvSbp').focus(), 100);
+  setTimeout(()=>document.getElementById('qvSbp').focus(), 200);
 }
 function closeQuickVital(){
   document.getElementById('qvOverlay').classList.remove('open');
   _qvSessionId = null;
 }
 function submitQuickVital(){
-  const sbp = parseInt(document.getElementById('qvSbp').value);
-  if(!sbp){ showToast('กรุณากรอก SBP','warning'); return; }
+  const sbpEl = document.getElementById('qvSbp');
+  const dbpEl = document.getElementById('qvDbp');
+  const hrEl = document.getElementById('qvHr');
+  const sbp = parseInt(sbpEl.value);
+  const dbp = parseInt(dbpEl.value);
+  const hr = parseInt(hrEl.value);
+
+  if(!sbp || isNaN(sbp)){
+    sbpEl.style.borderColor = 'var(--danger)';
+    sbpEl.focus();
+    showToast('กรุณากรอก SBP','warning');
+    return;
+  }
+  sbpEl.style.borderColor = '';
+
+  /* Disable button to prevent double-tap */
+  const btn = document.getElementById('qvSubmitBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ กำลังบันทึก...';
+
   const data = {
     sbp: sbp,
-    dbp: parseInt(document.getElementById('qvDbp').value) || null,
-    hr: parseInt(document.getElementById('qvHr').value) || null,
+    dbp: dbp || null,
+    hr: hr || null,
   };
+
   hdFetch('/hd/api/v1/sessions/'+_qvSessionId+'/quick-vital',{
-    method:'POST', body:JSON.stringify(data)
-  }).then(r=>r.json()).then(d=>{
-    if(d.error){ showToast(d.error,'danger'); return; }
-    showToast(d.message,'success');
-    if(d.alert) showToast('⚠️ '+d.alert.title,'danger');
-    closeQuickVital();
-    fetchBeds(); /* Refresh to show new vitals */
-  }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(data)
+  })
+  .then(r=>{
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.json();
+  })
+  .then(d=>{
+    if(d.error){
+      showToast('❌ '+d.error,'danger');
+      btn.disabled = false;
+      btn.textContent = '✅ บันทึก';
+      return;
+    }
+    /* Show result inline */
+    const res = document.getElementById('qvResult');
+    const bpText = sbp+'/'+(dbp||'-')+' mmHg  PR '+(hr||'-')+' /min';
+    if(d.alert){
+      res.style.background = 'rgba(231,76,60,.1)';
+      res.style.color = 'var(--danger)';
+      res.textContent = '⚠️ '+bpText+' — '+d.alert.title;
+    } else {
+      res.style.background = 'rgba(39,174,96,.1)';
+      res.style.color = 'var(--success)';
+      res.textContent = '✅ '+bpText;
+    }
+    res.style.display = 'block';
+    btn.textContent = '✅ บันทึกแล้ว';
+    showToast('บันทึก BP สำเร็จ','success');
+    fetchBeds();
+    /* Auto-close after 1.5s */
+    setTimeout(closeQuickVital, 1500);
+  })
+  .catch(e=>{
+    console.error('Quick vital error:', e);
+    showToast('❌ บันทึกไม่สำเร็จ — '+e.message,'danger');
+    btn.disabled = false;
+    btn.textContent = '✅ บันทึก';
+  });
 }
 
 /* Initial load + auto refresh */
