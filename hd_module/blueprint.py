@@ -308,19 +308,29 @@ def create_session():
                 return jsonify({"error": f"Patient HN {data['patient_hn']} not found"}), 404
             patient_id = row[0]
 
-            # Check if bed is already occupied today
-            cur.execute("""
-                SELECT id FROM hd_sessions
-                WHERE bed_number = %s AND session_date = CURRENT_DATE
-                  AND status IN ('scheduled', 'in_progress')
-            """, (bed,))
-            if cur.fetchone():
-                conn.close()
-                return jsonify({"error": f"Bed {bed} is already occupied today"}), 409
-
-            # Insert session (schedule_only → 'scheduled', else 'in_progress')
+            # Check bed availability:
+            # - Can't start 2 in_progress on same bed
+            # - Can schedule (รอบถัดไป) even if bed has in_progress
+            # - Can't double-schedule same bed same status
             is_schedule = data.get("schedule_only", False)
             init_status = "scheduled" if is_schedule else "in_progress"
+
+            cur.execute("""
+                SELECT id, status FROM hd_sessions
+                WHERE bed_number = %s
+                  AND status IN ('scheduled', 'in_progress')
+                ORDER BY status
+            """, (bed,))
+            existing = cur.fetchall()
+            for ex_id, ex_status in existing:
+                if init_status == "in_progress" and ex_status == "in_progress":
+                    conn.close()
+                    return jsonify({"error": f"เตียง {bed} มีคนไข้กำลังฟอกอยู่"}), 409
+                if init_status == "scheduled" and ex_status == "scheduled":
+                    conn.close()
+                    return jsonify({"error": f"เตียง {bed} มีการจองรอบถัดไปแล้ว"}), 409
+
+            # Insert session
             started = "NULL" if is_schedule else "NOW()"
             cur.execute(f"""
                 INSERT INTO hd_sessions
@@ -1140,7 +1150,10 @@ def bed_dashboard():
             conn = psycopg2.connect(db_url, connect_timeout=5)
             with conn.cursor() as cur:
                 # Show ALL active sessions (in_progress, scheduled)
-                # Don't filter by date — a session still running must always show
+                # Priority: in_progress > scheduled (so active session
+                # is never overwritten by a scheduled one on the same bed)
+                # ORDER BY: 'in_progress' sorts AFTER 'scheduled' so it
+                # overwrites in the loop — last write wins
                 cur.execute("""
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
@@ -1149,7 +1162,11 @@ def bed_dashboard():
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.status IN ('scheduled', 'in_progress')
-                    ORDER BY s.bed_number
+                    ORDER BY s.bed_number,
+                             CASE s.status
+                               WHEN 'scheduled' THEN 0
+                               WHEN 'in_progress' THEN 1
+                             END
                 """)
                 session_ids = []
                 for row in cur.fetchall():
@@ -1157,6 +1174,13 @@ def bed_dashboard():
                     if 1 <= bed_num <= HdConfig.TOTAL_BEDS:
                         db_status = row[2]
                         js_status = {"in_progress": "active", "scheduled": "pre_hd", "completed": "done"}.get(db_status, db_status)
+                        # Priority: in_progress > scheduled on same bed
+                        current_bed = beds[bed_num - 1]
+                        if current_bed.get("status") == "active" and js_status == "pre_hd":
+                            # Bed already active — mark next_scheduled instead
+                            beds[bed_num - 1]["next_scheduled"] = row[4]  # patient_name
+                            beds[bed_num - 1]["next_scheduled_hn"] = row[3]
+                            continue
                         beds[bed_num - 1] = {
                             "bed_number": bed_num,
                             "status": js_status,

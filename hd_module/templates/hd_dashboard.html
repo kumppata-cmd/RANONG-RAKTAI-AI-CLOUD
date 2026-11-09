@@ -208,6 +208,12 @@ function renderBeds(beds){
       hnLine = `<div class="bed-hn">${pHn ? 'HN '+pHn : ''}${va ? '<span class="bed-access">'+va+'</span>' : ''}</div>`;
     }
 
+    /* Next scheduled badge (when bed has active + scheduled) */
+    let nextBadge = '';
+    if(b.next_scheduled){
+      nextBadge = `<div style="font-size:.65rem;color:var(--info);margin-top:2px;">📅 ถัดไป: ${b.next_scheduled}</div>`;
+    }
+
     card.innerHTML = `
       <div class="bed-num">${b.bed_number}</div>
       <div class="bed-patient">${pName}</div>
@@ -215,6 +221,7 @@ function renderBeds(beds){
       ${vitals}
       ${timeLeft}
       <div class="bed-status">${s.label}</div>
+      ${nextBadge}
     `;
     grid.appendChild(card);
 
