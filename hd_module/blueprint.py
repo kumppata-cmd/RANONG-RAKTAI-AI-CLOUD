@@ -159,7 +159,8 @@ def hd_health():
         or get_setting_value("physician_line_id", "")
     )
 
-    status = "ok" if db_ok else "degraded"
+    # ok: DB connected or not configured (standalone); degraded: configured but unreachable
+    status = "ok" if (db_ok or not db_url) else "degraded"
     return jsonify({
         "module": "hd_smart_monitoring",
         "status": status,
