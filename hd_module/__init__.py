@@ -42,6 +42,13 @@ def register_hd_module(app):
         # Auto-backup HD tables to GCS (daily on boot)
         _auto_backup_hd_tables()
 
+        # Start self-ping to prevent Render sleep
+        _render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+        if _render_url:
+            from .monitoring import start_self_ping
+            start_self_ping(_render_url, interval=300)
+            logger.info("HD self-ping started for %s", _render_url)
+
         return True
     except Exception as e:
         logger.error(f"Failed to register HD module: {e}")

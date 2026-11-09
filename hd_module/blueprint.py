@@ -1587,3 +1587,38 @@ def get_setting_value(key, default=""):
     if env_key:
         return os.environ.get(env_key, default)
     return default
+
+
+# ── Monitoring API ────────────────────────────────────────
+
+@hd_bp.route("/monitoring/errors", methods=["GET"])
+@require_role("physician", "admin")
+def get_error_summary():
+    """ดู error summary — สำหรับ admin."""
+    from .monitoring import error_tracker, get_uptime
+    return jsonify({
+        "uptime": get_uptime(),
+        "errors": error_tracker.get_summary(),
+        "recent_errors": error_tracker.get_recent_errors(20),
+    })
+
+
+# ── PDPA API ──────────────────────────────────────────────
+
+@hd_bp.route("/pdpa/status", methods=["GET"])
+@require_role("physician", "admin")
+def pdpa_status():
+    """สรุปสถานะ PDPA compliance."""
+    from .pdpa import get_pdpa_status
+    return jsonify(get_pdpa_status())
+
+
+@hd_bp.route("/pdpa/patient-report/<hn>", methods=["GET"])
+@require_role("physician", "admin")
+def pdpa_patient_report(hn):
+    """สร้างรายงานข้อมูลผู้ป่วย (Right to Access)."""
+    import os
+    from .pdpa import generate_data_access_report
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    report = generate_data_access_report(db_url, hn)
+    return jsonify(report)

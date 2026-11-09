@@ -13817,6 +13817,24 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
     }
 
     # ── Pre-check: สลิปโอนเงิน / ธนาคาร ──
+    # ── Pre-check: ใบสั่งยาฟอกเลือด (HD Prescription) ──
+    # ใบยา HD มีทั้ง dialysis + medication keywords → บังคับ rx
+    _hd_rx_strong = ["hemodialysis", "dialyzer", "dry weight", "anticoagulant",
+                     "heparin", "dialysate", "bfr", "dfr"]
+    _rx_strong = ["medication", "dose", "frequency", "route", "regimen",
+                  "oral", "prescription", "mg", "tab", "cap", "ใบสั่งยา"]
+    _hd_hits = sum(1 for kw in _hd_rx_strong if kw.lower() in content_lower)
+    _rx_hits = sum(1 for kw in _rx_strong if kw.lower() in content_lower)
+    if _hd_hits >= 1 and _rx_hits >= 1:
+        logger.info("  pre-check: HD prescription detected (%d HD + %d rx hits) → rx",
+                     _hd_hits, _rx_hits)
+        return {
+            "category": "rx",
+            "reason": f"HD prescription pre-check ({_hd_hits} HD + {_rx_hits} rx hits)",
+            "confidence": min((_hd_hits + _rx_hits) / 4.0, 1.0),
+            "_ocr_text": content,
+        }
+
     # ถ้าพบ keyword ที่บ่งชี้ว่าเป็นสลิปโอนเงินชัดเจน → บังคับ bills
     # เพื่อป้องกันการจัดประเภทผิดเป็นผลแล็บ
     _bank_strong = [
