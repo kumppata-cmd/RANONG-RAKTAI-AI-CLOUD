@@ -531,6 +531,29 @@ def update_session(session_id):
                 if data.get("notes"):
                     updates.append("notes = %s")
                     params.append(data["notes"])
+                # ESA injection tracking
+                if "esa_given" in data:
+                    updates.append("esa_given = %s")
+                    params.append(bool(data["esa_given"]))
+                if data.get("esa_drug_given"):
+                    updates.append("esa_drug_given = %s")
+                    params.append(data["esa_drug_given"])
+                if data.get("esa_dose_given"):
+                    updates.append("esa_dose_given = %s")
+                    params.append(data["esa_dose_given"])
+                if data.get("esa_route"):
+                    updates.append("esa_route = %s")
+                    params.append(data["esa_route"])
+                if data.get("esa_skip_reason"):
+                    updates.append("esa_skip_reason = %s")
+                    params.append(data["esa_skip_reason"])
+                # Lab values
+                if data.get("hb_value") is not None:
+                    updates.append("hb_value = %s")
+                    params.append(data["hb_value"])
+                if data.get("hct_value") is not None:
+                    updates.append("hct_value = %s")
+                    params.append(data["hct_value"])
                 if updates:
                     updates.append("updated_at = NOW()")
                     params.append(session_id)
@@ -556,6 +579,10 @@ def update_session(session_id):
     # Generate summary if requested
     if data.get("generate_summary") and data.get("status") == "completed":
         result["summary"] = _build_session_summary(session_id, data)
+
+    # Check ESA alert: patient has prescribed ESA but didn't get it and no reason given
+    if data.get("status") == "completed":
+        _check_esa_missing_alert(session_id)
 
     return jsonify(result)
 
@@ -616,6 +643,53 @@ def send_session_summary(session_id):
         return jsonify({"sent": sent_count > 0, "count": sent_count})
 
 
+def _check_esa_missing_alert(session_id):
+    """Create alert if patient has prescribed ESA but session has no ESA record."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT s.esa_given, s.esa_skip_reason, p.esa_drug, p.patient_name, p.hn
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE s.id = %s
+            """, (session_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return
+            esa_given, skip_reason, prescribed_esa, name, hn = row
+            # If patient has prescribed ESA but esa_given is NULL (not recorded at all)
+            if prescribed_esa and esa_given is None:
+                cur.execute("""
+                    INSERT INTO hd_clinical_alerts (session_id, severity, title, message, acknowledged)
+                    VALUES (%s, 'warning', %s, %s, FALSE)
+                """, (
+                    session_id,
+                    f"ไม่มีการบันทึก ESA — {name} (HN {hn})",
+                    f"ผู้ป่วยมี ESA สั่ง ({prescribed_esa}) แต่ยังไม่ได้บันทึกการฉีด/ไม่ฉีดในรอบนี้ กรุณาตรวจสอบ",
+                ))
+            # If prescribed ESA but explicitly not given and no reason
+            elif prescribed_esa and esa_given is False and not skip_reason:
+                cur.execute("""
+                    INSERT INTO hd_clinical_alerts (session_id, severity, title, message, acknowledged)
+                    VALUES (%s, 'info', %s, %s, FALSE)
+                """, (
+                    session_id,
+                    f"งด ESA ไม่ระบุเหตุผล — {name} (HN {hn})",
+                    f"ผู้ป่วยมี ESA สั่ง ({prescribed_esa}) แต่งดฉีดครั้งนี้โดยไม่ระบุเหตุผล",
+                ))
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.warning("_check_esa_missing_alert error: %s", e)
+
+
 def _build_session_summary(session_id, post_data):
     """Build a summary dict for a completed session."""
     import os
@@ -630,7 +704,10 @@ def _build_session_summary(session_id, post_data):
                 SELECT s.id, s.bed_number, s.pre_weight, s.post_weight,
                        s.actual_uf, s.uf_goal, s.started_at, s.ended_at, s.notes,
                        p.hn, p.patient_name, p.vascular_access, p.dry_weight,
-                       p.schedule_days, p.esa_drug
+                       p.schedule_days, p.esa_drug,
+                       s.esa_given, s.esa_drug_given, s.esa_dose_given,
+                       s.esa_route, s.esa_skip_reason,
+                       s.hb_value, s.hct_value
                 FROM hd_sessions s
                 JOIN hd_patient_mapping p ON p.id = s.patient_id
                 WHERE s.id = %s
@@ -703,6 +780,14 @@ def _build_session_summary(session_id, post_data):
             "issues": issues,
             "assessment": assessment,
             "notes": row[8] or post_data.get("notes", ""),
+            # ESA injection
+            "esa_given": row[15],
+            "esa_drug_given": row[16],
+            "esa_dose_given": row[17],
+            "esa_route": row[18],
+            "esa_skip_reason": row[19],
+            "hb_value": float(row[20]) if row[20] else None,
+            "hct_value": float(row[21]) if row[21] else None,
         }
     except Exception as e:
         logger.error("_build_session_summary error: %s", e)
@@ -1263,7 +1348,8 @@ def bed_dashboard():
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
                            p.dry_weight, p.esa_drug,
-                           s.started_at, 4 as duration_hours
+                           s.started_at, 4 as duration_hours,
+                           s.esa_given, s.esa_drug_given
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.status IN ('scheduled', 'in_progress')
@@ -1302,6 +1388,8 @@ def bed_dashboard():
                             },
                             "start_time": (row[8].isoformat() + "Z") if row[8] else None,
                             "duration_hours": float(row[9]) if row[9] else 4,
+                            "esa_given": row[10],
+                            "esa_drug_given": row[11],
                             "current_vitals": None,
                             "alerts": [],
                         }
@@ -1968,6 +2056,60 @@ def shift_handover():
             summary["line_sent"] = True
 
     return jsonify(summary)
+
+
+# ── ESA History for Patient ───────────────────────────────
+
+@hd_bp.route("/patients/<hn>/esa-history", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patient_esa_history(hn):
+    """Get last 10 ESA injection + Hb/Hct records for a patient."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"records": [], "prescribed": {}})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Get prescribed ESA info
+            cur.execute(
+                "SELECT esa_drug, esa_dose FROM hd_patient_mapping WHERE hn = %s",
+                (hn,)
+            )
+            prow = cur.fetchone()
+            prescribed = {"esa_drug": prow[0] if prow else None,
+                          "esa_dose": prow[1] if prow else None}
+
+            # Get last 10 sessions with ESA/lab data
+            cur.execute("""
+                SELECT s.session_date, s.esa_given, s.esa_drug_given,
+                       s.esa_dose_given, s.esa_route, s.esa_skip_reason,
+                       s.hb_value, s.hct_value, s.shift
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE p.hn = %s AND s.status = 'completed'
+                ORDER BY s.session_date DESC, s.started_at DESC
+                LIMIT 10
+            """, (hn,))
+            rows = cur.fetchall()
+        conn.close()
+
+        records = []
+        for r in rows:
+            records.append({
+                "date": str(r[0]) if r[0] else None,
+                "esa_given": r[1],
+                "esa_drug": r[2], "esa_dose": r[3],
+                "esa_route": r[4], "esa_skip_reason": r[5],
+                "hb": float(r[6]) if r[6] else None,
+                "hct": float(r[7]) if r[7] else None,
+                "shift": r[8],
+            })
+        return jsonify({"records": records, "prescribed": prescribed})
+    except Exception as e:
+        logger.error("patient_esa_history error: %s", e)
+        return jsonify({"records": [], "prescribed": {}, "error": str(e)})
 
 
 # ── F3: Kt/V Calculator ──────────────────────────────────

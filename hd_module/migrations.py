@@ -249,6 +249,21 @@ CREATE TABLE IF NOT EXISTS hd_settings (
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.2.0', 'Add hd_settings key-value table')
 ON CONFLICT (version) DO NOTHING;
+
+-- v1.3.0: ESA injection tracking + Hb/Hct per session
+DO $$ BEGIN
+    ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS esa_given BOOLEAN;
+    ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS esa_drug_given VARCHAR(50);
+    ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS esa_dose_given VARCHAR(50);
+    ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS esa_route VARCHAR(10) DEFAULT 'SC';
+    ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS esa_skip_reason VARCHAR(200);
+    ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS hb_value NUMERIC(4,1);
+    ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS hct_value NUMERIC(4,1);
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+INSERT INTO hd_schema_version (version, description)
+VALUES ('1.3.0', 'Add ESA injection tracking and Hb/Hct to hd_sessions')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────

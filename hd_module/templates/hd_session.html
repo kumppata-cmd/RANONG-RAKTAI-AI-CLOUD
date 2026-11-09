@@ -254,6 +254,80 @@
     </div>
   </div>
 
+  <!-- ESA Injection + Lab -->
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">💉 ยากระตุ้นเม็ดเลือดแดง (ESA)</div>
+    <!-- Last ESA info -->
+    <div id="esaLastInfo" style="display:none;padding:8px 12px;background:rgba(52,152,219,.06);border-radius:var(--radius-sm);margin-bottom:12px;font-size:.85rem;"></div>
+    <!-- ESA Toggle -->
+    <div style="display:flex;gap:8px;margin-bottom:12px;">
+      <button type="button" class="btn" id="esaYesBtn" onclick="setEsaGiven(true)" style="flex:1;padding:12px;font-size:.95rem;">💉 ฉีด ESA</button>
+      <button type="button" class="btn" id="esaNoBtn" onclick="setEsaGiven(false)" style="flex:1;padding:12px;font-size:.95rem;">❌ ไม่ฉีด</button>
+    </div>
+    <!-- ESA Given Details -->
+    <div id="esaGivenPanel" style="display:none;">
+      <div class="grid-2">
+        <div class="vital-input">
+          <label>ชนิดยา</label>
+          <select class="form-control" id="esaDrug">
+            <option value="">เลือกยา...</option>
+            <option value="Epiao">Epiao (Epoetin alfa)</option>
+            <option value="Hemax">Hemax (Epoetin alfa)</option>
+            <option value="Hema-plus">Hema-plus (Epoetin alfa)</option>
+            <option value="Darbepoetin">Darbepoetin (Aranesp)</option>
+            <option value="Other">อื่นๆ</option>
+          </select>
+        </div>
+        <div class="vital-input">
+          <label>ขนาดยา (IU/mcg)</label>
+          <input type="text" class="form-control" id="esaDose" placeholder="เช่น 4000 IU" inputmode="text">
+        </div>
+      </div>
+      <div style="margin-top:8px;">
+        <label style="font-size:.85rem;color:var(--fg-muted);">ช่องทางให้ยา</label>
+        <div style="display:flex;gap:8px;margin-top:4px;">
+          <label class="symptom-check" style="flex:1;"><input type="radio" name="esaRoute" value="SC" checked> SC (ใต้ผิวหนัง)</label>
+          <label class="symptom-check" style="flex:1;"><input type="radio" name="esaRoute" value="IV"> IV (หลอดเลือดดำ)</label>
+        </div>
+      </div>
+    </div>
+    <!-- ESA Skipped Details -->
+    <div id="esaSkipPanel" style="display:none;">
+      <div class="vital-input">
+        <label>เหตุผลที่ไม่ฉีด</label>
+        <select class="form-control" id="esaSkipReason" onchange="toggleSkipOther()">
+          <option value="">เลือกเหตุผล...</option>
+          <option value="Hb สูงกว่าเป้า (>12 g/dL)">Hb สูงกว่าเป้า (>12 g/dL)</option>
+          <option value="ยาหมด/ไม่มียา">ยาหมด/ไม่มียา</option>
+          <option value="แพทย์สั่งหยุด">แพทย์สั่งหยุด</option>
+          <option value="ผู้ป่วยปฏิเสธ">ผู้ป่วยปฏิเสธ</option>
+          <option value="BP สูงเกินเกณฑ์">BP สูงเกินเกณฑ์</option>
+          <option value="มีการติดเชื้อ">มีการติดเชื้อ</option>
+          <option value="รอผล Lab">รอผล Lab</option>
+          <option value="other">อื่นๆ...</option>
+        </select>
+      </div>
+      <div class="vital-input" id="esaSkipOtherWrap" style="display:none;margin-top:8px;">
+        <input type="text" class="form-control" id="esaSkipOther" placeholder="ระบุเหตุผล...">
+      </div>
+    </div>
+    <!-- Hb/Hct Lab Values -->
+    <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--border);">
+      <label style="font-size:.85rem;font-weight:600;color:var(--fg-muted);">🔬 ผลแล็บ (ถ้ามี)</label>
+      <div class="grid-2" style="margin-top:8px;">
+        <div class="vital-input">
+          <label>Hb (g/dL)</label>
+          <input type="number" class="form-control" id="hbValue" step="0.1" inputmode="decimal" placeholder="เช่น 10.5" oninput="autoCalcHct()">
+        </div>
+        <div class="vital-input">
+          <label>Hct (%)</label>
+          <input type="number" class="form-control" id="hctValue" step="0.1" inputmode="decimal" placeholder="เช่น 33.0">
+        </div>
+      </div>
+      <div id="hbAssessment" style="display:none;margin-top:8px;padding:8px 12px;border-radius:var(--radius-sm);font-size:.85rem;"></div>
+    </div>
+  </div>
+
   <div class="card" style="margin-bottom:16px;">
     <div class="card-header">📝 อาการหลังฟอก</div>
     <div class="symptom-checks">
@@ -581,10 +655,12 @@ function startSession(){
     pre_weight: sessionData.pre_weight,
     dry_weight: sessionData.dry_weight,
   };
+  sessionData.hn = hn;
   hdFetch('/hd/api/v1/sessions',{method:'POST',body:JSON.stringify(data)})
     .then(r=>r.json())
     .then(d=>{
       sessionData.session_id = d.session_id || 1;
+      if(d.esa_drug) sessionData.esa_drug = d.esa_drug;
       document.getElementById('bedDisplay').textContent = bed;
       document.getElementById('sessionStatus').textContent = 'กำลังฟอก';
       document.getElementById('sessionStatus').className = 'badge badge-success';
@@ -592,6 +668,7 @@ function startSession(){
       startTimer();
       switchTab('session','intra');
       document.getElementById('cancelBtn').style.display = 'inline-flex';
+      loadEsaHistory();
     })
     .catch(()=>showToast('ไม่สามารถเริ่มรอบฟอกได้','danger'));
 }
@@ -647,7 +724,12 @@ function loadExistingSession(sid){
       document.getElementById('patientName').textContent = d.patient_name || 'ผู้ป่วย';
       document.getElementById('patientInfo').textContent = 'HN: '+(d.patient_hn||'-')+' | ตาราง: '+(d.schedule_days||'-')+' | Access: '+(d.vascular_access||'-');
       document.getElementById('bedDisplay').textContent = d.bed_number || '-';
-      if(d.patient_hn) document.getElementById('patientSelect').value = d.patient_hn;
+      if(d.patient_hn){
+        document.getElementById('patientSelect').value = d.patient_hn;
+        sessionData.hn = d.patient_hn;
+        loadEsaHistory();
+      }
+      if(d.esa_drug) sessionData.esa_drug = d.esa_drug;
       if(d.bed_number) document.getElementById('bedSelect').value = d.bed_number;
       /* Fill Pre-HD vitals if available */
       if(d.pre_weight) document.getElementById('preWeight').value = d.pre_weight;
@@ -801,6 +883,122 @@ function renderTimeline(){
 }
 
 let _sessionSummary = null;
+let _esaGiven = null; /* null=not set, true=given, false=skipped */
+
+function setEsaGiven(val){
+  _esaGiven = val;
+  const yesBtn = document.getElementById('esaYesBtn');
+  const noBtn = document.getElementById('esaNoBtn');
+  const givenPanel = document.getElementById('esaGivenPanel');
+  const skipPanel = document.getElementById('esaSkipPanel');
+  if(val){
+    yesBtn.style.background = 'var(--success)'; yesBtn.style.color = '#fff';
+    noBtn.style.background = ''; noBtn.style.color = '';
+    givenPanel.style.display = 'block'; skipPanel.style.display = 'none';
+    /* Auto-fill from patient's prescribed ESA */
+    if(sessionData.esa_drug && !document.getElementById('esaDrug').value){
+      const sel = document.getElementById('esaDrug');
+      for(let i=0;i<sel.options.length;i++){
+        if(sel.options[i].value && sessionData.esa_drug.toLowerCase().includes(sel.options[i].value.toLowerCase())){
+          sel.selectedIndex = i; break;
+        }
+      }
+    }
+  } else {
+    noBtn.style.background = 'var(--danger)'; noBtn.style.color = '#fff';
+    yesBtn.style.background = ''; yesBtn.style.color = '';
+    givenPanel.style.display = 'none'; skipPanel.style.display = 'block';
+  }
+}
+
+function toggleSkipOther(){
+  const sel = document.getElementById('esaSkipReason');
+  document.getElementById('esaSkipOtherWrap').style.display = sel.value === 'other' ? 'block' : 'none';
+}
+
+function autoCalcHct(){
+  const hb = parseFloat(document.getElementById('hbValue').value);
+  if(hb && !document.getElementById('hctValue').value){
+    document.getElementById('hctValue').value = (hb * 3).toFixed(1);
+  }
+  assessHb(hb);
+}
+
+function assessHb(hb){
+  const el = document.getElementById('hbAssessment');
+  if(!hb){ el.style.display='none'; return; }
+  el.style.display = 'block';
+  if(hb >= 10 && hb <= 12){
+    el.style.background = 'rgba(39,174,96,.1)'; el.style.color = 'var(--success)';
+    el.textContent = '✅ Hb อยู่ในเป้าหมาย KDOQI (10-12 g/dL)';
+  } else if(hb < 10){
+    el.style.background = 'rgba(231,76,60,.1)'; el.style.color = 'var(--danger)';
+    el.textContent = '⚠️ Hb ต่ำกว่าเป้า — พิจารณาปรับ ESA dose';
+  } else {
+    el.style.background = 'rgba(243,156,18,.1)'; el.style.color = 'var(--warning)';
+    el.textContent = '⚠️ Hb สูงกว่าเป้า (>12) — พิจารณาลด ESA dose';
+  }
+}
+
+function getEsaData(){
+  const data = {};
+  if(_esaGiven === null) return data;
+  data.esa_given = _esaGiven;
+  if(_esaGiven){
+    data.esa_drug_given = document.getElementById('esaDrug').value;
+    data.esa_dose_given = document.getElementById('esaDose').value;
+    const routeEl = document.querySelector('input[name="esaRoute"]:checked');
+    data.esa_route = routeEl ? routeEl.value : 'SC';
+  } else {
+    const reason = document.getElementById('esaSkipReason').value;
+    if(reason === 'other'){
+      data.esa_skip_reason = document.getElementById('esaSkipOther').value || 'อื่นๆ';
+    } else {
+      data.esa_skip_reason = reason;
+    }
+  }
+  const hb = parseFloat(document.getElementById('hbValue').value);
+  const hct = parseFloat(document.getElementById('hctValue').value);
+  if(hb) data.hb_value = hb;
+  if(hct) data.hct_value = hct;
+  return data;
+}
+
+function loadEsaHistory(){
+  if(!sessionData.hn) return;
+  hdFetch('/hd/api/v1/patients/'+sessionData.hn+'/esa-history')
+    .then(r=>r.json())
+    .then(d=>{
+      /* Store prescribed ESA for auto-fill */
+      if(d.prescribed?.esa_drug) sessionData.esa_drug = d.prescribed.esa_drug;
+      /* Show last ESA info */
+      const info = document.getElementById('esaLastInfo');
+      if(d.records && d.records.length > 0){
+        const last = d.records[0];
+        let text = '📋 ครั้งล่าสุด (' + (last.date||'-') + '): ';
+        if(last.esa_given === true){
+          text += '💉 ' + (last.esa_drug||'ESA') + ' ' + (last.esa_dose||'') + ' ' + (last.esa_route||'');
+        } else if(last.esa_given === false){
+          text += '❌ ไม่ฉีด — ' + (last.esa_skip_reason||'ไม่ระบุ');
+        } else {
+          text += 'ไม่มีข้อมูล ESA';
+        }
+        if(last.hb) text += ' | Hb ' + last.hb;
+        if(last.hct) text += ' Hct ' + last.hct + '%';
+        info.textContent = text;
+        info.style.display = 'block';
+      }
+      /* Show prescribed ESA */
+      if(d.prescribed?.esa_drug){
+        const info2 = document.getElementById('esaLastInfo');
+        const existing = info2.textContent;
+        info2.innerHTML = '💊 <strong>ESA สั่ง: ' + d.prescribed.esa_drug + (d.prescribed.esa_dose ? ' ' + d.prescribed.esa_dose : '') + '</strong>' +
+          (existing ? '<br>' + existing : '');
+        info2.style.display = 'block';
+      }
+    })
+    .catch(()=>{});
+}
 
 function endSession(){
   const postWeight = parseFloat(document.getElementById('postWeight').value) || 0;
@@ -812,6 +1010,9 @@ function endSession(){
   document.querySelectorAll('input[name="post_symptom"]:checked').forEach(el=>postSymptoms.push(el.value));
   const notes = document.getElementById('postNotes').value;
 
+  /* Merge ESA + lab data */
+  const esaData = getEsaData();
+
   const completionData = {
     status:'completed',
     post_weight: postWeight,
@@ -820,6 +1021,7 @@ function endSession(){
     post_symptoms: postSymptoms,
     notes: notes,
     generate_summary: true,
+    ...esaData,
   };
 
   if(sessionData.session_id){
@@ -906,6 +1108,9 @@ function showSessionSummary(s){
       <tr><td style="padding:4px 0;color:var(--fg-muted);">Post-HD BP</td><td style="padding:4px 0;">${s.post_sbp||'-'}/${s.post_dbp||'-'} mmHg</td></tr>
       <tr><td style="padding:4px 0;color:var(--fg-muted);">อาการหลังฟอก</td><td style="padding:4px 0;">${s.post_symptoms&&s.post_symptoms.length?s.post_symptoms.join(', '):'ปกติ'}</td></tr>
       <tr><td style="padding:4px 0;color:var(--fg-muted);">Vital บันทึก</td><td style="padding:4px 0;">${s.vital_records||0} ครั้ง</td></tr>
+      ${s.esa_given===true ? '<tr><td style="padding:4px 0;color:var(--fg-muted);">💉 ESA</td><td style="padding:4px 0;color:var(--success);font-weight:600;">✅ '+(s.esa_drug_given||'ESA')+' '+(s.esa_dose_given||'')+' '+(s.esa_route||'')+'</td></tr>' : ''}
+      ${s.esa_given===false ? '<tr><td style="padding:4px 0;color:var(--fg-muted);">💉 ESA</td><td style="padding:4px 0;color:var(--warning);">❌ ไม่ฉีด — '+(s.esa_skip_reason||'ไม่ระบุเหตุผล')+'</td></tr>' : ''}
+      ${s.hb_value ? '<tr><td style="padding:4px 0;color:var(--fg-muted);">🔬 Hb/Hct</td><td style="padding:4px 0;">'+(s.hb_value||'-')+' g/dL / '+(s.hct_value||'-')+'%</td></tr>' : ''}
     </table>
     <div style="margin-top:12px;"><strong>ปัญหา/ข้อสังเกต:</strong></div>
     ${alertsHtml}
