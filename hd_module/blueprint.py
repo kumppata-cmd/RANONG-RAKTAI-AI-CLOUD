@@ -925,6 +925,8 @@ def bed_dashboard():
             import psycopg2
             conn = psycopg2.connect(db_url, connect_timeout=5)
             with conn.cursor() as cur:
+                # Show ALL active sessions (in_progress, scheduled)
+                # Don't filter by date — a session still running must always show
                 cur.execute("""
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
@@ -932,8 +934,7 @@ def bed_dashboard():
                            s.started_at, 4 as duration_hours
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
-                    WHERE s.session_date = CURRENT_DATE
-                      AND s.status IN ('scheduled', 'in_progress')
+                    WHERE s.status IN ('scheduled', 'in_progress')
                     ORDER BY s.bed_number
                 """)
                 session_ids = []

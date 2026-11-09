@@ -151,6 +151,7 @@ function vibrateAlert(type){
 
 let _prevCriticalCount = 0;
 let _prevWarningCount = 0;
+let _hasEverRendered = false;
 
 const STATUS_MAP = {
   available: {label:'ว่าง', cls:'bed-available'},
@@ -242,7 +243,7 @@ function renderBeds(beds){
 }
 
 function fetchBeds(){
-  /* Use raw fetch with token — don't redirect on failure, keep showing beds */
+  /* Use raw fetch with token */
   const token = getHdToken();
   const headers = token ? {'Authorization':'Bearer '+token, 'Content-Type':'application/json'} : {};
   fetch('/hd/api/v1/dashboard/beds', {headers})
@@ -251,13 +252,18 @@ function fetchBeds(){
       return r.json();
     })
     .then(data=>{
-      renderBeds(data.beds || []);
+      const beds = data.beds || [];
+      /* Only render if we got real data — don't overwrite with all-empty */
+      const hasActive = beds.some(b=>b.status && b.status!=='available');
+      if(hasActive || _hasEverRendered){
+        renderBeds(beds);
+        _hasEverRendered = true;
+      }
       document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('th-TH');
       if(data.today_scheduled !== undefined) document.getElementById('statScheduled').textContent = data.today_scheduled;
     })
     .catch(e=>{
       console.warn('fetchBeds error:', e);
-      /* Don't clear the server-rendered beds on error */
       document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('th-TH') + ' (offline)';
     });
 }
