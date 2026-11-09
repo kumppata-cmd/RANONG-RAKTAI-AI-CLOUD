@@ -16493,7 +16493,21 @@ def _move_document_to_patient(
 
     patient = master_registry.match_hn(hn)
     if patient is None:
-        return {"error": f"ไม่พบ HN {hn} ในทะเบียนผู้ป่วย"}
+        # Auto-register: ลงทะเบียนผู้ป่วยอัตโนมัติจาก HN ที่ระบุ
+        # เพื่อให้ย้ายเอกสารได้ทันที — เอกสารต่อไปจะจัดเข้าแฟ้มนี้อัตโนมัติ
+        try:
+            _ok, _msg = master_registry.register(
+                hospital_hn=hn,
+                registered_by="auto_move",
+                notes="auto-registered from document move command",
+            )
+            if _ok:
+                patient = master_registry.match_hn(hn)
+                logger.info("Auto-registered HN %s for document move", hn)
+        except Exception as _reg_err:
+            logger.warning("Auto-register failed for HN %s: %s", hn, _reg_err)
+        if patient is None:
+            return {"error": f"ไม่พบ HN {hn} ในทะเบียน — ลงทะเบียนอัตโนมัติไม่สำเร็จ"}
 
     cat = doc.get("category", "")
     if cat not in CLINICAL_CATEGORIES:

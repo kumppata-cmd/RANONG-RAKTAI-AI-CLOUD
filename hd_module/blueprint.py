@@ -281,6 +281,7 @@ def hd_login():
 def hd_refresh_token():
     """Refresh JWT token — extends session for long nurse shifts."""
     from .auth import create_token, decode_token
+    from .config import HdConfig
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     payload = decode_token(token)
     if not payload:
