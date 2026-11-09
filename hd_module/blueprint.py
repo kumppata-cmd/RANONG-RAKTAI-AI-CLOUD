@@ -160,7 +160,6 @@ def hd_health():
     )
 
     status = "ok" if db_ok else "degraded"
-    code = 200 if db_ok else 503
     return jsonify({
         "module": "hd_smart_monitoring",
         "status": status,
@@ -176,7 +175,7 @@ def hd_health():
             "patients_imported": "✅" if db_patients > 0 else "⚠️ ยังไม่มีผู้ป่วย",
             "alert_recipients": "✅" if alert_configured else "⚠️ ยังไม่ตั้ง LINE alert → ตั้งค่าที่ ⚙️",
         },
-    }), code
+    })
 
 
 # ── Auth ──────────────────────────────────────────────────
