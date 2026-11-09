@@ -160,13 +160,11 @@ def hd_health():
         or get_setting_value("physician_line_id", "")
     )
 
-    # Check Anthropic API Key expiry (hardcoded warning for 12 Nov 2026)
+    # Check Anthropic API Key presence
     api_key_warning = ""
     _api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if _api_key:
-        _days_left = (datetime(2026, 11, 12, tzinfo=timezone.utc) - datetime.now(timezone.utc)).days
-        if _days_left <= 7:
-            api_key_warning = f"⚠️ Anthropic API Key หมดอายุใน {_days_left} วัน (12 พ.ย.)"
+    if not _api_key:
+        api_key_warning = "⚠️ Anthropic API Key ไม่ได้ตั้งค่า"
 
     # ok: DB connected or not configured (standalone); degraded: configured but unreachable
     status = "ok" if (db_ok or not db_url) else "degraded"
