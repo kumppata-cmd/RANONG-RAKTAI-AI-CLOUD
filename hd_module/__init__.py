@@ -375,10 +375,11 @@ def _start_daily_reminder_scheduler(app):
         last_sent_date = None
         while True:
             try:
-                now = datetime.now()
-                # Send at 18:00 Thai time (UTC+7), check every 5 minutes
-                if now.hour == 11 and now.minute < 5 and last_sent_date != now.date():
-                    # 18:00 Thai time ≈ 11:00 UTC
+                from datetime import timezone as _tz, timedelta as _td
+                _thai_tz = _tz(_td(hours=7))
+                now = datetime.now(_thai_tz)
+                # Send at 18:00 Thai time
+                if now.hour == 18 and now.minute < 5 and last_sent_date != now.date():
                     with app.app_context():
                         import os
                         db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")

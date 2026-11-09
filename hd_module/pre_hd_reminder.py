@@ -4,7 +4,7 @@ Separate from locked hd_schedule_reminder.
 Called by background scheduler daily at 18:00.
 """
 import logging
-from datetime import date, timedelta
+from datetime import date, timedelta, timezone, datetime as _dt
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,9 @@ def _parse_schedule_days(schedule_text):
 def get_tomorrow_patients(db_url):
     """Get patients scheduled for tomorrow."""
     import psycopg2
-    tomorrow = date.today() + timedelta(days=1)
+    _thai_tz = timezone(timedelta(hours=7))
+    thai_today = _dt.now(_thai_tz).date()
+    tomorrow = thai_today + timedelta(days=1)
     tomorrow_weekday = tomorrow.weekday()  # Mon=0
 
     conn = psycopg2.connect(db_url, connect_timeout=5)

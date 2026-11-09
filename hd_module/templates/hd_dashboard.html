@@ -81,7 +81,7 @@
   <div class="stat-item"><span class="stat-num" id="statActive" style="color:var(--success);">0</span><span class="stat-label">กำลังฟอก</span></div>
   <div class="stat-item"><span class="stat-num" id="statPre" style="color:var(--info);">0</span><span class="stat-label">รอเริ่ม</span></div>
   <div class="stat-item"><span class="stat-num" id="statScheduled" style="color:var(--accent);">0</span><span class="stat-label">📅 นัดวันนี้</span></div>
-  <div class="stat-item"><span class="stat-num" id="statAvailable" style="color:var(--fg-muted);">30</span><span class="stat-label">ว่าง</span></div>
+  <div class="stat-item"><span class="stat-num" id="statAvailable" style="color:var(--fg-muted);">{{ config.TOTAL_BEDS if config else 25 }}</span><span class="stat-label">ว่าง</span></div>
   <div class="stat-item"><span class="stat-num" id="statWarning" style="color:var(--warning);">0</span><span class="stat-label">⚠️ เฝ้าระวัง</span></div>
   <div class="stat-item"><span class="stat-num" id="statCritical" style="color:var(--danger);">0</span><span class="stat-label">🚨 วิกฤต</span></div>
 </div>

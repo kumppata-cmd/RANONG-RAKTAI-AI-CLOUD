@@ -16,6 +16,20 @@ from .config import HdConfig
 
 logger = logging.getLogger(__name__)
 
+# ── Thai Timezone Helper ─────────────────────────────────
+# Render server runs in UTC. All "today" calculations must use Thai time.
+_THAI_TZ = timezone(offset=__import__('datetime').timedelta(hours=7))
+
+
+def _thai_now():
+    """Current datetime in Thai timezone (UTC+7)."""
+    return datetime.now(_THAI_TZ)
+
+
+def _thai_today():
+    """Today's date in Thai timezone (UTC+7)."""
+    return _thai_now().date()
+
 hd_bp = Blueprint(
     "hd", __name__,
     url_prefix="/hd/api/v1",
@@ -346,7 +360,7 @@ def hd_refresh_token():
 @require_role("physician", "nurse", "admin", "auditor")
 def list_sessions():
     """List HD sessions (filterable by date, bed, patient)."""
-    session_date = request.args.get("date", date.today().isoformat())
+    session_date = request.args.get("date", _thai_today().isoformat())
     bed = request.args.get("bed", type=int)
     patient_hn = request.args.get("hn")
 
@@ -1435,7 +1449,7 @@ def bed_dashboard():
         try:
             import psycopg2
             day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
-            today_th = day_map.get(date.today().weekday(), "")
+            today_th = day_map.get(_thai_today().weekday(), "")
             if today_th:
                 conn2 = psycopg2.connect(db_url, connect_timeout=5)
                 with conn2.cursor() as cur:
@@ -1459,7 +1473,7 @@ def bed_dashboard():
     if not today_patients and current_app.config.get("MASTER_REGISTRY"):
         try:
             day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
-            today_th = day_map.get(date.today().weekday(), "")
+            today_th = day_map.get(_thai_today().weekday(), "")
             reg = current_app.config["MASTER_REGISTRY"]
             for p in reg.list_all():
                 sched = getattr(p, "dialysis_schedule", "") or ""
@@ -2607,8 +2621,8 @@ def esa_monthly_report():
     if not db_url:
         return jsonify({"error": "No database"}), 503
 
-    month = request.args.get("month", type=int, default=dt_date.today().month)
-    year = request.args.get("year", type=int, default=dt_date.today().year)
+    month = request.args.get("month", type=int, default=_thai_today().month)
+    year = request.args.get("year", type=int, default=_thai_today().year)
 
     try:
         import psycopg2
@@ -2861,8 +2875,8 @@ def quality_indicators_report():
     if not db_url:
         return jsonify({"error": "No database"}), 503
 
-    month = request.args.get("month", type=int, default=dt_date.today().month)
-    year = request.args.get("year", type=int, default=dt_date.today().year)
+    month = request.args.get("month", type=int, default=_thai_today().month)
+    year = request.args.get("year", type=int, default=_thai_today().year)
 
     try:
         import psycopg2
