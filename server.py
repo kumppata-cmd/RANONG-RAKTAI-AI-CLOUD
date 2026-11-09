@@ -17083,6 +17083,44 @@ def _batch_flush(batch_id: str, from_timer: bool) -> None:
         logger.warning("batch %s: ไม่มีผลใด ๆ ภายในเวลา — ไม่ส่งสรุป", batch_id)
         return
     col["items"].sort(key=lambda i: i.get("n", 0))
+
+    # ── Retroactive folder assignment ──────────────────────
+    # ถ้ามีเอกสาร clinical ในชุดที่ได้ folder แล้ว → ใบอื่นที่ยังไม่มี
+    # ให้ inherit folder เดียวกัน (เช่น ใบยาได้ HN แต่ใบฟอกไม่ได้)
+    clinical_items = [i for i in col["items"]
+                      if i.get("clinical") and i.get("status") == "ok"]
+    folders_found = {i["folder"] for i in clinical_items if i.get("folder")}
+    if len(folders_found) == 1:
+        # ชุดนี้มี folder เดียว → assign ให้ใบที่ยังไม่มี
+        shared_folder = folders_found.pop()
+        orphans = [i for i in clinical_items if not i.get("folder")]
+        if orphans:
+            logger.info(
+                "batch %s: retroactive assign %d orphan docs → folder %s",
+                batch_id, len(orphans), shared_folder,
+            )
+            for orph in orphans:
+                orph["folder"] = shared_folder
+                # Update index metadata (patient_hn_folder) for each orphan doc
+                _doc8 = orph.get("doc8", "")
+                if _doc8 and doc_index:
+                    try:
+                        for _d in doc_index._docs:
+                            _did = _d.get("document_id", "")
+                            if str(_did).startswith(_doc8):
+                                _d["patient_hn_folder"] = shared_folder
+                                _d["hn_route_source"] = "batch_retroactive"
+                                logger.info(
+                                    "batch retroactive: updated doc %s → %s",
+                                    _doc8, shared_folder,
+                                )
+                                break
+                    except Exception as _e:
+                        logger.warning(
+                            "batch retroactive: failed for doc %s: %s",
+                            _doc8, _e,
+                        )
+
     text = _batch_summary_text(col, partial)
     sender = col.get("line_user_id", "")
     if sender:
