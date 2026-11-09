@@ -36,6 +36,9 @@ def register_hd_module(app):
         # Auto-run database migrations (idempotent — CREATE IF NOT EXISTS)
         _run_hd_migrations()
 
+        # Auto-complete stale sessions from previous day (safety reset)
+        _auto_complete_stale_sessions()
+
         return True
     except Exception as e:
         logger.error(f"Failed to register HD module: {e}")
@@ -235,3 +238,40 @@ def create_default_hd_users():
         logger.info("HD users: created %d default accounts", created)
     except Exception as e:
         logger.error("HD users creation failed: %s", e)
+
+
+def _auto_complete_stale_sessions():
+    """Auto-complete sessions left in_progress from previous day.
+
+    Safety: sessions older than 8 hours are auto-completed on boot.
+    This prevents stale beds from blocking the next day's rounds.
+    Safe to call every boot — only affects truly stale sessions.
+    """
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=10)
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE hd_sessions
+                SET status = 'completed',
+                    ended_at = NOW(),
+                    notes = COALESCE(notes, '') || ' [auto-completed: stale session >8hr]'
+                WHERE status = 'in_progress'
+                  AND started_at < NOW() - INTERVAL '8 hours'
+                RETURNING id, bed_number
+            """)
+            rows = cur.fetchall()
+            conn.commit()
+        conn.close()
+        if rows:
+            ids = [f"bed {r[1]} (session {r[0]})" for r in rows]
+            logger.info("HD auto-complete: marked %d stale sessions as completed: %s",
+                        len(rows), ", ".join(ids))
+        else:
+            logger.info("HD auto-complete: no stale sessions found")
+    except Exception as e:
+        logger.error("HD auto-complete stale sessions failed: %s", e)

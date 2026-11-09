@@ -59,14 +59,26 @@ class VitalRecorder:
             # 1. Insert vital signs
             vital_id = None
             with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO hd_vital_signs
-                        (session_id, phase, sbp, dbp,
-                         heart_rate, temperature, spo2,
-                         recorded_at)
-                    VALUES (%s, %s::hd_vital_phase, %s, %s, %s, %s, %s, NOW())
-                    RETURNING id
-                """, (session_id, phase, sbp, dbp, hr, temp, spo2))
+                # Try with enum cast first, fallback to text
+                try:
+                    cur.execute("""
+                        INSERT INTO hd_vital_signs
+                            (session_id, phase, sbp, dbp,
+                             heart_rate, temperature, spo2,
+                             recorded_at)
+                        VALUES (%s, %s::hd_vital_phase, %s, %s, %s, %s, %s, NOW())
+                        RETURNING id
+                    """, (session_id, phase, sbp, dbp, hr, temp, spo2))
+                except Exception:
+                    conn.rollback()
+                    cur.execute("""
+                        INSERT INTO hd_vital_signs
+                            (session_id, phase, sbp, dbp,
+                             heart_rate, temperature, spo2,
+                             recorded_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                        RETURNING id
+                    """, (session_id, phase, sbp, dbp, hr, temp, spo2))
                 vital_id = cur.fetchone()[0]
                 conn.commit()
 

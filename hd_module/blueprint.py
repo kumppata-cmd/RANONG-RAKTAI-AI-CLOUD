@@ -227,6 +227,24 @@ def hd_login():
         return jsonify({"error": "ระบบขัดข้อง กรุณาลองใหม่"}), 500
 
 
+@hd_bp.route("/auth/refresh", methods=["POST"])
+@require_role("physician", "nurse", "admin", "auditor")
+def hd_refresh_token():
+    """Refresh JWT token — extends session for long nurse shifts."""
+    from .auth import create_token, decode_token
+    token = request.headers.get("Authorization", "").replace("Bearer ", "")
+    payload = decode_token(token)
+    if not payload:
+        return jsonify({"error": "Invalid token"}), 401
+    new_token = create_token(
+        payload["user_id"], payload["username"], payload["role"]
+    )
+    return jsonify({
+        "token": new_token,
+        "expires_in": HdConfig.JWT_EXPIRY_MINUTES * 60,
+    })
+
+
 # ── Sessions ──────────────────────────────────────────────
 
 @hd_bp.route("/sessions", methods=["GET"])
@@ -725,14 +743,25 @@ def record_vital(session_id):
             import psycopg2
             conn_fb = psycopg2.connect(db_url_fb, connect_timeout=5)
             with conn_fb.cursor() as cur_fb:
-                cur_fb.execute("""
-                    INSERT INTO hd_vital_signs
-                        (session_id, phase, sbp, dbp, heart_rate, temperature, spo2, recorded_at)
-                    VALUES (%s, %s::hd_vital_phase, %s, %s, %s, %s, %s, NOW())
-                    RETURNING id
-                """, (session_id, phase,
-                      data.get("sbp"), data.get("dbp"), data.get("hr"),
-                      data.get("temp"), data.get("spo2")))
+                try:
+                    cur_fb.execute("""
+                        INSERT INTO hd_vital_signs
+                            (session_id, phase, sbp, dbp, heart_rate, temperature, spo2, recorded_at)
+                        VALUES (%s, %s::hd_vital_phase, %s, %s, %s, %s, %s, NOW())
+                        RETURNING id
+                    """, (session_id, phase,
+                          data.get("sbp"), data.get("dbp"), data.get("hr"),
+                          data.get("temp"), data.get("spo2")))
+                except Exception:
+                    conn_fb.rollback()
+                    cur_fb.execute("""
+                        INSERT INTO hd_vital_signs
+                            (session_id, phase, sbp, dbp, heart_rate, temperature, spo2, recorded_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, NOW())
+                        RETURNING id
+                    """, (session_id, phase,
+                          data.get("sbp"), data.get("dbp"), data.get("hr"),
+                          data.get("temp"), data.get("spo2")))
                 vid = cur_fb.fetchone()[0]
                 conn_fb.commit()
             conn_fb.close()

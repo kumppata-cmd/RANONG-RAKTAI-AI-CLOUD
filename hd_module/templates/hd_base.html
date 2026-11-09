@@ -218,7 +218,7 @@ tr:hover td { background: rgba(0,0,0,.02); }
 <aside class="sidebar" id="sidebar">
   <div class="sidebar-brand">
     🏥 HD Smart Monitoring
-    <small>คลินิกระนอง รักษ์ไต <span style="opacity:.4;">v2.1</span></small>
+    <small>คลินิกระนอง รักษ์ไต <span style="opacity:.4;">v2.2</span></small>
   </div>
   <nav class="sidebar-nav">
     <a href="/hd/dashboard" class="{% block nav_dashboard %}{% endblock %}"><span class="icon">📊</span> แดชบอร์ด 30 เตียง</a>
@@ -321,6 +321,28 @@ function _showUsername(){
   }catch(e){}
 }
 _showUsername();
+/* Auto-refresh JWT every 2 hours to extend nurse shift sessions */
+function _scheduleTokenRefresh(){
+  setInterval(function(){
+    const token = getHdToken();
+    if(!token) return;
+    fetch('/hd/api/v1/auth/refresh', {
+      method:'POST',
+      headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'}
+    }).then(r=>{
+      if(!r.ok) return;
+      return r.json();
+    }).then(data=>{
+      if(data && data.token){
+        try{
+          sessionStorage.setItem('hd_token', data.token);
+          localStorage.setItem('hd_token', data.token);
+        }catch(e){}
+      }
+    }).catch(()=>{});
+  }, 2*60*60*1000); /* every 2 hours */
+}
+_scheduleTokenRefresh();
 /* Auth guard: redirect non-login pages if no token */
 (function(){
   const isLoginPage = window.location.pathname==='/hd/login' || window.location.pathname==='/hd/';

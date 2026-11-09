@@ -18,7 +18,7 @@ class HdConfig:
     # ── JWT / Auth ────────────────────────────────────────
     JWT_SECRET = os.environ.get("HD_JWT_SECRET", os.environ.get("ADMIN_SECRET", "dev-only-secret"))
     JWT_ALGORITHM = "HS256"
-    JWT_EXPIRY_MINUTES = int(os.environ.get("HD_JWT_EXPIRY_MINUTES", "480"))  # 8 hours
+    JWT_EXPIRY_MINUTES = int(os.environ.get("HD_JWT_EXPIRY_MINUTES", "720"))  # 12 hours (nurse shift)
     SESSION_TIMEOUT_MINUTES = int(os.environ.get("HD_SESSION_TIMEOUT", "30"))
 
     # ── Clinical Alert Defaults (configurable per-clinic) ─
