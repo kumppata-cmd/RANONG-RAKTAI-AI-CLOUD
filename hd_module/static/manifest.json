@@ -1,0 +1,24 @@
+{
+  "name": "HD Smart Monitoring — คลินิกระนอง รักษ์ไต",
+  "short_name": "HD Monitor",
+  "description": "ระบบติดตามการฟอกเลือด 25 เตียง",
+  "start_url": "/hd/dashboard",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#2980b9",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/hd/static/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/hd/static/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

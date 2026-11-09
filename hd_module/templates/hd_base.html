@@ -5,6 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#2980b9">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="manifest" href="/hd/static/manifest.json">
+<link rel="apple-touch-icon" href="/hd/static/icon-192.png">
 <title>{% block title %}HD Smart Monitoring{% endblock %} — รักษ์ไต</title>
 <style>
 /* === Design System: HD Smart Monitoring === */
@@ -226,6 +230,7 @@ tr:hover td { background: rgba(0,0,0,.02); }
     <a href="/hd/patients" class="{% block nav_patients %}{% endblock %}"><span class="icon">👥</span> รายชื่อผู้ป่วย</a>
     <a href="/hd/alerts" class="{% block nav_alerts %}{% endblock %}"><span class="icon">🔔</span> การแจ้งเตือน</a>
     <a href="/hd/kpi" class="{% block nav_kpi %}{% endblock %}"><span class="icon">📈</span> KPI</a>
+    <a href="/hd/analytics" class="{% block nav_analytics %}{% endblock %}"><span class="icon">📊</span> Analytics</a>
     <a href="/hd/settings" class="{% block nav_settings %}{% endblock %}"><span class="icon">⚙️</span> ตั้งค่าระบบ</a>
   </nav>
   <div class="sidebar-user">
@@ -344,6 +349,10 @@ function _scheduleTokenRefresh(){
   }, 2*60*60*1000); /* every 2 hours */
 }
 _scheduleTokenRefresh();
+/* PWA Service Worker */
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('/hd/static/sw.js',{scope:'/hd/'}).catch(()=>{});
+}
 /* Auth guard: redirect non-login pages if no token */
 (function(){
   const isLoginPage = window.location.pathname==='/hd/login' || window.location.pathname==='/hd/';

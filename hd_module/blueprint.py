@@ -30,6 +30,8 @@ hd_web = Blueprint(
     "hd_web", __name__,
     url_prefix="/hd",
     template_folder="templates",
+    static_folder="static",
+    static_url_path="/static",
 )
 
 
@@ -122,6 +124,12 @@ def hd_alerts_page():
 def hd_kpi_page():
     """Render KPI dashboard page."""
     return render_template("hd_kpi.html")
+
+
+@hd_web.route("/analytics")
+def hd_analytics_page():
+    """Render analytics dashboard."""
+    return render_template("hd_analytics.html")
 
 
 @hd_web.route("/settings")

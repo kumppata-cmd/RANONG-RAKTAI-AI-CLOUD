@@ -1,0 +1,201 @@
+{% extends "hd_base.html" %}
+{% block title %}Analytics{% endblock %}
+{% block nav_analytics %}active{% endblock %}
+{% block page_title %}📊 Clinic Analytics{% endblock %}
+
+{% block extra_css %}
+<style>
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; margin-bottom: 20px; }
+.stat-box { background: var(--bg-card); border-radius: var(--radius-sm); padding: 16px; text-align: center; border: 1px solid var(--border); }
+.stat-num { font-size: 1.8rem; font-weight: 700; color: var(--accent); }
+.stat-label { font-size: .75rem; color: var(--fg-muted); margin-top: 4px; }
+.chart-card { background: var(--bg-card); border-radius: var(--radius); padding: 16px; margin-bottom: 16px; border: 1px solid var(--border); }
+.chart-title { font-size: .95rem; font-weight: 600; margin-bottom: 12px; }
+svg.chart { width: 100%; height: 200px; }
+.period-btns { display: flex; gap: 8px; margin-bottom: 16px; }
+.period-btn { padding: 6px 16px; border-radius: 20px; border: 1px solid var(--border); background: var(--bg-card); color: var(--fg); font-size: .8rem; cursor: pointer; }
+.period-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.legend { display: flex; gap: 16px; justify-content: center; margin-top: 8px; font-size: .75rem; }
+.legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 4px; vertical-align: middle; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Period selector -->
+<div class="period-btns">
+  <button class="period-btn active" onclick="loadAnalytics(7,this)">7 วัน</button>
+  <button class="period-btn" onclick="loadAnalytics(30,this)">30 วัน</button>
+  <button class="period-btn" onclick="loadAnalytics(90,this)">90 วัน</button>
+</div>
+
+<!-- Stats -->
+<div class="stat-grid" id="statsGrid">
+  <div class="stat-box"><div class="stat-num" id="statSessions">-</div><div class="stat-label">รอบฟอกทั้งหมด</div></div>
+  <div class="stat-box"><div class="stat-num" id="statCompleted">-</div><div class="stat-label">เสร็จสมบูรณ์</div></div>
+  <div class="stat-box"><div class="stat-num" id="statUfPct">-</div><div class="stat-label">UF Achievement</div></div>
+  <div class="stat-box"><div class="stat-num" id="statAlerts">-</div><div class="stat-label">Alerts</div></div>
+</div>
+
+<!-- BP Trend Chart -->
+<div class="chart-card">
+  <div class="chart-title">❤️ BP Trend — ค่าเฉลี่ย SBP/DBP รายวัน</div>
+  <svg class="chart" id="bpChart" viewBox="0 0 600 200"></svg>
+  <div class="legend">
+    <span><span class="legend-dot" style="background:#e74c3c;"></span>SBP</span>
+    <span><span class="legend-dot" style="background:#3498db;"></span>DBP</span>
+    <span><span class="legend-dot" style="background:#95a5a6;"></span>HR</span>
+  </div>
+</div>
+
+<!-- UF Trend Chart -->
+<div class="chart-card">
+  <div class="chart-title">💧 UF Goal vs Actual — รายวัน</div>
+  <svg class="chart" id="ufChart" viewBox="0 0 600 200"></svg>
+  <div class="legend">
+    <span><span class="legend-dot" style="background:#f39c12;"></span>Goal</span>
+    <span><span class="legend-dot" style="background:#27ae60;"></span>Actual</span>
+  </div>
+</div>
+
+<!-- Alert Summary -->
+<div class="chart-card">
+  <div class="chart-title">🚨 Alert Summary</div>
+  <div id="alertSummary" style="font-size:.9rem;">กำลังโหลด...</div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let _analyticsData = null;
+
+function loadAnalytics(days, btn){
+  // Update active button
+  document.querySelectorAll('.period-btn').forEach(b=>b.classList.remove('active'));
+  if(btn) btn.classList.add('active');
+
+  const token = getHdToken();
+  const period = {7:'weekly',30:'monthly',90:'quarterly'}[days]||'monthly';
+  fetch('/hd/api/v1/analytics/clinic?days='+days, {
+    headers: token ? {'Authorization':'Bearer '+token} : {}
+  }).then(r=>r.json()).then(data=>{
+    _analyticsData = data;
+    renderStats(data);
+    renderBpChart(data.bp_trend || []);
+    renderUfChart(data.uf_trend || []);
+    renderAlertSummary(data.alerts || {});
+  }).catch(e=>{
+    document.getElementById('statsGrid').innerHTML = '<div class="stat-box"><div class="stat-label">❌ ไม่สามารถโหลดข้อมูลได้</div></div>';
+  });
+}
+
+function renderStats(data){
+  const s = data.sessions || {};
+  document.getElementById('statSessions').textContent = s.total || 0;
+  document.getElementById('statCompleted').textContent = s.completed || 0;
+  document.getElementById('statUfPct').textContent = (s.uf_achievement_pct || 0) + '%';
+  const alerts = data.alerts || {};
+  const totalAlerts = Object.values(alerts).reduce((a,b)=>a+b, 0);
+  document.getElementById('statAlerts').textContent = totalAlerts;
+}
+
+function renderBpChart(bpData){
+  const svg = document.getElementById('bpChart');
+  if(!bpData.length){ svg.innerHTML = '<text x="300" y="100" text-anchor="middle" fill="var(--fg-muted)" font-size="14">ไม่มีข้อมูล</text>'; return; }
+
+  const W=600, H=200, PAD=40;
+  const n = bpData.length;
+  const xStep = (W-PAD*2) / Math.max(n-1, 1);
+
+  // Y scale: 40-200 mmHg
+  const yMin=40, yMax=200;
+  const yScale = v => H - PAD - ((v-yMin)/(yMax-yMin)) * (H-PAD*2);
+
+  let sbpPath='', dbpPath='', hrPath='';
+  bpData.forEach((d,i)=>{
+    const x = PAD + i*xStep;
+    const cmd = i===0?'M':'L';
+    if(d.avg_sbp) sbpPath += `${cmd}${x.toFixed(1)},${yScale(d.avg_sbp).toFixed(1)} `;
+    if(d.avg_dbp) dbpPath += `${cmd}${x.toFixed(1)},${yScale(d.avg_dbp).toFixed(1)} `;
+    if(d.avg_hr) hrPath += `${cmd}${x.toFixed(1)},${yScale(d.avg_hr).toFixed(1)} `;
+  });
+
+  // Danger zone (SBP < 90)
+  const dangerY = yScale(90);
+
+  svg.innerHTML = `
+    <rect x="${PAD}" y="${PAD}" width="${W-PAD*2}" height="${H-PAD*2}" fill="none" stroke="var(--border)" stroke-width="0.5"/>
+    <line x1="${PAD}" y1="${dangerY}" x2="${W-PAD}" y2="${dangerY}" stroke="#e74c3c" stroke-width="1" stroke-dasharray="4,4" opacity="0.4"/>
+    <text x="${PAD-4}" y="${dangerY+4}" text-anchor="end" fill="#e74c3c" font-size="9" opacity="0.6">90</text>
+    <text x="${PAD-4}" y="${yScale(120)+4}" text-anchor="end" fill="var(--fg-muted)" font-size="9">120</text>
+    <text x="${PAD-4}" y="${yScale(160)+4}" text-anchor="end" fill="var(--fg-muted)" font-size="9">160</text>
+    <text x="${PAD-4}" y="${yScale(80)+4}" text-anchor="end" fill="var(--fg-muted)" font-size="9">80</text>
+    <path d="${sbpPath}" fill="none" stroke="#e74c3c" stroke-width="2.5" stroke-linejoin="round"/>
+    <path d="${dbpPath}" fill="none" stroke="#3498db" stroke-width="2" stroke-linejoin="round"/>
+    <path d="${hrPath}" fill="none" stroke="#95a5a6" stroke-width="1.5" stroke-dasharray="3,3" stroke-linejoin="round"/>
+    ${bpData.map((d,i)=>{
+      const x = PAD + i*xStep;
+      return d.avg_sbp ? `<circle cx="${x}" cy="${yScale(d.avg_sbp)}" r="3" fill="#e74c3c"/>` : '';
+    }).join('')}
+    ${n<=14 ? bpData.map((d,i)=>{
+      const x = PAD + i*xStep;
+      const label = d.date.slice(5); // MM-DD
+      return `<text x="${x}" y="${H-8}" text-anchor="middle" fill="var(--fg-muted)" font-size="8">${label}</text>`;
+    }).join('') : ''}
+  `;
+}
+
+function renderUfChart(ufData){
+  const svg = document.getElementById('ufChart');
+  if(!ufData.length){ svg.innerHTML = '<text x="300" y="100" text-anchor="middle" fill="var(--fg-muted)" font-size="14">ไม่มีข้อมูล</text>'; return; }
+
+  const W=600, H=200, PAD=50;
+  const n = ufData.length;
+  const xStep = (W-PAD*2) / Math.max(n-1, 1);
+  const barW = Math.max(8, Math.min(30, xStep*0.35));
+
+  // Y scale: 0 to max goal/actual
+  const allVals = ufData.flatMap(d=>[d.avg_goal||0, d.avg_actual||0]);
+  const yMax = Math.max(...allVals, 3000) * 1.1;
+  const yScale = v => H - PAD - (v/yMax) * (H-PAD*2);
+
+  let bars = '';
+  ufData.forEach((d,i)=>{
+    const x = PAD + i*xStep;
+    const goalH = H - PAD - yScale(d.avg_goal||0);
+    const actualH = H - PAD - yScale(d.avg_actual||0);
+    const goalY = yScale(d.avg_goal||0);
+    const actualY = yScale(d.avg_actual||0);
+    bars += `
+      <rect x="${x-barW}" y="${goalY}" width="${barW}" height="${goalH}" fill="#f39c12" opacity="0.5" rx="2"/>
+      <rect x="${x}" y="${actualY}" width="${barW}" height="${actualH}" fill="#27ae60" opacity="0.8" rx="2"/>
+    `;
+    if(n<=14){
+      bars += `<text x="${x}" y="${H-8}" text-anchor="middle" fill="var(--fg-muted)" font-size="8">${d.date.slice(5)}</text>`;
+    }
+  });
+
+  svg.innerHTML = `
+    <rect x="${PAD}" y="${PAD}" width="${W-PAD*2}" height="${H-PAD*2}" fill="none" stroke="var(--border)" stroke-width="0.5"/>
+    <text x="${PAD-4}" y="${yScale(2000)+4}" text-anchor="end" fill="var(--fg-muted)" font-size="9">2000</text>
+    <line x1="${PAD}" y1="${yScale(2000)}" x2="${W-PAD}" y2="${yScale(2000)}" stroke="var(--border)" stroke-width="0.5" stroke-dasharray="4,4"/>
+    ${bars}
+  `;
+}
+
+function renderAlertSummary(alerts){
+  const el = document.getElementById('alertSummary');
+  const total = Object.values(alerts).reduce((a,b)=>a+b, 0);
+  if(!total){ el.innerHTML = '✅ ไม่มี alert ในช่วงเวลาที่เลือก'; return; }
+
+  let html = '<div style="display:flex;gap:20px;flex-wrap:wrap;">';
+  if(alerts.critical) html += `<div><span style="color:var(--danger);font-size:1.5rem;font-weight:700;">${alerts.critical}</span><br><span style="font-size:.75rem;">🔴 Critical</span></div>`;
+  if(alerts.warning) html += `<div><span style="color:var(--warning);font-size:1.5rem;font-weight:700;">${alerts.warning}</span><br><span style="font-size:.75rem;">⚠️ Warning</span></div>`;
+  if(alerts.info) html += `<div><span style="color:var(--info);font-size:1.5rem;font-weight:700;">${alerts.info}</span><br><span style="font-size:.75rem;">ℹ️ Info</span></div>`;
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+// Load on page ready
+loadAnalytics(7, document.querySelector('.period-btn.active'));
+</script>
+{% endblock %}
