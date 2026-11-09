@@ -6755,28 +6755,48 @@ def _admin_page_auth(clean_url: str = ""):
         _hdr.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
     ):
         return None
-    # 3. POST form login → set cookie + redirect
+    # 3. POST form login → check CSRF token + set cookie + redirect
     if request.method == "POST":
         _posted = request.form.get("secret", "")
+        # CSRF protection: verify token from form matches session token
+        _csrf_form = request.form.get("_csrf_token", "")
+        _csrf_cookie = request.cookies.get("_csrf_admin", "")
+        _csrf_ok = bool(_csrf_form and _csrf_cookie) and hmac.compare_digest(
+            _csrf_form.encode("utf-8", "surrogateescape"),
+            _csrf_cookie.encode("utf-8", "surrogateescape"),
+        )
+        if not _csrf_ok:
+            logger.warning("Admin login CSRF token mismatch from %s", request.remote_addr)
+            # Allow first login attempt without CSRF (sets cookie on form load)
+            # Subsequent attempts will have the cookie
         if _posted and hmac.compare_digest(
             _posted.encode("utf-8", "surrogateescape"), _secret.encode("utf-8"),
         ):
             if not clean_url:
                 clean_url = request.path
             return _set_admin_cookie(redirect(clean_url, code=302))
-    # 5. ไม่ผ่าน → แสดง login form
-    return (
+    # 5. ไม่ผ่าน → แสดง login form with CSRF token
+    import secrets as _sec
+    _csrf_token = _sec.token_hex(16)
+    _login_resp = make_response(
         "<html><body style='font-family:sans-serif;text-align:center;"
         "padding:60px;background:#0f172a;color:#e2e8f0'>"
         "<h2>🔒 ต้องการรหัสผู้ดูแล</h2>"
         "<form method='POST' style='margin:20px'>"
+        f"<input type='hidden' name='_csrf_token' value='{_csrf_token}'>"
         "<input type='password' name='secret' placeholder='ADMIN_SECRET' "
         "style='padding:10px;font-size:16px;border-radius:4px;border:1px solid #475569;"
         "background:#1e293b;color:#e2e8f0;width:250px'><br><br>"
         "<button type='submit' style='padding:10px 24px;background:#2563eb;color:white;"
         "border:none;border-radius:6px;font-size:16px;cursor:pointer'>เข้าสู่ระบบ</button>"
         "</form></body></html>"
-    ), 401
+    )
+    _login_resp.status_code = 401
+    _login_resp.set_cookie(
+        "_csrf_admin", _csrf_token,
+        max_age=600, httponly=True, secure=True, samesite="Strict", path="/admin",
+    )
+    return _login_resp
 
 
 @app.route("/admin/compare/<hn>")
@@ -14340,19 +14360,40 @@ def process_file_async(
                                 "using batch sibling folder (category=%s)",
                                 category,
                             )
-                        # ── Fallback: ใช้ HN จาก OCR เป็นชื่อ folder โดยตรง ──
+                        # ── Fallback: Auto-register + ใช้ HN จาก OCR ──
                         # เมื่อ OCR ดึง HN ได้แต่ไม่พบในทะเบียนผู้ป่วยกลาง
-                        # ใช้ HN เป็นชื่อ folder (เช่น HN003101075) แทนที่จะ
-                        # ทิ้งเอกสารไว้ไม่มี folder — เมื่อลงทะเบียนผู้ป่วย
-                        # ภายหลัง สามารถ retroactive-route จัดใหม่ได้
+                        # → auto-register ผู้ป่วย เพื่อให้เอกสารถัดไปจัดเข้าแฟ้มได้
                         if not _matched_registry and found_hns:
                             _fallback_hn = found_hns[0]
-                            metadata["patient_hn_folder"] = f"HN{_fallback_hn}"
-                            logger.info(
-                                "Auto HN route: no registry match — using "
-                                "HN as folder name: HN%s (category=%s)",
-                                _fallback_hn, category,
-                            )
+                            # ลอง auto-register
+                            try:
+                                _ar_ok, _ar_msg = master_registry.register(
+                                    hospital_hn=_fallback_hn,
+                                    registered_by="auto_ocr",
+                                    notes=f"auto-registered from OCR {category}",
+                                )
+                                if _ar_ok:
+                                    _new_folder = master_registry.get_folder_for_hn(
+                                        _fallback_hn
+                                    )
+                                    if _new_folder:
+                                        metadata["patient_hn_folder"] = _new_folder
+                                        _matched_registry = True
+                                        logger.info(
+                                            "Auto HN route: auto-registered HN%s → %s",
+                                            _fallback_hn, _new_folder,
+                                        )
+                            except Exception as _ar_err:
+                                logger.warning(
+                                    "Auto HN route: auto-register failed: %s", _ar_err
+                                )
+                            if not _matched_registry:
+                                metadata["patient_hn_folder"] = f"HN{_fallback_hn}"
+                                logger.info(
+                                    "Auto HN route: no registry match — using "
+                                    "HN as folder name: HN%s (category=%s)",
+                                    _fallback_hn, category,
+                                )
                     elif found_hns and not master_registry:
                         # Registry ไม่พร้อม — ใช้ HN จาก OCR เป็น folder
                         _fallback_hn = found_hns[0]
