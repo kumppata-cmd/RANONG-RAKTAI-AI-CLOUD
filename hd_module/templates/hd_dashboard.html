@@ -29,7 +29,10 @@
 .bed-card .bed-num { font-size: 1.4rem; font-weight: 800; }
 .bed-card .bed-patient { font-size: .78rem; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bed-card .bed-hn { font-size: .65rem; color: var(--fg-muted); }
-.bed-card .bed-access { font-size: .6rem; padding: 1px 6px; border-radius: 8px; background: rgba(52,152,219,.12); color: var(--info); font-weight: 600; display: inline-block; margin-left: 4px; }
+.bed-card .bed-access { font-size: .65rem; padding: 2px 8px; border-radius: 8px; font-weight: 700; display: inline-block; margin-top: 2px; }
+.bed-access-avf { background: rgba(39,174,96,.15); color: var(--success); }
+.bed-access-avg { background: rgba(243,156,18,.15); color: var(--warning); }
+.bed-access-dlc, .bed-access-cvc, .bed-access-perm { background: rgba(231,76,60,.12); color: var(--danger); }
 .bed-card .bed-status { font-size: .7rem; font-weight: 600; margin-top: auto; display: flex; align-items: center; gap: 4px; }
 .bed-card .bed-time { font-size: .75rem; color: var(--success); font-weight: 700; font-variant-numeric: tabular-nums; }
 .bed-card .bed-time-urgent { color: var(--danger) !important; animation: pulse-text 1s infinite; }
@@ -230,10 +233,19 @@ function renderBeds(beds){
       timeLeft = `<div class="bed-time">⏱ เหลือ ${b.time_remaining}</div>`;
     }
 
-    /* HN + VA badge */
+    /* HN + VA badge — VA color-coded by type */
     let hnLine = '';
+    function vaClass(v){
+      if(!v) return '';
+      const u = v.toUpperCase();
+      if(u.includes('AVF')) return 'bed-access-avf';
+      if(u.includes('AVG')) return 'bed-access-avg';
+      if(u.includes('DLC')||u.includes('CVC')||u.includes('CLC')) return 'bed-access-dlc';
+      if(u.includes('PERM')) return 'bed-access-perm';
+      return 'bed-access-avf'; /* default */
+    }
     if(pHn || va){
-      hnLine = `<div class="bed-hn">${pHn ? 'HN '+pHn : ''}${va ? '<span class="bed-access">'+va+'</span>' : ''}</div>`;
+      hnLine = `<div class="bed-hn">${pHn ? 'HN '+pHn : ''}${va ? ' <span class="bed-access '+vaClass(va)+'">'+va+'</span>' : ''}</div>`;
     }
 
     /* Next scheduled badge (when bed has active + scheduled) */
@@ -346,8 +358,8 @@ function fetchBeds(){
         el.innerHTML = '<div style="font-weight:600;margin-bottom:8px;font-size:.9rem;">📋 ผู้ป่วยนัดฟอกวันนี้ ('+data.today_patients.length+' คน)</div>'
           + data.today_patients.map(p=>
             '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:.85rem;">'
-            + '<span>'+p.hn+' — '+p.name+(p.va?' <span style="font-size:.7rem;padding:1px 6px;background:rgba(52,152,219,.12);border-radius:8px;color:var(--info);font-weight:600;">'+p.va+'</span>':'')+'</span>'
-            + '<a href="/hd/session/new?hn='+encodeURIComponent(p.hn)+'" style="font-size:.8rem;color:var(--success);font-weight:600;text-decoration:none;">▶ เริ่มฟอก</a>'
+            + '<span>'+p.hn+' — '+p.name+(p.va?' <span class="bed-access '+(function(v){var u=(v||'').toUpperCase();if(u.includes('AVF'))return'bed-access-avf';if(u.includes('AVG'))return'bed-access-avg';if(u.includes('DLC')||u.includes('CVC'))return'bed-access-dlc';return'bed-access-avf'})(p.va)+'">'+p.va+'</span>':' <span style="font-size:.65rem;color:var(--fg-muted);">ไม่ระบุ VA</span>')+'</span>'
+            + '<a href="/hd/session/new?hn='+encodeURIComponent(p.hn)+'&bed=" style="font-size:.8rem;color:var(--success);font-weight:600;text-decoration:none;">▶ เริ่มฟอก</a>'
             + '</div>'
           ).join('');
       }
