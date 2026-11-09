@@ -19482,6 +19482,39 @@ def admin_assign_owner():
     }), 200
 
 
+@app.route("/admin/move-document", methods=["POST"])
+def admin_move_document():
+    """ย้ายเอกสารเข้าแฟ้มผู้ป่วย — Admin API.
+
+    Body JSON: {"doc_id": "c862644e", "hn": "60139"}
+    หรือ batch: {"moves": [{"doc_id": "...", "hn": "..."}, ...]}
+    """
+    auth_header = request.headers.get("X-Admin-Secret", "")
+    if not ADMIN_SECRET or auth_header != ADMIN_SECRET:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    data = request.get_json(force=True) or {}
+    moves = data.get("moves", [])
+    if not moves and data.get("doc_id"):
+        moves = [{"doc_id": data["doc_id"], "hn": data.get("hn", "")}]
+    if not moves:
+        return jsonify({"error": "No moves specified"}), 400
+
+    results = []
+    for mv in moves:
+        doc_prefix = mv.get("doc_id", "").strip()
+        hn = mv.get("hn", "").strip()
+        if not doc_prefix or not hn:
+            results.append({"doc_id": doc_prefix, "error": "missing doc_id or hn"})
+            continue
+        r = _move_document_to_patient(doc_prefix, hn, "admin_api")
+        r["doc_id"] = doc_prefix
+        r["hn"] = hn
+        results.append(r)
+
+    return jsonify({"results": results}), 200
+
+
 @app.route("/admin/legacy-docs", methods=["GET"])
 def admin_legacy_docs():
     """แสดงจำนวนเอกสาร legacy ที่ยังไม่มี owner — สำหรับ admin."""
