@@ -1,0 +1,152 @@
+{% extends "hd_base.html" %}
+{% block title %}Lab Results — {{ patient_hn }}{% endblock %}
+{% block page_title %}🔬 ผล Lab{% endblock %}
+
+{% block extra_css %}
+<style>
+.lab-header{background:var(--bg-card);border-radius:var(--radius);padding:12px;margin-bottom:12px;border:1px solid var(--border)}
+.lab-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;margin-bottom:16px}
+.lab-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;text-align:center}
+.lab-card .val{font-size:1.4rem;font-weight:800}
+.lab-card .name{font-size:.7rem;color:var(--fg-muted);margin-bottom:2px}
+.lab-card .unit{font-size:.6rem;color:var(--fg-muted)}
+.lab-card .range{font-size:.6rem;color:var(--fg-muted)}
+.lab-card.high{border-color:var(--danger);background:rgba(231,76,60,.04)}.lab-card.high .val{color:var(--danger)}
+.lab-card.low{border-color:var(--warning);background:rgba(243,156,18,.04)}.lab-card.low .val{color:var(--warning)}
+.lab-card.normal .val{color:var(--success)}
+.lab-history{overflow-x:auto;margin-top:12px}
+.lab-tbl{width:100%;border-collapse:collapse;font-size:.75rem;min-width:600px}
+.lab-tbl th{background:var(--accent);color:#fff;padding:6px 4px;text-align:center;position:sticky;top:0}
+.lab-tbl td{padding:6px 4px;text-align:center;border-bottom:1px solid var(--border)}
+.lab-tbl .flag-high{color:var(--danger);font-weight:700}
+.lab-tbl .flag-low{color:var(--warning);font-weight:700}
+.add-overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;display:none;align-items:flex-end;justify-content:center}
+.add-overlay.open{display:flex}
+.add-sheet{background:var(--bg-card);border-radius:16px 16px 0 0;width:100%;max-width:480px;padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));max-height:85vh;overflow-y:auto}
+.add-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.add-field label{font-size:.7rem;color:var(--fg-muted);display:block;margin-bottom:2px}
+.add-field input{width:100%;padding:8px;font-size:.9rem;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--fg);text-align:center}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="lab-header">
+  <strong id="labPatient">กำลังโหลด...</strong>
+  <div style="margin-top:8px">
+    <button class="btn btn-primary" onclick="openAddLab()" style="font-size:.85rem;padding:8px 16px">➕ เพิ่มผล Lab</button>
+    <a href="/hd/patient/{{ patient_hn }}" class="btn" style="font-size:.85rem;padding:8px 16px">← ข้อมูลผู้ป่วย</a>
+    <a href="/hd/epo-dashboard/{{ patient_hn }}" class="btn" style="font-size:.85rem;padding:8px 16px">📈 EPO Dashboard</a>
+  </div>
+</div>
+
+<div id="latestCards" class="lab-cards"></div>
+
+<div class="lab-history">
+  <h4 style="margin:0 0 8px;font-size:.9rem">📋 ประวัติ Lab</h4>
+  <table class="lab-tbl">
+    <thead><tr><th>วันที่</th><th>BUN</th><th>Cr</th><th>K</th><th>Na</th><th>Ca</th><th>PO4</th><th>Alb</th><th>Hb</th><th>Ferritin</th><th>iPTH</th></tr></thead>
+    <tbody id="labHistoryBody"><tr><td colspan="11" style="color:var(--fg-muted)">กำลังโหลด...</td></tr></tbody>
+  </table>
+</div>
+
+<!-- Add Lab Sheet -->
+<div class="add-overlay" id="addOverlay" onclick="if(event.target===this)closeAddLab()">
+  <div class="add-sheet">
+    <h3>➕ เพิ่มผล Lab</h3>
+    <div class="add-field" style="margin-bottom:10px"><label>วันที่ Lab</label><input type="date" id="labDate"></div>
+    <h4 style="font-size:.8rem;color:var(--fg-muted);margin:8px 0 4px">🩸 Renal</h4>
+    <div class="add-grid">
+      <div class="add-field"><label>BUN (mg/dL)</label><input type="number" step="0.1" id="lBun"></div>
+      <div class="add-field"><label>Creatinine (mg/dL)</label><input type="number" step="0.01" id="lCr"></div>
+      <div class="add-field"><label>K (mEq/L)</label><input type="number" step="0.1" id="lK"></div>
+      <div class="add-field"><label>Na (mEq/L)</label><input type="number" step="0.1" id="lNa"></div>
+      <div class="add-field"><label>Ca (mg/dL)</label><input type="number" step="0.1" id="lCa"></div>
+      <div class="add-field"><label>PO4 (mg/dL)</label><input type="number" step="0.1" id="lPO4"></div>
+    </div>
+    <h4 style="font-size:.8rem;color:var(--fg-muted);margin:8px 0 4px">🔬 Anemia</h4>
+    <div class="add-grid">
+      <div class="add-field"><label>Hb (g/dL)</label><input type="number" step="0.1" id="lHb"></div>
+      <div class="add-field"><label>Hct (%)</label><input type="number" step="0.1" id="lHct"></div>
+      <div class="add-field"><label>Ferritin (ng/mL)</label><input type="number" step="1" id="lFerritin"></div>
+      <div class="add-field"><label>TSAT (%)</label><input type="number" step="0.1" id="lTsat"></div>
+    </div>
+    <h4 style="font-size:.8rem;color:var(--fg-muted);margin:8px 0 4px">🦴 Bone</h4>
+    <div class="add-grid">
+      <div class="add-field"><label>iPTH (pg/mL)</label><input type="number" step="1" id="lIpth"></div>
+      <div class="add-field"><label>Albumin (g/dL)</label><input type="number" step="0.1" id="lAlb"></div>
+    </div>
+    <button class="btn btn-success" onclick="saveLab()" style="width:100%;padding:14px;font-size:1rem;margin-top:12px">💾 บันทึก</button>
+    <button class="btn" onclick="closeAddLab()" style="width:100%;margin-top:8px;padding:10px">ยกเลิก</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const HN='{{ patient_hn }}';
+const RANGES={bun:[7,20],creatinine:[0.6,1.2],potassium:[3.5,5.0],sodium:[136,145],calcium:[8.5,10.5],phosphate:[2.5,4.5],albumin:[3.5,5.0],ipth:[150,600],hemoglobin:[10,12],hematocrit:[30,36],ferritin:[200,500],tsat:[20,50]};
+const UNITS={bun:'mg/dL',creatinine:'mg/dL',potassium:'mEq/L',sodium:'mEq/L',calcium:'mg/dL',phosphate:'mg/dL',albumin:'g/dL',ipth:'pg/mL',hemoglobin:'g/dL',hematocrit:'%',ferritin:'ng/mL',tsat:'%'};
+const LABELS={bun:'BUN',creatinine:'Cr',potassium:'K',sodium:'Na',calcium:'Ca',phosphate:'PO4',albumin:'Alb',ipth:'iPTH',hemoglobin:'Hb',hematocrit:'Hct',ferritin:'Ferritin',tsat:'TSAT'};
+
+function flagClass(key,val){
+  if(!val||!RANGES[key]) return '';
+  if(val<RANGES[key][0]) return 'low';
+  if(val>RANGES[key][1]) return 'high';
+  return 'normal';
+}
+
+function loadLabs(){
+  hdFetch('/hd/api/v1/patients/'+HN+'/labs').then(r=>r.json()).then(d=>{
+    if(d.error){document.getElementById('labPatient').textContent='Error: '+d.error;return}
+    /* Latest lab cards */
+    const latest=d.labs&&d.labs[0]?d.labs[0]:{};
+    document.getElementById('labPatient').textContent='HN '+HN+' — ผล Lab ล่าสุด '+(latest.date||'-');
+    const cards=document.getElementById('latestCards');
+    cards.innerHTML='';
+    for(const[k,label] of Object.entries(LABELS)){
+      const v=latest[k];
+      const cls=flagClass(k,v);
+      const r=RANGES[k];
+      cards.innerHTML+=`<div class="lab-card ${cls}"><div class="name">${label}</div><div class="val">${v!=null?v:'—'}</div><div class="unit">${UNITS[k]||''}</div><div class="range">${r?r[0]+'-'+r[1]:''}</div></div>`;
+    }
+    /* History table */
+    const tbody=document.getElementById('labHistoryBody');
+    if(!d.labs||!d.labs.length){tbody.innerHTML='<tr><td colspan="11" style="color:var(--fg-muted)">ยังไม่มีผล Lab</td></tr>';return}
+    tbody.innerHTML=d.labs.map(l=>{
+      function cell(k){const v=l[k];if(v==null)return'<td>—</td>';const c=flagClass(k,v);return'<td class="'+(c==='high'?'flag-high':c==='low'?'flag-low':'')+'">'+v+'</td>'}
+      return'<tr><td>'+l.date+'</td>'+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('ferritin')+cell('ipth')+'</tr>';
+    }).join('');
+  }).catch(()=>{document.getElementById('labPatient').textContent='โหลดไม่สำเร็จ'});
+}
+
+function openAddLab(){
+  document.getElementById('labDate').value=new Date().toISOString().split('T')[0];
+  document.getElementById('addOverlay').classList.add('open');
+}
+function closeAddLab(){document.getElementById('addOverlay').classList.remove('open')}
+function saveLab(){
+  const data={
+    lab_date:document.getElementById('labDate').value,
+    bun:parseFloat(document.getElementById('lBun').value)||null,
+    creatinine:parseFloat(document.getElementById('lCr').value)||null,
+    potassium:parseFloat(document.getElementById('lK').value)||null,
+    sodium:parseFloat(document.getElementById('lNa').value)||null,
+    calcium:parseFloat(document.getElementById('lCa').value)||null,
+    phosphate:parseFloat(document.getElementById('lPO4').value)||null,
+    hemoglobin:parseFloat(document.getElementById('lHb').value)||null,
+    hematocrit:parseFloat(document.getElementById('lHct').value)||null,
+    ferritin:parseFloat(document.getElementById('lFerritin').value)||null,
+    tsat:parseFloat(document.getElementById('lTsat').value)||null,
+    ipth:parseFloat(document.getElementById('lIpth').value)||null,
+    albumin:parseFloat(document.getElementById('lAlb').value)||null,
+  };
+  hdFetch('/hd/api/v1/patients/'+HN+'/labs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('บันทึกผล Lab สำเร็จ','success');
+      closeAddLab();loadLabs();
+    }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
+loadLabs();
+</script>
+{% endblock %}

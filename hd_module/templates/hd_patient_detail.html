@@ -58,7 +58,10 @@
     <div class="info-item"><div class="label">ยา ESA</div><div class="value" id="pEsa">-</div></div>
     <div class="info-item"><div class="label">การวินิจฉัย</div><div class="value" id="pDx">-</div></div>
   </div>
-  <a href="/hd/epo-dashboard/{{ patient_hn }}" class="btn btn-primary" style="width:100%;margin-top:12px;padding:12px;text-align:center;">📈 EPO Response Dashboard</a>
+  <div style="display:flex;gap:8px;margin-top:12px;">
+    <a href="/hd/labs/{{ patient_hn }}" class="btn btn-primary" style="flex:1;padding:12px;text-align:center;">🔬 ผล Lab</a>
+    <a href="/hd/epo-dashboard/{{ patient_hn }}" class="btn" style="flex:1;padding:12px;text-align:center;">📈 EPO</a>
+  </div>
 </div>
 
 <!-- BP Trend Chart -->

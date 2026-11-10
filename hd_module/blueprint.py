@@ -169,6 +169,12 @@ def hd_settings_page():
     return render_template("hd_settings.html")
 
 
+@hd_web.route("/labs/<hn>")
+def hd_labs_page(hn):
+    """Lab Results page for a patient."""
+    return render_template("hd_labs.html", patient_hn=hn)
+
+
 @hd_web.route("/sheet/<int:session_id>")
 def hd_sheet_page(session_id):
     """HD Monitoring Sheet page."""
@@ -2776,6 +2782,490 @@ def monthly_summary_report():
         return jsonify(report)
     except Exception as e:
         logger.error("monthly_summary error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════
+# F15: Medication Orders
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/patients/<hn>/medications", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_patient_medications(hn):
+    """Get standing medication orders for a patient."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"orders": []})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT o.id, o.drug_name, o.drug_category, o.dose, o.route,
+                       o.frequency, o.is_standing, o.is_active, o.notes, o.ordered_at
+                FROM hd_medication_orders o
+                JOIN hd_patient_mapping p ON p.id = o.patient_id
+                WHERE p.hn = %s AND o.is_active = TRUE
+                ORDER BY o.drug_category, o.drug_name
+            """, (hn,))
+            rows = cur.fetchall()
+        conn.close()
+        orders = [{"id": r[0], "drug": r[1], "category": r[2], "dose": r[3],
+                   "route": r[4], "frequency": r[5], "standing": r[6],
+                   "active": r[7], "notes": r[8],
+                   "ordered_at": r[9].isoformat() if r[9] else None} for r in rows]
+        return jsonify({"orders": orders})
+    except Exception as e:
+        logger.error("get_medications error: %s", e)
+        return jsonify({"orders": [], "error": str(e)})
+
+
+@hd_bp.route("/patients/<hn>/medications", methods=["POST"])
+@require_role("physician")
+def create_medication_order(hn):
+    """Create a new medication order."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    data = request.get_json(silent=True) or {}
+    drug = data.get("drug_name", "").strip()
+    if not drug:
+        return jsonify({"error": "ต้องระบุชื่อยา"}), 400
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            pr = cur.fetchone()
+            if not pr:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            cur.execute("""
+                INSERT INTO hd_medication_orders
+                    (patient_id, drug_name, drug_category, dose, route, frequency,
+                     is_standing, ordered_by, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (pr[0], drug, data.get("category", "other"),
+                  data.get("dose"), data.get("route", "IV"),
+                  data.get("frequency"), data.get("standing", False),
+                  g.get("hd_user_id"), data.get("notes")))
+            oid = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return jsonify({"id": oid, "drug": drug}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/sessions/<int:sid>/medications", methods=["GET", "POST"])
+@require_role("physician", "nurse")
+def session_medications(sid):
+    """GET: list meds given this session. POST: record a med given."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"given": []} if request.method == "GET" else {"error": "No DB"}), 200 if request.method == "GET" else 503
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        if request.method == "GET":
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, drug_name, dose_given, route, given_at, slot_time, notes
+                    FROM hd_medication_given WHERE session_id = %s ORDER BY given_at
+                """, (sid,))
+                rows = cur.fetchall()
+            conn.close()
+            return jsonify({"given": [{"id": r[0], "drug": r[1], "dose": r[2],
+                "route": r[3], "time": r[4].isoformat() if r[4] else None,
+                "slot": r[5], "notes": r[6]} for r in rows]})
+        # POST
+        data = request.get_json(silent=True) or {}
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO hd_medication_given
+                    (session_id, order_id, drug_name, dose_given, route, given_by, slot_time, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (sid, data.get("order_id"), data.get("drug_name", ""),
+                  data.get("dose"), data.get("route", "IV"),
+                  g.get("hd_user_id"), data.get("slot_time"), data.get("notes")))
+            mid = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return jsonify({"id": mid, "recorded": True}), 201
+    except Exception as e:
+        logger.error("session_medications error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════
+# F16: Lab Results Viewer
+# ══════════════════════════════════════════════════════════
+
+_LAB_NORMAL_RANGES = {
+    "bun": (7, 20, "mg/dL"), "creatinine": (0.6, 1.2, "mg/dL"),
+    "potassium": (3.5, 5.0, "mEq/L"), "sodium": (136, 145, "mEq/L"),
+    "calcium": (8.5, 10.5, "mg/dL"), "phosphate": (2.5, 4.5, "mg/dL"),
+    "albumin": (3.5, 5.0, "g/dL"), "ipth": (150, 600, "pg/mL"),
+    "hemoglobin": (10, 12, "g/dL"), "hematocrit": (30, 36, "%"),
+    "ferritin": (200, 500, "ng/mL"), "tsat": (20, 50, "%"),
+}
+
+
+@hd_bp.route("/patients/<hn>/labs", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_patient_labs(hn):
+    """Get lab results history with abnormal flags."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"labs": []})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT l.id, l.lab_date, l.bun, l.creatinine, l.potassium, l.sodium,
+                       l.calcium, l.phosphate, l.albumin, l.ipth,
+                       l.hemoglobin, l.hematocrit, l.ferritin, l.tsat,
+                       l.iron, l.tibc, l.wbc, l.platelet, l.hba1c,
+                       l.uric_acid, l.ast, l.alt,
+                       l.hepatitis_b, l.hepatitis_c, l.hiv,
+                       l.notes, l.source
+                FROM hd_lab_results l
+                JOIN hd_patient_mapping p ON p.id = l.patient_id
+                WHERE p.hn = %s
+                ORDER BY l.lab_date DESC LIMIT 20
+            """, (hn,))
+            rows = cur.fetchall()
+        conn.close()
+        cols = ["id","date","bun","creatinine","potassium","sodium","calcium",
+                "phosphate","albumin","ipth","hemoglobin","hematocrit","ferritin",
+                "tsat","iron","tibc","wbc","platelet","hba1c","uric_acid",
+                "ast","alt","hep_b","hep_c","hiv","notes","source"]
+        labs = []
+        for r in rows:
+            entry = {}
+            for i, c in enumerate(cols):
+                v = r[i]
+                if c == "date" and v:
+                    v = v.isoformat()
+                elif isinstance(v, (int, float)):
+                    v = float(v) if not isinstance(v, int) else v
+                entry[c] = v
+            # Add flags
+            flags = {}
+            for key, (lo, hi, unit) in _LAB_NORMAL_RANGES.items():
+                val = entry.get(key)
+                if val is not None:
+                    if val < lo:
+                        flags[key] = "low"
+                    elif val > hi:
+                        flags[key] = "high"
+            entry["flags"] = flags
+            labs.append(entry)
+        return jsonify({"labs": labs, "normal_ranges": _LAB_NORMAL_RANGES})
+    except Exception as e:
+        logger.error("get_labs error: %s", e)
+        return jsonify({"labs": [], "error": str(e)})
+
+
+@hd_bp.route("/patients/<hn>/labs", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def save_lab_result(hn):
+    """Save a lab result entry."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    data = request.get_json(silent=True) or {}
+    if not data.get("lab_date"):
+        return jsonify({"error": "ต้องระบุวันที่ lab"}), 400
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            pr = cur.fetchone()
+            if not pr:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            lab_cols = ["bun","creatinine","potassium","sodium","calcium","phosphate",
+                        "albumin","ipth","hemoglobin","hematocrit","ferritin","tsat",
+                        "iron","tibc","wbc","platelet","hba1c","uric_acid","ast","alt",
+                        "hepatitis_b","hepatitis_c","hiv","notes","source"]
+            vals = [data.get(c) for c in lab_cols]
+            placeholders = ", ".join(["%s"] * (len(lab_cols) + 2))
+            col_str = ", ".join(["patient_id", "lab_date"] + lab_cols)
+            cur.execute(
+                f"INSERT INTO hd_lab_results ({col_str}) VALUES ({placeholders}) RETURNING id",
+                [pr[0], data["lab_date"]] + vals
+            )
+            lid = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return jsonify({"id": lid, "saved": True}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════
+# F17: Vascular Access Log
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/sessions/<int:sid>/va-assessment", methods=["GET", "POST"])
+@require_role("physician", "nurse")
+def va_assessment(sid):
+    """VA assessment per session."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"assessment": None} if request.method == "GET" else {"error": "No DB"}), 200 if request.method == "GET" else 503
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        if request.method == "GET":
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT va_type, site, thrill, bruit, needle_gauge,
+                           needle_site_a, needle_site_v, cannulation_ease,
+                           complications, appearance, notes
+                    FROM hd_va_assessments WHERE session_id = %s
+                    ORDER BY assessed_at DESC LIMIT 1
+                """, (sid,))
+                r = cur.fetchone()
+            conn.close()
+            if not r:
+                return jsonify({"assessment": None})
+            return jsonify({"assessment": {
+                "va_type": r[0], "site": r[1], "thrill": r[2], "bruit": r[3],
+                "needle_gauge": r[4], "needle_a": r[5], "needle_v": r[6],
+                "ease": r[7], "complications": r[8], "appearance": r[9], "notes": r[10],
+            }})
+        # POST
+        data = request.get_json(silent=True) or {}
+        with conn.cursor() as cur:
+            # Get patient_id from session
+            cur.execute("SELECT patient_id FROM hd_sessions WHERE id = %s", (sid,))
+            sr = cur.fetchone()
+            if not sr:
+                conn.close()
+                return jsonify({"error": "Session not found"}), 404
+            cur.execute("""
+                INSERT INTO hd_va_assessments
+                    (session_id, patient_id, va_type, site, thrill, bruit,
+                     needle_gauge, needle_site_a, needle_site_v, cannulation_ease,
+                     complications, appearance, assessed_by, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (sid, sr[0], data.get("va_type"), data.get("site"),
+                  data.get("thrill"), data.get("bruit"), data.get("needle_gauge"),
+                  data.get("needle_a"), data.get("needle_v"), data.get("ease"),
+                  data.get("complications"), data.get("appearance"),
+                  g.get("hd_user_id"), data.get("notes")))
+            vid = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return jsonify({"id": vid, "saved": True}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/patients/<hn>/va-history", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def va_history(hn):
+    """VA assessment history for a patient."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"history": []})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT v.assessed_at, v.va_type, v.thrill, v.bruit,
+                       v.complications, v.needle_gauge, v.cannulation_ease, v.notes
+                FROM hd_va_assessments v
+                JOIN hd_patient_mapping p ON p.id = v.patient_id
+                WHERE p.hn = %s
+                ORDER BY v.assessed_at DESC LIMIT 30
+            """, (hn,))
+            rows = cur.fetchall()
+        conn.close()
+        return jsonify({"history": [{"date": r[0].isoformat() if r[0] else None,
+            "va_type": r[1], "thrill": r[2], "bruit": r[3],
+            "complications": r[4], "gauge": r[5], "ease": r[6], "notes": r[7]}
+            for r in rows]})
+    except Exception as e:
+        return jsonify({"history": [], "error": str(e)})
+
+
+# ══════════════════════════════════════════════════════════
+# F18: Anticoagulation Protocol
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/sessions/<int:sid>/anticoagulation", methods=["GET", "POST"])
+@require_role("physician", "nurse")
+def session_anticoagulation(sid):
+    """Anticoagulation protocol per session."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"protocol": None} if request.method == "GET" else {"error": "No DB"}), 200 if request.method == "GET" else 503
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        if request.method == "GET":
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT protocol, loading_dose, loading_unit, maintenance_dose,
+                           maintenance_unit, total_dose, heparin_free_reason,
+                           act_pre, act_post, notes
+                    FROM hd_anticoagulation WHERE session_id = %s
+                    ORDER BY recorded_at DESC LIMIT 1
+                """, (sid,))
+                r = cur.fetchone()
+            conn.close()
+            if not r:
+                return jsonify({"protocol": None})
+            return jsonify({"protocol": {
+                "type": r[0], "loading": r[1], "loading_unit": r[2],
+                "maintenance": r[3], "maintenance_unit": r[4],
+                "total": r[5], "hep_free_reason": r[6],
+                "act_pre": r[7], "act_post": r[8], "notes": r[9],
+            }})
+        # POST
+        data = request.get_json(silent=True) or {}
+        protocol = data.get("protocol", "standard_heparin")
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO hd_anticoagulation
+                    (session_id, protocol, loading_dose, loading_unit,
+                     maintenance_dose, maintenance_unit, total_dose,
+                     heparin_free_reason, act_pre, act_post, notes, recorded_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+            """, (sid, protocol, data.get("loading_dose"), data.get("loading_unit", "IU"),
+                  data.get("maintenance_dose"), data.get("maintenance_unit", "IU/hr"),
+                  data.get("total_dose"), data.get("hep_free_reason"),
+                  data.get("act_pre"), data.get("act_post"),
+                  data.get("notes"), g.get("hd_user_id")))
+            aid = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return jsonify({"id": aid, "saved": True}), 201
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════
+# F19: Dialyzer Reuse Tracking
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/patients/<hn>/dialyzer", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_dialyzer(hn):
+    """Get active dialyzer for a patient."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"dialyzer": None})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT d.id, d.dialyzer_type, d.dialyzer_serial, d.first_use_date,
+                       d.reuse_count, d.max_reuse, d.tcv_initial, d.tcv_current,
+                       d.status, d.visual_pass, d.notes
+                FROM hd_dialyzer_tracking d
+                JOIN hd_patient_mapping p ON p.id = d.patient_id
+                WHERE p.hn = %s AND d.status = 'active'
+                ORDER BY d.first_use_date DESC LIMIT 1
+            """, (hn,))
+            r = cur.fetchone()
+        conn.close()
+        if not r:
+            return jsonify({"dialyzer": None})
+        pct_used = round(r[4] / r[5] * 100) if r[5] else 0
+        return jsonify({"dialyzer": {
+            "id": r[0], "type": r[1], "serial": r[2],
+            "first_use": r[3].isoformat() if r[3] else None,
+            "reuse_count": r[4], "max_reuse": r[5],
+            "tcv_initial": float(r[6]) if r[6] else None,
+            "tcv_current": float(r[7]) if r[7] else None,
+            "status": r[8], "visual_pass": r[9], "notes": r[10],
+            "pct_used": pct_used,
+            "near_limit": r[4] >= r[5] - 2 if r[5] else False,
+        }})
+    except Exception as e:
+        return jsonify({"dialyzer": None, "error": str(e)})
+
+
+@hd_bp.route("/patients/<hn>/dialyzer", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def register_dialyzer(hn):
+    """Register a new dialyzer or record reuse."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    data = request.get_json(silent=True) or {}
+    action = data.get("action", "new")  # "new" or "reuse"
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            pr = cur.fetchone()
+            if not pr:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            if action == "reuse":
+                # Increment reuse count of active dialyzer
+                cur.execute("""
+                    UPDATE hd_dialyzer_tracking
+                    SET reuse_count = reuse_count + 1,
+                        tcv_current = COALESCE(%s, tcv_current),
+                        visual_pass = %s,
+                        last_used_session = %s,
+                        last_reprocessed_at = NOW()
+                    WHERE patient_id = %s AND status = 'active'
+                    RETURNING id, reuse_count, max_reuse
+                """, (data.get("tcv"), data.get("visual_pass", True),
+                      data.get("session_id"), pr[0]))
+                r = cur.fetchone()
+                if not r:
+                    conn.close()
+                    return jsonify({"error": "ไม่พบ dialyzer active"}), 404
+                alert = None
+                if r[1] >= r[2]:
+                    alert = f"⚠️ Dialyzer ครบ {r[2]} ครั้ง — ต้องเปลี่ยนตัวใหม่"
+                    cur.execute("UPDATE hd_dialyzer_tracking SET status = 'expired' WHERE id = %s", (r[0],))
+                conn.commit()
+                conn.close()
+                return jsonify({"reuse_count": r[1], "max": r[2], "alert": alert})
+            else:
+                # Deactivate old dialyzer
+                cur.execute("""
+                    UPDATE hd_dialyzer_tracking SET status = 'retired'
+                    WHERE patient_id = %s AND status = 'active'
+                """, (pr[0],))
+                # Create new
+                cur.execute("""
+                    INSERT INTO hd_dialyzer_tracking
+                        (patient_id, dialyzer_type, dialyzer_serial, first_use_date,
+                         reuse_count, max_reuse, tcv_initial, tcv_current, visual_pass)
+                    VALUES (%s,%s,%s,CURRENT_DATE,1,%s,%s,%s,TRUE) RETURNING id
+                """, (pr[0], data.get("type", ""), data.get("serial"),
+                      data.get("max_reuse", 20),
+                      data.get("tcv"), data.get("tcv")))
+                did = cur.fetchone()[0]
+            conn.commit()
+            conn.close()
+            return jsonify({"id": did, "action": action}), 201
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 

@@ -335,6 +335,133 @@ END $$;
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.6.0', 'Add hd_flowsheet full HD monitoring sheet')
 ON CONFLICT (version) DO NOTHING;
+
+-- v1.7.0: Clinical Upgrade — Medications, Labs, VA Log, Anticoag, Dialyzer
+
+-- F15: Medication Orders (คำสั่งยาระหว่างฟอก)
+CREATE TABLE IF NOT EXISTS hd_medication_orders (
+    id SERIAL PRIMARY KEY,
+    patient_id INTEGER NOT NULL REFERENCES hd_patient_mapping(id),
+    drug_name VARCHAR(100) NOT NULL,
+    drug_category VARCHAR(50),
+    dose VARCHAR(50),
+    route VARCHAR(20) DEFAULT 'IV',
+    frequency VARCHAR(50),
+    is_standing BOOLEAN DEFAULT FALSE,
+    is_active BOOLEAN DEFAULT TRUE,
+    ordered_by INTEGER REFERENCES hd_users(id),
+    ordered_at TIMESTAMP DEFAULT NOW(),
+    notes VARCHAR(300)
+);
+CREATE TABLE IF NOT EXISTS hd_medication_given (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES hd_sessions(id),
+    order_id INTEGER REFERENCES hd_medication_orders(id),
+    drug_name VARCHAR(100) NOT NULL,
+    dose_given VARCHAR(50),
+    route VARCHAR(20),
+    given_at TIMESTAMP DEFAULT NOW(),
+    given_by INTEGER REFERENCES hd_users(id),
+    slot_time VARCHAR(5),
+    notes VARCHAR(200)
+);
+CREATE INDEX IF NOT EXISTS idx_hd_med_given_session ON hd_medication_given(session_id);
+
+-- F16: Lab Results
+CREATE TABLE IF NOT EXISTS hd_lab_results (
+    id SERIAL PRIMARY KEY,
+    patient_id INTEGER NOT NULL REFERENCES hd_patient_mapping(id),
+    lab_date DATE NOT NULL,
+    bun NUMERIC(6,1),
+    creatinine NUMERIC(5,2),
+    potassium NUMERIC(4,2),
+    sodium NUMERIC(5,1),
+    calcium NUMERIC(5,2),
+    phosphate NUMERIC(5,2),
+    albumin NUMERIC(4,2),
+    ipth NUMERIC(7,1),
+    hemoglobin NUMERIC(4,1),
+    hematocrit NUMERIC(4,1),
+    ferritin NUMERIC(7,1),
+    tsat NUMERIC(5,1),
+    iron NUMERIC(6,1),
+    tibc NUMERIC(6,1),
+    wbc NUMERIC(6,2),
+    platelet INTEGER,
+    hba1c NUMERIC(4,1),
+    uric_acid NUMERIC(5,2),
+    ast NUMERIC(6,1),
+    alt NUMERIC(6,1),
+    hepatitis_b VARCHAR(20),
+    hepatitis_c VARCHAR(20),
+    hiv VARCHAR(20),
+    notes VARCHAR(300),
+    source VARCHAR(50) DEFAULT 'manual',
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_hd_lab_patient ON hd_lab_results(patient_id, lab_date);
+
+-- F17: Vascular Access Log
+CREATE TABLE IF NOT EXISTS hd_va_assessments (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES hd_sessions(id),
+    patient_id INTEGER NOT NULL REFERENCES hd_patient_mapping(id),
+    va_type VARCHAR(20),
+    site VARCHAR(50),
+    thrill VARCHAR(20),
+    bruit VARCHAR(20),
+    needle_gauge VARCHAR(10),
+    needle_site_a VARCHAR(50),
+    needle_site_v VARCHAR(50),
+    cannulation_ease VARCHAR(20),
+    complications VARCHAR(200),
+    appearance VARCHAR(100),
+    assessed_by INTEGER REFERENCES hd_users(id),
+    assessed_at TIMESTAMP DEFAULT NOW(),
+    notes VARCHAR(300)
+);
+CREATE INDEX IF NOT EXISTS idx_hd_va_session ON hd_va_assessments(session_id);
+
+-- F18: Anticoagulation
+CREATE TABLE IF NOT EXISTS hd_anticoagulation (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES hd_sessions(id),
+    protocol VARCHAR(30) DEFAULT 'standard_heparin',
+    loading_dose INTEGER,
+    loading_unit VARCHAR(10) DEFAULT 'IU',
+    maintenance_dose INTEGER,
+    maintenance_unit VARCHAR(20) DEFAULT 'IU/hr',
+    total_dose INTEGER,
+    heparin_free_reason VARCHAR(200),
+    act_pre INTEGER,
+    act_post INTEGER,
+    notes VARCHAR(300),
+    recorded_by INTEGER REFERENCES hd_users(id),
+    recorded_at TIMESTAMP DEFAULT NOW()
+);
+
+-- F19: Dialyzer Reuse Tracking
+CREATE TABLE IF NOT EXISTS hd_dialyzer_tracking (
+    id SERIAL PRIMARY KEY,
+    patient_id INTEGER NOT NULL REFERENCES hd_patient_mapping(id),
+    dialyzer_type VARCHAR(50) NOT NULL,
+    dialyzer_serial VARCHAR(50),
+    first_use_date DATE,
+    reuse_count INTEGER DEFAULT 1,
+    max_reuse INTEGER DEFAULT 20,
+    tcv_initial NUMERIC(6,1),
+    tcv_current NUMERIC(6,1),
+    status VARCHAR(20) DEFAULT 'active',
+    last_used_session INTEGER REFERENCES hd_sessions(id),
+    last_reprocessed_at TIMESTAMP,
+    visual_pass BOOLEAN,
+    notes VARCHAR(300)
+);
+CREATE INDEX IF NOT EXISTS idx_hd_dialyzer_patient ON hd_dialyzer_tracking(patient_id);
+
+INSERT INTO hd_schema_version (version, description)
+VALUES ('1.7.0', 'Clinical upgrade: medications, labs, VA log, anticoagulation, dialyzer tracking')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────
