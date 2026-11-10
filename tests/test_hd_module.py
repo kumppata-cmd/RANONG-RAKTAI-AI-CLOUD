@@ -699,5 +699,245 @@ class TestHdConfig(unittest.TestCase):
             self.assertIsInstance(HdConfig.TOTAL_BEDS, int)
 
 
+# ═══════════════════════════════════════════════════════════
+# Test: New Features (Session B — 2026-11-10)
+# ═══════════════════════════════════════════════════════════
+
+class TestNewFeatures(unittest.TestCase):
+    """Tests for features added in the November 2026 sessions."""
+
+    def _make_app(self):
+        from flask import Flask
+        from hd_module.blueprint import hd_bp
+        app = Flask(__name__)
+        app.config["TESTING"] = True
+        app.register_blueprint(hd_bp, url_prefix="/hd/api/v1")
+        return app
+
+    def _get_token(self, role="nurse"):
+        from hd_module.auth import create_token
+        return create_token(1, f"test_{role}", role)
+
+    # ── Alerts API (was stub, now real) ──
+
+    def test_list_alerts_returns_json(self):
+        """list_alerts should return JSON with alerts array (not stub)."""
+        app = self._make_app()
+        token = self._get_token("physician")
+        with app.test_client() as c:
+            resp = c.get("/hd/api/v1/alerts",
+                         headers={"Authorization": f"Bearer {token}"})
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()
+            self.assertIn("alerts", data)
+            self.assertIsInstance(data["alerts"], list)
+
+    def test_acknowledge_alert_requires_auth(self):
+        """acknowledge_alert should require authentication."""
+        app = self._make_app()
+        with app.test_client() as c:
+            resp = c.post("/hd/api/v1/alerts/1/acknowledge")
+            self.assertIn(resp.status_code, [401, 403])
+
+    # ── Patient Edit API ──
+
+    def test_update_patient_requires_auth(self):
+        """PUT /patients/<hn> requires authentication."""
+        app = self._make_app()
+        with app.test_client() as c:
+            resp = c.put("/hd/api/v1/patients/12345",
+                         json={"schedule_days": "จ/พ/ศ"})
+            self.assertIn(resp.status_code, [401, 403])
+
+    def test_update_patient_requires_data(self):
+        """PUT /patients/<hn> with empty body returns 400 or 503 (no DB)."""
+        app = self._make_app()
+        token = self._get_token("physician")
+        with app.test_client() as c:
+            resp = c.put("/hd/api/v1/patients/12345",
+                         headers={"Authorization": f"Bearer {token}"},
+                         json={})
+            self.assertIn(resp.status_code, [400, 503])
+
+    # ── Needs Review API ──
+
+    def test_needs_review_returns_json(self):
+        """patients/needs-review returns list."""
+        app = self._make_app()
+        token = self._get_token("nurse")
+        with app.test_client() as c:
+            resp = c.get("/hd/api/v1/patients/needs-review",
+                         headers={"Authorization": f"Bearer {token}"})
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()
+            self.assertIn("patients", data)
+
+    # ── ESA History API ──
+
+    def test_esa_history_returns_json(self):
+        """patients/<hn>/esa-history returns records + prescribed."""
+        app = self._make_app()
+        token = self._get_token("nurse")
+        with app.test_client() as c:
+            resp = c.get("/hd/api/v1/patients/00001/esa-history",
+                         headers={"Authorization": f"Bearer {token}"})
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()
+            self.assertIn("records", data)
+            self.assertIn("prescribed", data)
+
+    # ── Flowsheet API ──
+
+    def test_flowsheet_get_returns_json(self):
+        """GET /sessions/<id>/flowsheet returns rows + session info."""
+        app = self._make_app()
+        token = self._get_token("nurse")
+        with app.test_client() as c:
+            resp = c.get("/hd/api/v1/sessions/999/flowsheet",
+                         headers={"Authorization": f"Bearer {token}"})
+            self.assertEqual(resp.status_code, 200)
+            data = resp.get_json()
+            self.assertIn("rows", data)
+
+    def test_flowsheet_post_requires_slot_time(self):
+        """POST /sessions/<id>/flowsheet without slot_time returns 400 or 503."""
+        app = self._make_app()
+        token = self._get_token("nurse")
+        with app.test_client() as c:
+            resp = c.post("/hd/api/v1/sessions/999/flowsheet",
+                          headers={"Authorization": f"Bearer {token}"},
+                          json={"sbp": 120})
+            self.assertIn(resp.status_code, [400, 503])
+
+    # ── UF Recording API ──
+
+    def test_uf_get_returns_records(self):
+        """GET /sessions/<id>/uf returns records list or 503 (no DB)."""
+        app = self._make_app()
+        token = self._get_token("nurse")
+        with app.test_client() as c:
+            resp = c.get("/hd/api/v1/sessions/999/uf",
+                         headers={"Authorization": f"Bearer {token}"})
+            self.assertIn(resp.status_code, [200, 503])
+            if resp.status_code == 200:
+                data = resp.get_json()
+                self.assertIn("records", data)
+
+    # ── Quick Vital API ──
+
+    def test_quick_vital_requires_sbp(self):
+        """POST quick-vital without SBP returns 400 or 503 (no DB)."""
+        app = self._make_app()
+        token = self._get_token("nurse")
+        with app.test_client() as c:
+            resp = c.post("/hd/api/v1/sessions/999/quick-vital",
+                          headers={"Authorization": f"Bearer {token}"},
+                          json={"dbp": 80})
+            self.assertIn(resp.status_code, [400, 503])
+
+    # ── Quality Indicators API ──
+
+    def test_quality_indicators_returns_json(self):
+        """report/quality-indicators returns indicators or 503 (no DB)."""
+        app = self._make_app()
+        token = self._get_token("physician")
+        with app.test_client() as c:
+            resp = c.get("/hd/api/v1/report/quality-indicators",
+                         headers={"Authorization": f"Bearer {token}"})
+            self.assertIn(resp.status_code, [200, 503])
+            if resp.status_code == 200:
+                data = resp.get_json()
+                self.assertIn("indicators", data)
+
+    # ── ESA Monthly Report API ──
+
+    def test_esa_monthly_report_returns_json(self):
+        """report/esa-monthly returns summary or 503 (no DB)."""
+        app = self._make_app()
+        token = self._get_token("physician")
+        with app.test_client() as c:
+            resp = c.get("/hd/api/v1/report/esa-monthly",
+                         headers={"Authorization": f"Bearer {token}"})
+            self.assertIn(resp.status_code, [200, 503])
+            if resp.status_code == 200:
+                data = resp.get_json()
+                self.assertIn("summary", data)
+
+    # ── Pre-HD Reminder Module ──
+
+    def test_pre_hd_reminder_parse_schedule(self):
+        """parse schedule_days Thai format."""
+        from hd_module.pre_hd_reminder import _parse_schedule_days
+        self.assertEqual(_parse_schedule_days("จ/พ/ศ"), {0, 2, 4})
+        self.assertEqual(_parse_schedule_days("อ/พฤ/ส"), {1, 3, 5})
+        self.assertEqual(_parse_schedule_days(""), set())
+        self.assertEqual(_parse_schedule_days(None), set())
+
+    def test_pre_hd_reminder_format_message(self):
+        """format_reminder_message returns non-empty string."""
+        from hd_module.pre_hd_reminder import format_reminder_message
+        from datetime import date
+        patient = {"hn": "12345", "name": "ทดสอบ", "schedule": "จ/พ/ศ", "va": "AVF"}
+        msg = format_reminder_message(patient, date(2026, 11, 11))
+        self.assertIn("ทดสอบ", msg)
+        self.assertIn("คลินิกระนอง", msg)
+        self.assertNotIn("XXX", msg)  # placeholder removed
+
+    # ── Thai Timezone Helper ──
+
+    def test_thai_today_returns_date(self):
+        """_thai_today returns a date object."""
+        from hd_module.blueprint import _thai_today
+        from datetime import date
+        today = _thai_today()
+        self.assertIsInstance(today, date)
+
+    # ── Kt/V Calculator ──
+
+    def test_ktv_calculation(self):
+        """Kt/V formula returns valid result."""
+        from hd_module.kt_v_calculator import calculate_kt_v
+        result = calculate_kt_v(
+            pre_bun=60, post_bun=20,
+            pre_weight=65, post_weight=63,
+            duration_hours=4,
+        )
+        self.assertIn("kt_v", result)
+        self.assertIn("urr", result)
+        self.assertGreater(result["kt_v"], 0)
+        self.assertGreater(result["urr"], 0)
+
+    # ── Shift Handover ──
+
+    def test_shift_handover_module_import(self):
+        """shift_handover module imports without error."""
+        from hd_module.shift_handover import generate_handover_summary
+        self.assertTrue(callable(generate_handover_summary))
+
+    # ── QR Checkin ──
+
+    def test_qr_data_generation(self):
+        """QR generates bed data with token."""
+        from hd_module.qr_checkin import generate_bed_qr_data
+        data = generate_bed_qr_data(1)
+        self.assertIn("bed", data)
+        self.assertIn("token", data)
+        self.assertEqual(data["bed"], 1)
+
+    # ── Dashboard Shift Filter ──
+
+    def test_beds_accepts_shift_param(self):
+        """Dashboard beds API accepts shift parameter."""
+        app = self._make_app()
+        token = self._get_token("nurse")
+        with app.test_client() as c:
+            for shift in ["morning", "afternoon", "evening"]:
+                resp = c.get(f"/hd/api/v1/dashboard/beds?shift={shift}",
+                             headers={"Authorization": f"Bearer {token}"})
+                self.assertEqual(resp.status_code, 200)
+                data = resp.get_json()
+                self.assertEqual(data["total"], 25)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

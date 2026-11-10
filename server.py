@@ -120,6 +120,9 @@ from pathlib import Path
 # Thai timezone constant — used throughout for date/time calculations
 BKK_TZ = timezone(timedelta(hours=7))
 
+# Base URL — use RENDER_EXTERNAL_URL ENV, fallback to hardcoded
+_RENDER_BASE = os.getenv("RENDER_EXTERNAL_URL", "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+
 from flask import Flask, request, abort, jsonify, redirect, make_response
 import requests as http_requests
 
@@ -7974,7 +7977,7 @@ def handle_search_command(
             _staff_areas = [
                 {"bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
                  "action": {"type": "uri", "label": "ดูผลแล็บ",
-                            "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff"}},
+                            "uri": _liff_url or f"{_RENDER_BASE}/liff"}},
                 {"bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
                  "action": {"type": "message", "label": "ส่งเอกสาร", "text": "ส่งเอกสาร"}},
                 {"bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
@@ -7998,7 +8001,7 @@ def handle_search_command(
             _patient_areas = [
                 {"bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
                  "action": {"type": "uri", "label": "ดูผลแล็บ",
-                            "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff"}},
+                            "uri": _liff_url or f"{_RENDER_BASE}/liff"}},
                 {"bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
                  "action": {"type": "message", "label": "ส่งเอกสาร", "text": "ส่งเอกสาร"}},
                 {"bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
@@ -11727,7 +11730,7 @@ def handle_search_command(
                 flag = " ⚠️" if val > 5.5 or val < 3.5 else " ✅"
                 lines.append(f"  {date[5:]} {bar} {val:.1f}{flag}")
 
-        _compare_url = f"https://ranong-raktai-ai-cloud.onrender.com/admin/compare/{_ch_real_hn}"
+        _compare_url = f"{_RENDER_BASE}/admin/compare/{_ch_real_hn}"
         lines.append(f"\n🔗 ดูรายละเอียด: {_compare_url}")
 
         return "\n".join(lines)
@@ -18486,10 +18489,7 @@ def webhook():
                                 f"❌ ไม่พบ HN: {_cmp_q} ในทะเบียน")
                         else:
                             _cmp_hn = _cmp_p.hospital_hn or _cmp_p.clinic_hn
-                            _cmp_url = (
-                                f"https://ranong-raktai-ai-cloud.onrender.com"
-                                f"/admin/compare/{_cmp_hn}"
-                            )
+                            _cmp_url = f"{_RENDER_BASE}/admin/compare/{_cmp_hn}"
                             _cmp_msg = (
                                 f"📊 เปรียบเทียบข้อมูลผู้ป่วย\n"
                                 f"━━━━━━━━━━━━━━━━\n"
@@ -21921,7 +21921,7 @@ def api_richmenu_setup():
                 "action": {
                     "type": "uri",
                     "label": "ดูผลแล็บ",
-                    "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff",
+                    "uri": _liff_url or f"{_RENDER_BASE}/liff",
                 },
             },
             {
@@ -22115,7 +22115,7 @@ def api_richmenu_deploy():
                 "action": {
                     "type": "uri",
                     "label": "ดูผลแล็บ",
-                    "uri": _liff_url or "https://ranong-raktai-ai-cloud.onrender.com/liff",
+                    "uri": _liff_url or f"{_RENDER_BASE}/liff",
                 },
             },
             {

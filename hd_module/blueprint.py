@@ -1674,19 +1674,10 @@ def hd_kpi():
 @hd_bp.route("/report/monthly", methods=["GET"])
 @require_role("physician", "admin")
 def hd_monthly_report():
-    """Generate monthly HD report."""
-    import os
-    from .monthly_report import generate_monthly_report
-
-    month = request.args.get("month", type=int)
-    year = request.args.get("year", type=int)
-    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    registry = current_app.config.get("MASTER_REGISTRY")
-
-    report = generate_monthly_report(registry, db_url, month, year)
-    log_action(user_id=g.get("hd_user_id"), action="report.monthly",
-               resource_type="report", ip_address=request.remote_addr or "")
-    return jsonify(report)
+    """Redirect to monthly-summary (F8) — consolidated endpoint."""
+    return redirect(url_for("hd.monthly_summary_report",
+                            month=request.args.get("month", ""),
+                            year=request.args.get("year", "")))
 
 
 # ── BI Reports ────────────────────────────────────────────
@@ -1694,21 +1685,10 @@ def hd_monthly_report():
 @hd_bp.route("/report/ha", methods=["GET"])
 @require_role("physician", "admin")
 def hd_ha_report():
-    """HA Quality Indicators report."""
-    import os
-    from .bi_reporting import BiReportEngine
-
-    month = request.args.get("month", type=int, default=0)
-    year = request.args.get("year", type=int, default=0)
-    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    registry = current_app.config.get("MASTER_REGISTRY")
-
-    engine = BiReportEngine(master_registry=registry, db_url=db_url)
-    report = engine.generate_ha_report(month, year)
-
-    log_action(user_id=g.get("hd_user_id"), action="report.ha",
-               resource_type="report", ip_address=request.remote_addr or "")
-    return jsonify(report.to_dict())
+    """Redirect to quality-indicators (F13) — consolidated endpoint."""
+    return redirect(url_for("hd.quality_indicators_report",
+                            month=request.args.get("month", ""),
+                            year=request.args.get("year", "")))
 
 
 @hd_bp.route("/report/trt", methods=["GET"])
@@ -2551,6 +2531,14 @@ def save_flowsheet_row(session_id):
                     "UPDATE hd_sessions SET actual_uf = %s WHERE id = %s",
                     (params["total_uf"], session_id)
                 )
+
+            # Sync vitals to hd_vital_signs for timeline display
+            if params["sbp"]:
+                cur.execute("""
+                    INSERT INTO hd_vital_signs
+                        (session_id, phase, sbp, dbp, heart_rate, recorded_at)
+                    VALUES (%s, 'intra', %s, %s, %s, NOW())
+                """, (session_id, params["sbp"], params["dbp"], params["pr"]))
 
             # Generate alert if BP abnormal
             alert = None
