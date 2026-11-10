@@ -397,7 +397,7 @@ def create_session():
         return jsonify({"error": f"Missing fields: {', '.join(missing)}"}), 400
 
     bed = data.get("bed_number")
-    if not isinstance(bed, int) or bed < 1 or bed > 50:
+    if not isinstance(bed, int) or bed < 1 or bed > HdConfig.TOTAL_BEDS:
         return jsonify({"error": "bed_number must be 1-50"}), 400
 
     import os
@@ -853,7 +853,7 @@ def _format_patient_summary_line(s):
         f"{s['assessment']}\n"
         f"{issues_text}\n"
         f"━━━━━━━━━━━━\n"
-        f"📞 หากมีอาการผิดปกติ โทร 077-812-XXX"
+        f"📞 หากมีอาการผิดปกติ กรุณาติดต่อ รพ.ระนอง"
     )
 
 
@@ -1231,24 +1231,86 @@ def record_uf(session_id):
 @hd_bp.route("/alerts", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def list_alerts():
-    """List active clinical alerts."""
-    return jsonify({"alerts": [], "total": 0})
+    """List clinical alerts from DB."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"alerts": [], "total": 0})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            only_active = request.args.get("active", "true") == "true"
+            if only_active:
+                cur.execute("""
+                    SELECT a.id, a.session_id, a.severity, a.title, a.message,
+                           a.acknowledged, a.created_at,
+                           p.hn, p.patient_name, s.bed_number
+                    FROM hd_clinical_alerts a
+                    JOIN hd_sessions s ON s.id = a.session_id
+                    JOIN hd_patient_mapping p ON p.id = s.patient_id
+                    WHERE a.acknowledged = FALSE
+                    ORDER BY a.created_at DESC LIMIT 50
+                """)
+            else:
+                cur.execute("""
+                    SELECT a.id, a.session_id, a.severity, a.title, a.message,
+                           a.acknowledged, a.created_at,
+                           p.hn, p.patient_name, s.bed_number
+                    FROM hd_clinical_alerts a
+                    JOIN hd_sessions s ON s.id = a.session_id
+                    JOIN hd_patient_mapping p ON p.id = s.patient_id
+                    ORDER BY a.created_at DESC LIMIT 100
+                """)
+            rows = cur.fetchall()
+        conn.close()
+        alerts = [{
+            "id": r[0], "session_id": r[1], "severity": r[2],
+            "title": r[3], "message": r[4], "acknowledged": r[5],
+            "created_at": r[6].isoformat() if r[6] else None,
+            "hn": r[7], "patient_name": r[8], "bed_number": r[9],
+        } for r in rows]
+        return jsonify({"alerts": alerts, "total": len(alerts)})
+    except Exception as e:
+        logger.error("list_alerts error: %s", e)
+        return jsonify({"alerts": [], "total": 0, "error": str(e)})
 
 
 @hd_bp.route("/alerts/<int:alert_id>/acknowledge", methods=["POST"])
 @require_role("physician", "nurse")
 def acknowledge_alert(alert_id):
-    """Acknowledge a clinical alert."""
+    """Acknowledge a clinical alert — update DB."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
     data = request.get_json(silent=True) or {}
-    log_action(
-        user_id=g.get("hd_user_id"),
-        action="alert.acknowledge",
-        resource_type="alert",
-        resource_id=alert_id,
-        new_values=data,
-        ip_address=request.remote_addr or "",
-    )
-    return jsonify({"alert_id": alert_id, "acknowledged": True})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE hd_clinical_alerts SET acknowledged = TRUE
+                WHERE id = %s RETURNING id
+            """, (alert_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "Alert not found"}), 404
+        conn.commit()
+        conn.close()
+        log_action(
+            user_id=g.get("hd_user_id"),
+            action="alert.acknowledge",
+            resource_type="alert",
+            resource_id=alert_id,
+            new_values=data,
+            ip_address=request.remote_addr or "",
+        )
+        return jsonify({"alert_id": alert_id, "acknowledged": True})
+    except Exception as e:
+        logger.error("acknowledge_alert error: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Patients ──────────────────────────────────────────────
@@ -2021,7 +2083,7 @@ def auto_assign_beds():
 
         # วันนี้ภาษาไทย
         day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
-        today_th = day_map.get(date.today().weekday(), "")
+        today_th = day_map.get(_thai_today().weekday(), "")
         if not today_th:
             conn.close()
             return jsonify({"assigned": 0, "message": "ไม่มีรอบฟอกวันนี้"})
@@ -2581,45 +2643,13 @@ def calculate_kt_v_endpoint():
     return jsonify(result)
 
 
-# ── F4: EPO Response Tracker ─────────────────────────────
+# ── F4: EPO Response — redirects to full epo_dashboard ───
 
 @hd_bp.route("/epo/response/<hn>", methods=["GET"])
 @require_role("physician", "admin")
 def epo_response(hn):
-    """ติดตามการตอบสนอง ESA — Hb trend vs ESA dose."""
-    import os
-    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        return jsonify({"error": "No database"}), 503
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url, connect_timeout=5)
-
-        # Patient info + ESA
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT patient_name, esa_drug, vascular_access, dry_weight
-                FROM hd_patient_mapping WHERE hn = %s
-            """, (hn,))
-            row = cur.fetchone()
-            if not row:
-                conn.close()
-                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
-            patient = {"name": row[0], "esa": row[1], "va": row[2], "dw": float(row[3] or 0)}
-
-        # Try to get Hb from lab_extractor or GCS docs (future)
-        # For now, return patient info + ESA drug
-        conn.close()
-
-        return jsonify({
-            "patient": patient,
-            "hn": hn,
-            "esa_drug": patient["esa"],
-            "note": "Hb trend data will come from lab results once imported",
-        })
-    except Exception as e:
-        logger.error("epo_response error: %s", e)
-        return jsonify({"error": str(e)}), 500
+    """Redirect to full EPO dashboard (F10)."""
+    return redirect(url_for("hd.epo_dashboard", hn=hn))
 
 
 # ── F5: QR Check-in ──────────────────────────────────────

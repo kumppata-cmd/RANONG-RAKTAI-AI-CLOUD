@@ -88,7 +88,7 @@
         <label class="form-label">เตียง</label>
         <select class="form-control" id="bedSelect">
           <option value="">-- เลือกเตียง --</option>
-          {% for i in range(1,31) %}
+          {% for i in range(1, 26) %}
           <option value="{{ i }}">เตียง {{ i }}</option>
           {% endfor %}
         </select>
@@ -893,9 +893,13 @@ function saveUfRecord(){
   if(sessionData.session_id){
     const token = getHdToken();
     const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {'Content-Type':'application/json'};
-    const ufBody = JSON.stringify({uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0});
+    const now = new Date();
+    const slotTime = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+    const ufBody = JSON.stringify({uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0, slot_time:slotTime});
     fetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
       method:'POST', headers, body:ufBody
+    }).then(r=>r.json()).then(d=>{
+      if(d.uf_recorded) showToast('💧 UF บันทึกลง DB สำเร็จ','info');
     }).catch(e=>{
       console.warn('UF API:', e);
       _pushOffline('/hd/api/v1/sessions/'+sessionData.session_id+'/uf', 'POST', ufBody);

@@ -114,8 +114,11 @@ import tempfile
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, date as _date_cls
 from pathlib import Path
+
+# Thai timezone constant — used throughout for date/time calculations
+BKK_TZ = timezone(timedelta(hours=7))
 
 from flask import Flask, request, abort, jsonify, redirect, make_response
 import requests as http_requests
@@ -7317,7 +7320,7 @@ def api_send_note_line():
         msg += f"👤 {patient_name}\n"
     msg += (f"📂 ประเภท: {_type_th}\n"
             f"\n💊 {note}\n"
-            f"\n⏰ {datetime.now(timezone(timedelta(hours=7))).strftime('%d/%m/%Y %H:%M')}")
+            f"\n⏰ {datetime.now(BKK_TZ).strftime('%d/%m/%Y %H:%M')}")
 
     # ส่งให้เจ้าหน้าที่ทั้งหมด
     sent = 0
@@ -8709,7 +8712,7 @@ def handle_search_command(
     if text_stripped in ("ตรวจสอบระบบ", "สถานะระบบ", "system status"):
         if not _is_staff:
             return None
-        _bkk_tz = timezone(timedelta(hours=7))
+        _bkk_tz = BKK_TZ
         _now_bkk = datetime.now(_bkk_tz)
         _doc_total = len(doc_index._docs) if doc_index else 0
         _pt_total = master_registry.count() if master_registry else 0
@@ -10833,7 +10836,7 @@ def handle_search_command(
 
     # ── สถิติเดือนนี้ (Monthly Stats) — เพิ่ม 2026-11-05 ──
     if text_stripped in ("สถิติเดือนนี้", "สถิติเดือน", "monthly stats"):
-        _bkk_tz = timezone(timedelta(hours=7))
+        _bkk_tz = BKK_TZ
         _now_bkk = datetime.now(_bkk_tz)
         _month_prefix = _now_bkk.strftime("%Y-%m")
         _thai_month = f"{_now_bkk.month}/{_now_bkk.year + 543}"
@@ -12083,49 +12086,10 @@ def _staff_line_ids() -> list[str]:
         return []
 
 
-def _send_dialysis_staff_summary() -> dict:
-    """ส่งสรุปตารางฟอกวันนี้ให้เจ้าหน้าที่ (เพิ่ม 2026-11-05)
-
-    ส่ง push ไปยัง alert recipients ทุกเช้า จ-ส (ไม่ส่งวันอาทิตย์)
-    """
-    from patient_master_registry import THAI_DAY_DISPLAY
-    _bkk = timezone(timedelta(hours=7))
-    _now = datetime.now(_bkk)
-    _weekday = _now.weekday()  # 0=Mon, 6=Sun
-    _day_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat"}
-    if _weekday not in _day_map:
-        return {"skipped": "sunday"}
-    _day_en = _day_map[_weekday]
-    _day_th = THAI_DAY_DISPLAY.get(_day_en, _day_en)
-
-    pts = master_registry.get_patients_by_day(_day_en)
-    if not pts:
-        return {"skipped": "no_patients", "day": _day_en}
-
-    lines = [f"📋 ตารางฟอกวัน{_day_th} ({len(pts)} คน)\n"]
-    for i, p in enumerate(pts, 1):
-        _esa = p.esa_code or "-"
-        _va = f" [{p.vascular_access}]" if p.vascular_access else ""
-        lines.append(f"{i}. {p.clinic_hn} {p.patient_name} | {_esa}{_va}")
-
-    text = "\n".join(lines)
-    sent = 0
-    errors = 0
-    # ส่งให้ alert recipients (physician + nurse + admin)
-    for _recip_id in _staff_line_ids():
-        try:
-            push_message(_recip_id, text)
-            sent += 1
-        except Exception as _e:
-            logger.warning("dialysis_staff_summary push failed: %s", type(_e).__name__)
-            errors += 1
-    return {"sent": sent, "errors": errors, "patients": len(pts), "day": _day_en}
-
-
 def _build_daily_digest() -> str:
     """สร้างสรุปประจำวันรวมทุกส่วนในข้อความเดียว (เพิ่ม 2026-11-05)"""
     from patient_master_registry import THAI_DAY_DISPLAY
-    _bkk = timezone(timedelta(hours=7))
+    _bkk = BKK_TZ
     _now = datetime.now(_bkk)
     _day_map = {0: "mon", 1: "tue", 2: "wed", 3: "thu", 4: "fri", 5: "sat"}
     _day_en = _day_map.get(_now.weekday(), "")
