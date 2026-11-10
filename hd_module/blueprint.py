@@ -1340,11 +1340,11 @@ def list_patients():
             sql = """SELECT p.id, p.hn, p.hospital_hn, p.patient_name,
                             p.vascular_access, p.dry_weight, p.schedule_days,
                             p.esa_drug, p.esa_dose, p.primary_diagnosis, p.is_active,
-                            MAX(s.start_time)::date AS last_hd,
+                            MAX(s.started_at)::date AS last_hd,
                             COALESCE(SUM(CASE WHEN a.acknowledged = FALSE THEN 1 ELSE 0 END), 0) AS unacked_alerts
                      FROM hd_patient_mapping p
                      LEFT JOIN hd_sessions s ON s.patient_id = p.id
-                     LEFT JOIN hd_alerts a ON a.session_id = s.id AND a.acknowledged = FALSE
+                     LEFT JOIN hd_clinical_alerts a ON a.session_id = s.id AND a.acknowledged = FALSE
                      WHERE p.is_active = TRUE"""
             params = []
             if search:
