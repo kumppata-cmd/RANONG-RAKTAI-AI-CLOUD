@@ -475,11 +475,8 @@ let currentShift = detectShift();
 })();
 
 function fetchBeds(){
-  /* Use raw fetch with token */
-  const token = getHdToken();
-  const headers = token ? {'Authorization':'Bearer '+token, 'Content-Type':'application/json'} : {};
   let _dateParam = _selectedDate ? '&date='+_selectedDate : '';
-  fetch('/hd/api/v1/dashboard/beds?shift='+encodeURIComponent(currentShift)+_dateParam, {headers})
+  hdFetch('/hd/api/v1/dashboard/beds?shift='+encodeURIComponent(currentShift)+_dateParam)
     .then(r=>{
       if(!r.ok) throw new Error('API '+r.status);
       return r.json();
@@ -703,12 +700,10 @@ function fetchAllRounds(){
   const shifts = ['morning','afternoon','evening'];
   const labels = {morning:'countMorning', afternoon:'countAfternoon', evening:'countEvening'};
   const grids = {morning:'gridMorning', afternoon:'gridAfternoon', evening:'gridEvening'};
-  const token = getHdToken();
-  const headers = token ? {'Authorization':'Bearer '+token, 'Content-Type':'application/json'} : {};
   let dateParam = _selectedDate ? '&date='+_selectedDate : '';
 
   shifts.forEach(shift=>{
-    fetch('/hd/api/v1/dashboard/beds?shift='+shift+dateParam, {headers})
+    hdFetch('/hd/api/v1/dashboard/beds?shift='+shift+dateParam)
       .then(r=>r.json())
       .then(data=>{
         const beds = data.beds || [];
