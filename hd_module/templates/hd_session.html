@@ -428,9 +428,17 @@
 {% block extra_js %}
 <script>
 let sessionData = {session_id: null, pre_weight: 0, dry_weight: 0, start_time: null, duration_hours: 4};
-/* Read shift from URL parameter (?shift=afternoon) */
+/* Read shift from URL parameter (?shift=afternoon), fallback to auto-detect */
 const _urlParams = new URLSearchParams(window.location.search);
-const _currentShift = _urlParams.get('shift') || 'morning';
+function _autoDetectShift(){
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const h = new Date(utc + 7 * 3600000).getHours();
+  if(h >= 7 && h < 13) return 'morning';
+  if(h >= 13 && h < 17) return 'afternoon';
+  return 'evening';
+}
+const _currentShift = _urlParams.get('shift') || _autoDetectShift();
 const timeline = [];
 let timerInterval = null;
 
