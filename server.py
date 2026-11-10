@@ -12146,6 +12146,21 @@ def _build_daily_digest() -> str:
     else:
         lines.append("🏥 วันอาทิตย์ — ไม่มีรอบฟอก")
 
+    # 1.5 นัดหมายวันนี้ (รวมจาก appointment_store)
+    try:
+        if appointment_store is not None:
+            _todays_appts = appointment_store.list_on(_now.date())
+            _active_appts = [a for a in _todays_appts if a.get("status") not in ("cancelled", "done")]
+            if _active_appts:
+                lines.append(f"\n📋 นัดหมายวันนี้: {len(_active_appts)} ราย")
+                for _a in _active_appts[:5]:
+                    _a_name = _patient_name_for_hn(_a.get("clinic_hn", "")) if callable(_patient_name_for_hn) else ""
+                    lines.append(f"  • {_a.get('time','--:--')} HN {_a.get('clinic_hn','-')} {_a_name}")
+                if len(_active_appts) > 5:
+                    lines.append(f"  ... อีก {len(_active_appts)-5} ราย")
+    except Exception:
+        pass
+
     # 2. เอกสารใหม่เมื่อวาน
     _yesterday = (_now - timedelta(days=1)).strftime("%Y-%m-%d")
     _new_docs = 0
@@ -12222,9 +12237,11 @@ def job_daily_reminders() -> dict:
     """งานประจำวัน 08:00: เตือนนัดพรุ่งนี้/วันนี้ + นัดประจำ + ฟอกเลือด + สรุปเจ้าหน้าที่"""
     out: dict = {}
     if _apr is not None and appointment_store is not None:
+        # ส่ง appointment reminders ถึงคนไข้ แต่ไม่ส่ง staff summary แยก
+        # (staff summary รวมอยู่ใน daily_digest แล้ว)
         out["appointments"] = _apr.run_daily(
             appointment_store, _patient_line_id_for_hn, _patient_name_for_hn,
-            push_message, _staff_line_ids(),
+            push_message, [],  # empty staff list → ไม่ส่ง staff summary แยก
         )
     # ── hd_schedule_reminder ปิดแล้ว — รวมอยู่ใน _build_daily_digest() ──
     # เดิม hd_schedule_reminder.send_reminders() ส่งรายชื่อฟอกแยก
@@ -12232,6 +12249,9 @@ def job_daily_reminders() -> dict:
     # ตอนนี้ _build_daily_digest() มีรายชื่อฟอกครบแล้ว ไม่ต้องส่งแยก
     out["hd"] = {"skipped": "merged into daily_digest"}
     # ── สรุปรายวันรวม → เจ้าหน้าที่ (เพิ่ม 2026-11-05) ──
+    # ส่งแค่ข้อความเดียว — _build_daily_digest() รวมทุกอย่างแล้ว
+    # (ฟอกวันนี้ + เอกสาร + ค่าวิกฤต + ติดตามผลยา + Hb ต่ำ)
+    # ไม่ส่ง treatment_followup แยกอีก — เพราะรวมอยู่ใน digest แล้ว
     try:
         _digest = _build_daily_digest()
         _sent = 0
@@ -12244,25 +12264,8 @@ def job_daily_reminders() -> dict:
         out["daily_digest"] = {"sent": _sent, "length": len(_digest)}
     except Exception as _e:
         out["daily_digest"] = {"error": type(_e).__name__}
-    # ── Treatment Followup Alert (เพิ่ม 2026-11-06) ──
-    try:
-        _pending = treatment_tracker.get_pending_followups()
-        if _pending:
-            _fu_msg = treatment_tracker.format_pending_for_line(_pending)
-            _fu_sent = 0
-            for _rid in _staff_line_ids():
-                try:
-                    push_message(_rid, _fu_msg)
-                    _fu_sent += 1
-                except Exception:
-                    pass
-            out["treatment_followup"] = {
-                "pending": len(_pending), "sent": _fu_sent
-            }
-        else:
-            out["treatment_followup"] = {"pending": 0}
-    except Exception as _e:
-        out["treatment_followup"] = {"error": type(_e).__name__}
+    # treatment_followup: ข้อมูลรวมอยู่ใน daily_digest section 4 แล้ว ไม่ส่งแยก
+    out["treatment_followup"] = {"merged_into": "daily_digest"}
     # ── Automated Daily Backup (เพิ่ม 2026-11-05) ──
     try:
         out["daily_backup"] = backup_manager.run_daily_backup(
