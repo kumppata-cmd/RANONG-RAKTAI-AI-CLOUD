@@ -483,6 +483,13 @@ CREATE INDEX IF NOT EXISTS idx_hd_checklist_date ON hd_daily_checklist(checklist
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.8.0', 'Daily checklist for nursing QA')
 ON CONFLICT (version) DO NOTHING;
+
+-- v1.9.0: VA Location on patient record
+ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS va_location VARCHAR(50);
+
+INSERT INTO hd_schema_version (version, description)
+VALUES ('1.9.0', 'VA location field on patient mapping')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────

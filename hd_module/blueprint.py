@@ -546,14 +546,24 @@ def create_session():
                 except Exception as e:
                     logger.warning("heparin save error: %s", e)
 
-            # Update VA on patient record if provided
+            # Update VA + VA Location on patient record if provided
             va = data.get("vascular_access")
-            if va:
+            va_loc = data.get("va_location")
+            if va or va_loc:
                 try:
-                    cur.execute("""
+                    updates = []
+                    params = []
+                    if va:
+                        updates.append("vascular_access = %s")
+                        params.append(va)
+                    if va_loc:
+                        updates.append("va_location = %s")
+                        params.append(va_loc)
+                    params.append(patient_id)
+                    cur.execute(f"""
                         UPDATE hd_patient_mapping
-                        SET vascular_access = %s WHERE id = %s
-                    """, (va, patient_id))
+                        SET {', '.join(updates)} WHERE id = %s
+                    """, params)
                 except Exception as e:
                     logger.warning("VA update error: %s", e)
 
@@ -1501,6 +1511,16 @@ def get_patient(hn):
                 FROM hd_patient_mapping WHERE hn = %s
             """, (hn,))
             row = cur.fetchone()
+            # Get va_location separately (column may not exist yet)
+            va_loc = None
+            if row:
+                try:
+                    cur.execute("SELECT va_location FROM hd_patient_mapping WHERE hn = %s", (hn,))
+                    vr = cur.fetchone()
+                    if vr:
+                        va_loc = vr[0]
+                except Exception:
+                    pass  # column doesn't exist yet
         conn.close()
         if not row:
             return jsonify({"hn": hn, "status": "not_found"}), 404
@@ -1510,6 +1530,7 @@ def get_patient(hn):
             "date_of_birth": row[4].isoformat() if row[4] else None,
             "gender": row[5], "blood_type": row[6], "allergies": row[7],
             "vascular_access": row[8],
+            "va_location": va_loc,
             "dry_weight": float(row[9]) if row[9] else None,
             "schedule_days": row[10], "esa_drug": row[11], "esa_dose": row[12],
             "primary_diagnosis": row[13], "is_active": row[14],

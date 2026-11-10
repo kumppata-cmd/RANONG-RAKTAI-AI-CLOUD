@@ -146,9 +146,9 @@
   <!-- Dialyzer + Heparin + VA — auto-filled from last session -->
   <div class="card" style="margin-bottom:16px;">
     <div class="card-header">🔧 Dialyzer / Heparin / VA</div>
-    <div class="grid-3">
+    <div class="grid-2">
       <div class="vital-input">
-        <label>Dialyzer Type</label>
+        <label>🔧 Dialyzer Type</label>
         <select class="form-control" id="dialyzerType" style="padding:10px;">
           <option value="">-- เลือก --</option>
           <option value="HF21">HF21</option>
@@ -165,15 +165,17 @@
         </select>
       </div>
       <div class="vital-input">
-        <label>Reuse ครั้งที่</label>
+        <label>🔄 Reuse ครั้งที่</label>
         <div style="display:flex;gap:4px;align-items:center;">
           <input type="number" class="form-control" id="dialyzerReuse" inputmode="numeric" min="0" max="30" placeholder="0" style="flex:1;text-align:center;">
           <span style="color:var(--fg-muted);font-size:.8rem;">/ </span>
           <input type="number" class="form-control" id="dialyzerMax" inputmode="numeric" min="1" max="30" value="20" style="width:50px;text-align:center;">
         </div>
       </div>
+    </div>
+    <div class="grid-2" style="margin-top:8px;">
       <div class="vital-input">
-        <label>Vascular Access</label>
+        <label>🩺 Vascular Access</label>
         <select class="form-control" id="vaSelect" style="padding:10px;">
           <option value="">-- เลือก --</option>
           <option value="AVF">AVF</option>
@@ -181,6 +183,22 @@
           <option value="DLC">DLC (Double Lumen)</option>
           <option value="Perm Cath">Perm Cath</option>
           <option value="CVC">CVC</option>
+        </select>
+      </div>
+      <div class="vital-input">
+        <label>📍 VA Location</label>
+        <select class="form-control" id="vaLocation" style="padding:10px;">
+          <option value="">-- ตำแหน่ง --</option>
+          <option value="Lt. arm">Lt. arm (แขนซ้าย)</option>
+          <option value="Rt. arm">Rt. arm (แขนขวา)</option>
+          <option value="Lt. forearm">Lt. forearm</option>
+          <option value="Rt. forearm">Rt. forearm</option>
+          <option value="Rt. neck (IJV)">Rt. neck (IJV)</option>
+          <option value="Lt. neck (IJV)">Lt. neck (IJV)</option>
+          <option value="Rt. subclavian">Rt. subclavian</option>
+          <option value="Lt. subclavian">Lt. subclavian</option>
+          <option value="Rt. femoral">Rt. femoral</option>
+          <option value="Lt. femoral">Lt. femoral</option>
         </select>
       </div>
     </div>
@@ -688,13 +706,16 @@ function onPatientSelect(){
     /* Auto-fill VA from patient record */
     if(p.vascular_access){
       const vaEl = document.getElementById('vaSelect');
-      /* Match the closest option */
       const vaUpper = (p.vascular_access||'').toUpperCase();
       if(vaUpper.includes('AVF')) vaEl.value = 'AVF';
       else if(vaUpper.includes('AVG')) vaEl.value = 'AVG';
       else if(vaUpper.includes('DLC')) vaEl.value = 'DLC';
       else if(vaUpper.includes('PERM')) vaEl.value = 'Perm Cath';
       else if(vaUpper.includes('CVC')) vaEl.value = 'CVC';
+    }
+    /* Auto-fill VA Location from patient record */
+    if(p.va_location){
+      document.getElementById('vaLocation').value = p.va_location;
     }
   }).catch(()=>{});
 
@@ -788,6 +809,7 @@ function startSession(){
     dialyzer_reuse: parseInt(document.getElementById('dialyzerReuse').value) || 0,
     dialyzer_max: parseInt(document.getElementById('dialyzerMax').value) || 20,
     vascular_access: document.getElementById('vaSelect').value || null,
+    va_location: document.getElementById('vaLocation').value || null,
     hep_drug: document.getElementById('hepProtocol').value || null,
     hep_bolus: parseInt(document.getElementById('hepBolus').value) || null,
     hep_maintenance: parseInt(document.getElementById('hepMaintenance').value) || null,
