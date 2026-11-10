@@ -499,6 +499,64 @@ def create_session():
                 shift,
             ))
             session_id = cur.fetchone()[0]
+
+            # Save Dialyzer tracking (upsert active dialyzer)
+            d_type = data.get("dialyzer_type")
+            if d_type:
+                d_reuse = data.get("dialyzer_reuse", 1)
+                d_max = data.get("dialyzer_max", 20)
+                try:
+                    # Check if active dialyzer exists for this patient
+                    cur.execute("""
+                        SELECT id FROM hd_dialyzer_tracking
+                        WHERE patient_id = %s AND status = 'active'
+                        ORDER BY registered_at DESC LIMIT 1
+                    """, (patient_id,))
+                    existing = cur.fetchone()
+                    if existing:
+                        cur.execute("""
+                            UPDATE hd_dialyzer_tracking
+                            SET dialyzer_type = %s, use_count = %s, max_uses = %s,
+                                last_used_session = %s
+                            WHERE id = %s
+                        """, (d_type, d_reuse, d_max, session_id, existing[0]))
+                    else:
+                        cur.execute("""
+                            INSERT INTO hd_dialyzer_tracking
+                                (patient_id, dialyzer_type, use_count, max_uses,
+                                 status, last_used_session, registered_at)
+                            VALUES (%s, %s, %s, %s, 'active', %s, NOW())
+                        """, (patient_id, d_type, d_reuse, d_max, session_id))
+                except Exception as e:
+                    logger.warning("dialyzer save error: %s", e)
+
+            # Save Heparin protocol
+            hep_drug = data.get("hep_drug")
+            if hep_drug:
+                try:
+                    cur.execute("""
+                        INSERT INTO hd_anticoagulation
+                            (session_id, drug, bolus_dose, maintenance_dose,
+                             recorded_by, recorded_at)
+                        VALUES (%s, %s, %s, %s, %s, NOW())
+                    """, (session_id, hep_drug,
+                          data.get("hep_bolus"),
+                          data.get("hep_maintenance"),
+                          g.get("hd_user_id")))
+                except Exception as e:
+                    logger.warning("heparin save error: %s", e)
+
+            # Update VA on patient record if provided
+            va = data.get("vascular_access")
+            if va:
+                try:
+                    cur.execute("""
+                        UPDATE hd_patient_mapping
+                        SET vascular_access = %s WHERE id = %s
+                    """, (va, patient_id))
+                except Exception as e:
+                    logger.warning("VA update error: %s", e)
+
         conn.commit()
         conn.close()
 
@@ -1460,6 +1518,59 @@ def get_patient(hn):
     except Exception as e:
         logger.error("get_patient error: %s", e)
         return jsonify({"hn": hn, "error": str(e)}), 500
+
+
+@hd_bp.route("/patients/<hn>/last-clinical", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_patient_last_clinical(hn):
+    """Get last session's dialyzer, heparin, VA for auto-fill."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    result = {}
+    if not db_url:
+        return jsonify(result)
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Get patient_id
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify(result)
+            pid = row[0]
+
+            # Last active dialyzer
+            cur.execute("""
+                SELECT dialyzer_type, use_count, max_uses
+                FROM hd_dialyzer_tracking
+                WHERE patient_id = %s AND status = 'active'
+                ORDER BY registered_at DESC LIMIT 1
+            """, (pid,))
+            d = cur.fetchone()
+            if d:
+                result["dialyzer_type"] = d[0]
+                result["dialyzer_reuse"] = d[1]
+                result["dialyzer_max"] = d[2]
+
+            # Last heparin protocol from most recent session
+            cur.execute("""
+                SELECT a.drug, a.bolus_dose, a.maintenance_dose
+                FROM hd_anticoagulation a
+                JOIN hd_sessions s ON s.id = a.session_id
+                WHERE s.patient_id = %s
+                ORDER BY a.recorded_at DESC LIMIT 1
+            """, (pid,))
+            h = cur.fetchone()
+            if h:
+                result["hep_drug"] = h[0]
+                result["hep_bolus"] = h[1]
+                result["hep_maintenance"] = h[2]
+
+        conn.close()
+    except Exception as e:
+        logger.warning("last-clinical error: %s", e)
+    return jsonify(result)
 
 
 @hd_bp.route("/patients/<hn>/history", methods=["GET"])

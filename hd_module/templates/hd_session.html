@@ -143,6 +143,72 @@
     </div>
   </div>
 
+  <!-- Dialyzer + Heparin + VA — auto-filled from last session -->
+  <div class="card" style="margin-bottom:16px;">
+    <div class="card-header">🔧 Dialyzer / Heparin / VA</div>
+    <div class="grid-3">
+      <div class="vital-input">
+        <label>Dialyzer Type</label>
+        <select class="form-control" id="dialyzerType" style="padding:10px;">
+          <option value="">-- เลือก --</option>
+          <option value="HF21">HF21</option>
+          <option value="HF80">HF80</option>
+          <option value="F60">F60</option>
+          <option value="F80">F80</option>
+          <option value="F100">F100</option>
+          <option value="FX80">FX80</option>
+          <option value="FX100">FX100</option>
+          <option value="DIA2">DIA2</option>
+          <option value="B20+">B20+</option>
+          <option value="HDF1">HDF1</option>
+          <option value="other">อื่นๆ</option>
+        </select>
+      </div>
+      <div class="vital-input">
+        <label>Reuse ครั้งที่</label>
+        <div style="display:flex;gap:4px;align-items:center;">
+          <input type="number" class="form-control" id="dialyzerReuse" inputmode="numeric" min="0" max="30" placeholder="0" style="flex:1;text-align:center;">
+          <span style="color:var(--fg-muted);font-size:.8rem;">/ </span>
+          <input type="number" class="form-control" id="dialyzerMax" inputmode="numeric" min="1" max="30" value="20" style="width:50px;text-align:center;">
+        </div>
+      </div>
+      <div class="vital-input">
+        <label>Vascular Access</label>
+        <select class="form-control" id="vaSelect" style="padding:10px;">
+          <option value="">-- เลือก --</option>
+          <option value="AVF">AVF</option>
+          <option value="AVG">AVG</option>
+          <option value="DLC">DLC (Double Lumen)</option>
+          <option value="Perm Cath">Perm Cath</option>
+          <option value="CVC">CVC</option>
+        </select>
+      </div>
+    </div>
+    <div class="grid-3" style="margin-top:8px;">
+      <div class="vital-input">
+        <label>💉 Heparin Protocol</label>
+        <select class="form-control" id="hepProtocol" style="padding:10px;">
+          <option value="">-- เลือก --</option>
+          <option value="Heparin">Heparin</option>
+          <option value="LMWH">LMWH (Enoxaparin)</option>
+          <option value="Heparin-free">Heparin-free</option>
+          <option value="Citrate">Citrate</option>
+        </select>
+      </div>
+      <div class="vital-input">
+        <label>Bolus Dose (IU)</label>
+        <input type="number" class="form-control" id="hepBolus" inputmode="numeric" placeholder="-" step="500">
+      </div>
+      <div class="vital-input">
+        <label>Maintenance (IU/hr)</label>
+        <input type="number" class="form-control" id="hepMaintenance" inputmode="numeric" placeholder="-" step="100">
+      </div>
+    </div>
+    <div id="clinicalAutoFill" style="display:none;margin-top:8px;padding:8px;background:rgba(52,152,219,.06);border-radius:6px;font-size:.75rem;color:var(--accent);">
+      ℹ️ ข้อมูลจากครั้งก่อน — ตรวจสอบแล้วกดเริ่มฟอกได้เลย
+    </div>
+  </div>
+
   <div class="card" style="margin-bottom:16px;">
     <div class="card-header">📝 อาการก่อนฟอก</div>
     <div class="symptom-checks">
@@ -619,7 +685,42 @@ function onPatientSelect(){
     document.getElementById('patientInfo').textContent = 'HN: '+hn+' | ตาราง: '+(p.schedule_days||'-')+' | Access: '+(p.vascular_access||'-');
     if(p.dry_weight) document.getElementById('dryWeight').value = p.dry_weight;
     document.getElementById('bedDisplay').textContent = document.getElementById('bedSelect').value || '-';
+    /* Auto-fill VA from patient record */
+    if(p.vascular_access){
+      const vaEl = document.getElementById('vaSelect');
+      /* Match the closest option */
+      const vaUpper = (p.vascular_access||'').toUpperCase();
+      if(vaUpper.includes('AVF')) vaEl.value = 'AVF';
+      else if(vaUpper.includes('AVG')) vaEl.value = 'AVG';
+      else if(vaUpper.includes('DLC')) vaEl.value = 'DLC';
+      else if(vaUpper.includes('PERM')) vaEl.value = 'Perm Cath';
+      else if(vaUpper.includes('CVC')) vaEl.value = 'CVC';
+    }
   }).catch(()=>{});
+
+  /* Load last session's dialyzer + heparin for this patient */
+  fetch('/hd/api/v1/patients/'+hn+'/last-clinical', {headers})
+    .then(r=>r.ok?r.json():Promise.reject())
+    .then(d=>{
+      let autoFilled = false;
+      /* Dialyzer */
+      if(d.dialyzer_type){
+        document.getElementById('dialyzerType').value = d.dialyzer_type;
+        document.getElementById('dialyzerReuse').value = (d.dialyzer_reuse||0) + 1; /* next use */
+        document.getElementById('dialyzerMax').value = d.dialyzer_max || 20;
+        autoFilled = true;
+      }
+      /* Heparin */
+      if(d.hep_drug){
+        document.getElementById('hepProtocol').value = d.hep_drug;
+        if(d.hep_bolus) document.getElementById('hepBolus').value = d.hep_bolus;
+        if(d.hep_maintenance) document.getElementById('hepMaintenance').value = d.hep_maintenance;
+        autoFilled = true;
+      }
+      if(autoFilled){
+        document.getElementById('clinicalAutoFill').style.display = 'block';
+      }
+    }).catch(()=>{ /* No previous data — nurse fills manually */ });
 }
 
 function toggleCheck(el){ el.closest('.symptom-check').classList.toggle('checked', el.checked); }
@@ -682,6 +783,14 @@ function startSession(){
     pre_weight: sessionData.pre_weight,
     dry_weight: sessionData.dry_weight,
     uf_goal: calcUfGoal,
+    /* Dialyzer + Heparin + VA */
+    dialyzer_type: document.getElementById('dialyzerType').value || null,
+    dialyzer_reuse: parseInt(document.getElementById('dialyzerReuse').value) || 0,
+    dialyzer_max: parseInt(document.getElementById('dialyzerMax').value) || 20,
+    vascular_access: document.getElementById('vaSelect').value || null,
+    hep_drug: document.getElementById('hepProtocol').value || null,
+    hep_bolus: parseInt(document.getElementById('hepBolus').value) || null,
+    hep_maintenance: parseInt(document.getElementById('hepMaintenance').value) || null,
   };
   sessionData.hn = hn;
   hdFetch('/hd/api/v1/sessions',{method:'POST',body:JSON.stringify(data)})
