@@ -573,6 +573,12 @@ def update_session(session_id):
                 if data.get("notes"):
                     updates.append("notes = %s")
                     params.append(data["notes"])
+                if data.get("shift") and data["shift"] in ("morning", "afternoon", "evening"):
+                    updates.append("shift = %s")
+                    params.append(data["shift"])
+                if data.get("bed_number"):
+                    updates.append("bed_number = %s")
+                    params.append(int(data["bed_number"]))
                 # ESA injection tracking
                 if "esa_given" in data:
                     updates.append("esa_given = %s")
@@ -2770,6 +2776,48 @@ def monthly_summary_report():
         return jsonify(report)
     except Exception as e:
         logger.error("monthly_summary error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ══════════════════════════════════════════════════════════
+# Session Shift Management
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/sessions/<int:session_id>/change-shift", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def change_session_shift(session_id):
+    """Change shift of a scheduled/active session (e.g. morning → afternoon)."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    data = request.get_json(silent=True) or {}
+    new_shift = data.get("shift", "")
+    if new_shift not in ("morning", "afternoon", "evening"):
+        return jsonify({"error": "shift ต้องเป็น morning/afternoon/evening"}), 400
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE hd_sessions SET shift = %s
+                WHERE id = %s AND status IN ('scheduled', 'in_progress')
+                RETURNING id, bed_number, shift
+            """, (new_shift, session_id))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบ session หรือ session จบแล้ว"}), 404
+        conn.commit()
+        conn.close()
+        shift_names = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}
+        return jsonify({
+            "session_id": row[0], "bed": row[1], "shift": row[2],
+            "message": f"เปลี่ยนเป็นรอบ{shift_names.get(new_shift, new_shift)}สำเร็จ",
+        })
+    except Exception as e:
+        logger.error("change_session_shift error: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
