@@ -428,6 +428,9 @@
 {% block extra_js %}
 <script>
 let sessionData = {session_id: null, pre_weight: 0, dry_weight: 0, start_time: null, duration_hours: 4};
+/* Read shift from URL parameter (?shift=afternoon) */
+const _urlParams = new URLSearchParams(window.location.search);
+const _currentShift = _urlParams.get('shift') || 'morning';
 const timeline = [];
 let timerInterval = null;
 
@@ -653,6 +656,7 @@ function startSession(){
 
   const data = {
     patient_hn: hn, bed_number: parseInt(bed),
+    shift: _currentShift,
     pre_sbp: parseInt(document.getElementById('preSbp').value),
     pre_dbp: parseInt(document.getElementById('preDbp').value),
     pre_hr: parseInt(document.getElementById('preHr').value),
@@ -686,12 +690,13 @@ function scheduleSession(){
   const bed = document.getElementById('bedSelect').value;
   if(!hn){ showToast('กรุณาเลือกผู้ป่วย','warning'); return; }
   if(!bed){ showToast('กรุณาเลือกเตียง','warning'); return; }
-  const data = { patient_hn: hn, bed_number: parseInt(bed), schedule_only: true };
+  const data = { patient_hn: hn, bed_number: parseInt(bed), schedule_only: true, shift: _currentShift };
   hdFetch('/hd/api/v1/sessions',{method:'POST',body:JSON.stringify(data)})
     .then(r=>r.json())
     .then(d=>{
       if(d.error){ showToast(d.error,'danger'); return; }
-      showToast('จองเตียง '+bed+' สำเร็จ — รอเริ่มฟอกรอบถัดไป','success');
+      const shiftNames = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
+      showToast('จองเตียง '+bed+' รอบ'+(shiftNames[_currentShift]||_currentShift)+' สำเร็จ','success');
       /* Reset form for next patient */
       document.getElementById('patientSelect').value = '';
       document.getElementById('bedSelect').value = '';
