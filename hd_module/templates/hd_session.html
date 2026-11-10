@@ -29,6 +29,18 @@
 .idwg-calc .value { font-size: 1.3rem; font-weight: 800; }
 .idwg-high { color: var(--danger); }
 .idwg-normal { color: var(--success); }
+/* Flowsheet table */
+.flowsheet-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+.flowsheet-table th { background: var(--accent); color: #fff; padding: 6px 4px; text-align: center; font-size: .7rem; position: sticky; top: 0; z-index: 1; }
+.flowsheet-table td { padding: 4px 2px; text-align: center; border-bottom: 1px solid var(--border); }
+.flowsheet-table input { width: 100%; padding: 8px 2px; font-size: .9rem; text-align: center; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); font-weight: 600; }
+.flowsheet-table input:focus { border-color: var(--accent); outline: none; background: rgba(52,152,219,.05); }
+.flowsheet-table input.has-value { background: rgba(39,174,96,.05); border-color: var(--success); }
+.flowsheet-table .fs-divider { border-left: 2px solid rgba(243,156,18,.4); }
+.flowsheet-table .fs-time { font-weight: 700; font-size: .8rem; color: var(--accent); background: rgba(52,152,219,.05); min-width: 50px; }
+.flowsheet-table .fs-saved { background: rgba(39,174,96,.08); }
+.fs-save-btn { font-size: .65rem; padding: 4px 6px; border: 1px solid var(--success); border-radius: 4px; background: rgba(39,174,96,.1); color: var(--success); cursor: pointer; font-weight: 600; }
+.fs-save-btn:active { background: var(--success); color: #fff; }
 /* Timer */
 .session-timer { text-align: center; padding: 16px; background: var(--bg-card); border-radius: var(--radius); border: 2px solid var(--success); margin-bottom: 16px; }
 .session-timer .timer-value { font-size: 2.5rem; font-weight: 800; font-variant-numeric: tabular-nums; letter-spacing: 2px; }
@@ -183,37 +195,56 @@
     ⚠️ <span id="warningAlertText">-</span>
   </div>
 
-  <!-- UF Progress -->
-  <div class="card" style="margin-bottom:16px;">
-    <div class="card-header">💧 UF Progress</div>
-    <div class="uf-progress-container">
-      <div class="uf-progress-label">
-        <span>UF Removed: <strong id="ufRemoved">0</strong> mL</span>
-        <span>UF Goal: <strong id="ufGoal">2000</strong> mL</span>
-      </div>
-      <div class="progress">
-        <div class="progress-bar" id="ufProgressBar" style="width:0%;background:var(--success);">0%</div>
-      </div>
-      <p style="font-size:.8rem;color:var(--fg-muted);margin-top:6px;">UF Rate: <strong id="ufRate">-</strong> mL/hr | Remaining: <strong id="ufRemaining">-</strong> mL</p>
+  <!-- UF Progress Summary -->
+  <div class="card" style="margin-bottom:12px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <span>💧 UF: <strong id="ufRemoved">0</strong> / <strong id="ufGoal">2000</strong> mL</span>
+      <span style="font-size:.8rem;color:var(--fg-muted);">Rate: <strong id="ufRate">-</strong> mL/hr</span>
+    </div>
+    <div class="progress" style="margin-top:6px;">
+      <div class="progress-bar" id="ufProgressBar" style="width:0%;background:var(--success);">0%</div>
     </div>
   </div>
 
-  <!-- Action Buttons -->
-  <div class="grid-2" style="margin-bottom:16px;">
-    <button class="btn btn-primary btn-lg" onclick="openModal('vitalModal')">
-      ❤️ บันทึก Vital Signs
+  <!-- HD Flowsheet — 30-min intervals -->
+  <div class="card" style="margin-bottom:12px;padding:8px;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+      <strong style="font-size:.9rem;">📋 HD Flowsheet</strong>
+      <button class="btn" onclick="addFlowsheetRow()" style="font-size:.75rem;padding:4px 12px;">➕ เพิ่มแถว</button>
+    </div>
+    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
+      <table class="flowsheet-table" id="flowsheetTable">
+        <thead>
+          <tr>
+            <th style="width:55px;">เวลา</th>
+            <th style="width:50px;">SBP</th>
+            <th style="width:50px;">DBP</th>
+            <th style="width:45px;">PR</th>
+            <th class="fs-divider" style="width:55px;">UF<br><small>Removed</small></th>
+            <th style="width:50px;">UF<br><small>Rate</small></th>
+            <th style="width:1px;"></th>
+          </tr>
+        </thead>
+        <tbody id="flowsheetBody">
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Quick Action Buttons -->
+  <div class="grid-2" style="margin-bottom:12px;">
+    <button class="btn btn-primary btn-lg" onclick="quickAddVitalNow()">
+      ❤️ บันทึก Vital ตอนนี้
     </button>
-    <button class="btn btn-warning btn-lg" onclick="openModal('ufModal')">
-      💧 บันทึก UF
+    <button class="btn btn-warning btn-lg" onclick="quickAddUfNow()">
+      💧 บันทึก UF ตอนนี้
     </button>
   </div>
 
-  <!-- Timeline -->
-  <div class="card">
-    <div class="card-header">📜 บันทึกระหว่างฟอก</div>
-    <div class="timeline" id="intraTimeline">
-      <p style="color:var(--fg-muted);font-size:.9rem;text-align:center;padding:20px;">ยังไม่มีข้อมูล — กดปุ่มด้านบนเพื่อบันทึก</p>
-    </div>
+  <!-- Timeline (legacy entries) -->
+  <div class="card" id="timelineCard" style="display:none;">
+    <div class="card-header">📜 บันทึกเพิ่มเติม</div>
+    <div class="timeline" id="intraTimeline"></div>
   </div>
 </div>
 
@@ -669,6 +700,7 @@ function startSession(){
       switchTab('session','intra');
       document.getElementById('cancelBtn').style.display = 'inline-flex';
       loadEsaHistory();
+      initFlowsheet();
     })
     .catch(()=>showToast('ไม่สามารถเริ่มรอบฟอกได้','danger'));
 }
@@ -753,7 +785,8 @@ function loadExistingSession(sid){
           timerInterval = setInterval(updateTimer, 1000);
         }
         switchTab('session','intra');
-        /* Load existing vitals from DB */
+        initFlowsheet();
+        /* Load existing vitals from DB (legacy timeline) */
         fetch('/hd/api/v1/sessions/'+sid+'/vitals', {headers})
           .then(r=>r.ok?r.json():Promise.reject())
           .then(vd=>{
@@ -883,7 +916,219 @@ function renderTimeline(){
 }
 
 let _sessionSummary = null;
-let _esaGiven = null; /* null=not set, true=given, false=skipped */
+let _esaGiven = null;
+
+/* ════════════════════════════════════════════════
+   HD FLOWSHEET — 30-min interval monitoring grid
+   ════════════════════════════════════════════════ */
+let flowsheetData = []; /* [{slot_time, sbp, dbp, hr, uf_removed, uf_rate, saved}] */
+
+function initFlowsheet(){
+  /* Generate 12 time slots (every 30 min for 4 hours) from session start */
+  const tbody = document.getElementById('flowsheetBody');
+  tbody.innerHTML = '';
+  flowsheetData = [];
+
+  let startH = 7, startM = 0;
+  if(sessionData.start_time){
+    try {
+      const st = new Date(sessionData.start_time);
+      startH = st.getHours(); startM = st.getMinutes();
+    } catch(e){}
+  }
+
+  /* Round to nearest 30-min */
+  startM = startM < 15 ? 0 : 30;
+
+  for(let i = 0; i < 12; i++){
+    let h = startH + Math.floor((startM + i*30) / 60);
+    let m = (startM + i*30) % 60;
+    if(h >= 24) h -= 24;
+    const timeStr = String(h).padStart(2,'0') + ':' + String(m).padStart(2,'0');
+    const row = {slot_time: timeStr, sbp:'', dbp:'', hr:'', uf_removed:'', uf_rate:'', saved:false};
+    flowsheetData.push(row);
+    _renderFlowsheetRow(i, row);
+  }
+
+  /* Load existing records from DB */
+  if(sessionData.session_id){
+    _loadFlowsheetFromDB();
+  }
+}
+
+function _renderFlowsheetRow(idx, row){
+  const tbody = document.getElementById('flowsheetBody');
+  const tr = document.createElement('tr');
+  tr.id = 'fsRow_'+idx;
+  if(row.saved) tr.classList.add('fs-saved');
+  tr.innerHTML = `
+    <td class="fs-time">${row.slot_time}</td>
+    <td><input type="number" inputmode="numeric" id="fs_sbp_${idx}" value="${row.sbp}" onchange="fsMarkDirty(${idx})" placeholder="—"></td>
+    <td><input type="number" inputmode="numeric" id="fs_dbp_${idx}" value="${row.dbp}" onchange="fsMarkDirty(${idx})" placeholder="—"></td>
+    <td><input type="number" inputmode="numeric" id="fs_hr_${idx}" value="${row.hr}" onchange="fsMarkDirty(${idx})" placeholder="—"></td>
+    <td class="fs-divider"><input type="number" inputmode="numeric" id="fs_ufr_${idx}" value="${row.uf_removed}" onchange="fsMarkDirty(${idx})" placeholder="—"></td>
+    <td><input type="number" inputmode="numeric" id="fs_rate_${idx}" value="${row.uf_rate}" onchange="fsMarkDirty(${idx})" placeholder="—"></td>
+    <td><button class="fs-save-btn" onclick="fsSaveRow(${idx})">💾</button></td>
+  `;
+  tbody.appendChild(tr);
+}
+
+function addFlowsheetRow(){
+  const now = new Date();
+  const timeStr = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+  const idx = flowsheetData.length;
+  const row = {slot_time:timeStr, sbp:'', dbp:'', hr:'', uf_removed:'', uf_rate:'', saved:false};
+  flowsheetData.push(row);
+  _renderFlowsheetRow(idx, row);
+  /* Scroll to new row */
+  document.getElementById('fsRow_'+idx).scrollIntoView({behavior:'smooth'});
+}
+
+function fsMarkDirty(idx){
+  const tr = document.getElementById('fsRow_'+idx);
+  if(tr) tr.classList.remove('fs-saved');
+  /* Highlight inputs with values */
+  ['sbp','dbp','hr','ufr','rate'].forEach(f=>{
+    const el = document.getElementById('fs_'+f+'_'+idx);
+    if(el) el.classList.toggle('has-value', !!el.value);
+  });
+}
+
+function fsSaveRow(idx){
+  const d = flowsheetData[idx];
+  const sbp = document.getElementById('fs_sbp_'+idx).value;
+  const dbp = document.getElementById('fs_dbp_'+idx).value;
+  const hr = document.getElementById('fs_hr_'+idx).value;
+  const ufr = document.getElementById('fs_ufr_'+idx).value;
+  const rate = document.getElementById('fs_rate_'+idx).value;
+
+  if(!sbp && !ufr){ showToast('กรุณากรอก BP หรือ UF','warning'); return; }
+
+  /* Save Vital if present */
+  if(sbp && sessionData.session_id){
+    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/quick-vital',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null})
+    }).then(r=>r.json()).then(res=>{
+      if(res.alert) showToast('⚠️ '+res.alert.title,'danger');
+    }).catch(()=>{});
+  }
+
+  /* Save UF if present */
+  if(ufr && sessionData.session_id){
+    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        slot_time: d.slot_time,
+        uf_removed: parseInt(ufr)||0,
+        uf_rate: parseInt(rate)||0,
+      })
+    }).then(r=>r.json()).then(res=>{
+      if(res.uf_removed !== undefined){
+        document.getElementById('ufRemoved').textContent = res.uf_removed;
+        const goal = parseInt(document.getElementById('ufGoal').textContent)||2000;
+        const pct = Math.min(100, Math.round(res.uf_removed/goal*100));
+        document.getElementById('ufProgressBar').style.width = pct+'%';
+        document.getElementById('ufProgressBar').textContent = pct+'%';
+        if(rate) document.getElementById('ufRate').textContent = rate;
+      }
+    }).catch(()=>{});
+  }
+
+  /* Mark saved */
+  flowsheetData[idx] = {...d, sbp, dbp, hr, uf_removed:ufr, uf_rate:rate, saved:true};
+  const tr = document.getElementById('fsRow_'+idx);
+  if(tr) tr.classList.add('fs-saved');
+  showToast('💾 บันทึก '+d.slot_time+' สำเร็จ','success');
+}
+
+function quickAddVitalNow(){
+  /* Find current time slot or add new row */
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = now.getMinutes() < 30 ? '00' : '30';
+  const timeStr = hh+':'+mm;
+  let idx = flowsheetData.findIndex(r=>r.slot_time===timeStr);
+  if(idx < 0){
+    addFlowsheetRow();
+    idx = flowsheetData.length - 1;
+  }
+  document.getElementById('fs_sbp_'+idx).focus();
+  document.getElementById('fsRow_'+idx).scrollIntoView({behavior:'smooth'});
+}
+
+function quickAddUfNow(){
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = now.getMinutes() < 30 ? '00' : '30';
+  const timeStr = hh+':'+mm;
+  let idx = flowsheetData.findIndex(r=>r.slot_time===timeStr);
+  if(idx < 0){
+    addFlowsheetRow();
+    idx = flowsheetData.length - 1;
+  }
+  document.getElementById('fs_ufr_'+idx).focus();
+  document.getElementById('fsRow_'+idx).scrollIntoView({behavior:'smooth'});
+}
+
+function _loadFlowsheetFromDB(){
+  /* Load vitals */
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals')
+    .then(r=>r.json())
+    .then(d=>{
+      (d.vitals||[]).forEach(v=>{
+        if(!v.recorded_at) return;
+        const t = new Date(v.recorded_at);
+        const hh = String(t.getHours()).padStart(2,'0');
+        const mm = t.getMinutes() < 30 ? '00' : '30';
+        const ts = hh+':'+mm;
+        const idx = flowsheetData.findIndex(r=>r.slot_time===ts);
+        if(idx >= 0 && !flowsheetData[idx].saved){
+          if(v.sbp) document.getElementById('fs_sbp_'+idx).value = v.sbp;
+          if(v.dbp) document.getElementById('fs_dbp_'+idx).value = v.dbp;
+          if(v.heart_rate) document.getElementById('fs_hr_'+idx).value = v.heart_rate;
+          flowsheetData[idx].saved = true;
+          document.getElementById('fsRow_'+idx).classList.add('fs-saved');
+          ['sbp','dbp','hr'].forEach(f=>{
+            const el = document.getElementById('fs_'+f+'_'+idx);
+            if(el && el.value) el.classList.add('has-value');
+          });
+        }
+      });
+    }).catch(()=>{});
+
+  /* Load UF records */
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf')
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.uf_goal) document.getElementById('ufGoal').textContent = d.uf_goal;
+      let lastUf = 0;
+      (d.records||[]).forEach(u=>{
+        const ts = u.slot_time || '';
+        const idx = flowsheetData.findIndex(r=>r.slot_time===ts);
+        if(idx >= 0){
+          if(u.uf_removed) document.getElementById('fs_ufr_'+idx).value = u.uf_removed;
+          if(u.uf_rate) document.getElementById('fs_rate_'+idx).value = u.uf_rate;
+          flowsheetData[idx].saved = true;
+          document.getElementById('fsRow_'+idx).classList.add('fs-saved');
+          ['ufr','rate'].forEach(f=>{
+            const el = document.getElementById('fs_'+f+'_'+idx);
+            if(el && el.value) el.classList.add('has-value');
+          });
+        }
+        if(u.uf_removed > lastUf) lastUf = u.uf_removed;
+      });
+      if(lastUf > 0){
+        document.getElementById('ufRemoved').textContent = lastUf;
+        const goal = d.uf_goal || 2000;
+        const pct = Math.min(100, Math.round(lastUf/goal*100));
+        document.getElementById('ufProgressBar').style.width = pct+'%';
+        document.getElementById('ufProgressBar').textContent = pct+'%';
+      }
+    }).catch(()=>{});
+} /* null=not set, true=given, false=skipped */
 
 function setEsaGiven(val){
   _esaGiven = val;

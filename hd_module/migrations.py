@@ -279,6 +279,26 @@ END $$;
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.4.0', 'Add needs_review flag for incomplete patient data')
 ON CONFLICT (version) DO NOTHING;
+
+-- v1.5.0: UF time-series + shift support
+CREATE TABLE IF NOT EXISTS hd_uf_records (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES hd_sessions(id),
+    recorded_at TIMESTAMP DEFAULT NOW(),
+    slot_time VARCHAR(5),
+    uf_removed INTEGER DEFAULT 0,
+    uf_rate INTEGER DEFAULT 0,
+    uf_remaining INTEGER DEFAULT 0,
+    notes VARCHAR(200)
+);
+CREATE INDEX IF NOT EXISTS idx_hd_uf_session ON hd_uf_records(session_id);
+DO $$ BEGIN
+    ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS shift VARCHAR(20) DEFAULT 'morning';
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+INSERT INTO hd_schema_version (version, description)
+VALUES ('1.5.0', 'Add hd_uf_records table and shift to hd_sessions')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────

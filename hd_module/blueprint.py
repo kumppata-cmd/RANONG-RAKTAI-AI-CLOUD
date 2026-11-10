@@ -418,12 +418,17 @@ def create_session():
             is_schedule = data.get("schedule_only", False)
             init_status = "scheduled" if is_schedule else "in_progress"
 
+            shift = data.get("shift", "morning")
+            if shift not in ("morning", "afternoon", "evening"):
+                shift = "morning"
             cur.execute("""
                 SELECT id, status FROM hd_sessions
                 WHERE bed_number = %s
+                  AND session_date = %s
+                  AND COALESCE(shift, 'morning') = %s
                   AND status IN ('scheduled', 'in_progress')
                 ORDER BY status
-            """, (bed,))
+            """, (bed, _thai_today().isoformat(), shift))
             existing = cur.fetchall()
             for ex_id, ex_status in existing:
                 if init_status == "in_progress" and ex_status == "in_progress":
@@ -433,22 +438,27 @@ def create_session():
                     conn.close()
                     return jsonify({"error": f"เตียง {bed} มีการจองรอบถัดไปแล้ว"}), 409
 
-            # Insert session
+            # Insert session with shift
             started = "NULL" if is_schedule else "NOW()"
+            shift = data.get("shift", "morning")
+            if shift not in ("morning", "afternoon", "evening"):
+                shift = "morning"
             cur.execute(f"""
                 INSERT INTO hd_sessions
                     (patient_id, bed_number, session_date, status,
                      pre_weight, post_weight, uf_goal,
-                     started_at, nurse_id)
-                VALUES (%s, %s, CURRENT_DATE, '{init_status}',
+                     started_at, nurse_id, shift)
+                VALUES (%s, %s, %s, '{init_status}',
                         %s, NULL, %s,
-                        {started}, %s)
+                        {started}, %s, %s)
                 RETURNING id
             """, (
                 patient_id, bed,
+                _thai_today().isoformat(),
                 data.get("pre_weight"),
                 data.get("uf_goal", 2000),
                 g.get("hd_user_id"),
+                shift,
             ))
             session_id = cur.fetchone()[0]
         conn.commit()
@@ -1121,19 +1131,93 @@ def list_vitals(session_id):
 
 # ── UF Records ────────────────────────────────────────────
 
-@hd_bp.route("/sessions/<int:session_id>/uf", methods=["POST"])
+@hd_bp.route("/sessions/<int:session_id>/uf", methods=["GET", "POST"])
 @require_role("physician", "nurse")
 def record_uf(session_id):
-    """Record UF data for a session."""
+    """Record or list UF data for a session."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+
+    if request.method == "GET":
+        # Return all UF records for this session
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("""
+                    SELECT id, recorded_at, slot_time, uf_removed, uf_rate,
+                           uf_remaining, notes
+                    FROM hd_uf_records WHERE session_id = %s
+                    ORDER BY recorded_at
+                """, (session_id,))
+                rows = cur.fetchall()
+                # Also get session's uf_goal
+                cur.execute("SELECT uf_goal FROM hd_sessions WHERE id = %s", (session_id,))
+                srow = cur.fetchone()
+            conn.close()
+            records = [{
+                "id": r[0],
+                "recorded_at": r[1].isoformat() if r[1] else None,
+                "slot_time": r[2],
+                "uf_removed": r[3], "uf_rate": r[4],
+                "uf_remaining": r[5], "notes": r[6],
+            } for r in rows]
+            return jsonify({
+                "records": records,
+                "uf_goal": int(srow[0]) if srow and srow[0] else 2000,
+            })
+        except Exception as e:
+            logger.error("get UF records error: %s", e)
+            return jsonify({"records": [], "error": str(e)})
+
+    # POST: Save new UF record
     data = request.get_json(silent=True) or {}
-    log_action(
-        user_id=g.get("hd_user_id"),
-        action="uf.record",
-        resource_type="uf_record",
-        new_values=data,
-        ip_address=request.remote_addr or "",
-    )
-    return jsonify({"session_id": session_id, "uf_recorded": True}), 201
+    uf_removed = data.get("uf_removed", 0)
+    uf_rate = data.get("uf_rate", 0)
+    uf_remaining = data.get("uf_remaining", 0)
+    slot_time = data.get("slot_time", "")
+    notes = data.get("notes", "")
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Insert UF record
+            cur.execute("""
+                INSERT INTO hd_uf_records
+                    (session_id, slot_time, uf_removed, uf_rate, uf_remaining, notes)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (session_id, slot_time, uf_removed, uf_rate, uf_remaining, notes))
+            rec_id = cur.fetchone()[0]
+
+            # Update session's actual_uf to latest cumulative value
+            cur.execute("""
+                UPDATE hd_sessions SET actual_uf = %s WHERE id = %s
+            """, (uf_removed, session_id))
+        conn.commit()
+        conn.close()
+
+        log_action(
+            user_id=g.get("hd_user_id"),
+            action="uf.record",
+            resource_type="uf_record",
+            resource_id=rec_id,
+            new_values=data,
+            ip_address=request.remote_addr or "",
+        )
+        return jsonify({
+            "id": rec_id,
+            "session_id": session_id,
+            "uf_removed": uf_removed,
+            "uf_rate": uf_rate,
+            "uf_recorded": True,
+        }), 201
+    except Exception as e:
+        logger.error("record_uf error: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Alerts ────────────────────────────────────────────────
@@ -1344,10 +1428,11 @@ def get_patient_history(hn):
 @hd_bp.route("/dashboard/beds", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def bed_dashboard():
-    """30-bed real-time dashboard with active sessions."""
+    """25-bed real-time dashboard with active sessions, filtered by shift."""
     import os
     from .config import HdConfig
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    current_shift = request.args.get("shift", "morning")
 
     beds = []
     for i in range(1, HdConfig.TOTAL_BEDS + 1):
@@ -1379,12 +1464,14 @@ def bed_dashboard():
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.status IN ('scheduled', 'in_progress')
+                      AND s.session_date = %s
+                      AND COALESCE(s.shift, 'morning') = %s
                     ORDER BY s.bed_number,
                              CASE s.status
                                WHEN 'scheduled' THEN 0
                                WHEN 'in_progress' THEN 1
                              END
-                """)
+                """, (_thai_today().isoformat(), current_shift))
                 session_ids = []
                 for row in cur.fetchall():
                     bed_num = row[0]
@@ -1485,6 +1572,7 @@ def bed_dashboard():
     return jsonify({
         "beds": beds,
         "total": HdConfig.TOTAL_BEDS,
+        "shift": current_shift,
         "today_scheduled": today_count,
         "today_patients": today_patients,
     })
