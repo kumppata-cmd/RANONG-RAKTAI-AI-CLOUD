@@ -87,12 +87,13 @@
 </div>
 
 <!-- Shift selector -->
-<div class="shift-selector" style="overflow-x:auto;-webkit-overflow-scrolling:touch;">
-  <button class="shift-btn active" data-shift="morning" onclick="selectShift(this,'morning')">🌅 เช้า<br><small>(07:00-15:00)</small></button>
-  <button class="shift-btn" data-shift="afternoon" onclick="selectShift(this,'afternoon')">☀️ บ่าย<br><small>(13:00-21:00)</small></button>
-  <button class="shift-btn" data-shift="evening" onclick="selectShift(this,'evening')">🌙 ค่ำ<br><small>(17:00-01:00)</small></button>
-  <button class="btn btn-outline" onclick="shiftHandover()" style="color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่ง<br>เวร</button>
-  <button class="btn btn-outline" onclick="autoAssignBeds()" style="color:var(--info);border-color:var(--info);font-size:.8rem;">🤖 จัด<br>เตียง</button>
+<div class="shift-selector">
+  <button class="shift-btn active" data-shift="morning" onclick="selectShift(this,'morning')">🌅 เช้า (07:00-15:00)</button>
+  <button class="shift-btn" data-shift="afternoon" onclick="selectShift(this,'afternoon')">☀️ บ่าย (13:00-21:00)</button>
+  <button class="shift-btn" data-shift="evening" onclick="selectShift(this,'evening')">🌙 ค่ำ (17:00-01:00)</button>
+  <button class="btn btn-outline" onclick="shiftHandover()" style="margin-left:auto;color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่งเวร</button>
+  <button class="btn btn-outline" onclick="autoAssignBeds()" style="margin-left:8px;color:var(--info);border-color:var(--info);font-size:.8rem;">🤖 จัดเตียง</button>
+  <a href="/hd/session/new" class="btn btn-success btn-lg" style="margin-left:8px;">➕ เริ่มรอบฟอกใหม่</a>
 </div>
 
 <!-- 30-Bed Grid -->
@@ -320,7 +321,7 @@ function shiftHandover(){
 
 function autoAssignBeds(){
   if(!confirm('จัดเตียงอัตโนมัติสำหรับผู้ป่วยนัดฟอกวันนี้?')) return;
-  const shift = currentShift;
+  const shift = document.querySelector('.shift-btn.active')?.dataset?.shift || 'morning';
   const token = getHdToken();
   fetch('/hd/api/v1/schedule/auto-assign', {
     method:'POST',
@@ -334,6 +335,8 @@ function autoAssignBeds(){
     fetchBeds(); // refresh
   }).catch(()=>alert('❌ ไม่สามารถจัดเตียงได้'));
 }
+
+let currentShift = 'morning';
 
 function fetchBeds(){
   /* Use raw fetch with token */
@@ -378,7 +381,6 @@ function fetchBeds(){
     });
 }
 
-let currentShift = 'morning';
 function selectShift(el, shift){
   document.querySelectorAll('.shift-btn').forEach(b=>b.classList.remove('active'));
   el.classList.add('active');
