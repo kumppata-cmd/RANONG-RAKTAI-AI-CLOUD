@@ -1,0 +1,133 @@
+{% extends "hd_base.html" %}
+{% block title %}เช็คลิสส์ประจำวัน{% endblock %}
+{% block page_title %}✅ เช็คลิสส์ประจำวัน{% endblock %}
+
+{% block extra_css %}
+<style>
+.cl-header{display:flex;gap:8px;align-items:center;margin-bottom:16px;flex-wrap:wrap}
+.cl-shift-btn{padding:8px 16px;border:2px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-card);cursor:pointer;font-weight:600;font-size:.85rem;color:var(--fg)}
+.cl-shift-btn.active{border-color:var(--accent);background:var(--accent);color:#fff}
+.cl-progress{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:16px;text-align:center}
+.cl-progress .pct{font-size:2rem;font-weight:800}
+.cl-progress-bar{height:8px;border-radius:4px;background:var(--border);margin-top:8px;overflow:hidden}
+.cl-progress-fill{height:100%;border-radius:4px;transition:width .3s}
+.cl-section{margin-bottom:20px}
+.cl-section-title{font-weight:700;font-size:.9rem;padding:10px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm) var(--radius-sm) 0 0;display:flex;align-items:center;gap:8px}
+.cl-section-count{font-size:.75rem;color:var(--fg-muted);margin-left:auto}
+.cl-items{border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius-sm) var(--radius-sm)}
+.cl-item{display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid var(--border);cursor:pointer;transition:background .1s}
+.cl-item:last-child{border-bottom:none}
+.cl-item:active{background:var(--bg)}
+.cl-item.checked{opacity:.6}
+.cl-item.checked .cl-label{text-decoration:line-through}
+.cl-check{width:24px;height:24px;border:2px solid var(--border);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:.8rem;flex-shrink:0;transition:all .15s}
+.cl-item.checked .cl-check{background:var(--success);border-color:var(--success);color:#fff}
+.cl-label{flex:1;font-size:.85rem;font-weight:500;min-width:0}
+.cl-time{font-size:.7rem;color:var(--fg-muted)}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="cl-header">
+  <button class="cl-shift-btn active" data-shift="morning" onclick="clSelectShift('morning',this)">🌅 เช้า</button>
+  <button class="cl-shift-btn" data-shift="afternoon" onclick="clSelectShift('afternoon',this)">☀️ บ่าย</button>
+  <button class="cl-shift-btn" data-shift="evening" onclick="clSelectShift('evening',this)">🌙 ค่ำ</button>
+  <a href="/hd/" class="btn" style="margin-left:auto;font-size:.85rem;">← Dashboard</a>
+</div>
+
+<div class="cl-progress">
+  <div class="pct" id="clPct" style="color:var(--fg-muted)">0%</div>
+  <div style="font-size:.85rem;color:var(--fg-muted)" id="clCount">0 / 0 รายการ</div>
+  <div class="cl-progress-bar"><div class="cl-progress-fill" id="clBar" style="width:0;background:var(--accent)"></div></div>
+</div>
+
+<div id="clBody">
+  <div style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let _clShift = 'morning';
+const CAT_LABELS = {
+  pre_shift: {icon:'🔧', label:'ก่อนเริ่มรอบฟอก'},
+  during_shift: {icon:'⚡', label:'ระหว่างฟอก'},
+  post_shift: {icon:'🧹', label:'หลังเสร็จรอบฟอก'},
+};
+
+function clSelectShift(shift, el){
+  _clShift = shift;
+  document.querySelectorAll('.cl-shift-btn').forEach(b=>b.classList.remove('active'));
+  el.classList.add('active');
+  loadChecklist();
+}
+
+function loadChecklist(){
+  hdFetch('/hd/api/v1/checklist?shift='+_clShift)
+    .then(r=>r.json())
+    .then(d=>{
+      if(d.error){ document.getElementById('clBody').innerHTML='<div style="text-align:center;color:var(--danger);padding:20px;">'+d.error+'</div>'; return; }
+      renderChecklist(d);
+    }).catch(()=>{
+      document.getElementById('clBody').innerHTML='<div style="text-align:center;color:var(--fg-muted);padding:20px;">ไม่สามารถโหลดได้</div>';
+    });
+}
+
+function renderChecklist(data){
+  const pct = data.progress || 0;
+  document.getElementById('clPct').textContent = pct+'%';
+  document.getElementById('clPct').style.color = pct>=100?'var(--success)':pct>=50?'var(--warning)':'var(--fg-muted)';
+  document.getElementById('clCount').textContent = data.done+' / '+data.total+' รายการ';
+  document.getElementById('clBar').style.width = pct+'%';
+  document.getElementById('clBar').style.background = pct>=100?'var(--success)':pct>=50?'var(--warning)':'var(--accent)';
+
+  const body = document.getElementById('clBody');
+  body.innerHTML = '';
+  const cats = ['pre_shift','during_shift','post_shift'];
+  cats.forEach(cat=>{
+    const items = data.items[cat] || [];
+    if(!items.length) return;
+    const checked = items.filter(i=>i.checked).length;
+    const info = CAT_LABELS[cat] || {icon:'📋', label:cat};
+    const section = document.createElement('div');
+    section.className = 'cl-section';
+    section.innerHTML = `
+      <div class="cl-section-title">${info.icon} ${info.label} <span class="cl-section-count">${checked}/${items.length}</span></div>
+      <div class="cl-items">${items.map(it=>`
+        <div class="cl-item ${it.checked?'checked':''}" onclick="toggleItem('${it.key}',${!it.checked})">
+          <div class="cl-check">${it.checked?'✓':''}</div>
+          <div class="cl-label">${it.label}</div>
+          ${it.checked_at?'<div class="cl-time">'+new Date(it.checked_at).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'})+'</div>':''}
+        </div>
+      `).join('')}</div>
+    `;
+    body.appendChild(section);
+  });
+}
+
+function toggleItem(key, checked){
+  hdFetch('/hd/api/v1/checklist',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({item_key:key, checked:checked, shift:_clShift})
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){ showToast(d.error,'danger'); return; }
+    loadChecklist();
+  }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
+
+/* Auto-detect shift */
+(function(){
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset()*60000;
+  const h = new Date(utc+7*3600000).getHours();
+  if(h>=13&&h<17) _clShift='afternoon';
+  else if(h>=17||h<7) _clShift='evening';
+  document.querySelectorAll('.cl-shift-btn').forEach(b=>{
+    b.classList.toggle('active', b.dataset.shift===_clShift);
+  });
+})();
+
+loadChecklist();
+</script>
+{% endblock %}

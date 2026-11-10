@@ -1639,6 +1639,23 @@ def bed_dashboard():
                     except Exception:
                         pass
 
+                # Fetch anticoagulation protocol for active sessions
+                for sid, bnum in session_ids:
+                    try:
+                        cur.execute("""
+                            SELECT drug, bolus_dose, maintenance_dose
+                            FROM hd_anticoagulation
+                            WHERE session_id = %s
+                            ORDER BY recorded_at DESC LIMIT 1
+                        """, (sid,))
+                        arow = cur.fetchone()
+                        if arow and 1 <= bnum <= len(beds):
+                            beds[bnum - 1]["anticoag_drug"] = arow[0]
+                            beds[bnum - 1]["anticoag_bolus"] = arow[1]
+                            beds[bnum - 1]["anticoag_maintenance"] = arow[2]
+                    except Exception:
+                        pass
+
             conn.close()
         except Exception as e:
             logger.warning("bed_dashboard DB error: %s", e)
@@ -4156,3 +4173,272 @@ def _build_hb_trend_svg(hb_data):
   <polyline points="{polyline}" fill="none" stroke="#3498db" stroke-width="2" stroke-linejoin="round"/>
   {"".join(dots)}
 </svg>"""
+
+
+# ── Daily Checklist ──────────────────────────────────────
+
+# Standard checklist items
+_CHECKLIST_ITEMS = {
+    "pre_shift": [
+        ("check_water_system", "ตรวจระบบน้ำ RO/DI"),
+        ("check_dialysate", "ตรวจน้ำยาไตเทียม Dialysate"),
+        ("check_machines", "ตรวจเครื่องฟอกเลือดทุกเครื่อง"),
+        ("prepare_supplies", "เตรียมอุปกรณ์/เวชภัณฑ์"),
+        ("check_emergency", "ตรวจเครื่องมือฉุกเฉิน (Defibrillator/O2)"),
+        ("check_medications", "เตรียมยาประจำรอบ"),
+        ("patient_list_ready", "ตรวจสอบรายชื่อผู้ป่วยนัดฟอก"),
+    ],
+    "during_shift": [
+        ("vital_signs_recorded", "บันทึก Vital Signs ครบทุกราย"),
+        ("uf_monitoring", "ติดตาม UF Goal ตามแผน"),
+        ("machine_alarms_checked", "ตอบสนอง Machine Alarm ทันเวลา"),
+        ("anticoag_given", "ให้ Anticoagulant ตามแผน"),
+        ("esa_given_per_plan", "ฉีด ESA ตามแผนการรักษา"),
+        ("complications_documented", "บันทึกภาวะแทรกซ้อน (ถ้ามี)"),
+    ],
+    "post_shift": [
+        ("machines_cleaned", "ทำความสะอาดเครื่องฟอก"),
+        ("supplies_restocked", "เติมอุปกรณ์/เวชภัณฑ์"),
+        ("waste_disposed", "กำจัดขยะติดเชื้อ"),
+        ("documentation_complete", "บันทึกข้อมูลครบถ้วน"),
+        ("handover_done", "ส่งเวรเรียบร้อย"),
+        ("area_cleaned", "ทำความสะอาดพื้นที่"),
+    ],
+}
+
+
+@hd_bp.route("/checklist", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_checklist():
+    """Get daily checklist status for a date+shift."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    current_shift = request.args.get("shift", "morning")
+    date_str = request.args.get("date", _thai_today().isoformat())
+
+    items = {}
+    for cat, cat_items in _CHECKLIST_ITEMS.items():
+        items[cat] = []
+        for key, label in cat_items:
+            items[cat].append({
+                "key": key, "label": label,
+                "checked": False, "checked_by": None, "checked_at": None, "notes": "",
+            })
+
+    if db_url:
+        try:
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                # Auto-create table if not exists
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS hd_daily_checklist (
+                        id SERIAL PRIMARY KEY,
+                        checklist_date DATE NOT NULL,
+                        shift VARCHAR(20) NOT NULL DEFAULT 'morning',
+                        category VARCHAR(30) NOT NULL,
+                        item_key VARCHAR(60) NOT NULL,
+                        item_label VARCHAR(200) NOT NULL,
+                        checked BOOLEAN NOT NULL DEFAULT FALSE,
+                        checked_by INTEGER REFERENCES hd_users(id),
+                        checked_at TIMESTAMP,
+                        notes VARCHAR(300),
+                        created_at TIMESTAMP DEFAULT NOW(),
+                        UNIQUE(checklist_date, shift, item_key)
+                    )
+                """)
+                conn.commit()
+
+                cur.execute("""
+                    SELECT item_key, checked, checked_at, notes
+                    FROM hd_daily_checklist
+                    WHERE checklist_date = %s AND shift = %s
+                """, (date_str, current_shift))
+                db_items = {r[0]: {"checked": r[1], "checked_at": r[2].isoformat() if r[2] else None, "notes": r[3]} for r in cur.fetchall()}
+
+                for cat in items:
+                    for item in items[cat]:
+                        if item["key"] in db_items:
+                            item["checked"] = db_items[item["key"]]["checked"]
+                            item["checked_at"] = db_items[item["key"]]["checked_at"]
+                            item["notes"] = db_items[item["key"]]["notes"] or ""
+            conn.close()
+        except Exception as e:
+            logger.warning("checklist GET error: %s", e)
+
+    total = sum(len(v) for v in items.values())
+    done = sum(1 for cat in items.values() for it in cat if it["checked"])
+
+    return jsonify({
+        "date": date_str, "shift": current_shift,
+        "items": items, "total": total, "done": done,
+        "progress": round(done / total * 100) if total else 0,
+    })
+
+
+@hd_bp.route("/checklist", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def update_checklist():
+    """Toggle a checklist item."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database configured"}), 503
+
+    data = request.get_json(force=True, silent=True) or {}
+    item_key = data.get("item_key")
+    checked = data.get("checked", True)
+    shift = data.get("shift", "morning")
+    date_str = data.get("date", _thai_today().isoformat())
+    notes = data.get("notes", "")
+
+    if not item_key:
+        return jsonify({"error": "item_key required"}), 400
+
+    # Find the label
+    label = item_key
+    category = ""
+    for cat, cat_items in _CHECKLIST_ITEMS.items():
+        for k, l in cat_items:
+            if k == item_key:
+                label = l
+                category = cat
+                break
+
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO hd_daily_checklist (checklist_date, shift, category, item_key, item_label, checked, checked_by, checked_at, notes)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+                ON CONFLICT (checklist_date, shift, item_key) DO UPDATE
+                SET checked = EXCLUDED.checked, checked_by = EXCLUDED.checked_by,
+                    checked_at = NOW(), notes = EXCLUDED.notes
+            """, (date_str, shift, category, item_key, label, checked, g.get("hd_user_id"), notes))
+        conn.commit()
+        conn.close()
+        return jsonify({"saved": True, "item_key": item_key, "checked": checked})
+    except Exception as e:
+        logger.error("checklist POST error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/checklist/page")
+@require_role("physician", "nurse", "admin")
+def checklist_page():
+    """Render the daily checklist page."""
+    return render_template("hd_checklist.html")
+
+
+# ── Morning Brief ─────────────────────────────────────────
+
+@hd_bp.route("/morning-brief")
+@require_role("physician", "nurse", "admin")
+def morning_brief_page():
+    """Render the Morning Brief web page for Nurse Station TV."""
+    return render_template("hd_morning_brief.html")
+
+
+@hd_bp.route("/morning-brief/data", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def morning_brief_data():
+    """Morning Brief JSON: today's summary for all shifts."""
+    import os, psycopg2
+    from .config import HdConfig
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    today = _thai_today()
+
+    result = {
+        "date": today.isoformat(),
+        "date_thai": "",
+        "shifts": {"morning": 0, "afternoon": 0, "evening": 0},
+        "total_beds": HdConfig.TOTAL_BEDS,
+        "today_patients": 0,
+        "alerts": [],
+        "dialyzer_warnings": [],
+        "lab_abnormal": [],
+        "checklist_progress": {},
+    }
+
+    # Thai date format
+    thai_days = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"]
+    thai_months = ["", "ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.",
+                   "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
+    result["date_thai"] = f"วัน{thai_days[today.weekday()]}ที่ {today.day} {thai_months[today.month]} {today.year + 543}"
+
+    if not db_url:
+        return jsonify(result)
+
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Count sessions per shift today
+            for shift in ["morning", "afternoon", "evening"]:
+                cur.execute("""
+                    SELECT COUNT(*) FROM hd_sessions
+                    WHERE session_date = %s AND COALESCE(shift, 'morning') = %s
+                      AND status IN ('scheduled', 'in_progress', 'completed')
+                """, (today.isoformat(), shift))
+                result["shifts"][shift] = cur.fetchone()[0]
+
+            # Count today's scheduled patients
+            day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
+            today_th = day_map.get(today.weekday(), "")
+            if today_th:
+                cur.execute("""
+                    SELECT COUNT(*) FROM hd_patient_mapping
+                    WHERE is_active = TRUE AND schedule_days ILIKE %s
+                """, (f"%{today_th}%",))
+                result["today_patients"] = cur.fetchone()[0]
+
+            # Pending alerts
+            try:
+                cur.execute("""
+                    SELECT title, severity, created_at
+                    FROM hd_clinical_alerts
+                    WHERE DATE(created_at) = %s AND acknowledged = FALSE
+                    ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END
+                    LIMIT 10
+                """, (today.isoformat(),))
+                result["alerts"] = [{"title": r[0], "severity": r[1],
+                                     "time": r[2].strftime("%H:%M") if r[2] else ""} for r in cur.fetchall()]
+            except Exception:
+                pass
+
+            # Dialyzers near max reuse
+            try:
+                cur.execute("""
+                    SELECT d.dialyzer_type, d.use_count, d.max_uses, p.patient_name, p.hn
+                    FROM hd_dialyzer_tracking d
+                    JOIN hd_patient_mapping p ON p.id = d.patient_id
+                    WHERE d.status = 'active' AND d.use_count >= d.max_uses * 0.8
+                    ORDER BY d.use_count DESC LIMIT 10
+                """)
+                result["dialyzer_warnings"] = [
+                    {"patient": r[3], "hn": r[4], "type": r[0], "use": r[1], "max": r[2]}
+                    for r in cur.fetchall()
+                ]
+            except Exception:
+                pass
+
+            # Checklist progress per shift
+            for shift in ["morning", "afternoon", "evening"]:
+                try:
+                    cur.execute("""
+                        SELECT COUNT(*) FILTER (WHERE checked = TRUE), COUNT(*)
+                        FROM hd_daily_checklist
+                        WHERE checklist_date = %s AND shift = %s
+                    """, (today.isoformat(), shift))
+                    row = cur.fetchone()
+                    if row and row[1]:
+                        result["checklist_progress"][shift] = {
+                            "done": row[0], "total": row[1],
+                            "pct": round(row[0] / row[1] * 100),
+                        }
+                except Exception:
+                    pass
+
+        conn.close()
+    except Exception as e:
+        logger.warning("morning_brief_data error: %s", e)
+
+    return jsonify(result)

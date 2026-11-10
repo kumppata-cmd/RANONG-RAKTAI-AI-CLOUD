@@ -79,6 +79,17 @@
 .bed-dialyzer { font-size: .6rem; padding: 2px 6px; border-radius: 6px; font-weight: 700; background: rgba(124,58,237,.1); color: #7c3aed; display: inline-block; margin-top: 2px; font-variant-numeric: tabular-nums; }
 .bed-dialyzer.reuse-warn { background: rgba(243,156,18,.12); color: var(--warning); }
 .bed-dialyzer.reuse-max { background: rgba(231,76,60,.12); color: var(--danger); }
+/* Filter tabs */
+.filter-bar { display: flex; gap: 4px; margin-bottom: 12px; overflow-x: auto; -webkit-overflow-scrolling: touch; padding-bottom: 4px; }
+.filter-tab { padding: 6px 12px; border: 1.5px solid var(--border); border-radius: 16px; background: var(--bg-card); cursor: pointer; font-weight: 600; font-size: .75rem; color: var(--fg-muted); white-space: nowrap; transition: all .15s; }
+.filter-tab.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+.filter-tab:hover:not(.active) { border-color: var(--accent); color: var(--accent); }
+/* Anticoag badge on bed card */
+.bed-anticoag { font-size: .6rem; padding: 2px 6px; border-radius: 6px; font-weight: 700; background: rgba(20,184,166,.1); color: #14b8a6; display: inline-block; margin-top: 2px; }
+/* ESA badge */
+.bed-esa { font-size: .6rem; padding: 2px 6px; border-radius: 6px; font-weight: 700; display: inline-block; margin-top: 2px; }
+.bed-esa.given { background: rgba(34,197,94,.1); color: var(--success); }
+.bed-esa.not-given { background: rgba(243,156,18,.1); color: var(--warning); }
 /* Quick Vital Modal */
 .qv-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 999; align-items: flex-end; justify-content: center; }
 .qv-overlay.open { display: flex; }
@@ -119,6 +130,15 @@
   <button class="btn btn-outline" onclick="shiftHandover()" style="margin-left:auto;color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่งเวร</button>
   <button class="btn btn-outline" onclick="autoAssignBeds()" style="color:var(--info);border-color:var(--info);font-size:.8rem;">🤖 จัดเตียง</button>
   <a href="/hd/session/new" class="btn btn-success" style="font-size:.85rem;">➕ เริ่มฟอก</a>
+</div>
+
+<!-- Quick Filter Tabs (EMMA-style context switch) -->
+<div class="filter-bar" id="filterBar">
+  <button class="filter-tab active" data-filter="default" onclick="setFilter('default')">📊 สถานะ</button>
+  <button class="filter-tab" data-filter="dialyzer" onclick="setFilter('dialyzer')">🔧 Dialyzer</button>
+  <button class="filter-tab" data-filter="hep" onclick="setFilter('hep')">💉 Heparin</button>
+  <button class="filter-tab" data-filter="epo" onclick="setFilter('epo')">💊 ESA/EPO</button>
+  <button class="filter-tab" data-filter="va" onclick="setFilter('va')">🩺 Vascular</button>
 </div>
 
 <!-- Shift selector (single mode) -->
@@ -322,19 +342,52 @@ function renderBeds(beds){
       dialyzerBadge = `<span class="${dCls}">${b.dialyzer_type} ${reuse}/${maxR}</span>`;
     }
 
+    /* Anticoag badge */
+    let anticoagBadge = '';
+    if(b.anticoag_drug){
+      const bolus = b.anticoag_bolus ? b.anticoag_bolus+'IU' : '';
+      anticoagBadge = `<span class="bed-anticoag">${b.anticoag_drug} ${bolus}</span>`;
+    }
+
+    /* ESA badge */
+    let esaBadge = '';
+    if(b.esa_given){
+      esaBadge = `<span class="bed-esa given">✓ ${b.esa_drug_given||'ESA'}</span>`;
+    } else if(b.status !== 'available' && b.patient){
+      const esaDrug = b.patient.esa_drug;
+      if(esaDrug) esaBadge = `<span class="bed-esa not-given">⏳ ${esaDrug}</span>`;
+    }
+
     /* Quick vital button for active beds */
     let quickBtn = '';
     if(b.session_id && b.status === 'active'){
       quickBtn = `<button class="quick-vital-btn" onclick="event.stopPropagation();openQuickVital(${b.session_id},${b.bed_number},'${pName}')">❤️ วัด BP</button>`;
     }
 
+    /* Filter-aware content: show different info based on active filter */
+    let filterContent = '';
+    switch(_activeFilter){
+      case 'dialyzer':
+        filterContent = dialyzerBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มี dialyzer</span>';
+        break;
+      case 'hep':
+        filterContent = anticoagBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มีข้อมูล</span>';
+        break;
+      case 'epo':
+        filterContent = esaBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มี ESA</span>';
+        break;
+      case 'va':
+        filterContent = va ? `<span class="bed-access ${vaClass(va)}" style="font-size:.75rem;padding:3px 10px;">${va}</span>` : '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่ระบุ VA</span>';
+        break;
+      default:
+        filterContent = `${dialyzerBadge}${vitals}${timeLeft}`;
+    }
+
     card.innerHTML = `
       <div class="bed-num">${b.bed_number}</div>
       <div class="bed-patient">${pName}</div>
       ${hnLine}
-      ${dialyzerBadge}
-      ${vitals}
-      ${timeLeft}
+      ${filterContent}
       <div class="bed-status">${s.label}</div>
       ${nextBadge}
       ${quickBtn}
@@ -558,6 +611,18 @@ function submitQuickVital(){
   });
 }
 
+/* ── Quick Filter Tabs ── */
+let _activeFilter = 'default';
+function setFilter(f){
+  _activeFilter = f;
+  document.querySelectorAll('.filter-tab').forEach(b=>b.classList.remove('active'));
+  const btn = document.querySelector('.filter-tab[data-filter="'+f+'"]');
+  if(btn) btn.classList.add('active');
+  /* Re-render with new filter */
+  if(_viewMode === 'all') fetchAllRounds();
+  else fetchBeds();
+}
+
 /* ── Day-of-Week Selector ── */
 let _selectedDate = null; /* null = today */
 
@@ -655,11 +720,23 @@ function fetchAllRounds(){
             else if(reuse >= maxR * 0.8) dCls += ' reuse-warn';
             dBadge = `<span class="${dCls}">${b.dialyzer_type} ${reuse}/${maxR}</span>`;
           }
+          let aBadge = '';
+          if(b.anticoag_drug) aBadge = `<span class="bed-anticoag">${b.anticoag_drug} ${b.anticoag_bolus||''}IU</span>`;
+          let eBadge = '';
+          if(b.esa_given) eBadge = `<span class="bed-esa given">✓ ${b.esa_drug_given||'ESA'}</span>`;
+          else if(b.patient && b.patient.esa_drug) eBadge = `<span class="bed-esa not-given">⏳ ${b.patient.esa_drug}</span>`;
           function vaC(v){
             if(!v)return'';const u=v.toUpperCase();
             if(u.includes('AVF'))return'bed-access-avf';if(u.includes('AVG'))return'bed-access-avg';
             if(u.includes('DLC')||u.includes('CVC'))return'bed-access-dlc';return'bed-access-avf';
           }
+          /* Filter-aware extra line */
+          let extraLine = dBadge;
+          if(_activeFilter==='dialyzer') extraLine = dBadge||'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
+          else if(_activeFilter==='hep') extraLine = aBadge||'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
+          else if(_activeFilter==='epo') extraLine = eBadge||'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
+          else if(_activeFilter==='va') extraLine = va?'<span class="bed-access '+vaC(va)+'" style="font-size:.7rem;padding:3px 8px;">'+va+'</span>':'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
+
           const card = document.createElement('div');
           card.className = 'bed-card '+s.cls;
           card.style.minHeight = '80px';
@@ -668,11 +745,11 @@ function fetchAllRounds(){
           card.innerHTML = `
             <div style="display:flex;justify-content:space-between;align-items:baseline;">
               <span class="bed-num" style="font-size:1.1rem;">${b.bed_number}</span>
-              ${va ? '<span class="bed-access '+vaC(va)+'" style="font-size:.6rem;">'+va+'</span>' : ''}
+              ${va&&_activeFilter!=='va' ? '<span class="bed-access '+vaC(va)+'" style="font-size:.6rem;">'+va+'</span>' : ''}
             </div>
             <div class="bed-patient" style="font-size:.72rem;">${pName}</div>
             <div class="bed-hn" style="font-size:.6rem;">${b.patient_hn?'HN '+b.patient_hn:''}</div>
-            ${dBadge}
+            ${extraLine}
           `;
           grid.appendChild(card);
         });

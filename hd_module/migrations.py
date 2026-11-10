@@ -462,6 +462,27 @@ CREATE INDEX IF NOT EXISTS idx_hd_dialyzer_patient ON hd_dialyzer_tracking(patie
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.7.0', 'Clinical upgrade: medications, labs, VA log, anticoagulation, dialyzer tracking')
 ON CONFLICT (version) DO NOTHING;
+
+-- v1.8.0: Daily Checklist for QA
+CREATE TABLE IF NOT EXISTS hd_daily_checklist (
+    id SERIAL PRIMARY KEY,
+    checklist_date DATE NOT NULL,
+    shift VARCHAR(20) NOT NULL DEFAULT 'morning',
+    category VARCHAR(30) NOT NULL,  -- 'pre_shift', 'during_shift', 'post_shift'
+    item_key VARCHAR(60) NOT NULL,
+    item_label VARCHAR(200) NOT NULL,
+    checked BOOLEAN NOT NULL DEFAULT FALSE,
+    checked_by INTEGER REFERENCES hd_users(id),
+    checked_at TIMESTAMP,
+    notes VARCHAR(300),
+    created_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(checklist_date, shift, item_key)
+);
+CREATE INDEX IF NOT EXISTS idx_hd_checklist_date ON hd_daily_checklist(checklist_date, shift);
+
+INSERT INTO hd_schema_version (version, description)
+VALUES ('1.8.0', 'Daily checklist for nursing QA')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────

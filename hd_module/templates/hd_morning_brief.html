@@ -1,0 +1,145 @@
+{% extends "hd_base.html" %}
+{% block title %}Morning Brief{% endblock %}
+{% block page_title %}☀️ Morning Brief{% endblock %}
+
+{% block extra_css %}
+<style>
+.mb-date{text-align:center;font-size:1.2rem;font-weight:700;margin-bottom:20px;color:var(--accent)}
+.mb-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:20px}
+@media(max-width:768px){.mb-grid{grid-template-columns:1fr}}
+.mb-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;text-align:center}
+.mb-card .num{font-size:2.5rem;font-weight:800;font-variant-numeric:tabular-nums}
+.mb-card .label{font-size:.8rem;color:var(--fg-muted);margin-top:4px}
+.mb-card .sub{font-size:.75rem;color:var(--fg-muted);margin-top:2px}
+.mb-section{margin-bottom:20px}
+.mb-section-title{font-weight:700;font-size:.9rem;margin-bottom:8px;display:flex;align-items:center;gap:8px}
+.mb-section-title::after{content:'';flex:1;height:1px;background:var(--border)}
+.mb-alert-item{display:flex;align-items:center;gap:10px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px}
+.mb-alert-icon{width:28px;height:28px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:.85rem;flex-shrink:0}
+.mb-alert-text{flex:1;font-size:.85rem;font-weight:500;min-width:0}
+.mb-alert-time{font-size:.7rem;color:var(--fg-muted);white-space:nowrap}
+.mb-dialyzer-item{display:flex;align-items:center;gap:10px;padding:8px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:4px;font-size:.8rem}
+.mb-dialyzer-bar{flex:1;height:6px;border-radius:3px;background:var(--border);min-width:40px}
+.mb-dialyzer-fill{height:100%;border-radius:3px}
+.mb-checklist-row{display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);margin-bottom:6px}
+.mb-cl-bar{flex:1;height:8px;border-radius:4px;background:var(--border);overflow:hidden}
+.mb-cl-fill{height:100%;border-radius:4px}
+.mb-footer{text-align:center;padding:20px 0;font-size:.75rem;color:var(--fg-muted)}
+.mb-auto-refresh{font-size:.7rem;color:var(--fg-muted);text-align:center;margin-bottom:12px}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="mb-auto-refresh">🔄 รีเฟรชอัตโนมัติทุก 60 วินาที | <a href="/hd/" style="color:var(--accent);text-decoration:none;">← Dashboard</a> | <a href="/hd/checklist/page" style="color:var(--accent);text-decoration:none;">✅ Checklist</a></div>
+<div class="mb-date" id="mbDate">กำลังโหลด...</div>
+
+<!-- Shift Summary -->
+<div class="mb-grid" id="mbShifts">
+  <div class="mb-card"><div class="num" style="color:var(--accent)" id="mbMorning">-</div><div class="label">🌅 รอบเช้า</div><div class="sub">07:00-15:00</div></div>
+  <div class="mb-card"><div class="num" style="color:var(--warning)" id="mbAfternoon">-</div><div class="label">☀️ รอบบ่าย</div><div class="sub">13:00-21:00</div></div>
+  <div class="mb-card"><div class="num" style="color:#7c3aed" id="mbEvening">-</div><div class="label">🌙 รอบค่ำ</div><div class="sub">17:00-01:00</div></div>
+</div>
+
+<div class="mb-grid" style="grid-template-columns:1fr 1fr">
+  <div class="mb-card"><div class="num" style="color:var(--success)" id="mbTotalPatients">-</div><div class="label">📋 นัดฟอกวันนี้</div></div>
+  <div class="mb-card"><div class="num" style="color:var(--danger)" id="mbAlertCount">0</div><div class="label">⚠️ แจ้งเตือนที่ยังไม่ดู</div></div>
+</div>
+
+<!-- Alerts -->
+<div class="mb-section" id="mbAlertSection" style="display:none">
+  <div class="mb-section-title">🚨 แจ้งเตือน (Alerts)</div>
+  <div id="mbAlertList"></div>
+</div>
+
+<!-- Dialyzer Warnings -->
+<div class="mb-section" id="mbDialyzerSection" style="display:none">
+  <div class="mb-section-title">🔧 Dialyzer ใกล้ครบ Reuse</div>
+  <div id="mbDialyzerList"></div>
+</div>
+
+<!-- Checklist Progress -->
+<div class="mb-section" id="mbChecklistSection" style="display:none">
+  <div class="mb-section-title">✅ Checklist Progress</div>
+  <div id="mbChecklistList"></div>
+</div>
+
+<div class="mb-footer">RANONG-RAKTAI-AI INTELLIGENT — HD Smart Monitoring<br>อัปเดตล่าสุด: <span id="mbUpdated">-</span></div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function loadBrief(){
+  hdFetch('/hd/api/v1/morning-brief/data')
+    .then(r=>r.json())
+    .then(d=>{
+      document.getElementById('mbDate').textContent = d.date_thai || d.date;
+      document.getElementById('mbMorning').textContent = d.shifts.morning || 0;
+      document.getElementById('mbAfternoon').textContent = d.shifts.afternoon || 0;
+      document.getElementById('mbEvening').textContent = d.shifts.evening || 0;
+      document.getElementById('mbTotalPatients').textContent = d.today_patients || 0;
+      document.getElementById('mbAlertCount').textContent = (d.alerts||[]).length;
+
+      /* Alerts */
+      const alerts = d.alerts || [];
+      const alertSec = document.getElementById('mbAlertSection');
+      const alertList = document.getElementById('mbAlertList');
+      if(alerts.length){
+        alertSec.style.display = '';
+        alertList.innerHTML = alerts.map(a=>{
+          const color = a.severity==='critical'?'var(--danger)':a.severity==='warning'?'var(--warning)':'var(--info)';
+          const icon = a.severity==='critical'?'🔴':a.severity==='warning'?'🟡':'🔵';
+          return `<div class="mb-alert-item">
+            <div class="mb-alert-icon" style="background:${color}20;color:${color}">${icon}</div>
+            <div class="mb-alert-text">${a.title}</div>
+            <div class="mb-alert-time">${a.time}</div>
+          </div>`;
+        }).join('');
+      } else { alertSec.style.display = 'none'; }
+
+      /* Dialyzer warnings */
+      const dw = d.dialyzer_warnings || [];
+      const dwSec = document.getElementById('mbDialyzerSection');
+      const dwList = document.getElementById('mbDialyzerList');
+      if(dw.length){
+        dwSec.style.display = '';
+        dwList.innerHTML = dw.map(w=>{
+          const pct = Math.round(w.use/w.max*100);
+          const color = pct>=100?'var(--danger)':'var(--warning)';
+          return `<div class="mb-dialyzer-item">
+            <span style="font-weight:600;min-width:60px">${w.hn}</span>
+            <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${w.patient}</span>
+            <span style="font-weight:700;color:${color}">${w.type} ${w.use}/${w.max}</span>
+            <div class="mb-dialyzer-bar"><div class="mb-dialyzer-fill" style="width:${Math.min(pct,100)}%;background:${color}"></div></div>
+          </div>`;
+        }).join('');
+      } else { dwSec.style.display = 'none'; }
+
+      /* Checklist progress */
+      const cp = d.checklist_progress || {};
+      const cpSec = document.getElementById('mbChecklistSection');
+      const cpList = document.getElementById('mbChecklistList');
+      const shiftNames = {morning:'🌅 เช้า', afternoon:'☀️ บ่าย', evening:'🌙 ค่ำ'};
+      const cpEntries = Object.entries(cp);
+      if(cpEntries.length){
+        cpSec.style.display = '';
+        cpList.innerHTML = cpEntries.map(([s,v])=>{
+          const color = v.pct>=100?'var(--success)':v.pct>=50?'var(--warning)':'var(--accent)';
+          return `<div class="mb-checklist-row">
+            <span style="font-weight:600;min-width:70px">${shiftNames[s]||s}</span>
+            <div class="mb-cl-bar"><div class="mb-cl-fill" style="width:${v.pct}%;background:${color}"></div></div>
+            <span style="font-weight:700;font-size:.85rem;color:${color}">${v.pct}%</span>
+            <span style="font-size:.7rem;color:var(--fg-muted)">${v.done}/${v.total}</span>
+          </div>`;
+        }).join('');
+      } else { cpSec.style.display = 'none'; }
+
+      document.getElementById('mbUpdated').textContent = new Date().toLocaleTimeString('th-TH');
+    }).catch(()=>{
+      document.getElementById('mbDate').textContent = 'โหลดไม่สำเร็จ';
+    });
+}
+
+loadBrief();
+setInterval(loadBrief, 60000);
+</script>
+{% endblock %}
