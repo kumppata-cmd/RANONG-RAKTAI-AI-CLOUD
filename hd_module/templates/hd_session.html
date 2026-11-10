@@ -636,6 +636,12 @@ function calcIDWG(){
     const valEl = document.getElementById('idwgValue');
     valEl.className = 'value ' + (pct > 4 ? 'idwg-high' : 'idwg-normal');
     el.style.display = 'block';
+    /* Auto-calculate UF Goal = (pre_weight - dry_weight) × 1000 mL */
+    const ufGoal = Math.round(idwg * 1000);
+    if(ufGoal > 0){
+      document.getElementById('ufGoal').textContent = ufGoal;
+      sessionData.uf_goal = ufGoal;
+    }
   } else { el.style.display = 'none'; }
 }
 
@@ -662,6 +668,11 @@ function startSession(){
   sessionData.pre_weight = parseFloat(document.getElementById('preWeight').value) || 0;
   sessionData.dry_weight = parseFloat(document.getElementById('dryWeight').value) || 0;
 
+  /* Calculate UF Goal from pre_weight - dry_weight */
+  const calcUfGoal = (sessionData.pre_weight && sessionData.dry_weight && sessionData.pre_weight > sessionData.dry_weight)
+    ? Math.round((sessionData.pre_weight - sessionData.dry_weight) * 1000)
+    : (sessionData.uf_goal || 2000);
+
   const data = {
     patient_hn: hn, bed_number: parseInt(bed),
     shift: _currentShift,
@@ -670,6 +681,7 @@ function startSession(){
     pre_hr: parseInt(document.getElementById('preHr').value),
     pre_weight: sessionData.pre_weight,
     dry_weight: sessionData.dry_weight,
+    uf_goal: calcUfGoal,
   };
   sessionData.hn = hn;
   hdFetch('/hd/api/v1/sessions',{method:'POST',body:JSON.stringify(data)})

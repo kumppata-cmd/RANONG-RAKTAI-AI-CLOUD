@@ -455,6 +455,20 @@ def create_session():
             shift = data.get("shift", "morning")
             if shift not in ("morning", "afternoon", "evening"):
                 shift = "morning"
+            # Auto-calculate UF Goal from pre_weight - dry_weight
+            pre_w = data.get("pre_weight")
+            dry_w = data.get("dry_weight")
+            uf_goal = data.get("uf_goal")
+            if not uf_goal and pre_w and dry_w:
+                try:
+                    calc_uf = round((float(pre_w) - float(dry_w)) * 1000)
+                    if calc_uf > 0:
+                        uf_goal = calc_uf
+                except (ValueError, TypeError):
+                    pass
+            if not uf_goal or uf_goal <= 0:
+                uf_goal = 2000  # fallback only when no weights given
+
             cur.execute(f"""
                 INSERT INTO hd_sessions
                     (patient_id, bed_number, session_date, status,
@@ -467,8 +481,8 @@ def create_session():
             """, (
                 patient_id, bed,
                 _thai_today().isoformat(),
-                data.get("pre_weight"),
-                data.get("uf_goal", 2000),
+                pre_w,
+                uf_goal,
                 g.get("hd_user_id"),
                 shift,
             ))
