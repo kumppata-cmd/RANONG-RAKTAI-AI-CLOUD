@@ -449,10 +449,10 @@ def create_session():
                 SELECT id, status FROM hd_sessions
                 WHERE bed_number = %s
                   AND session_date = %s
-                  AND COALESCE(shift, 'morning') = %s
+                  AND (shift = %s OR (shift IS NULL AND %s = 'morning'))
                   AND status IN ('scheduled', 'in_progress')
                 ORDER BY status
-            """, (bed, _thai_today().isoformat(), shift))
+            """, (bed, _thai_today().isoformat(), shift, shift))
             existing = cur.fetchall()
             for ex_id, ex_status in existing:
                 if init_status == "in_progress" and ex_status == "in_progress":
@@ -1703,23 +1703,26 @@ def bed_dashboard():
                 # is never overwritten by a scheduled one on the same bed)
                 # ORDER BY: 'in_progress' sorts AFTER 'scheduled' so it
                 # overwrites in the loop — last write wins
+                # Query sessions: match shift exactly, OR include NULL-shift
+                # sessions when viewing morning (legacy sessions before shift feature)
                 cur.execute("""
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
                            p.dry_weight, p.esa_drug,
                            s.started_at, 4 as duration_hours,
-                           s.esa_given, s.esa_drug_given
+                           s.esa_given, s.esa_drug_given,
+                           s.shift as saved_shift
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.status IN ('scheduled', 'in_progress')
                       AND s.session_date = %s
-                      AND COALESCE(s.shift, 'morning') = %s
+                      AND (s.shift = %s OR (s.shift IS NULL AND %s = 'morning'))
                     ORDER BY s.bed_number,
                              CASE s.status
                                WHEN 'scheduled' THEN 0
                                WHEN 'in_progress' THEN 1
                              END
-                """, (target_date.isoformat(), current_shift))
+                """, (target_date.isoformat(), current_shift, current_shift))
                 session_ids = []
                 for row in cur.fetchall():
                     bed_num = row[0]
@@ -1858,11 +1861,13 @@ def bed_dashboard():
         except Exception:
             pass
 
+    active_count = sum(1 for b in beds if b.get("status") not in ("available", None))
     return jsonify({
         "beds": beds,
         "total": HdConfig.TOTAL_BEDS,
         "shift": current_shift,
         "date": target_date.isoformat(),
+        "active_in_shift": active_count,
         "today_scheduled": today_count,
         "today_patients": today_patients,
     })

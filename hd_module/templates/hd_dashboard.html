@@ -486,13 +486,15 @@ function fetchBeds(){
     })
     .then(data=>{
       const beds = data.beds || [];
-      /* Only render if we got real data — don't overwrite with all-empty */
-      const hasActive = beds.some(b=>b.status && b.status!=='available');
-      if(hasActive || _hasEverRendered){
-        renderBeds(beds);
-        _hasEverRendered = true;
-      }
-      document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('th-TH');
+      /* Always render — the grid must reflect the current shift state */
+      renderBeds(beds);
+      /* Show shift info for debugging */
+      const shiftNames = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
+      const activeCount = data.active_in_shift || 0;
+      document.getElementById('lastUpdated').textContent =
+        new Date().toLocaleTimeString('th-TH') +
+        ' | รอบ' + (shiftNames[data.shift]||data.shift) +
+        ' | ฟอก ' + activeCount + ' คน';
       if(data.today_scheduled !== undefined) document.getElementById('statScheduled').textContent = data.today_scheduled;
       /* Show today's scheduled patients */
       if(data.today_patients && data.today_patients.length){
@@ -514,7 +516,16 @@ function fetchBeds(){
     })
     .catch(e=>{
       console.warn('fetchBeds error:', e);
-      document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('th-TH') + ' (offline)';
+      document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('th-TH') + ' ❌ '+e.message;
+      /* Show error on bed grid so nurse knows something is wrong */
+      const grid = document.getElementById('bedGrid');
+      if(grid && !grid.querySelector('.bed-error')){
+        const errDiv = document.createElement('div');
+        errDiv.className = 'bed-error';
+        errDiv.style.cssText = 'grid-column:1/-1;text-align:center;padding:20px;color:var(--danger);font-size:.85rem;';
+        errDiv.textContent = '⚠️ โหลดข้อมูลเตียงไม่สำเร็จ — ลอง login ใหม่หรือ refresh';
+        grid.prepend(errDiv);
+      }
     });
 }
 
