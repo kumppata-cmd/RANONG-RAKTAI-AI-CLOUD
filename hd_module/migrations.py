@@ -299,6 +299,42 @@ END $$;
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.5.0', 'Add hd_uf_records table and shift to hd_sessions')
 ON CONFLICT (version) DO NOTHING;
+
+-- v1.6.0: Full HD Flowsheet (standard HD monitoring sheet)
+CREATE TABLE IF NOT EXISTS hd_flowsheet (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES hd_sessions(id),
+    slot_time VARCHAR(5) NOT NULL,
+    recorded_at TIMESTAMP DEFAULT NOW(),
+    -- Vital Signs
+    sbp INTEGER,
+    dbp INTEGER,
+    pr INTEGER,
+    rr INTEGER,
+    temp NUMERIC(4,1),
+    spo2 INTEGER,
+    -- Machine Parameters
+    bfr INTEGER,
+    vp INTEGER,
+    tmp INTEGER,
+    ap INTEGER,
+    conductivity NUMERIC(4,1),
+    dialysate_temp NUMERIC(4,1),
+    -- UF
+    ufr INTEGER,
+    total_uf INTEGER,
+    -- Notes
+    remark VARCHAR(500),
+    nurse_id INTEGER REFERENCES hd_users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_hd_flowsheet_session ON hd_flowsheet(session_id);
+DO $$ BEGIN
+    ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS pre_hd_note TEXT;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+INSERT INTO hd_schema_version (version, description)
+VALUES ('1.6.0', 'Add hd_flowsheet full HD monitoring sheet')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────

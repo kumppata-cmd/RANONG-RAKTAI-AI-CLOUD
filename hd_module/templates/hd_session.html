@@ -207,6 +207,10 @@
       💧 บันทึก UF
     </button>
   </div>
+  <!-- HD Sheet link -->
+  <a id="hdSheetLink" href="#" class="btn btn-outline" style="width:100%;text-align:center;margin-bottom:16px;padding:12px;font-size:.9rem;display:none;" onclick="return true;">
+    📋 เปิด HD Monitoring Sheet (บันทึกครบทุกค่า)
+  </a>
 
   <!-- Timeline -->
   <div class="card">
@@ -669,6 +673,10 @@ function startSession(){
       switchTab('session','intra');
       document.getElementById('cancelBtn').style.display = 'inline-flex';
       loadEsaHistory();
+      /* Show HD Sheet link */
+      const sheetLink = document.getElementById('hdSheetLink');
+      sheetLink.href = '/hd/sheet/'+d.session_id;
+      sheetLink.style.display = 'block';
     })
     .catch(()=>showToast('ไม่สามารถเริ่มรอบฟอกได้','danger'));
 }
@@ -753,6 +761,10 @@ function loadExistingSession(sid){
           timerInterval = setInterval(updateTimer, 1000);
         }
         switchTab('session','intra');
+        /* Show HD Sheet link */
+        const sl = document.getElementById('hdSheetLink');
+        sl.href = '/hd/sheet/'+sid;
+        sl.style.display = 'block';
         /* Load existing vitals from DB */
         fetch('/hd/api/v1/sessions/'+sid+'/vitals', {headers})
           .then(r=>r.ok?r.json():Promise.reject())

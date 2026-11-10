@@ -169,6 +169,12 @@ def hd_settings_page():
     return render_template("hd_settings.html")
 
 
+@hd_web.route("/sheet/<int:session_id>")
+def hd_sheet_page(session_id):
+    """HD Monitoring Sheet page."""
+    return render_template("hd_sheet.html", session_id=session_id)
+
+
 @hd_web.route("/epo-dashboard/<hn>")
 def hd_epo_dashboard_page(hn):
     """EPO Response Dashboard page."""
@@ -2335,6 +2341,226 @@ def patient_esa_history(hn):
     except Exception as e:
         logger.error("patient_esa_history error: %s", e)
         return jsonify({"records": [], "prescribed": {}, "error": str(e)})
+
+
+# ══════════════════════════════════════════════════════════
+# HD FLOWSHEET — Full HD Monitoring Sheet
+# ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/sessions/<int:session_id>/flowsheet", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_flowsheet(session_id):
+    """Get all flowsheet entries for a session."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"rows": []})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT id, slot_time, recorded_at,
+                       sbp, dbp, pr, rr, temp, spo2,
+                       bfr, vp, tmp, ap, conductivity, dialysate_temp,
+                       ufr, total_uf, remark
+                FROM hd_flowsheet
+                WHERE session_id = %s
+                ORDER BY slot_time, recorded_at
+            """, (session_id,))
+            rows = cur.fetchall()
+            # Get session info
+            cur.execute("""
+                SELECT s.uf_goal, s.pre_hd_note, s.started_at,
+                       p.patient_name, p.hn, p.vascular_access
+                FROM hd_sessions s
+                JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE s.id = %s
+            """, (session_id,))
+            srow = cur.fetchone()
+        conn.close()
+
+        entries = []
+        for r in rows:
+            entries.append({
+                "id": r[0], "slot_time": r[1],
+                "recorded_at": r[2].isoformat() if r[2] else None,
+                "sbp": r[3], "dbp": r[4], "pr": r[5], "rr": r[6],
+                "temp": float(r[7]) if r[7] else None,
+                "spo2": r[8],
+                "bfr": r[9], "vp": r[10], "tmp": r[11], "ap": r[12],
+                "conductivity": float(r[13]) if r[13] else None,
+                "dialysate_temp": float(r[14]) if r[14] else None,
+                "ufr": r[15], "total_uf": r[16],
+                "remark": r[17],
+            })
+        return jsonify({
+            "rows": entries,
+            "session": {
+                "uf_goal": int(srow[0]) if srow and srow[0] else 2000,
+                "pre_hd_note": srow[1] if srow else None,
+                "started_at": srow[2].isoformat() if srow and srow[2] else None,
+                "patient_name": srow[3] if srow else None,
+                "hn": srow[4] if srow else None,
+                "va": srow[5] if srow else None,
+            } if srow else {},
+        })
+    except Exception as e:
+        logger.error("get_flowsheet error: %s", e)
+        return jsonify({"rows": [], "error": str(e)})
+
+
+@hd_bp.route("/sessions/<int:session_id>/flowsheet", methods=["POST"])
+@require_role("physician", "nurse")
+def save_flowsheet_row(session_id):
+    """Save one flowsheet row (insert or update by slot_time)."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+
+    data = request.get_json(silent=True) or {}
+    slot_time = data.get("slot_time", "")
+    if not slot_time:
+        return jsonify({"error": "slot_time required"}), 400
+
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Check if row exists for this slot_time
+            cur.execute("""
+                SELECT id FROM hd_flowsheet
+                WHERE session_id = %s AND slot_time = %s
+            """, (session_id, slot_time))
+            existing = cur.fetchone()
+
+            params = {
+                "sbp": data.get("sbp"), "dbp": data.get("dbp"),
+                "pr": data.get("pr"), "rr": data.get("rr"),
+                "temp": data.get("temp"), "spo2": data.get("spo2"),
+                "bfr": data.get("bfr"), "vp": data.get("vp"),
+                "tmp": data.get("tmp"), "ap": data.get("ap"),
+                "conductivity": data.get("conductivity"),
+                "dialysate_temp": data.get("dialysate_temp"),
+                "ufr": data.get("ufr"), "total_uf": data.get("total_uf"),
+                "remark": data.get("remark"),
+            }
+
+            if existing:
+                # Update — only non-null fields
+                sets = []
+                vals = []
+                for k, v in params.items():
+                    if v is not None:
+                        sets.append(f"{k} = %s")
+                        vals.append(v)
+                if sets:
+                    sets.append("recorded_at = NOW()")
+                    vals.append(existing[0])
+                    cur.execute(
+                        f"UPDATE hd_flowsheet SET {', '.join(sets)} WHERE id = %s",
+                        vals
+                    )
+                row_id = existing[0]
+            else:
+                # Insert
+                cur.execute("""
+                    INSERT INTO hd_flowsheet
+                        (session_id, slot_time, sbp, dbp, pr, rr, temp, spo2,
+                         bfr, vp, tmp, ap, conductivity, dialysate_temp,
+                         ufr, total_uf, remark, nurse_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    RETURNING id
+                """, (
+                    session_id, slot_time,
+                    params["sbp"], params["dbp"], params["pr"], params["rr"],
+                    params["temp"], params["spo2"],
+                    params["bfr"], params["vp"], params["tmp"], params["ap"],
+                    params["conductivity"], params["dialysate_temp"],
+                    params["ufr"], params["total_uf"],
+                    params["remark"], g.get("hd_user_id"),
+                ))
+                row_id = cur.fetchone()[0]
+
+            # Also update session actual_uf to latest total_uf
+            if params["total_uf"]:
+                cur.execute(
+                    "UPDATE hd_sessions SET actual_uf = %s WHERE id = %s",
+                    (params["total_uf"], session_id)
+                )
+
+            # Generate alert if BP abnormal
+            alert = None
+            if params["sbp"] and (int(params["sbp"]) < 90 or int(params["sbp"]) > 180):
+                severity = "critical" if int(params["sbp"]) < 80 or int(params["sbp"]) > 200 else "warning"
+                title = f"BP ผิดปกติ: {params['sbp']}/{params['dbp'] or '-'} ({slot_time})"
+                cur.execute("""
+                    INSERT INTO hd_clinical_alerts (session_id, severity, title, message, acknowledged)
+                    VALUES (%s, %s, %s, %s, FALSE)
+                """, (session_id, severity, title,
+                      f"BP {params['sbp']}/{params['dbp'] or '-'} at {slot_time}"))
+                alert = {"severity": severity, "title": title}
+
+        conn.commit()
+        conn.close()
+
+        # Return the previous row for auto-fill
+        prev_row = None
+        try:
+            conn2 = psycopg2.connect(db_url, connect_timeout=5)
+            with conn2.cursor() as cur2:
+                cur2.execute("""
+                    SELECT bfr, vp, tmp, ap, conductivity, dialysate_temp, ufr
+                    FROM hd_flowsheet
+                    WHERE session_id = %s AND slot_time < %s
+                    ORDER BY slot_time DESC LIMIT 1
+                """, (session_id, slot_time))
+                pr = cur2.fetchone()
+                if pr:
+                    prev_row = {"bfr": pr[0], "vp": pr[1], "tmp": pr[2],
+                                "ap": pr[3], "conductivity": float(pr[4]) if pr[4] else None,
+                                "dialysate_temp": float(pr[5]) if pr[5] else None,
+                                "ufr": pr[6]}
+            conn2.close()
+        except Exception:
+            pass
+
+        log_action(user_id=g.get("hd_user_id"), action="flowsheet.save",
+                   resource_type="flowsheet", resource_id=row_id,
+                   ip_address=request.remote_addr or "")
+
+        return jsonify({
+            "id": row_id, "slot_time": slot_time,
+            "saved": True, "alert": alert,
+            "prev_row": prev_row,
+        }), 201
+    except Exception as e:
+        logger.error("save_flowsheet error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/sessions/<int:session_id>/pre-hd-note", methods=["PUT"])
+@require_role("physician", "nurse")
+def save_pre_hd_note(session_id):
+    """Save Pre-HD Note."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    data = request.get_json(silent=True) or {}
+    note = data.get("note", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hd_sessions SET pre_hd_note = %s WHERE id = %s",
+                        (note, session_id))
+        conn.commit()
+        conn.close()
+        return jsonify({"saved": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 # ── F3: Kt/V Calculator ──────────────────────────────────

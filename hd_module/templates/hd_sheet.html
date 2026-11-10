@@ -1,0 +1,338 @@
+{% extends "hd_base.html" %}
+{% block title %}HD Sheet{% endblock %}
+{% block page_title %}📋 HD Monitoring Sheet{% endblock %}
+
+{% block extra_css %}
+<style>
+.sheet-header { background: var(--bg-card); border-radius: var(--radius); padding: 12px; margin-bottom: 12px; border: 1px solid var(--border); }
+.sheet-header .pt-name { font-size: 1.1rem; font-weight: 700; }
+.sheet-header .pt-info { font-size: .8rem; color: var(--fg-muted); margin-top: 4px; }
+/* Pre-HD Note */
+.pre-note { margin-bottom: 12px; }
+.pre-note textarea { width: 100%; padding: 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); font-size: .85rem; min-height: 50px; background: var(--bg); color: var(--fg); resize: vertical; }
+/* Summary Table */
+.summary-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-bottom: 12px; }
+.summary-tbl { width: 100%; border-collapse: collapse; font-size: .75rem; min-width: 380px; }
+.summary-tbl th { background: var(--accent); color: #fff; padding: 6px 4px; text-align: center; font-weight: 600; position: sticky; top: 0; z-index: 1; }
+.summary-tbl td { padding: 6px 4px; text-align: center; border-bottom: 1px solid var(--border); cursor: pointer; }
+.summary-tbl tr:active td { background: rgba(52,152,219,.1); }
+.summary-tbl .saved { background: rgba(39,174,96,.05); }
+.summary-tbl .empty { color: var(--fg-muted); font-style: italic; }
+.summary-tbl .time-col { font-weight: 700; color: var(--accent); background: rgba(52,152,219,.04); min-width: 48px; }
+.summary-tbl .check-col { min-width: 28px; }
+/* Entry Card (bottom sheet) */
+.entry-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 999; display: none; align-items: flex-end; justify-content: center; }
+.entry-overlay.open { display: flex; }
+.entry-sheet { background: var(--bg-card); border-radius: 16px 16px 0 0; width: 100%; max-width: 480px; padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); max-height: 85vh; overflow-y: auto; }
+.entry-sheet h3 { margin: 0 0 12px; font-size: 1rem; }
+.param-group { margin-bottom: 14px; }
+.param-group-title { font-size: .8rem; font-weight: 700; color: var(--fg-muted); margin-bottom: 6px; padding-bottom: 4px; border-bottom: 1px solid var(--border); }
+.param-row { display: flex; gap: 8px; margin-bottom: 6px; flex-wrap: wrap; }
+.param-field { flex: 1; min-width: 70px; }
+.param-field label { font-size: .65rem; color: var(--fg-muted); display: block; margin-bottom: 2px; text-align: center; }
+.param-field input { width: 100%; padding: 10px 4px; font-size: 1.1rem; text-align: center; border: 1.5px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); font-weight: 600; }
+.param-field input:focus { border-color: var(--accent); outline: none; background: rgba(52,152,219,.04); }
+.param-field input.filled { border-color: var(--success); background: rgba(39,174,96,.04); }
+.param-field .unit { font-size: .6rem; color: var(--fg-muted); text-align: center; display: block; }
+.autofill-hint { font-size: .7rem; color: var(--info); background: rgba(52,152,219,.06); padding: 6px 10px; border-radius: 6px; margin-bottom: 8px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Patient Header -->
+<div class="sheet-header">
+  <div class="pt-name" id="sheetPatient">กำลังโหลด...</div>
+  <div class="pt-info" id="sheetInfo"></div>
+</div>
+
+<!-- Pre-HD Note -->
+<div class="pre-note">
+  <label style="font-size:.8rem;font-weight:600;color:var(--fg-muted);">📝 Pre HD Note</label>
+  <textarea id="preHdNote" placeholder="บันทึกก่อนเริ่มฟอก: อาการ, VA สภาพ, ข้อสังเกต..." onblur="savePreHdNote()"></textarea>
+</div>
+
+<!-- Summary Table -->
+<div class="summary-wrap">
+  <table class="summary-tbl">
+    <thead>
+      <tr>
+        <th class="time-col">เวลา</th>
+        <th>BP</th>
+        <th>PR</th>
+        <th>BFR</th>
+        <th>UF</th>
+        <th>Total</th>
+        <th class="check-col"></th>
+      </tr>
+    </thead>
+    <tbody id="summaryBody">
+    </tbody>
+  </table>
+</div>
+
+<button class="btn btn-primary" onclick="openEntryNow()" style="width:100%;padding:14px;font-size:1rem;font-weight:700;margin-bottom:12px;">
+  ➕ บันทึกตอนนี้
+</button>
+
+<a href="/hd/session/{{ session_id }}" class="btn" style="width:100%;text-align:center;padding:10px;font-size:.85rem;">← กลับหน้ารอบฟอก</a>
+
+<!-- Entry Bottom Sheet -->
+<div class="entry-overlay" id="entryOverlay" onclick="if(event.target===this)closeEntry()">
+  <div class="entry-sheet">
+    <h3>⏰ <span id="entryTime">-</span></h3>
+
+    <div id="autofillHint" class="autofill-hint" style="display:none;">
+      💡 ค่าเครื่องฟอก auto-fill จากรอบก่อน — แก้ได้ถ้าเปลี่ยน
+    </div>
+
+    <div class="param-group">
+      <div class="param-group-title">❤️ Vital Signs</div>
+      <div class="param-row">
+        <div class="param-field"><label>SBP</label><input type="number" id="eSbp" inputmode="numeric"><span class="unit">mmHg</span></div>
+        <div class="param-field"><label>DBP</label><input type="number" id="eDbp" inputmode="numeric"><span class="unit">mmHg</span></div>
+        <div class="param-field"><label>PR</label><input type="number" id="ePr" inputmode="numeric"><span class="unit">/min</span></div>
+        <div class="param-field"><label>RR</label><input type="number" id="eRr" inputmode="numeric"><span class="unit">/min</span></div>
+      </div>
+    </div>
+
+    <div class="param-group">
+      <div class="param-group-title">🔧 เครื่องฟอก</div>
+      <div class="param-row">
+        <div class="param-field"><label>BFR</label><input type="number" id="eBfr" inputmode="numeric"><span class="unit">ml/min</span></div>
+        <div class="param-field"><label>VP</label><input type="number" id="eVp" inputmode="numeric"><span class="unit">mmHg</span></div>
+        <div class="param-field"><label>TMP</label><input type="number" id="eTmp" inputmode="numeric"><span class="unit">mmHg</span></div>
+      </div>
+      <div class="param-row">
+        <div class="param-field"><label>AP</label><input type="number" id="eAp" inputmode="numeric"><span class="unit">mmHg</span></div>
+        <div class="param-field"><label>Conduct</label><input type="number" id="eConduct" inputmode="decimal" step="0.1"><span class="unit">mS/cm</span></div>
+        <div class="param-field"><label>Temp</label><input type="number" id="eDTemp" inputmode="decimal" step="0.1"><span class="unit">°C</span></div>
+      </div>
+    </div>
+
+    <div class="param-group">
+      <div class="param-group-title">💧 UF</div>
+      <div class="param-row">
+        <div class="param-field"><label>UFR</label><input type="number" id="eUfr" inputmode="numeric"><span class="unit">ml/hr</span></div>
+        <div class="param-field"><label>Total UF</label><input type="number" id="eTotalUf" inputmode="numeric"><span class="unit">ml</span></div>
+      </div>
+    </div>
+
+    <div class="param-group">
+      <div class="param-group-title">📝 Remark</div>
+      <input type="text" id="eRemark" style="width:100%;padding:10px;font-size:.9rem;border:1.5px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);" placeholder="หมายเหตุ...">
+    </div>
+
+    <button class="btn btn-success" id="entrySaveBtn" onclick="saveEntry()" style="width:100%;padding:16px;font-size:1.1rem;font-weight:700;">💾 บันทึก</button>
+    <button class="btn" onclick="closeEntry()" style="width:100%;margin-top:8px;padding:10px;">ยกเลิก</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const SESSION_ID = {{ session_id }};
+let sheetData = []; /* [{slot_time, sbp, dbp, pr, rr, bfr, vp, tmp, ap, conduct, dtemp, ufr, total_uf, remark, saved}] */
+let _currentSlot = '';
+
+function initSheet(){
+  hdFetch('/hd/api/v1/sessions/'+SESSION_ID+'/flowsheet')
+    .then(r=>r.json())
+    .then(d=>{
+      /* Patient header */
+      const s = d.session || {};
+      document.getElementById('sheetPatient').textContent = (s.patient_name||'-')+' — HN '+(s.hn||'-');
+      document.getElementById('sheetInfo').textContent = 'VA: '+(s.va||'-')+' | UF Goal: '+(s.uf_goal||2000)+' mL';
+      if(s.pre_hd_note) document.getElementById('preHdNote').value = s.pre_hd_note;
+
+      /* Generate time slots from started_at */
+      let startH = 7, startM = 0;
+      if(s.started_at){
+        try { const t = new Date(s.started_at+'Z'); startH = t.getHours(); startM = t.getMinutes(); } catch(e){}
+      }
+      startM = startM < 15 ? 0 : 30;
+      const slots = [];
+      for(let i = 0; i < 12; i++){
+        let h = startH + Math.floor((startM + i*30) / 60);
+        let m = (startM + i*30) % 60;
+        if(h >= 24) h -= 24;
+        slots.push(String(h).padStart(2,'0')+':'+String(m).padStart(2,'0'));
+      }
+
+      /* Merge DB rows into slots */
+      const dbMap = {};
+      (d.rows||[]).forEach(r=>{ dbMap[r.slot_time] = r; });
+
+      sheetData = slots.map(t=>{
+        const r = dbMap[t] || {};
+        return {
+          slot_time: t,
+          sbp: r.sbp||'', dbp: r.dbp||'', pr: r.pr||'', rr: r.rr||'',
+          bfr: r.bfr||'', vp: r.vp||'', tmp: r.tmp||'', ap: r.ap||'',
+          conduct: r.conductivity||'', dtemp: r.dialysate_temp||'',
+          ufr: r.ufr||'', total_uf: r.total_uf||'',
+          remark: r.remark||'',
+          saved: !!r.id,
+        };
+      });
+      renderSummary();
+    })
+    .catch(e=>{
+      console.error('initSheet error:', e);
+      document.getElementById('sheetPatient').textContent = 'โหลดไม่สำเร็จ';
+    });
+}
+
+function renderSummary(){
+  const tbody = document.getElementById('summaryBody');
+  tbody.innerHTML = sheetData.map((r,i)=>{
+    const bp = r.sbp ? r.sbp+'/'+r.dbp : '';
+    const cls = r.saved ? 'saved' : '';
+    const check = r.saved ? '✅' : '';
+    const bpCls = r.sbp && (parseInt(r.sbp)<90||parseInt(r.sbp)>180) ? 'style="color:var(--danger);font-weight:700;"' : '';
+    return `<tr class="${cls}" onclick="openEntry('${r.slot_time}',${i})">
+      <td class="time-col">${r.slot_time}</td>
+      <td ${bpCls}>${bp || '<span class="empty">—</span>'}</td>
+      <td>${r.pr || '<span class="empty">—</span>'}</td>
+      <td>${r.bfr || '<span class="empty">—</span>'}</td>
+      <td>${r.ufr || '<span class="empty">—</span>'}</td>
+      <td>${r.total_uf || '<span class="empty">—</span>'}</td>
+      <td class="check-col">${check}</td>
+    </tr>`;
+  }).join('');
+}
+
+function openEntry(slot, idx){
+  _currentSlot = slot;
+  document.getElementById('entryTime').textContent = slot;
+  const r = sheetData[idx] || {};
+
+  /* Fill fields */
+  document.getElementById('eSbp').value = r.sbp||'';
+  document.getElementById('eDbp').value = r.dbp||'';
+  document.getElementById('ePr').value = r.pr||'';
+  document.getElementById('eRr').value = r.rr||'';
+  document.getElementById('eBfr').value = r.bfr||'';
+  document.getElementById('eVp').value = r.vp||'';
+  document.getElementById('eTmp').value = r.tmp||'';
+  document.getElementById('eAp').value = r.ap||'';
+  document.getElementById('eConduct').value = r.conduct||'';
+  document.getElementById('eDTemp').value = r.dtemp||'';
+  document.getElementById('eUfr').value = r.ufr||'';
+  document.getElementById('eTotalUf').value = r.total_uf||'';
+  document.getElementById('eRemark').value = r.remark||'';
+
+  /* Auto-fill machine params from previous row if this row is empty */
+  const hint = document.getElementById('autofillHint');
+  if(!r.bfr && idx > 0){
+    const prev = sheetData[idx-1];
+    if(prev.bfr){
+      document.getElementById('eBfr').value = prev.bfr;
+      document.getElementById('eVp').value = prev.vp||'';
+      document.getElementById('eTmp').value = prev.tmp||'';
+      document.getElementById('eAp').value = prev.ap||'';
+      document.getElementById('eConduct').value = prev.conduct||'';
+      document.getElementById('eDTemp').value = prev.dtemp||'';
+      document.getElementById('eUfr').value = prev.ufr||'';
+      hint.style.display = 'block';
+    } else { hint.style.display = 'none'; }
+  } else { hint.style.display = 'none'; }
+
+  /* Mark filled inputs */
+  document.querySelectorAll('.entry-sheet input[type="number"]').forEach(el=>{
+    el.classList.toggle('filled', !!el.value);
+    el.addEventListener('input', ()=>el.classList.toggle('filled', !!el.value));
+  });
+
+  document.getElementById('entrySaveBtn').disabled = false;
+  document.getElementById('entrySaveBtn').textContent = '💾 บันทึก';
+  document.getElementById('entryOverlay').classList.add('open');
+  setTimeout(()=>document.getElementById('eSbp').focus(), 200);
+}
+
+function openEntryNow(){
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2,'0');
+  const mm = now.getMinutes() < 30 ? '00' : '30';
+  const timeStr = hh+':'+mm;
+  let idx = sheetData.findIndex(r=>r.slot_time===timeStr);
+  if(idx < 0){
+    /* Add new slot */
+    const exactTime = hh+':'+String(now.getMinutes()).padStart(2,'0');
+    sheetData.push({slot_time:exactTime,sbp:'',dbp:'',pr:'',rr:'',bfr:'',vp:'',tmp:'',ap:'',conduct:'',dtemp:'',ufr:'',total_uf:'',remark:'',saved:false});
+    idx = sheetData.length-1;
+    renderSummary();
+    openEntry(exactTime, idx);
+  } else {
+    openEntry(timeStr, idx);
+  }
+}
+
+function closeEntry(){
+  document.getElementById('entryOverlay').classList.remove('open');
+}
+
+function saveEntry(){
+  const btn = document.getElementById('entrySaveBtn');
+  btn.disabled = true; btn.textContent = '⏳ กำลังบันทึก...';
+
+  const data = {
+    slot_time: _currentSlot,
+    sbp: parseInt(document.getElementById('eSbp').value)||null,
+    dbp: parseInt(document.getElementById('eDbp').value)||null,
+    pr: parseInt(document.getElementById('ePr').value)||null,
+    rr: parseInt(document.getElementById('eRr').value)||null,
+    bfr: parseInt(document.getElementById('eBfr').value)||null,
+    vp: parseInt(document.getElementById('eVp').value)||null,
+    tmp: parseInt(document.getElementById('eTmp').value)||null,
+    ap: parseInt(document.getElementById('eAp').value)||null,
+    conductivity: parseFloat(document.getElementById('eConduct').value)||null,
+    dialysate_temp: parseFloat(document.getElementById('eDTemp').value)||null,
+    ufr: parseInt(document.getElementById('eUfr').value)||null,
+    total_uf: parseInt(document.getElementById('eTotalUf').value)||null,
+    remark: document.getElementById('eRemark').value||null,
+  };
+
+  hdFetch('/hd/api/v1/sessions/'+SESSION_ID+'/flowsheet',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify(data)
+  })
+  .then(r=>{if(!r.ok) throw new Error('HTTP '+r.status); return r.json();})
+  .then(d=>{
+    if(d.error){ showToast('❌ '+d.error,'danger'); btn.disabled=false; btn.textContent='💾 บันทึก'; return; }
+    /* Update local data */
+    const idx = sheetData.findIndex(r=>r.slot_time===_currentSlot);
+    if(idx >= 0){
+      Object.assign(sheetData[idx], {
+        sbp:data.sbp||'', dbp:data.dbp||'', pr:data.pr||'', rr:data.rr||'',
+        bfr:data.bfr||'', vp:data.vp||'', tmp:data.tmp||'', ap:data.ap||'',
+        conduct:data.conductivity||'', dtemp:data.dialysate_temp||'',
+        ufr:data.ufr||'', total_uf:data.total_uf||'',
+        remark:data.remark||'', saved:true
+      });
+    }
+    renderSummary();
+    if(d.alert) showToast('⚠️ '+d.alert.title,'danger');
+    showToast('✅ บันทึก '+_currentSlot+' สำเร็จ','success');
+    closeEntry();
+  })
+  .catch(e=>{
+    showToast('❌ บันทึกไม่สำเร็จ: '+e.message,'danger');
+    btn.disabled=false; btn.textContent='💾 บันทึก';
+  });
+}
+
+function savePreHdNote(){
+  const note = document.getElementById('preHdNote').value;
+  hdFetch('/hd/api/v1/sessions/'+SESSION_ID+'/pre-hd-note',{
+    method:'PUT',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({note})
+  }).then(r=>r.json()).then(d=>{
+    if(d.saved) showToast('บันทึก Pre-HD Note','success');
+  }).catch(()=>{});
+}
+
+initSheet();
+</script>
+{% endblock %}
