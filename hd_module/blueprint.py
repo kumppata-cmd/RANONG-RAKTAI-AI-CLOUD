@@ -1873,6 +1873,61 @@ def bed_dashboard():
     })
 
 
+@hd_bp.route("/debug/sessions-today", methods=["GET"])
+@require_role("physician", "admin")
+def debug_sessions_today():
+    """DEBUG: Show all sessions for today with shift info — for troubleshooting."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no DB", "sessions": []})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        today = _thai_today()
+        sessions = []
+        with conn.cursor() as cur:
+            # Get ALL sessions for today — no shift filter
+            cur.execute("""
+                SELECT s.id, s.bed_number, s.status, s.shift,
+                       s.session_date, s.started_at, s.ended_at,
+                       p.hn, p.patient_name, s.uf_goal, s.pre_weight
+                FROM hd_sessions s
+                LEFT JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE s.session_date = %s
+                ORDER BY s.id DESC
+            """, (today.isoformat(),))
+            for r in cur.fetchall():
+                sessions.append({
+                    "session_id": r[0], "bed": r[1], "status": r[2],
+                    "shift": r[3], "shift_is_null": r[3] is None,
+                    "session_date": r[4].isoformat() if r[4] else None,
+                    "started_at": (r[5].isoformat() + "Z") if r[5] else None,
+                    "ended_at": (r[6].isoformat() + "Z") if r[6] else None,
+                    "hn": r[7], "patient_name": r[8],
+                    "uf_goal": r[9], "pre_weight": float(r[10]) if r[10] else None,
+                })
+            # Also check: what does the dashboard query return for each shift?
+            shifts_debug = {}
+            for shift in ["morning", "afternoon", "evening"]:
+                cur.execute("""
+                    SELECT COUNT(*) FROM hd_sessions s
+                    WHERE s.status IN ('scheduled', 'in_progress')
+                      AND s.session_date = %s
+                      AND (s.shift = %s OR (s.shift IS NULL AND %s = 'morning'))
+                """, (today.isoformat(), shift, shift))
+                shifts_debug[shift] = cur.fetchone()[0]
+        conn.close()
+        return jsonify({
+            "today": today.isoformat(),
+            "thai_now": _thai_now().isoformat(),
+            "total_sessions_today": len(sessions),
+            "dashboard_would_show": shifts_debug,
+            "sessions": sessions,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e), "sessions": []})
+
+
 # ── KPI Dashboard ─────────────────────────────────────────
 
 @hd_bp.route("/kpi", methods=["GET"])
