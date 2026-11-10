@@ -336,7 +336,27 @@ function autoAssignBeds(){
   }).catch(()=>alert('❌ ไม่สามารถจัดเตียงได้'));
 }
 
-let currentShift = 'morning';
+/* Auto-detect shift from current Thai time (UTC+7) */
+function detectShift(){
+  const now = new Date();
+  /* Convert to Thai time regardless of browser timezone */
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  const thaiTime = new Date(utc + 7 * 3600000);
+  const h = thaiTime.getHours();
+  /* Morning 07:00-12:59, Afternoon 13:00-16:59, Evening 17:00+ and before 07:00 */
+  if(h >= 7 && h < 13) return 'morning';
+  if(h >= 13 && h < 17) return 'afternoon';
+  return 'evening';
+}
+
+let currentShift = detectShift();
+
+/* Highlight the correct shift button on load */
+(function(){
+  document.querySelectorAll('.shift-btn').forEach(b=>b.classList.remove('active'));
+  const btn = document.querySelector('.shift-btn[data-shift="'+currentShift+'"]');
+  if(btn) btn.classList.add('active');
+})();
 
 function fetchBeds(){
   /* Use raw fetch with token */
