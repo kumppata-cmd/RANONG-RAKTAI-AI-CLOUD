@@ -1232,7 +1232,7 @@ def list_vitals(session_id):
                 "id": r[0], "phase": r[1],
                 "sbp": r[2], "dbp": r[3], "heart_rate": r[4], "hr": r[4],
                 "temp": float(r[5]) if r[5] else None, "spo2": r[6],
-                "recorded_at": r[7].isoformat() if r[7] else None,
+                "recorded_at": (r[7].isoformat() + "Z") if r[7] else None,
             } for r in cur.fetchall()]
         conn.close()
         return jsonify({"session_id": session_id, "vitals": vitals, "count": len(vitals)})
@@ -1271,7 +1271,7 @@ def record_uf(session_id):
             conn.close()
             records = [{
                 "id": r[0],
-                "recorded_at": r[1].isoformat() if r[1] else None,
+                "recorded_at": (r[1].isoformat() + "Z") if r[1] else None,
                 "slot_time": r[2],
                 "uf_removed": r[3], "uf_rate": r[4],
                 "uf_remaining": r[5], "notes": r[6],
@@ -4416,7 +4416,7 @@ def get_checklist():
                     FROM hd_daily_checklist
                     WHERE checklist_date = %s AND shift = %s
                 """, (date_str, current_shift))
-                db_items = {r[0]: {"checked": r[1], "checked_at": r[2].isoformat() if r[2] else None, "notes": r[3]} for r in cur.fetchall()}
+                db_items = {r[0]: {"checked": r[1], "checked_at": (r[2].isoformat() + "Z") if r[2] else None, "notes": r[3]} for r in cur.fetchall()}
 
                 for cat in items:
                     for item in items[cat]:
