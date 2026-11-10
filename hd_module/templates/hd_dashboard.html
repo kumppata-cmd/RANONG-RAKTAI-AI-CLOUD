@@ -66,6 +66,19 @@
 /* Quick Vital button on bed card */
 .quick-vital-btn { font-size: .7rem; padding: 4px 10px; border: 1px solid var(--accent); border-radius: 12px; background: rgba(52,152,219,.1); color: var(--accent); font-weight: 600; cursor: pointer; margin-top: 4px; min-height: 28px; }
 .quick-vital-btn:active { background: var(--accent); color: #fff; }
+/* Day-of-week buttons */
+.day-btn { padding: 6px 10px; border: 2px solid var(--border); border-radius: var(--radius-sm); background: var(--bg-card); cursor: pointer; font-weight: 600; font-size: .8rem; color: var(--fg); min-height: var(--touch-min); }
+.day-btn.active { border-color: var(--accent); background: var(--accent); color: #fff; }
+.day-btn.today { border-color: var(--success); }
+/* All-Rounds view */
+.round-section { margin-bottom: 20px; }
+.round-header { font-weight: 700; font-size: .95rem; padding: 10px 14px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm) var(--radius-sm) 0 0; display: flex; align-items: center; gap: 8px; }
+.round-count { font-size: .8rem; color: var(--fg-muted); font-weight: 600; margin-left: auto; }
+.round-section .bed-grid { border: 1px solid var(--border); border-top: none; border-radius: 0 0 var(--radius-sm) var(--radius-sm); padding: 10px; }
+/* Dialyzer badge on bed card */
+.bed-dialyzer { font-size: .6rem; padding: 2px 6px; border-radius: 6px; font-weight: 700; background: rgba(124,58,237,.1); color: #7c3aed; display: inline-block; margin-top: 2px; font-variant-numeric: tabular-nums; }
+.bed-dialyzer.reuse-warn { background: rgba(243,156,18,.12); color: var(--warning); }
+.bed-dialyzer.reuse-max { background: rgba(231,76,60,.12); color: var(--danger); }
 /* Quick Vital Modal */
 .qv-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 999; align-items: flex-end; justify-content: center; }
 .qv-overlay.open { display: flex; }
@@ -86,17 +99,36 @@
   <div class="stat-item"><span class="stat-num" id="statCritical" style="color:var(--danger);">0</span><span class="stat-label">🚨 วิกฤต</span></div>
 </div>
 
-<!-- Shift selector -->
-<div class="shift-selector">
-  <button class="shift-btn active" data-shift="morning" onclick="selectShift(this,'morning')">🌅 เช้า (07:00-15:00)</button>
-  <button class="shift-btn" data-shift="afternoon" onclick="selectShift(this,'afternoon')">☀️ บ่าย (13:00-21:00)</button>
-  <button class="shift-btn" data-shift="evening" onclick="selectShift(this,'evening')">🌙 ค่ำ (17:00-01:00)</button>
-  <button class="btn btn-outline" onclick="shiftHandover()" style="margin-left:auto;color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่งเวร</button>
-  <button class="btn btn-outline" onclick="autoAssignBeds()" style="margin-left:8px;color:var(--info);border-color:var(--info);font-size:.8rem;">🤖 จัดเตียง</button>
-  <a href="/hd/session/new" class="btn btn-success btn-lg" style="margin-left:8px;">➕ เริ่มรอบฟอกใหม่</a>
+<!-- Day-of-Week Selector -->
+<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
+  <span style="font-size:.8rem;font-weight:600;color:var(--fg-muted);margin-right:4px;">📅</span>
+  <button class="day-btn" data-day="1" onclick="selectDay(1)">จ.</button>
+  <button class="day-btn" data-day="2" onclick="selectDay(2)">อ.</button>
+  <button class="day-btn" data-day="3" onclick="selectDay(3)">พ.</button>
+  <button class="day-btn" data-day="4" onclick="selectDay(4)">พฤ.</button>
+  <button class="day-btn" data-day="5" onclick="selectDay(5)">ศ.</button>
+  <button class="day-btn" data-day="6" onclick="selectDay(6)">ส.</button>
+  <button class="day-btn" data-day="0" onclick="selectDay(0)">อา.</button>
+  <span id="dayLabel" style="font-size:.8rem;color:var(--fg-muted);margin-left:8px;"></span>
 </div>
 
-<!-- 30-Bed Grid -->
+<!-- View Mode Toggle -->
+<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
+  <button class="shift-btn active" id="viewSingle" onclick="setViewMode('single')">🔘 รอบเดียว</button>
+  <button class="shift-btn" id="viewAll" onclick="setViewMode('all')">📊 ดูทุกรอบ (EMMA)</button>
+  <button class="btn btn-outline" onclick="shiftHandover()" style="margin-left:auto;color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่งเวร</button>
+  <button class="btn btn-outline" onclick="autoAssignBeds()" style="color:var(--info);border-color:var(--info);font-size:.8rem;">🤖 จัดเตียง</button>
+  <a href="/hd/session/new" class="btn btn-success" style="font-size:.85rem;">➕ เริ่มฟอก</a>
+</div>
+
+<!-- Shift selector (single mode) -->
+<div class="shift-selector" id="shiftSelector">
+  <button class="shift-btn active" data-shift="morning" onclick="selectShift(this,'morning')">🌅 เช้า</button>
+  <button class="shift-btn" data-shift="afternoon" onclick="selectShift(this,'afternoon')">☀️ บ่าย</button>
+  <button class="shift-btn" data-shift="evening" onclick="selectShift(this,'evening')">🌙 ค่ำ</button>
+</div>
+
+<!-- Single Shift Bed Grid -->
 <div class="bed-grid" id="bedGrid">
   {% for i in range(1, config.TOTAL_BEDS + 1 if config else 26) %}
   <div class="bed-card bed-available" onclick="window.location.href='/hd/session/new?bed={{ i }}'">
@@ -105,6 +137,22 @@
     <div class="bed-status">⬜ ว่าง</div>
   </div>
   {% endfor %}
+</div>
+
+<!-- All-Rounds View (EMMA style) — hidden by default -->
+<div id="allRoundsView" style="display:none;">
+  <div class="round-section" id="roundMorning">
+    <div class="round-header">🌅 รอบเช้า <span class="round-count" id="countMorning">HD: 0 คน</span></div>
+    <div class="bed-grid" id="gridMorning"></div>
+  </div>
+  <div class="round-section" id="roundAfternoon">
+    <div class="round-header">☀️ รอบบ่าย <span class="round-count" id="countAfternoon">HD: 0 คน</span></div>
+    <div class="bed-grid" id="gridAfternoon"></div>
+  </div>
+  <div class="round-section" id="roundEvening">
+    <div class="round-header">🌙 รอบค่ำ <span class="round-count" id="countEvening">HD: 0 คน</span></div>
+    <div class="bed-grid" id="gridEvening"></div>
+  </div>
 </div>
 
 <!-- Last updated -->
@@ -263,6 +311,17 @@ function renderBeds(beds){
       nextBadge = `<div style="font-size:.65rem;color:var(--info);margin-top:2px;">📅 ถัดไป: ${b.next_scheduled}</div>`;
     }
 
+    /* Dialyzer + reuse badge */
+    let dialyzerBadge = '';
+    if(b.dialyzer_type){
+      const reuse = b.dialyzer_reuse || 0;
+      const maxR = b.dialyzer_max || 20;
+      let dCls = 'bed-dialyzer';
+      if(reuse >= maxR) dCls += ' reuse-max';
+      else if(reuse >= maxR * 0.8) dCls += ' reuse-warn';
+      dialyzerBadge = `<span class="${dCls}">${b.dialyzer_type} ${reuse}/${maxR}</span>`;
+    }
+
     /* Quick vital button for active beds */
     let quickBtn = '';
     if(b.session_id && b.status === 'active'){
@@ -273,6 +332,7 @@ function renderBeds(beds){
       <div class="bed-num">${b.bed_number}</div>
       <div class="bed-patient">${pName}</div>
       ${hnLine}
+      ${dialyzerBadge}
       ${vitals}
       ${timeLeft}
       <div class="bed-status">${s.label}</div>
@@ -362,7 +422,8 @@ function fetchBeds(){
   /* Use raw fetch with token */
   const token = getHdToken();
   const headers = token ? {'Authorization':'Bearer '+token, 'Content-Type':'application/json'} : {};
-  fetch('/hd/api/v1/dashboard/beds?shift='+encodeURIComponent(currentShift), {headers})
+  let _dateParam = _selectedDate ? '&date='+_selectedDate : '';
+  fetch('/hd/api/v1/dashboard/beds?shift='+encodeURIComponent(currentShift)+_dateParam, {headers})
     .then(r=>{
       if(!r.ok) throw new Error('API '+r.status);
       return r.json();
@@ -497,8 +558,139 @@ function submitQuickVital(){
   });
 }
 
+/* ── Day-of-Week Selector ── */
+let _selectedDate = null; /* null = today */
+
+function getTodayThai(){
+  const now = new Date();
+  const utc = now.getTime() + now.getTimezoneOffset() * 60000;
+  return new Date(utc + 7 * 3600000);
+}
+
+function formatDate(d){
+  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+}
+
+function initDayButtons(){
+  const thai = getTodayThai();
+  const todayDow = thai.getDay(); /* 0=Sun */
+  /* Highlight today's button */
+  document.querySelectorAll('.day-btn').forEach(b=>{
+    const d = parseInt(b.dataset.day);
+    if(d === todayDow){
+      b.classList.add('active','today');
+    }
+  });
+  updateDayLabel(thai);
+}
+
+function selectDay(dow){
+  const thai = getTodayThai();
+  const todayDow = thai.getDay();
+  let diff = dow - todayDow;
+  /* Allow going back up to 6 days or forward up to 6 */
+  if(diff > 3) diff -= 7;
+  if(diff < -3) diff += 7;
+  const target = new Date(thai.getTime() + diff * 86400000);
+  _selectedDate = formatDate(target);
+
+  document.querySelectorAll('.day-btn').forEach(b=>b.classList.remove('active'));
+  const btn = document.querySelector('.day-btn[data-day="'+dow+'"]');
+  if(btn) btn.classList.add('active');
+  updateDayLabel(target);
+
+  if(_viewMode === 'all') fetchAllRounds();
+  else fetchBeds();
+}
+
+function updateDayLabel(d){
+  const thaiDays = ['อาทิตย์','จันทร์','อังคาร','พุธ','พฤหัสบดี','ศุกร์','เสาร์'];
+  const label = 'วัน'+thaiDays[d.getDay()]+' '+d.getDate()+'/'+(d.getMonth()+1)+'/'+(d.getFullYear()+543);
+  document.getElementById('dayLabel').textContent = label;
+}
+
+/* ── View Mode: single vs all-rounds ── */
+let _viewMode = 'single';
+
+function setViewMode(mode){
+  _viewMode = mode;
+  document.getElementById('viewSingle').classList.toggle('active', mode==='single');
+  document.getElementById('viewAll').classList.toggle('active', mode==='all');
+  document.getElementById('shiftSelector').style.display = mode==='single' ? '' : 'none';
+  document.getElementById('bedGrid').style.display = mode==='single' ? '' : 'none';
+  document.getElementById('allRoundsView').style.display = mode==='all' ? '' : 'none';
+
+  if(mode === 'all') fetchAllRounds();
+  else fetchBeds();
+}
+
+function fetchAllRounds(){
+  const shifts = ['morning','afternoon','evening'];
+  const labels = {morning:'countMorning', afternoon:'countAfternoon', evening:'countEvening'};
+  const grids = {morning:'gridMorning', afternoon:'gridAfternoon', evening:'gridEvening'};
+  const token = getHdToken();
+  const headers = token ? {'Authorization':'Bearer '+token, 'Content-Type':'application/json'} : {};
+  let dateParam = _selectedDate ? '&date='+_selectedDate : '';
+
+  shifts.forEach(shift=>{
+    fetch('/hd/api/v1/dashboard/beds?shift='+shift+dateParam, {headers})
+      .then(r=>r.json())
+      .then(data=>{
+        const beds = data.beds || [];
+        const active = beds.filter(b=>b.status && b.status!=='available');
+        document.getElementById(labels[shift]).textContent = 'HD: '+active.length+' คน';
+        /* Render mini bed cards */
+        const grid = document.getElementById(grids[shift]);
+        grid.innerHTML = '';
+        beds.forEach(b=>{
+          if(b.status === 'available') return; /* skip empty in all-rounds view */
+          const s = STATUS_MAP[b.status] || STATUS_MAP.available;
+          const pName = b.patient_name || '';
+          const va = b.vascular_access || '';
+          let dBadge = '';
+          if(b.dialyzer_type){
+            const reuse = b.dialyzer_reuse||0, maxR = b.dialyzer_max||20;
+            let dCls = 'bed-dialyzer';
+            if(reuse >= maxR) dCls += ' reuse-max';
+            else if(reuse >= maxR * 0.8) dCls += ' reuse-warn';
+            dBadge = `<span class="${dCls}">${b.dialyzer_type} ${reuse}/${maxR}</span>`;
+          }
+          function vaC(v){
+            if(!v)return'';const u=v.toUpperCase();
+            if(u.includes('AVF'))return'bed-access-avf';if(u.includes('AVG'))return'bed-access-avg';
+            if(u.includes('DLC')||u.includes('CVC'))return'bed-access-dlc';return'bed-access-avf';
+          }
+          const card = document.createElement('div');
+          card.className = 'bed-card '+s.cls;
+          card.style.minHeight = '80px';
+          card.style.padding = '10px';
+          card.onclick = ()=>{ if(b.session_id) window.location.href='/hd/session/'+b.session_id; };
+          card.innerHTML = `
+            <div style="display:flex;justify-content:space-between;align-items:baseline;">
+              <span class="bed-num" style="font-size:1.1rem;">${b.bed_number}</span>
+              ${va ? '<span class="bed-access '+vaC(va)+'" style="font-size:.6rem;">'+va+'</span>' : ''}
+            </div>
+            <div class="bed-patient" style="font-size:.72rem;">${pName}</div>
+            <div class="bed-hn" style="font-size:.6rem;">${b.patient_hn?'HN '+b.patient_hn:''}</div>
+            ${dBadge}
+          `;
+          grid.appendChild(card);
+        });
+        /* If no patients in this round */
+        if(!active.length){
+          grid.innerHTML = '<div style="grid-column:1/-1;text-align:center;color:var(--fg-muted);font-size:.8rem;padding:16px;">ยังไม่มีผู้ป่วยในรอบนี้</div>';
+        }
+      }).catch(()=>{});
+  });
+  document.getElementById('lastUpdated').textContent = new Date().toLocaleTimeString('th-TH');
+}
+
+/* ── fetchBeds: add date param ── */
+const _origFetchBeds = fetchBeds;
+
 /* Initial load + auto refresh */
-fetchBeds();
-setInterval(fetchBeds, 30000);
+initDayButtons();
+if(_viewMode === 'all') fetchAllRounds(); else fetchBeds();
+setInterval(()=>{ if(_viewMode==='all') fetchAllRounds(); else fetchBeds(); }, 30000);
 </script>
 {% endblock %}

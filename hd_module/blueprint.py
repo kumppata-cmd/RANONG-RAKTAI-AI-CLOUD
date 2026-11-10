@@ -1513,6 +1513,16 @@ def bed_dashboard():
     from .config import HdConfig
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     current_shift = request.args.get("shift", "morning")
+    # Allow date override for day-of-week navigation (YYYY-MM-DD)
+    date_str = request.args.get("date", "")
+    if date_str:
+        try:
+            from datetime import date as _dt_date
+            target_date = _dt_date.fromisoformat(date_str)
+        except (ValueError, TypeError):
+            target_date = _thai_today()
+    else:
+        target_date = _thai_today()
 
     beds = []
     for i in range(1, HdConfig.TOTAL_BEDS + 1):
@@ -1551,7 +1561,7 @@ def bed_dashboard():
                                WHEN 'scheduled' THEN 0
                                WHEN 'in_progress' THEN 1
                              END
-                """, (_thai_today().isoformat(), current_shift))
+                """, (target_date.isoformat(), current_shift))
                 session_ids = []
                 for row in cur.fetchall():
                     bed_num = row[0]
@@ -1605,6 +1615,30 @@ def bed_dashboard():
                             }
                     except Exception:
                         pass
+
+                # Fetch dialyzer info for each patient on a bed
+                for sid, bnum in session_ids:
+                    try:
+                        patient_id_q = """
+                            SELECT patient_id FROM hd_sessions WHERE id = %s
+                        """
+                        cur.execute(patient_id_q, (sid,))
+                        pid_row = cur.fetchone()
+                        if pid_row and pid_row[0]:
+                            cur.execute("""
+                                SELECT dialyzer_type, use_count, max_uses
+                                FROM hd_dialyzer_tracking
+                                WHERE patient_id = %s AND status = 'active'
+                                ORDER BY registered_at DESC LIMIT 1
+                            """, (pid_row[0],))
+                            drow = cur.fetchone()
+                            if drow and 1 <= bnum <= len(beds):
+                                beds[bnum - 1]["dialyzer_type"] = drow[0]
+                                beds[bnum - 1]["dialyzer_reuse"] = drow[1]
+                                beds[bnum - 1]["dialyzer_max"] = drow[2]
+                    except Exception:
+                        pass
+
             conn.close()
         except Exception as e:
             logger.warning("bed_dashboard DB error: %s", e)
@@ -1616,7 +1650,7 @@ def bed_dashboard():
         try:
             import psycopg2
             day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
-            today_th = day_map.get(_thai_today().weekday(), "")
+            today_th = day_map.get(target_date.weekday(), "")
             if today_th:
                 conn2 = psycopg2.connect(db_url, connect_timeout=5)
                 with conn2.cursor() as cur:
@@ -1640,7 +1674,7 @@ def bed_dashboard():
     if not today_patients and current_app.config.get("MASTER_REGISTRY"):
         try:
             day_map = {0: "จ", 1: "อ", 2: "พ", 3: "พฤ", 4: "ศ", 5: "ส", 6: "อา"}
-            today_th = day_map.get(_thai_today().weekday(), "")
+            today_th = day_map.get(target_date.weekday(), "")
             reg = current_app.config["MASTER_REGISTRY"]
             for p in reg.list_all():
                 sched = getattr(p, "dialysis_schedule", "") or ""
@@ -1653,6 +1687,7 @@ def bed_dashboard():
         "beds": beds,
         "total": HdConfig.TOTAL_BEDS,
         "shift": current_shift,
+        "date": target_date.isoformat(),
         "today_scheduled": today_count,
         "today_patients": today_patients,
     })
