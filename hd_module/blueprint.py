@@ -193,6 +193,18 @@ def hd_quality_page():
     return render_template("hd_quality.html")
 
 
+@hd_web.route("/checklist/page")
+def checklist_page():
+    """Render the daily checklist page — auth handled by JS/API."""
+    return render_template("hd_checklist.html")
+
+
+@hd_web.route("/morning-brief")
+def morning_brief_page():
+    """Render the Morning Brief web page — auth handled by JS/API."""
+    return render_template("hd_morning_brief.html")
+
+
 # ── Health / Status ───────────────────────────────────────
 
 @hd_bp.route("/health", methods=["GET"])
@@ -4336,20 +4348,8 @@ def update_checklist():
         return jsonify({"error": str(e)}), 500
 
 
-@hd_bp.route("/checklist/page")
-@require_role("physician", "nurse", "admin")
-def checklist_page():
-    """Render the daily checklist page."""
-    return render_template("hd_checklist.html")
-
-
-# ── Morning Brief ─────────────────────────────────────────
-
-@hd_bp.route("/morning-brief")
-@require_role("physician", "nurse", "admin")
-def morning_brief_page():
-    """Render the Morning Brief web page for Nurse Station TV."""
-    return render_template("hd_morning_brief.html")
+# Page routes are on hd_web (prefix /hd), not hd_bp (prefix /hd/api/v1)
+# See below — checklist_page and morning_brief_page registered on hd_web
 
 
 @hd_bp.route("/morning-brief/data", methods=["GET"])
