@@ -31,6 +31,22 @@ def _safe_int(val):
         return None
 
 
+def _content_disposition(filename, fallback="file"):
+    """Build a Content-Disposition header safe for non-ASCII (Thai) filenames.
+
+    HTTP headers must be Latin-1; a Thai filename in the plain `filename=`
+    parameter makes the server reject the response (400/502). RFC 5987
+    `filename*=UTF-8''...` carries the real name; an ASCII fallback keeps
+    old clients working.
+    """
+    import re as _re
+    from urllib.parse import quote
+    name = (filename or fallback).replace('"', "")
+    ext = ("." + name.rsplit(".", 1)[1]) if "." in name else ""
+    ascii_name = _re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("_") or (fallback + ext)
+    return f"inline; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(name)}"
+
+
 def _thai_now():
     """Current datetime in Thai timezone (UTC+7)."""
     return datetime.now(_THAI_TZ)
@@ -5246,7 +5262,7 @@ def download_water_quality_file(wq_id):
         if not r or not r[2]:
             return jsonify({"error": "ไม่พบไฟล์"}), 404
         resp = Response(bytes(r[2]), content_type=r[1] or 'application/octet-stream')
-        resp.headers["Content-Disposition"] = f'inline; filename="{r[0] or "water_quality.pdf"}"'
+        resp.headers["Content-Disposition"] = _content_disposition(r[0], "water_quality")
         resp.headers["Content-Length"] = str(len(bytes(r[2])))
         return resp
     except Exception as e:
@@ -5494,7 +5510,7 @@ def download_sop_file(file_id):
             return jsonify({"error": "not found"}), 404
         filename, ctype, data = r[0], r[1], bytes(r[2])
         resp = Response(data, content_type=ctype)
-        resp.headers["Content-Disposition"] = f'inline; filename="{filename}"'
+        resp.headers["Content-Disposition"] = _content_disposition(filename, "sop_file")
         resp.headers["Content-Length"] = str(len(data))
         return resp
     except Exception as e:
