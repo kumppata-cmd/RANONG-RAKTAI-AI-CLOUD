@@ -267,6 +267,12 @@
     ⚠️ <span id="warningAlertText">-</span>
   </div>
 
+  <!-- Alerts + physician orders -->
+  <div class="card" id="alertsPanel" style="display:none;margin-bottom:12px;">
+    <div class="card-header">🚨 การแจ้งเตือน & คำสั่งแพทย์ <span id="alertsCount" style="font-size:.7rem;color:var(--fg-muted);margin-left:6px"></span></div>
+    <div id="alertsList" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
+  </div>
+
   <!-- UF Progress -->
   <div class="card" style="margin-bottom:16px;">
     <div class="card-header">💧 UF Progress</div>
@@ -882,6 +888,7 @@ function loadExistingSession(sid){
     .then(r=>r.ok?r.json():Promise.reject())
     .then(d=>{
       sessionData.session_id = d.session_id || sid;
+      loadSessionAlerts();
       sessionData.pre_weight = d.pre_weight || 0;
       sessionData.dry_weight = d.dry_weight || 0;
       /* Fill header */
@@ -1007,6 +1014,7 @@ function saveIntraVital(){
     }).then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(e)))
     .then(d=>{
       if(d.vital_id) showToast('Vital #'+d.vital_id+' บันทึกลง DB สำเร็จ','info');
+      loadSessionAlerts();
       if(d.alerts && d.alerts.length){
         d.alerts.forEach(a=>{
           if(a.severity==='critical'){
@@ -1031,6 +1039,56 @@ function saveIntraVital(){
     });
   }
 }
+
+/* ── Alerts & physician orders panel ── */
+function _hdRole(){
+  try{ const t=getHdToken(); return JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))).role||''; }catch(e){ return ''; }
+}
+function loadSessionAlerts(){
+  if(!sessionData.session_id) return;
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/alerts').then(r=>r.json()).then(d=>{
+    const list=d.alerts||[]; const panel=document.getElementById('alertsPanel');
+    if(!list.length){ panel.style.display='none'; return; }
+    panel.style.display='block';
+    const open=list.filter(a=>!a.acknowledged).length;
+    document.getElementById('alertsCount').textContent = open ? `(${open} รายการยังไม่รับทราบ)` : '(รับทราบครบแล้ว)';
+    const isDoc = _hdRole()==='physician';
+    document.getElementById('alertsList').innerHTML = list.map(a=>{
+      const sev = a.severity==='critical' ? ['🔴','var(--danger)','วิกฤต'] : a.severity==='warning' ? ['🟡','var(--warning)','เฝ้าระวัง'] : ['🔵','var(--info)','ข้อมูล'];
+      const when = a.created_at ? hdTime(a.created_at) : '-';
+      const orderBlock = a.physician_order
+        ? `<div style="margin-top:6px;padding:8px;background:rgba(39,174,96,.08);border-left:3px solid var(--success);border-radius:6px;font-size:.8rem">
+             <b>✍️ คำสั่งแพทย์</b> <span style="color:var(--fg-muted);font-size:.7rem">(${a.order_by||'-'} · ${a.order_at?hdTime(a.order_at):''})</span><br>${a.physician_order}</div>`
+        : (isDoc ? `<div style="margin-top:6px;display:flex;gap:6px">
+             <input id="order_${a.id}" class="form-control" placeholder="พิมพ์คำสั่งการรักษา เช่น ลด UF, ให้ NSS 200 mL, Trendelenburg..." style="flex:1;font-size:.85rem">
+             <button class="btn btn-success" onclick="sendOrder(${a.id})" style="white-space:nowrap">✍️ สั่ง</button></div>`
+           : `<div style="margin-top:4px;font-size:.72rem;color:var(--fg-muted)">รอคำสั่งแพทย์</div>`);
+      const ackBtn = a.acknowledged ? '' : `<button class="btn" onclick="ackAlert(${a.id})" style="font-size:.7rem;padding:3px 8px">✔ รับทราบ</button>`;
+      return `<div style="border:1px solid ${sev[1]};border-radius:8px;padding:10px;${a.acknowledged?'opacity:.6':''}">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <div style="font-weight:700;color:${sev[1]};font-size:.85rem">${sev[0]} ${sev[2]} — ${a.title}</div>${ackBtn}</div>
+        <div style="font-size:.78rem;margin-top:2px">${a.message||''}</div>
+        <div style="font-size:.7rem;color:var(--fg-muted)">👤 ${a.patient_name||''} · HN ${a.hn||'-'} · เตียง ${a.bed_number||'-'} · ${when} น.</div>
+        ${orderBlock}</div>`;
+    }).join('');
+  }).catch(()=>{});
+}
+function sendOrder(alertId){
+  const el=document.getElementById('order_'+alertId); const txt=(el.value||'').trim();
+  if(!txt){ showToast('กรุณาพิมพ์คำสั่งการรักษา','warning'); return; }
+  hdFetch('/hd/api/v1/alerts/'+alertId+'/order',{method:'POST',body:JSON.stringify({order:txt})})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){ showToast(d.error,'danger'); return; }
+      showToast(d.relayed_to_nurses ? '✅ บันทึกคำสั่ง + ส่ง LINE พยาบาลแล้ว' : '✅ บันทึกคำสั่งแพทย์แล้ว','success');
+      loadSessionAlerts();
+    }).catch(()=>showToast('บันทึกคำสั่งไม่สำเร็จ','danger'));
+}
+function ackAlert(alertId){
+  hdFetch('/hd/api/v1/alerts/'+alertId+'/acknowledge',{method:'POST',body:'{}'})
+    .then(r=>r.json()).then(()=>{ showToast('รับทราบแล้ว','success'); loadSessionAlerts(); })
+    .catch(()=>showToast('ไม่สำเร็จ','danger'));
+}
+setInterval(loadSessionAlerts, 60000);
 
 function saveUfRecord(){
   const removed = document.getElementById('modalUfRemoved').value;

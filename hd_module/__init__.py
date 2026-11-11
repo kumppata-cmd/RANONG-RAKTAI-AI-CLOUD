@@ -122,6 +122,10 @@ def _run_hd_migrations():
                 "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS triggered_at TIMESTAMP DEFAULT NOW()",
                 "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS is_acknowledged BOOLEAN NOT NULL DEFAULT FALSE",
                 "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMP",
+                # physician treatment order recorded on an alert (free text by a human)
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS physician_order TEXT",
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS order_by VARCHAR(100)",
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS order_at TIMESTAMP",
                 # Create SOP files table
                 """CREATE TABLE IF NOT EXISTS hd_sop_files (
                     id SERIAL PRIMARY KEY, sop_key VARCHAR(80) NOT NULL,

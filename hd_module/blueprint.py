@@ -1217,6 +1217,46 @@ th {{ background: #f8f9fa; font-weight: 600; }}
 
 # ── Vital Signs ───────────────────────────────────────────
 
+
+def _process_vital_alerts(cur, session_id, sbp=None, dbp=None, hr=None, spo2=None, temp=None):
+    """Evaluate a vital reading, store alerts, push LINE to physician.
+
+    Runs inside a SAVEPOINT so a failure here never loses the vital itself.
+    Returns the list of alerts that were newly created.
+    """
+    from flask import current_app
+    from .vital_alerts import evaluate, session_context, store_alerts, notify_physician
+    created = []
+    cur.execute("SAVEPOINT sp_alerts")
+    try:
+        ctx = session_context(cur, session_id)
+        if not ctx:
+            cur.execute("RELEASE SAVEPOINT sp_alerts")
+            return created
+        alerts = evaluate(
+            sbp=sbp, dbp=dbp, hr=hr, spo2=spo2, temp=temp,
+            pre_sbp=ctx["pre_sbp"], prev_sbp=ctx["prev_sbp"],
+            severe_sbp=get_setting_value("alert_severe_sbp", "90") or 90,
+            sbp_drop=get_setting_value("alert_sbp_drop", "20") or 20,
+        )
+        created = store_alerts(cur, session_id, ctx["patient_id"], alerts)
+        cur.execute("RELEASE SAVEPOINT sp_alerts")
+    except Exception as e:
+        cur.execute("ROLLBACK TO SAVEPOINT sp_alerts")
+        logger.warning("vital alert evaluation failed (vital still saved): %s", e)
+        return created
+    if created:
+        try:
+            push_fn = current_app.config.get("LINE_PUSH_FN")
+            ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+            recipients = [r.strip() for r in ids.split(",") if r.strip()]
+            base = (request.host_url or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+            n = notify_physician(push_fn, recipients, ctx, created, base)
+            logger.info("vital alerts: session=%s created=%d line_sent=%d", session_id, len(created), n)
+        except Exception as e:
+            logger.warning("vital alert LINE push failed: %s", e)
+    return created
+
 @hd_bp.route("/sessions/<int:session_id>/vitals", methods=["POST"])
 @require_role("physician", "nurse")
 def record_vital(session_id):
@@ -1313,9 +1353,14 @@ def record_vital(session_id):
                           data.get("sbp"), data.get("dbp"), data.get("hr"),
                           data.get("temp"), data.get("spo2")))
                 vid = cur_fb.fetchone()[0]
+                new_alerts = _process_vital_alerts(
+                    cur_fb, session_id, sbp=data.get("sbp"), dbp=data.get("dbp"),
+                    hr=data.get("hr"), spo2=data.get("spo2"), temp=data.get("temp"))
                 conn_fb.commit()
             conn_fb.close()
-            return jsonify({"session_id": session_id, "phase": phase, "recorded": True, "vital_id": vid}), 201
+            return jsonify({"session_id": session_id, "phase": phase, "recorded": True,
+                            "vital_id": vid, "alerts": new_alerts,
+                            "alert_count": len(new_alerts)}), 201
         except Exception as ve:
             logger.error("vital fallback error: %s", ve)
     return jsonify({"session_id": session_id, "phase": phase, "recorded": True}), 201
@@ -1491,6 +1536,105 @@ def list_alerts():
         logger.error("list_alerts error: %s", e)
         return jsonify({"alerts": [], "total": 0, "error": str(e)})
 
+
+
+@hd_bp.route("/sessions/<int:session_id>/alerts", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def session_alerts(session_id):
+    """Alerts for one session with physician orders (for the session page panel)."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"alerts": []})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT a.id, a.severity::text, a.title, a.message, a.acknowledged, a.created_at,
+                       a.physician_order, a.order_by, a.order_at, p.patient_name, p.hn, s.bed_number
+                FROM hd_clinical_alerts a
+                JOIN hd_sessions s ON s.id = a.session_id
+                LEFT JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE a.session_id = %s
+                ORDER BY a.acknowledged ASC,
+                         CASE a.severity::text WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                         a.created_at DESC
+                LIMIT 30
+            """, (session_id,))
+            rows = cur.fetchall()
+        conn.close()
+        return jsonify({"alerts": [{
+            "id": r[0], "severity": r[1], "title": r[2], "message": r[3], "acknowledged": r[4],
+            "created_at": (r[5].isoformat() + "Z") if r[5] else None,
+            "physician_order": r[6], "order_by": r[7],
+            "order_at": (r[8].isoformat() + "Z") if r[8] else None,
+            "patient_name": r[9], "hn": r[10], "bed_number": r[11],
+        } for r in rows]})
+    except Exception as e:
+        logger.warning("session_alerts: %s", e)
+        return jsonify({"alerts": [], "error": str(e)})
+
+
+@hd_bp.route("/alerts/<int:alert_id>/order", methods=["POST"])
+@require_role("physician")
+def physician_order(alert_id):
+    """Physician records a treatment order on an alert (free text, by a human).
+
+    The system never generates orders itself — it only stores what the
+    physician typed and relays it to the nursing team.
+    """
+    import os, psycopg2
+    data = request.get_json(silent=True) or {}
+    order = (data.get("order") or "").strip()
+    if not order:
+        return jsonify({"error": "กรุณาพิมพ์คำสั่งการรักษา"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 503
+    who = g.get("hd_username") or str(g.get("hd_user_id") or "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE hd_clinical_alerts
+                SET physician_order = %s, order_by = %s, order_at = NOW()
+                WHERE id = %s
+                RETURNING session_id, title
+            """, (order[:1000], who[:100], alert_id))
+            r = cur.fetchone()
+            if not r:
+                conn.close()
+                return jsonify({"error": "ไม่พบ alert"}), 404
+            session_id, title = r
+            cur.execute("""
+                SELECT p.patient_name, p.hn, s.bed_number FROM hd_sessions s
+                LEFT JOIN hd_patient_mapping p ON p.id = s.patient_id WHERE s.id = %s
+            """, (session_id,))
+            pr = cur.fetchone() or ("", "", None)
+            conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action="alert.physician_order",
+                   resource_type="alert", resource_id=alert_id,
+                   new_values={"order": order[:200]}, ip_address=request.remote_addr or "")
+
+        # Relay to nursing team (LINE Notify group) if configured; never fatal
+        relayed = False
+        try:
+            token = get_setting_value("nurse_group_token", "") or get_setting_value("line_notify_token", "")
+            if token:
+                import requests as req
+                msg = (f"\n✍️ คำสั่งแพทย์ ({who})\n👤 {pr[0]} (HN {pr[1]}) เตียง {pr[2] or '-'}\n"
+                       f"⚠️ {title}\n📝 {order}")
+                req.post("https://notify-api.line.me/api/notify",
+                         headers={"Authorization": f"Bearer {token}"},
+                         data={"message": msg}, timeout=10)
+                relayed = True
+        except Exception as e:
+            logger.warning("order relay: %s", e)
+        return jsonify({"ok": True, "alert_id": alert_id, "relayed_to_nurses": relayed})
+    except Exception as e:
+        logger.error("physician_order: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 @hd_bp.route("/alerts/<int:alert_id>/acknowledge", methods=["POST"])
 @require_role("physician", "nurse")
@@ -1850,6 +1994,7 @@ def bed_dashboard():
         try:
             import psycopg2
             conn = psycopg2.connect(db_url, connect_timeout=5)
+            conn.autocommit = True   # read-only: one failed lookup must not abort the rest
             with conn.cursor() as cur:
                 # Show ALL active sessions (in_progress, scheduled)
                 # Priority: in_progress > scheduled (so active session
@@ -1934,6 +2079,32 @@ def bed_dashboard():
                             }
                     except Exception:
                         pass
+
+                # Attach open (unacknowledged) alerts → bed status warning/critical
+                for sid, bnum in session_ids:
+                    try:
+                        cur.execute("""
+                            SELECT id, severity::text, title, message, created_at, physician_order
+                            FROM hd_clinical_alerts
+                            WHERE session_id = %s AND acknowledged = FALSE
+                            ORDER BY CASE severity::text WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                                     created_at DESC
+                            LIMIT 5
+                        """, (sid,))
+                        arows = cur.fetchall()
+                        if arows and 1 <= bnum <= len(beds):
+                            b = beds[bnum - 1]
+                            b["alerts"] = [{
+                                "id": r[0], "severity": r[1], "title": r[2], "message": r[3],
+                                "created_at": (r[4].isoformat() + "Z") if r[4] else None,
+                                "physician_order": r[5],
+                            } for r in arows]
+                            worst = arows[0][1]
+                            if b.get("status") == "active" and worst in ("critical", "warning"):
+                                b["status"] = worst
+                                b["alert_reason"] = arows[0][2]
+                    except Exception as ae:
+                        logger.warning("bed alerts fetch: %s", ae)
 
                 # Fetch dialyzer info for each patient on a bed
                 for sid, bnum in session_ids:
@@ -4156,17 +4327,12 @@ def quick_vital_entry(session_id):
             """, (session_id, sbp, dbp, hr))
             vital_id = cur.fetchone()[0]
 
-            # Check alert thresholds
+            # Evaluate alert rules (shared with the session page) + LINE physician
+            new_alerts = _process_vital_alerts(cur, session_id, sbp=sbp, dbp=dbp, hr=hr)
             alert = None
-            if sbp and (int(sbp) < 90 or int(sbp) > 180):
-                severity = "critical" if int(sbp) < 80 or int(sbp) > 200 else "warning"
-                title = f"BP ผิดปกติ: {sbp}/{dbp or '-'} mmHg"
-                msg = f"BP {sbp}/{dbp or '-'} mmHg (Quick Entry)"
-                cur.execute("""
-                    INSERT INTO hd_clinical_alerts (session_id, severity, title, message, acknowledged)
-                    VALUES (%s, %s, %s, %s, FALSE) RETURNING id
-                """, (session_id, severity, title, msg))
-                alert = {"severity": severity, "title": title}
+            if new_alerts:
+                worst = sorted(new_alerts, key=lambda a: 0 if a["severity"] == "critical" else 1)[0]
+                alert = {"severity": worst["severity"], "title": worst["title"]}
 
         conn.commit()
         conn.close()
@@ -4179,6 +4345,7 @@ def quick_vital_entry(session_id):
             "vital_id": vital_id,
             "sbp": sbp, "dbp": dbp, "hr": hr,
             "alert": alert,
+            "alerts": new_alerts,
             "message": f"บันทึก BP {sbp}/{dbp or '-'} HR {hr or '-'} สำเร็จ",
         })
     except Exception as e:
