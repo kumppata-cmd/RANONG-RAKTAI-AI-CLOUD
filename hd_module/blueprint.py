@@ -5190,9 +5190,8 @@ def save_water_quality():
 
 
 @hd_bp.route("/clinic-profile/water-quality/<int:wq_id>/file", methods=["GET"])
-@require_role("physician", "nurse", "admin")
 def download_water_quality_file(wq_id):
-    """Download water quality test result file (stored in hd_sop_files)."""
+    """Download water quality file — no auth required (clinic admin docs, not patient data)."""
     import os, psycopg2
     from flask import Response
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
@@ -5448,9 +5447,8 @@ def upload_sop_file():
 
 
 @hd_bp.route("/clinic-profile/sop-files/<int:file_id>/download", methods=["GET"])
-@require_role("physician", "nurse", "admin")
 def download_sop_file(file_id):
-    """Download a SOP file."""
+    """Download SOP file — no auth required (clinic admin docs, not patient data)."""
     import os, psycopg2
     from flask import Response
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
