@@ -1593,6 +1593,49 @@ def list_patients():
         return jsonify({"patients": [], "total": 0, "error": str(e)})
 
 
+@hd_bp.route("/patients/import-roster", methods=["POST"])
+@require_role("physician", "admin")
+def import_patient_roster():
+    """Import the annual Excel roster (VA / BFR / HD-wk / schedule / ESA).
+
+    multipart: file=<xlsx>, confirm=0|1. confirm=0 (default) only previews.
+    """
+    import os, psycopg2
+    from .registry_import import parse_roster, apply_roster
+    f = request.files.get("file")
+    if not f or not f.filename.lower().endswith((".xlsx", ".xlsm")):
+        return jsonify({"error": "กรุณาเลือกไฟล์ Excel (.xlsx)"}), 400
+    data = f.read()
+    if len(data) > 5 * 1024 * 1024:
+        return jsonify({"error": "ไฟล์ใหญ่เกิน 5 MB"}), 400
+    confirm = request.form.get("confirm", "0") == "1"
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 503
+    try:
+        rows, skipped = parse_roster(data)
+    except Exception as e:
+        return jsonify({"error": f"อ่านไฟล์ไม่ได้: {e}"}), 400
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=10)
+        summary = apply_roster(conn, rows, confirm=confirm)
+        conn.close()
+    except Exception as e:
+        logger.error("roster import: %s", e)
+        return jsonify({"error": str(e)}), 500
+    summary["skipped"] = skipped
+    if confirm:
+        log_action(user_id=g.get("hd_user_id"), action="patients.import_roster",
+                   resource_type="patient",
+                   new_values={"file": f.filename, "matched": summary["matched"],
+                               "written": summary["written"], "unmatched": len(summary["unmatched"])},
+                   ip_address=request.remote_addr or "")
+        logger.info("roster import by %s: matched=%d written=%d unmatched=%d",
+                    g.get("hd_username"), summary["matched"], summary["written"],
+                    len(summary["unmatched"]))
+    return jsonify(summary)
+
+
 @hd_bp.route("/patients/<hn>", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def get_patient(hn):

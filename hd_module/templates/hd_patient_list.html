@@ -50,6 +50,27 @@
   <div class="stat-card" onclick="filterIncomplete()" title="คลิกเพื่อดูรายชื่อ"><span class="num" id="incompletePatients" style="color:var(--warning);">0</span><span class="lbl">ข้อมูลไม่ครบ</span></div>
 </div>
 
+<!-- Import roster -->
+<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+  <input type="file" id="rosterFile" accept=".xlsx,.xlsm" style="display:none" onchange="previewRoster()">
+  <button class="btn btn-primary" onclick="document.getElementById('rosterFile').click()" style="font-size:.85rem">📥 นำเข้า Excel รายชื่อ (VA / BFR / รอบฟอก / ยาฉีด)</button>
+  <span style="font-size:.72rem;color:var(--fg-muted)">ไฟล์ "รายชื่อผู้ป่วยประจำปี" — ระบบจับคู่ด้วย HN แล้วแสดงตัวอย่างก่อนบันทึก (ไม่แก้ชื่อ, ไม่เก็บเลขบัตร)</span>
+</div>
+
+<!-- Roster preview modal -->
+<div class="edit-overlay" id="rosterOverlay" onclick="if(event.target===this)closeRoster()">
+  <div class="edit-modal" style="max-width:560px;max-height:88vh;overflow-y:auto">
+    <h3 style="margin:0 0 10px">📥 ตัวอย่างการนำเข้า</h3>
+    <div id="rosterSummary" style="font-size:.85rem;line-height:1.7"></div>
+    <div id="rosterUnmatched" style="margin-top:8px"></div>
+    <details style="margin-top:8px"><summary style="cursor:pointer;font-size:.8rem">ดูรายการที่จะเปลี่ยน</summary>
+      <div id="rosterChanges" style="font-size:.72rem;max-height:220px;overflow:auto;margin-top:6px"></div>
+    </details>
+    <button class="btn btn-success" id="rosterConfirmBtn" onclick="confirmRoster()" style="width:100%;padding:14px;font-size:1rem;margin-top:12px">✅ ยืนยันนำเข้า</button>
+    <button class="btn" onclick="closeRoster()" style="width:100%;margin-top:8px;padding:10px">ยกเลิก</button>
+  </div>
+</div>
+
 <!-- Search -->
 <div class="search-bar">
   <input type="search" class="form-control" id="searchInput" placeholder="🔍 ค้นหา HN, ชื่อ..." autocomplete="off">
@@ -330,6 +351,57 @@ function savePatientEdit(){
     })
     .catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
 }
+
+/* ── Roster import (Excel) ── */
+let _rosterFile = null;
+function _rosterPost(confirm){
+  const fd = new FormData();
+  fd.append('file', _rosterFile);
+  fd.append('confirm', confirm ? '1' : '0');
+  const token = getHdToken();
+  return fetch('/hd/api/v1/patients/import-roster', {
+    method:'POST', headers: token ? {'Authorization':'Bearer '+token} : {}, body: fd
+  }).then(r=>r.json());
+}
+function previewRoster(){
+  const inp = document.getElementById('rosterFile');
+  _rosterFile = inp.files[0];
+  if(!_rosterFile) return;
+  showToast('กำลังอ่านไฟล์...','info');
+  _rosterPost(false).then(d=>{
+    inp.value = '';
+    if(d.error){ showToast(d.error,'danger'); return; }
+    const va = Object.entries(d.va_counts||{}).map(([k,v])=>k+' '+v).join(' · ');
+    document.getElementById('rosterSummary').innerHTML =
+      `พบในไฟล์ <b>${d.total_rows}</b> คน · จับคู่กับระบบได้ <b style="color:var(--success)">${d.matched}</b> คน<br>`+
+      `จะอัปเดต <b style="color:var(--accent)">${d.to_update}</b> คน · ข้อมูลตรงอยู่แล้ว ${d.unchanged} คน<br>`+
+      `<span style="color:var(--fg-muted)">Vascular Access: ${va}</span>`;
+    const um = d.unmatched||[];
+    document.getElementById('rosterUnmatched').innerHTML = um.length
+      ? `<div style="font-size:.78rem;color:var(--danger)">⚠️ ไม่พบในระบบ ${um.length} คน (จะข้าม): `+
+        um.slice(0,15).map(u=>`${u.name} (HN ${u.hn_clinic||u.hn_hospital||'-'})`).join(', ')+(um.length>15?' …':'')+`</div>`
+      : `<div style="font-size:.78rem;color:var(--success)">✅ จับคู่ได้ครบทุกคน</div>`;
+    const ch = (d.details||[]).filter(m=>Object.keys(m.changes).length);
+    document.getElementById('rosterChanges').innerHTML = ch.length
+      ? ch.map(m=>`<div style="padding:3px 0;border-bottom:1px solid var(--border)"><b>HN ${m.hn}</b> ${m.db_name||m.name}: `+
+          Object.entries(m.changes).map(([k,[a,b]])=>`${k}: ${a??'-'} → <b>${b}</b>`).join(', ')+`</div>`).join('')
+      : '<div style="color:var(--fg-muted)">ไม่มีรายการเปลี่ยนแปลง</div>';
+    document.getElementById('rosterConfirmBtn').disabled = d.to_update === 0;
+    document.getElementById('rosterOverlay').classList.add('open');
+  }).catch(()=>{ inp.value=''; showToast('อ่านไฟล์ไม่สำเร็จ','danger'); });
+}
+function confirmRoster(){
+  const btn = document.getElementById('rosterConfirmBtn');
+  btn.disabled = true; btn.textContent = 'กำลังบันทึก...';
+  _rosterPost(true).then(d=>{
+    btn.disabled = false; btn.textContent = '✅ ยืนยันนำเข้า';
+    if(d.error){ showToast(d.error,'danger'); return; }
+    showToast(`✅ อัปเดตแล้ว ${d.written} คน (จับคู่ ${d.matched}/${d.total_rows})`,'success');
+    closeRoster();
+    fetchPatients();
+  }).catch(()=>{ btn.disabled=false; btn.textContent='✅ ยืนยันนำเข้า'; showToast('บันทึกไม่สำเร็จ','danger'); });
+}
+function closeRoster(){ document.getElementById('rosterOverlay').classList.remove('open'); }
 
 function filterIncomplete(){
   const incomplete = allPatients.filter(isIncomplete);
