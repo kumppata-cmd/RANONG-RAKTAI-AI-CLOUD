@@ -5035,14 +5035,39 @@ def get_water_quality():
                 created_at TIMESTAMP DEFAULT NOW())""")
             conn.commit()
             cur.execute("""SELECT id, test_date, test_type, parameter, result_value, unit,
-                pass_fail, method, tested_by, notes
+                pass_fail, method, tested_by, notes,
+                CASE WHEN EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='hd_water_quality' AND column_name='send_date') THEN 1 ELSE 0 END
                 FROM hd_water_quality ORDER BY test_date DESC LIMIT 50""")
-            for r in cur.fetchall():
-                logs.append({
-                    "id": r[0], "date": r[1].isoformat() if r[1] else None,
-                    "type": r[2], "parameter": r[3], "value": r[4], "unit": r[5],
-                    "pass_fail": r[6], "method": r[7], "tested_by": r[8], "notes": r[9],
-                })
+            # Check if extra columns exist
+            has_extra = False
+            try:
+                cur.execute("SELECT send_date, file_name FROM hd_water_quality LIMIT 0")
+                has_extra = True
+            except Exception:
+                conn.rollback()
+
+            if has_extra:
+                cur.execute("""SELECT id, test_date, test_type, parameter, result_value, unit,
+                    pass_fail, method, tested_by, notes, send_date, file_name
+                    FROM hd_water_quality ORDER BY test_date DESC LIMIT 50""")
+                for r in cur.fetchall():
+                    logs.append({
+                        "id": r[0], "date": r[1].isoformat() if r[1] else None,
+                        "type": r[2], "parameter": r[3], "value": r[4], "unit": r[5],
+                        "pass_fail": r[6], "method": r[7], "tested_by": r[8], "notes": r[9],
+                        "send_date": r[10].isoformat() if r[10] else None,
+                        "file_id": r[0] if r[11] else None, "file_name": r[11],
+                    })
+            else:
+                cur.execute("""SELECT id, test_date, test_type, parameter, result_value, unit,
+                    pass_fail, method, tested_by, notes
+                    FROM hd_water_quality ORDER BY test_date DESC LIMIT 50""")
+                for r in cur.fetchall():
+                    logs.append({
+                        "id": r[0], "date": r[1].isoformat() if r[1] else None,
+                        "type": r[2], "parameter": r[3], "value": r[4], "unit": r[5],
+                        "pass_fail": r[6], "method": r[7], "tested_by": r[8], "notes": r[9],
+                    })
         conn.close()
     except Exception as e:
         logger.warning("water_quality GET: %s", e)
@@ -5052,12 +5077,21 @@ def get_water_quality():
 @hd_bp.route("/clinic-profile/water-quality", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def save_water_quality():
-    """Add water quality test result."""
+    """Add water quality test result (supports JSON or multipart with file)."""
     import os, psycopg2
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not db_url:
         return jsonify({"error": "no db"}), 500
-    data = request.get_json(force=True)
+
+    # Handle both JSON and FormData
+    if request.content_type and 'multipart' in request.content_type:
+        data = request.form.to_dict()
+    else:
+        data = request.get_json(force=True) or {}
+
+    uploaded_file = request.files.get("file")
+    has_file = False
+
     try:
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
@@ -5066,19 +5100,69 @@ def save_water_quality():
                 parameter VARCHAR(100), result_value VARCHAR(100), unit VARCHAR(30),
                 pass_fail VARCHAR(10) DEFAULT 'pass', method VARCHAR(100),
                 tested_by VARCHAR(100), notes VARCHAR(300),
+                send_date DATE, file_data BYTEA, file_name VARCHAR(255), file_type VARCHAR(100),
                 created_at TIMESTAMP DEFAULT NOW())""")
+            conn.commit()
+
+            # Add columns if they don't exist (table may have been created before)
+            for col, ctype in [('send_date','DATE'),('file_data','BYTEA'),('file_name','VARCHAR(255)'),('file_type','VARCHAR(100)')]:
+                try:
+                    cur.execute(f"ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS {col} {ctype}")
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+
+            file_data_bin = None
+            file_name = None
+            file_type = None
+            if uploaded_file and uploaded_file.filename:
+                file_data_bin = uploaded_file.read()
+                if len(file_data_bin) > 10 * 1024 * 1024:
+                    return jsonify({"error": "ไฟล์ใหญ่เกิน 10 MB"}), 400
+                file_name = uploaded_file.filename
+                file_type = uploaded_file.content_type
+                has_file = True
+
             cur.execute("""INSERT INTO hd_water_quality (test_date, test_type, parameter,
-                result_value, unit, pass_fail, method, tested_by, notes)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                result_value, unit, pass_fail, method, tested_by, notes, send_date,
+                file_data, file_name, file_type)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                 (data.get("date"), data.get("type","bacteria"), data.get("parameter"),
                  data.get("value"), data.get("unit"), data.get("pass_fail","pass"),
-                 data.get("method"), data.get("tested_by"), data.get("notes")))
+                 data.get("method"), data.get("tested_by"), data.get("notes"),
+                 data.get("send_date") or None,
+                 psycopg2.Binary(file_data_bin) if file_data_bin else None,
+                 file_name, file_type))
             new_id = cur.fetchone()[0]
             conn.commit()
         conn.close()
-        return jsonify({"ok": True, "id": new_id})
+        return jsonify({"ok": True, "id": new_id, "has_file": has_file})
     except Exception as e:
         logger.warning("water_quality POST: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/water-quality/<int:wq_id>/file", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def download_water_quality_file(wq_id):
+    """Download water quality test result file."""
+    import os, psycopg2
+    from flask import Response
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT file_name, file_type, file_data FROM hd_water_quality WHERE id = %s", (wq_id,))
+            r = cur.fetchone()
+        conn.close()
+        if not r or not r[2]:
+            return jsonify({"error": "ไม่พบไฟล์"}), 404
+        resp = Response(bytes(r[2]), content_type=r[1] or 'application/octet-stream')
+        resp.headers["Content-Disposition"] = f'inline; filename="{r[0] or "water_quality.pdf"}"'
+        return resp
+    except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 

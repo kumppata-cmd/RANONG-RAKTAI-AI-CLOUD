@@ -326,10 +326,11 @@
 
 <!-- Add Water Quality Modal -->
 <div class="cp-modal" id="waterModal" onclick="if(event.target===this)this.classList.remove('open')">
-  <div class="cp-sheet">
+  <div class="cp-sheet" style="max-height:90vh">
     <h3>🧪 เพิ่มผลตรวจคุณภาพน้ำ</h3>
     <div class="field-grid">
-      <div class="cp-field"><div class="flabel">วันที่ตรวจ</div><input type="date" id="wq_date"></div>
+      <div class="cp-field"><div class="flabel">วันที่ส่งตรวจ</div><input type="date" id="wq_send_date"></div>
+      <div class="cp-field"><div class="flabel">วันที่ได้ผล</div><input type="date" id="wq_date"></div>
       <div class="cp-field"><div class="flabel">ประเภทตรวจ</div><select id="wq_type">
         <option value="bacteria">Bacteria (TVC)</option>
         <option value="endotoxin">Endotoxin (LAL)</option>
@@ -338,16 +339,22 @@
         <option value="chlorine">Chlorine</option>
         <option value="hardness">Hardness</option>
       </select></div>
-      <div class="cp-field"><div class="flabel">พารามิเตอร์</div><input id="wq_param" placeholder="เช่น TVC, LAL, Conductivity"></div>
-      <div class="cp-field"><div class="flabel">ผลตรวจ</div><input id="wq_value" placeholder="เช่น <100, 0.25"></div>
-      <div class="cp-field"><div class="flabel">หน่วย</div><input id="wq_unit" placeholder="CFU/mL, EU/mL, μS/cm"></div>
       <div class="cp-field"><div class="flabel">ผ่าน/ไม่ผ่าน</div><select id="wq_pass">
         <option value="pass">✅ ผ่าน</option>
         <option value="fail">❌ ไม่ผ่าน</option>
       </select></div>
+      <div class="cp-field"><div class="flabel">พารามิเตอร์</div><input id="wq_param" placeholder="เช่น TVC, LAL, Conductivity"></div>
+      <div class="cp-field"><div class="flabel">ผลตรวจ</div><input id="wq_value" placeholder="เช่น <100, 0.25"></div>
+      <div class="cp-field"><div class="flabel">หน่วย</div><input id="wq_unit" placeholder="CFU/mL, EU/mL, μS/cm"></div>
       <div class="cp-field"><div class="flabel">วิธีตรวจ</div><input id="wq_method" placeholder="เช่น Pour Plate, LAL Gel Clot"></div>
       <div class="cp-field"><div class="flabel">ตรวจโดย</div><input id="wq_by" placeholder="ชื่อผู้ตรวจ/บริษัท"></div>
       <div class="cp-field" style="grid-column:1/-1"><div class="flabel">หมายเหตุ</div><input id="wq_notes" placeholder="รายละเอียดเพิ่มเติม"></div>
+      <!-- File upload -->
+      <div class="cp-field" style="grid-column:1/-1">
+        <div class="flabel">📎 แนบไฟล์ผลตรวจ (PDF/รูปภาพ)</div>
+        <input type="file" id="wq_file" accept=".pdf,.png,.jpg,.jpeg" style="font-size:.8rem;margin-top:4px">
+        <div style="font-size:.6rem;color:var(--fg-muted);margin-top:2px">สูงสุด 10 MB</div>
+      </div>
     </div>
     <button class="save-btn" onclick="saveWaterLog()">💾 บันทึกผลตรวจ</button>
   </div>
@@ -743,11 +750,13 @@ function loadWaterLogs(){
     const typeMap={bacteria:'🦠 Bacteria',endotoxin:'💉 Endotoxin',chemical:'🧪 Chemical',conductivity:'⚡ Conductivity',chlorine:'💧 Chlorine',hardness:'🪨 Hardness'};
     el.innerHTML=list.map(l=>{
       const badge=l.pass_fail==='pass'?'<span class="log-badge pass">ผ่าน</span>':'<span class="log-badge fail">ไม่ผ่าน</span>';
+      const sendInfo = l.send_date ? `<br><span style="font-size:.65rem;color:var(--fg-muted)">ส่ง: ${l.send_date}</span>` : '';
+      const fileLink = l.file_id ? `<a href="/hd/api/v1/clinic-profile/water-quality/${l.id}/file" target="_blank" style="font-size:.65rem;color:var(--accent);text-decoration:none">📎 ดูไฟล์</a>` : '';
       return `<div class="log-item">
-        <div class="log-date">${l.date||'-'}</div>
+        <div class="log-date">${l.date||'-'}${sendInfo}</div>
         <div class="log-body"><strong>${typeMap[l.type]||l.type}</strong> ${l.parameter||''}<br>
           <span style="font-size:.75rem">ผล: <strong>${l.value||'-'}</strong> ${l.unit||''}</span>
-          ${l.tested_by?' · '+l.tested_by:''}</div>
+          ${l.tested_by?' · '+l.tested_by:''}${fileLink?' '+fileLink:''}</div>
         ${badge}
         <button onclick="deleteWaterLog(${l.id})" style="border:none;background:none;cursor:pointer;font-size:.8rem;flex-shrink:0" title="ลบ">🗑️</button>
       </div>`;
@@ -759,9 +768,11 @@ function loadWaterLogs(){
 function openWaterLogModal(){
   const today=new Date().toISOString().split('T')[0];
   document.getElementById('wq_date').value=today;
+  document.getElementById('wq_send_date').value=today;
   ['wq_param','wq_value','wq_unit','wq_method','wq_by','wq_notes'].forEach(id=>{
     const el=document.getElementById(id); if(el) el.value='';
   });
+  document.getElementById('wq_file').value='';
   document.getElementById('wq_type').value='bacteria';
   document.getElementById('wq_pass').value='pass';
   document.getElementById('waterModal').classList.add('open');
@@ -775,26 +786,39 @@ function deleteWaterLog(id){
     }).catch(()=>showToast('ลบไม่สำเร็จ','danger'));
 }
 function saveWaterLog(){
-  const data={
-    date: document.getElementById('wq_date').value,
-    type: document.getElementById('wq_type').value,
-    parameter: document.getElementById('wq_param').value,
-    value: document.getElementById('wq_value').value,
-    unit: document.getElementById('wq_unit').value,
-    pass_fail: document.getElementById('wq_pass').value,
-    method: document.getElementById('wq_method').value,
-    tested_by: document.getElementById('wq_by').value,
-    notes: document.getElementById('wq_notes').value,
-  };
-  if(!data.date){showToast('กรุณาระบุวันที่ตรวจ','danger');return}
-  if(!data.value){showToast('กรุณาระบุผลตรวจ','danger');return}
-  hdFetch('/hd/api/v1/clinic-profile/water-quality',{method:'POST',body:JSON.stringify(data)})
-    .then(r=>r.json()).then(d=>{
-      if(d.error){showToast(d.error,'danger');return}
-      showToast('บันทึกผลตรวจน้ำสำเร็จ','success');
-      document.getElementById('waterModal').classList.remove('open');
-      loadWaterLogs();
-    }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+  const fileInput = document.getElementById('wq_file');
+  const file = fileInput.files[0];
+  if(file && file.size>10*1024*1024){showToast('ไฟล์ใหญ่เกิน 10 MB','danger');return}
+
+  const sendDate = document.getElementById('wq_send_date').value;
+  const resultDate = document.getElementById('wq_date').value;
+  if(!resultDate && !sendDate){showToast('กรุณาระบุวันที่','danger');return}
+
+  const formData = new FormData();
+  formData.append('date', resultDate||sendDate);
+  formData.append('send_date', sendDate);
+  formData.append('type', document.getElementById('wq_type').value);
+  formData.append('parameter', document.getElementById('wq_param').value);
+  formData.append('value', document.getElementById('wq_value').value);
+  formData.append('unit', document.getElementById('wq_unit').value);
+  formData.append('pass_fail', document.getElementById('wq_pass').value);
+  formData.append('method', document.getElementById('wq_method').value);
+  formData.append('tested_by', document.getElementById('wq_by').value);
+  formData.append('notes', document.getElementById('wq_notes').value);
+  if(file) formData.append('file', file);
+
+  showToast('กำลังบันทึก...','info');
+  const token = getHdToken();
+  fetch('/hd/api/v1/clinic-profile/water-quality',{
+    method:'POST',
+    headers: token ? {'Authorization':'Bearer '+token} : {},
+    body: formData
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){showToast(d.error,'danger');return}
+    showToast('✅ บันทึกผลตรวจน้ำสำเร็จ'+(d.has_file?' (พร้อมไฟล์)':''),'success');
+    document.getElementById('waterModal').classList.remove('open');
+    loadWaterLogs();
+  }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
 }
 
 /* ── Incidents ── */
