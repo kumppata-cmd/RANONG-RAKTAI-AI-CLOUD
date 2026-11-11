@@ -4830,6 +4830,26 @@ def save_staff():
         return jsonify({"error": str(e)}), 500
 
 
+@hd_bp.route("/clinic-profile/staff/<int:staff_id>", methods=["DELETE"])
+@require_role("physician", "admin")
+def delete_staff(staff_id):
+    """Delete staff member by ID."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM hd_staff_registry WHERE id = %s", (staff_id,))
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.warning("staff DELETE: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/clinic-profile/equipment", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def get_equipment():
@@ -4926,6 +4946,46 @@ def delete_equipment(equip_id):
         return jsonify({"ok": True})
     except Exception as e:
         logger.warning("equipment DELETE: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/water-quality/<int:wq_id>", methods=["DELETE"])
+@require_role("physician", "admin")
+def delete_water_quality(wq_id):
+    """Delete water quality log by ID."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM hd_water_quality WHERE id = %s", (wq_id,))
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.warning("water_quality DELETE: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/incidents/<int:inc_id>", methods=["DELETE"])
+@require_role("physician", "admin")
+def delete_incident(inc_id):
+    """Delete incident by ID."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM hd_incidents WHERE id = %s", (inc_id,))
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.warning("incidents DELETE: %s", e)
         return jsonify({"error": str(e)}), 500
 
 

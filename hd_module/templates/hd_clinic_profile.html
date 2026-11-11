@@ -101,7 +101,7 @@
   <div class="cp-card">
     <h3>👥 บุคลากร <button class="add-btn" onclick="openStaffModal()" style="margin-left:auto">➕ เพิ่ม</button></h3>
     <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
-      <table class="cp-table"><thead><tr><th>ชื่อ</th><th>ตำแหน่ง</th><th>ว./ใบอนุญาต</th><th>หมดอายุ</th><th>อบรม HD</th><th>HBV</th></tr></thead>
+      <table class="cp-table"><thead><tr><th>ชื่อ</th><th>ตำแหน่ง</th><th>ว./ใบอนุญาต</th><th>หมดอายุ</th><th>อบรม HD</th><th>HBV</th><th>จัดการ</th></tr></thead>
         <tbody id="staffBody"><tr><td colspan="6" class="cp-empty">กำลังโหลด...</td></tr></tbody>
       </table>
     </div>
@@ -450,11 +450,13 @@ function saveIcTab(){
 }
 
 /* Staff */
+let _staffData = [];
 function loadStaff(){
   hdFetch('/hd/api/v1/clinic-profile/staff').then(r=>r.json()).then(d=>{
     const body = document.getElementById('staffBody');
     const list = d.staff||[];
-    if(!list.length){body.innerHTML='<tr><td colspan="6" class="cp-empty">ยังไม่มีข้อมูล — กด ➕ เพิ่ม</td></tr>';return}
+    _staffData = list;
+    if(!list.length){body.innerHTML='<tr><td colspan="7" class="cp-empty">ยังไม่มีข้อมูล — กด ➕ เพิ่ม</td></tr>';return}
     const roleMap={physician:'แพทย์',nurse:'พยาบาล',technician:'ช่าง',admin:'ธุรการ'};
     const hbvMap={completed:'✅ ครบ',incomplete:'⚠️ ไม่ครบ',pending:'⏳ รอ'};
     body.innerHTML=list.map(s=>`<tr>
@@ -464,11 +466,48 @@ function loadStaff(){
       <td>${s.license_expiry||'-'}</td>
       <td>${s.training?(s.training+' ('+s.training_year+')'):'-'}</td>
       <td>${hbvMap[s.hbv_status]||'-'}</td>
+      <td style="white-space:nowrap">
+        <button onclick="editStaff(${s.id})" style="border:none;background:none;cursor:pointer;font-size:.85rem" title="แก้ไข">✏️</button>
+        <button onclick="deleteStaff(${s.id},'${(s.name||'').replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;font-size:.85rem" title="ลบ">🗑️</button>
+      </td>
     </tr>`).join('');
   }).catch(()=>{});
 }
 
-function openStaffModal(){ document.getElementById('staffModal').classList.add('open'); }
+function editStaff(id){
+  const s=_staffData.find(x=>x.id===id);
+  if(!s)return;
+  document.getElementById('sm_id').value=s.id;
+  document.getElementById('sm_name').value=s.name||'';
+  document.getElementById('sm_role').value=s.role||'nurse';
+  document.getElementById('sm_license').value=s.license||'';
+  document.getElementById('sm_expiry').value=s.license_expiry||'';
+  document.getElementById('sm_specialty').value=s.specialty||'';
+  document.getElementById('sm_training').value=s.training||'';
+  document.getElementById('sm_year').value=s.training_year||'';
+  document.getElementById('sm_hbv').value=s.hbv_status||'';
+  document.getElementById('sm_phone').value=s.phone||'';
+  document.getElementById('staffModal').classList.add('open');
+}
+
+function deleteStaff(id, name){
+  if(!confirm('ลบบุคลากร "'+name+'" ?\n\nข้อมูลจะถูกลบถาวร'))return;
+  hdFetch('/hd/api/v1/clinic-profile/staff/'+id,{method:'DELETE'})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('ลบสำเร็จ','success');loadStaff();
+    }).catch(()=>showToast('ลบไม่สำเร็จ','danger'));
+}
+
+function openStaffModal(){
+  document.getElementById('sm_id').value='';
+  ['sm_name','sm_license','sm_expiry','sm_specialty','sm_training','sm_year','sm_phone'].forEach(id=>{
+    const el=document.getElementById(id);if(el)el.value='';
+  });
+  document.getElementById('sm_role').value='nurse';
+  document.getElementById('sm_hbv').value='';
+  document.getElementById('staffModal').classList.add('open');
+}
 function saveStaff(){
   const data = {
     id: document.getElementById('sm_id').value||null,
@@ -667,6 +706,7 @@ function loadWaterLogs(){
           <span style="font-size:.75rem">ผล: <strong>${l.value||'-'}</strong> ${l.unit||''}</span>
           ${l.tested_by?' · '+l.tested_by:''}</div>
         ${badge}
+        <button onclick="deleteWaterLog(${l.id})" style="border:none;background:none;cursor:pointer;font-size:.8rem;flex-shrink:0" title="ลบ">🗑️</button>
       </div>`;
     }).join('');
   }).catch(()=>{
@@ -682,6 +722,14 @@ function openWaterLogModal(){
   document.getElementById('wq_type').value='bacteria';
   document.getElementById('wq_pass').value='pass';
   document.getElementById('waterModal').classList.add('open');
+}
+function deleteWaterLog(id){
+  if(!confirm('ลบผลตรวจนี้?'))return;
+  hdFetch('/hd/api/v1/clinic-profile/water-quality/'+id,{method:'DELETE'})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('ลบสำเร็จ','success');loadWaterLogs();
+    }).catch(()=>showToast('ลบไม่สำเร็จ','danger'));
 }
 function saveWaterLog(){
   const data={
@@ -725,11 +773,20 @@ function loadIncidents(){
           ${i.action?'<br><span style="font-size:.7rem;color:var(--success)">จัดการ: '+i.action+'</span>':''}
           ${i.reported_by?' · <span style="font-size:.7rem">โดย '+i.reported_by+'</span>':''}</div>
         <span class="log-badge ${i.status==='open'?'fail':'pass'}">${i.status==='open'?'เปิด':'ปิด'}</span>
+        <button onclick="deleteIncident(${i.id})" style="border:none;background:none;cursor:pointer;font-size:.8rem;flex-shrink:0" title="ลบ">🗑️</button>
       </div>`;
     }).join('');
   }).catch(()=>{
     document.getElementById('incidentList').innerHTML='<div class="cp-empty">โหลดไม่สำเร็จ</div>';
   });
+}
+function deleteIncident(id){
+  if(!confirm('ลบรายงานอุบัติการณ์นี้?'))return;
+  hdFetch('/hd/api/v1/clinic-profile/incidents/'+id,{method:'DELETE'})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('ลบสำเร็จ','success');loadIncidents();
+    }).catch(()=>showToast('ลบไม่สำเร็จ','danger'));
 }
 function openIncidentModal(){
   ['inc_desc','inc_action','inc_by'].forEach(id=>{
