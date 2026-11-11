@@ -4720,11 +4720,19 @@ def get_clinic_profile():
                 UNIQUE(section, item_key))""")
             conn.commit()
             # Fix column type if migration created it as INTEGER
-            try:
-                cur.execute("ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100)")
+            cur.execute("""SELECT data_type FROM information_schema.columns
+                WHERE table_name='hd_clinic_profile' AND column_name='updated_by'""")
+            col_info = cur.fetchone()
+            if col_info and col_info[0] == 'integer':
+                cur.execute("""SELECT tc.constraint_name FROM information_schema.table_constraints tc
+                    JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
+                    WHERE tc.table_name='hd_clinic_profile' AND ccu.column_name='updated_by'
+                    AND tc.constraint_type='FOREIGN KEY'""")
+                for fk in cur.fetchall():
+                    cur.execute(f"ALTER TABLE hd_clinic_profile DROP CONSTRAINT {fk[0]}")
+                cur.execute("ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100) USING updated_by::text")
                 conn.commit()
-            except Exception:
-                conn.rollback()
+                logger.info("Fixed hd_clinic_profile.updated_by: INTEGER → VARCHAR(100)")
             cur.execute("SELECT section, item_key, item_value, file_url, expires_at FROM hd_clinic_profile ORDER BY section, id")
             for r in cur.fetchall():
                 sec = r[0]
@@ -5129,17 +5137,31 @@ def save_incident():
                 created_at TIMESTAMP DEFAULT NOW())""")
             inc_date = data.get("date") or _thai_today().isoformat()
             reported_name = data.get("reported_by", "")
-            # Migration created reported_by as INTEGER REFERENCES hd_users(id)
-            # so we need to alter the column to accept text names
-            try:
-                cur.execute("ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100)")
-            except Exception:
-                conn.rollback()
-            # Also add resolved_at if missing
-            try:
-                cur.execute("ALTER TABLE hd_incidents ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP")
-            except Exception:
-                conn.rollback()
+
+            # Fix column type: drop FK constraint + alter to VARCHAR
+            # Check if reported_by is still INTEGER
+            cur.execute("""SELECT data_type FROM information_schema.columns
+                WHERE table_name='hd_incidents' AND column_name='reported_by'""")
+            col_type = cur.fetchone()
+            if col_type and col_type[0] == 'integer':
+                # Drop foreign key constraint first
+                cur.execute("""SELECT tc.constraint_name FROM information_schema.table_constraints tc
+                    JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
+                    WHERE tc.table_name='hd_incidents' AND ccu.column_name='reported_by'
+                    AND tc.constraint_type='FOREIGN KEY'""")
+                for fk in cur.fetchall():
+                    cur.execute(f"ALTER TABLE hd_incidents DROP CONSTRAINT {fk[0]}")
+                cur.execute("ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100) USING reported_by::text")
+                conn.commit()
+                logger.info("Fixed hd_incidents.reported_by: INTEGER → VARCHAR(100)")
+
+            # Add resolved_at if missing
+            cur.execute("""SELECT 1 FROM information_schema.columns
+                WHERE table_name='hd_incidents' AND column_name='resolved_at'""")
+            if not cur.fetchone():
+                cur.execute("ALTER TABLE hd_incidents ADD COLUMN resolved_at TIMESTAMP")
+                conn.commit()
+
             cur.execute("""INSERT INTO hd_incidents (incident_date, incident_type, severity,
                 description, action_taken, reported_by, status)
                 VALUES (%s::date, %s, %s, %s, %s, %s, 'open') RETURNING id""",
@@ -5166,6 +5188,7 @@ def save_incident():
                    f"ผู้รายงาน: {data.get('reported_by','')}\n"
                    f"━━━━━━━━━━━")
             sent = False
+            line_err = ""
             # Method 1: LINE Push (if configured via LINE Messaging API)
             from flask import current_app
             push_fn = current_app.config.get("LINE_PUSH_FN")
@@ -5173,13 +5196,22 @@ def save_incident():
                 alert_ids = get_setting_value("alert_recipients", "")
                 if not alert_ids:
                     alert_ids = get_setting_value("physician_line_id", "")
+                if not alert_ids:
+                    # Hardcoded fallback — Dr. Kamphon
+                    alert_ids = "U1b1068cde88a06e88e53c014d1b83824"
                 recipients = [r.strip() for r in alert_ids.split(",") if r.strip()] if alert_ids else []
+                logger.info("incident LINE push: push_fn=%s, recipients=%d", bool(push_fn), len(recipients))
                 for r in recipients:
                     try:
-                        push_fn(r, msg)
+                        result = push_fn(r, msg)
+                        logger.info("incident LINE push to %s: result=%s", r[:10], result)
                         sent = True
-                    except Exception:
-                        pass
+                    except Exception as pe:
+                        line_err = str(pe)
+                        logger.warning("incident LINE push failed: %s", pe)
+            else:
+                line_err = "LINE_PUSH_FN not configured"
+                logger.warning("incident LINE: push_fn not available")
             # Method 2: LINE Notify (fallback — uses group token from hd_settings)
             if not sent:
                 notify_token = get_setting_value("line_notify_token", "")
@@ -5198,7 +5230,7 @@ def save_incident():
         except Exception as e2:
             logger.warning("incident LINE notify: %s", e2)
 
-        return jsonify({"ok": True, "id": new_id})
+        return jsonify({"ok": True, "id": new_id, "line_sent": sent, "line_err": line_err if not sent else ""})
     except Exception as e:
         logger.warning("incidents POST: %s", e)
         return jsonify({"error": str(e)}), 500

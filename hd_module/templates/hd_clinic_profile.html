@@ -855,7 +855,11 @@ function saveIncident(){
   hdFetch('/hd/api/v1/clinic-profile/incidents',{method:'POST',body:JSON.stringify(data)})
     .then(r=>r.json()).then(d=>{
       if(d.error){showToast(d.error,'danger');return}
-      showToast('บันทึกรายงานสำเร็จ','success');
+      if(d.line_sent){
+        showToast('✅ บันทึก + ส่ง LINE แจ้งเตือนแล้ว','success');
+      } else {
+        showToast('✅ บันทึกสำเร็จ'+(d.line_err?' (LINE: '+d.line_err+')':''),'success');
+      }
       document.getElementById('incidentModal').classList.remove('open');
       loadIncidents();
     }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
