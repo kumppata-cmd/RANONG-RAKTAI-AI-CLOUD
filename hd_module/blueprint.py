@@ -5038,28 +5038,33 @@ def get_water_quality():
             cur.execute("""SELECT column_name FROM information_schema.columns
                 WHERE table_name='hd_water_quality'""")
             existing_cols = {r[0] for r in cur.fetchall()}
-            has_send = 'send_date' in existing_cols
-            has_file = 'file_name' in existing_cols
 
-            cols = "id, test_date, test_type, parameter, result_value, unit, pass_fail, method, tested_by, notes"
-            if has_send:
-                cols += ", send_date"
-            if has_file:
-                cols += ", file_name"
-            cur.execute(f"SELECT {cols} FROM hd_water_quality ORDER BY test_date DESC LIMIT 50")
+            # Build SELECT dynamically from what actually exists
+            col_list = ['id', 'test_date', 'test_type']
+            # These may or may not exist depending on migration version
+            for c in ['parameter','result_value','unit','pass_fail','method','tested_by',
+                       'lab_name','notes','send_date','file_name']:
+                if c in existing_cols:
+                    col_list.append(c)
+
+            cur.execute(f"SELECT {','.join(col_list)} FROM hd_water_quality ORDER BY test_date DESC LIMIT 50")
             for r in cur.fetchall():
+                row = dict(zip(col_list, r))
                 entry = {
-                    "id": r[0], "date": r[1].isoformat() if r[1] else None,
-                    "type": r[2], "parameter": r[3], "value": r[4], "unit": r[5],
-                    "pass_fail": r[6], "method": r[7], "tested_by": r[8], "notes": r[9],
+                    "id": row.get('id'),
+                    "date": row['test_date'].isoformat() if row.get('test_date') else None,
+                    "type": row.get('test_type'),
+                    "parameter": row.get('parameter',''),
+                    "value": row.get('result_value',''),
+                    "unit": row.get('unit',''),
+                    "pass_fail": row.get('pass_fail','pass'),
+                    "method": row.get('method',''),
+                    "tested_by": row.get('tested_by') or row.get('lab_name',''),
+                    "notes": row.get('notes',''),
+                    "send_date": row['send_date'].isoformat() if row.get('send_date') else None,
+                    "file_id": row['id'] if row.get('file_name') else None,
+                    "file_name": row.get('file_name'),
                 }
-                idx = 10
-                if has_send:
-                    entry["send_date"] = r[idx].isoformat() if r[idx] else None
-                    idx += 1
-                if has_file:
-                    entry["file_id"] = r[0] if r[idx] else None
-                    entry["file_name"] = r[idx]
                 logs.append(entry)
         conn.close()
     except Exception as e:
@@ -5097,8 +5102,11 @@ def save_water_quality():
                 created_at TIMESTAMP DEFAULT NOW())""")
             conn.commit()
 
-            # Add new columns one by one (safe for existing tables)
-            new_cols = [('send_date','DATE'),('file_data','BYTEA'),('file_name','VARCHAR(255)'),('file_type','VARCHAR(100)')]
+            # Add ALL missing columns (migration may have created table with fewer cols)
+            new_cols = [
+                ('parameter','VARCHAR(100)'),('method','VARCHAR(100)'),('tested_by','VARCHAR(100)'),
+                ('send_date','DATE'),('file_data','BYTEA'),('file_name','VARCHAR(255)'),('file_type','VARCHAR(100)'),
+            ]
             for col, ctype in new_cols:
                 cur.execute("""SELECT 1 FROM information_schema.columns
                     WHERE table_name='hd_water_quality' AND column_name=%s""", (col,))
