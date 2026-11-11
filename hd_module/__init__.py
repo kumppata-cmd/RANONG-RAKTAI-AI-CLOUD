@@ -91,42 +91,16 @@ def _run_hd_migrations():
         conn = psycopg2.connect(db_url, connect_timeout=10)
         conn.autocommit = True
         with conn.cursor() as cur:
+            # Plain statements only (no DO blocks) — each is idempotent.
+            # DROP CONSTRAINT IF EXISTS is a no-op when already gone;
+            # ALTER TYPE VARCHAR on a VARCHAR column is a harmless no-op.
             fixes = [
-                # Drop FK constraints that block VARCHAR columns
-                """DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hd_incidents_reported_by_fkey') THEN
-                        ALTER TABLE hd_incidents DROP CONSTRAINT hd_incidents_reported_by_fkey;
-                    END IF;
-                END $$""",
-                """DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hd_clinic_profile_updated_by_fkey') THEN
-                        ALTER TABLE hd_clinic_profile DROP CONSTRAINT hd_clinic_profile_updated_by_fkey;
-                    END IF;
-                END $$""",
-                """DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hd_water_quality_recorded_by_fkey') THEN
-                        ALTER TABLE hd_water_quality DROP CONSTRAINT hd_water_quality_recorded_by_fkey;
-                    END IF;
-                END $$""",
-                # Change INTEGER columns to VARCHAR
-                """DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM information_schema.columns
-                        WHERE table_name='hd_incidents' AND column_name='reported_by' AND data_type='integer') THEN
-                        ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100) USING reported_by::text;
-                    END IF;
-                END $$""",
-                """DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM information_schema.columns
-                        WHERE table_name='hd_clinic_profile' AND column_name='updated_by' AND data_type='integer') THEN
-                        ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100) USING updated_by::text;
-                    END IF;
-                END $$""",
-                """DO $$ BEGIN
-                    IF EXISTS (SELECT 1 FROM information_schema.columns
-                        WHERE table_name='hd_water_quality' AND column_name='recorded_by' AND data_type='integer') THEN
-                        ALTER TABLE hd_water_quality ALTER COLUMN recorded_by TYPE VARCHAR(100) USING recorded_by::text;
-                    END IF;
-                END $$""",
+                "ALTER TABLE hd_incidents DROP CONSTRAINT IF EXISTS hd_incidents_reported_by_fkey",
+                "ALTER TABLE hd_clinic_profile DROP CONSTRAINT IF EXISTS hd_clinic_profile_updated_by_fkey",
+                "ALTER TABLE hd_water_quality DROP CONSTRAINT IF EXISTS hd_water_quality_recorded_by_fkey",
+                "ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100) USING reported_by::text",
+                "ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100) USING updated_by::text",
+                "ALTER TABLE hd_water_quality ALTER COLUMN recorded_by TYPE VARCHAR(100) USING recorded_by::text",
                 # Add missing columns to hd_water_quality
                 "ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS parameter VARCHAR(100)",
                 "ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS method VARCHAR(100)",
@@ -147,11 +121,16 @@ def _run_hd_migrations():
                     VALUES ('alert_recipients', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId แพทย์', NOW())
                     ON CONFLICT (key) DO NOTHING""",
             ]
+            ok = 0
             for sql in fixes:
+                one_line = " ".join(sql.split())[:70]
                 try:
                     cur.execute(sql)
+                    ok += 1
+                    logger.info("HD fix OK: %s", one_line)
                 except Exception as fix_err:
-                    logger.warning("HD fix: %s — %s", sql[:60], fix_err)
+                    logger.warning("HD fix FAILED: %s | %s", one_line, " ".join(str(fix_err).split()))
+            logger.info("HD fixes: %d/%d succeeded", ok, len(fixes))
         conn.close()
         logger.info("HD post-migration fixes: done")
     except Exception as e:

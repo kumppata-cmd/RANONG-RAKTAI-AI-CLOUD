@@ -586,24 +586,8 @@ INSERT INTO hd_schema_version (version, description)
 VALUES ('2.0.0', 'Clinic Profile & Accreditation — profile, staff, equipment, water, incidents, self-assessment')
 ON CONFLICT (version) DO NOTHING;
 
--- v2.0.1: Fixes are applied by __init__.py post-migration script (runs every boot)
--- See _run_hd_migrations() in __init__.py for DROP CONSTRAINT + ALTER + ADD COLUMN
-ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
-
-INSERT INTO hd_settings (key, value, description, updated_at)
-VALUES ('physician_line_id', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId ของแพทย์ (Dr. Kamphon)', NOW())
-ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
-
-CREATE TABLE IF NOT EXISTS hd_sop_files (
-    id SERIAL PRIMARY KEY, sop_key VARCHAR(80) NOT NULL,
-    filename VARCHAR(255) NOT NULL, content_type VARCHAR(100),
-    file_size INTEGER, file_data BYTEA NOT NULL,
-    uploaded_by VARCHAR(100), uploaded_at TIMESTAMP DEFAULT NOW()
-);
-
-INSERT INTO hd_schema_version (version, description)
-VALUES ('2.0.1', 'LINE alert recipients + fix reported_by/updated_by column types + SOP files table')
-ON CONFLICT (version) DO NOTHING;
+-- v2.0.1: Schema fixes (DROP FK / ALTER type / ADD COLUMN) are applied by the
+-- post-migration script in __init__.py, which runs every boot statement-by-statement.
 """
 
 # ── Rollback migration ────────────────────────────────────
