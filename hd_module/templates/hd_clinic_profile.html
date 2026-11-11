@@ -218,9 +218,20 @@
       <h3 id="sopViewTitle" style="margin:0;font-size:1rem">📚 คู่มือ</h3>
       <button onclick="document.getElementById('sopViewModal').classList.remove('open')" style="border:none;background:none;font-size:1.2rem;cursor:pointer">✕</button>
     </div>
-    <div id="sopViewContent" style="font-size:.85rem;line-height:1.7;white-space:pre-wrap;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;min-height:120px"></div>
+    <div id="sopViewContent" style="font-size:.85rem;line-height:1.7;white-space:pre-wrap;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;min-height:60px"></div>
+    <!-- File list -->
+    <div style="margin-top:12px">
+      <div style="font-size:.8rem;font-weight:700;margin-bottom:6px">📎 ไฟล์แนบ</div>
+      <div id="sopFileList" style="display:flex;flex-direction:column;gap:4px"><span style="font-size:.75rem;color:var(--fg-muted)">กำลังโหลด...</span></div>
+    </div>
+    <!-- Upload -->
+    <div style="margin-top:10px;padding:10px;background:var(--bg);border:1px dashed var(--border);border-radius:8px;text-align:center">
+      <input type="file" id="sopFileInput" accept=".pdf,.png,.jpg,.jpeg,.doc,.docx,.xls,.xlsx" style="display:none" onchange="uploadSopFile()">
+      <button onclick="document.getElementById('sopFileInput').click()" class="add-btn" style="font-size:.8rem">📤 อัปโหลดไฟล์ (PDF/รูปภาพ/Word)</button>
+      <div style="font-size:.65rem;color:var(--fg-muted);margin-top:4px">สูงสุด 10 MB ต่อไฟล์</div>
+    </div>
     <div style="display:flex;gap:8px;margin-top:12px">
-      <button class="save-btn" style="background:var(--accent)" onclick="editCurrentSop()">✏️ แก้ไข</button>
+      <button class="save-btn" style="background:var(--accent)" onclick="editCurrentSop()">✏️ แก้ไขเนื้อหา</button>
     </div>
   </div>
 </div>
@@ -861,11 +872,20 @@ const SOP_DEFAULTS = [
 ];
 let _sopData = {};
 
+let _sopFiles = {};
 function loadSops(){
-  hdFetch('/hd/api/v1/clinic-profile?section=sop').then(r=>r.json()).then(d=>{
-    const items = (d.sections||{}).sop || [];
+  Promise.all([
+    hdFetch('/hd/api/v1/clinic-profile?section=sop').then(r=>r.json()),
+    hdFetch('/hd/api/v1/clinic-profile/sop-files').then(r=>r.json()),
+  ]).then(([profileData, fileData])=>{
+    const items = (profileData.sections||{}).sop || [];
     _sopData = {};
     items.forEach(i=>{ _sopData[i.key] = i; });
+    /* Count files per sop_key */
+    _sopFiles = {};
+    (fileData.files||[]).forEach(f=>{
+      _sopFiles[f.sop_key] = (_sopFiles[f.sop_key]||0) + 1;
+    });
     renderSopList();
   }).catch(()=>renderSopList());
 }
@@ -882,11 +902,13 @@ function renderSopList(){
     const db = _sopData[def.key];
     const title = db ? (db.value ? def.title : def.title) : def.title;
     const hasContent = db && db.value;
-    const badge = hasContent ? '<span class="log-badge pass" style="font-size:.6rem">มีเนื้อหา</span>' : '<span class="log-badge fail" style="font-size:.6rem">ว่าง</span>';
+    const fileCount = _sopFiles[def.key] || 0;
+    const fileBadge = fileCount ? `<span class="log-badge pass" style="font-size:.6rem">📎 ${fileCount} ไฟล์</span>` : '';
+    const badge = hasContent ? '<span class="log-badge pass" style="font-size:.6rem">มีเนื้อหา</span>' : (fileCount ? '' : '<span class="log-badge fail" style="font-size:.6rem">ว่าง</span>');
     html += `<div class="log-item" style="cursor:pointer" onclick="viewSop('${def.key}','${def.icon}','${def.title.replace(/'/g,"\\'")}')">
       <span style="font-size:1.2rem">${def.icon}</span>
       <div class="log-body"><strong>${def.title}</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">${def.desc}</span></div>
-      ${badge}
+      ${badge} ${fileBadge}
     </div>`;
   });
   /* Custom SOPs (not in defaults) */
@@ -911,8 +933,69 @@ function viewSop(key, icon, title){
   document.getElementById('sopViewTitle').textContent = icon+' '+title;
   const db = _sopData[key];
   const content = db ? db.value : '';
-  document.getElementById('sopViewContent').textContent = content || '(ยังไม่มีเนื้อหา — กด ✏️ แก้ไข เพื่อเพิ่ม)';
+  document.getElementById('sopViewContent').textContent = content || '(ยังไม่มีเนื้อหา — กด ✏️ แก้ไขเนื้อหา หรืออัปโหลดไฟล์)';
   document.getElementById('sopViewModal').classList.add('open');
+  loadSopFiles(key);
+}
+
+function loadSopFiles(key){
+  const el = document.getElementById('sopFileList');
+  el.innerHTML = '<span style="font-size:.75rem;color:var(--fg-muted)">กำลังโหลด...</span>';
+  hdFetch('/hd/api/v1/clinic-profile/sop-files?sop_key='+encodeURIComponent(key)).then(r=>r.json()).then(d=>{
+    const files = d.files||[];
+    if(!files.length){el.innerHTML='<span style="font-size:.75rem;color:var(--fg-muted)">ยังไม่มีไฟล์ — กด 📤 อัปโหลด</span>';return}
+    el.innerHTML = files.map(f=>{
+      const sizeKB = f.size ? Math.round(f.size/1024) : '?';
+      const icon = f.content_type?.includes('pdf')?'📄':f.content_type?.includes('image')?'🖼️':'📎';
+      const dt = f.uploaded_at ? new Date(f.uploaded_at).toLocaleDateString('th-TH',{day:'2-digit',month:'short'}) : '';
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg-card);border:1px solid var(--border);border-radius:6px">
+        <span style="font-size:1rem">${icon}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:.8rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.filename}</div>
+          <div style="font-size:.65rem;color:var(--fg-muted)">${sizeKB} KB · ${dt} ${f.uploaded_by?'· '+f.uploaded_by:''}</div>
+        </div>
+        <a href="/hd/api/v1/clinic-profile/sop-files/${f.id}/download" target="_blank" style="border:none;background:var(--accent);color:#fff;padding:4px 10px;border-radius:6px;font-size:.7rem;font-weight:600;text-decoration:none;white-space:nowrap">📥 ดาวน์โหลด</a>
+        <button onclick="deleteSopFile(${f.id},'${f.filename.replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;font-size:.8rem" title="ลบ">🗑️</button>
+      </div>`;
+    }).join('');
+  }).catch(()=>{el.innerHTML='<span style="font-size:.75rem;color:var(--danger)">โหลดไม่สำเร็จ</span>';});
+}
+
+function uploadSopFile(){
+  const input = document.getElementById('sopFileInput');
+  const file = input.files[0];
+  if(!file) return;
+  if(file.size > 10*1024*1024){showToast('ไฟล์ใหญ่เกิน 10 MB','danger');input.value='';return}
+
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('sop_key', _currentSopKey);
+  formData.append('uploaded_by', '');
+
+  showToast('กำลังอัปโหลด...','info');
+  const token = getHdToken();
+  fetch('/hd/api/v1/clinic-profile/sop-files', {
+    method:'POST',
+    headers: token ? {'Authorization':'Bearer '+token} : {},
+    body: formData
+  }).then(r=>r.json()).then(d=>{
+    input.value='';
+    if(d.error){showToast(d.error,'danger');return}
+    showToast('อัปโหลด "'+d.filename+'" สำเร็จ','success');
+    loadSopFiles(_currentSopKey);
+    loadSops();
+  }).catch(()=>{input.value='';showToast('อัปโหลดไม่สำเร็จ','danger');});
+}
+
+function deleteSopFile(id, name){
+  if(!confirm('ลบไฟล์ "'+name+'" ?'))return;
+  hdFetch('/hd/api/v1/clinic-profile/sop-files/'+id,{method:'DELETE'})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('ลบไฟล์สำเร็จ','success');
+      loadSopFiles(_currentSopKey);
+      loadSops();
+    }).catch(()=>showToast('ลบไม่สำเร็จ','danger'));
 }
 
 function editCurrentSop(){

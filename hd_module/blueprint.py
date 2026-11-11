@@ -5158,6 +5158,136 @@ def save_incident():
         return jsonify({"error": str(e)}), 500
 
 
+# ── SOP Files (upload/download) ─────────────────────────
+
+@hd_bp.route("/clinic-profile/sop-files", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def list_sop_files():
+    """List SOP files, optionally filtered by sop_key."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    files = []
+    if not db_url:
+        return jsonify({"files": files})
+    sop_key = request.args.get("sop_key", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_sop_files (
+                id SERIAL PRIMARY KEY, sop_key VARCHAR(80) NOT NULL,
+                filename VARCHAR(255) NOT NULL, content_type VARCHAR(100),
+                file_size INTEGER, file_data BYTEA NOT NULL,
+                uploaded_by VARCHAR(100), uploaded_at TIMESTAMP DEFAULT NOW())""")
+            conn.commit()
+            if sop_key:
+                cur.execute("""SELECT id, sop_key, filename, content_type, file_size, uploaded_by, uploaded_at
+                    FROM hd_sop_files WHERE sop_key = %s ORDER BY uploaded_at DESC""", (sop_key,))
+            else:
+                cur.execute("""SELECT id, sop_key, filename, content_type, file_size, uploaded_by, uploaded_at
+                    FROM hd_sop_files ORDER BY uploaded_at DESC""")
+            for r in cur.fetchall():
+                files.append({
+                    "id": r[0], "sop_key": r[1], "filename": r[2],
+                    "content_type": r[3], "size": r[4], "uploaded_by": r[5],
+                    "uploaded_at": r[6].isoformat() + "Z" if r[6] else None,
+                })
+        conn.close()
+    except Exception as e:
+        logger.warning("sop_files GET: %s", e)
+    return jsonify({"files": files})
+
+
+@hd_bp.route("/clinic-profile/sop-files", methods=["POST"])
+@require_role("physician", "admin")
+def upload_sop_file():
+    """Upload a file for an SOP."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+
+    sop_key = request.form.get("sop_key", "")
+    uploaded_by = request.form.get("uploaded_by", "")
+    f = request.files.get("file")
+    if not f or not sop_key:
+        return jsonify({"error": "sop_key and file required"}), 400
+
+    filename = f.filename or "unknown"
+    content_type = f.content_type or "application/octet-stream"
+    file_data = f.read()
+    file_size = len(file_data)
+
+    # Limit 10 MB
+    if file_size > 10 * 1024 * 1024:
+        return jsonify({"error": "ไฟล์ใหญ่เกิน 10 MB"}), 400
+
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_sop_files (
+                id SERIAL PRIMARY KEY, sop_key VARCHAR(80) NOT NULL,
+                filename VARCHAR(255) NOT NULL, content_type VARCHAR(100),
+                file_size INTEGER, file_data BYTEA NOT NULL,
+                uploaded_by VARCHAR(100), uploaded_at TIMESTAMP DEFAULT NOW())""")
+            cur.execute("""INSERT INTO hd_sop_files (sop_key, filename, content_type, file_size, file_data, uploaded_by)
+                VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                (sop_key, filename, content_type, file_size, psycopg2.Binary(file_data), uploaded_by))
+            new_id = cur.fetchone()[0]
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": new_id, "filename": filename, "size": file_size})
+    except Exception as e:
+        logger.warning("sop_files POST: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/sop-files/<int:file_id>/download", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def download_sop_file(file_id):
+    """Download a SOP file."""
+    import os, psycopg2
+    from flask import Response
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT filename, content_type, file_data FROM hd_sop_files WHERE id = %s", (file_id,))
+            r = cur.fetchone()
+        conn.close()
+        if not r:
+            return jsonify({"error": "not found"}), 404
+        filename, ctype, data = r[0], r[1], bytes(r[2])
+        resp = Response(data, content_type=ctype)
+        resp.headers["Content-Disposition"] = f'inline; filename="{filename}"'
+        resp.headers["Content-Length"] = str(len(data))
+        return resp
+    except Exception as e:
+        logger.warning("sop_files download: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/sop-files/<int:file_id>", methods=["DELETE"])
+@require_role("physician", "admin")
+def delete_sop_file(file_id):
+    """Delete a SOP file."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM hd_sop_files WHERE id = %s", (file_id,))
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.warning("sop_files DELETE: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/clinic-profile/self-assessment", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def get_self_assessment():
