@@ -148,7 +148,7 @@
   <div class="cp-card">
     <h3>⚙️ ทะเบียนอุปกรณ์ <button class="add-btn" onclick="openEquipModal()" style="margin-left:auto">➕ เพิ่ม</button></h3>
     <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
-      <table class="cp-table"><thead><tr><th>ประเภท</th><th>ยี่ห้อ/รุ่น</th><th>S/N</th><th>เตียง</th><th>สถานะ</th><th>PM ถัดไป</th></tr></thead>
+      <table class="cp-table"><thead><tr><th>ประเภท</th><th>ยี่ห้อ/รุ่น</th><th>S/N</th><th>เตียง</th><th>สถานะ</th><th>PM ถัดไป</th><th>จัดการ</th></tr></thead>
         <tbody id="equipBody"><tr><td colspan="6" class="cp-empty">กำลังโหลด...</td></tr></tbody>
       </table>
     </div>
@@ -251,7 +251,8 @@
 <!-- Add Equipment Modal -->
 <div class="cp-modal" id="equipModal" onclick="if(event.target===this)this.classList.remove('open')">
   <div class="cp-sheet">
-    <h3>➕ เพิ่มอุปกรณ์</h3>
+    <h3 id="equipModalTitle">➕ เพิ่มอุปกรณ์</h3>
+    <input type="hidden" id="eq_edit_id">
     <div class="field-grid">
       <div class="cp-field"><div class="flabel">ประเภท</div><select id="eq_type">
         <option value="dialysis_machine">เครื่องฟอกเลือด</option>
@@ -491,11 +492,13 @@ function saveStaff(){
 }
 
 /* Equipment */
+let _equipData = [];
 function loadEquipment(){
   hdFetch('/hd/api/v1/clinic-profile/equipment').then(r=>r.json()).then(d=>{
     const body = document.getElementById('equipBody');
     const list = d.equipment||[];
-    if(!list.length){body.innerHTML='<tr><td colspan="6" class="cp-empty">ยังไม่มีข้อมูล — กด ➕ เพิ่ม</td></tr>';return}
+    _equipData = list;
+    if(!list.length){body.innerHTML='<tr><td colspan="7" class="cp-empty">ยังไม่มีข้อมูล — กด ➕ เพิ่ม</td></tr>';return}
     const typeMap={dialysis_machine:'เครื่องฟอก',defibrillator:'Defibrillator',ro_system:'RO System',scale:'เครื่องชั่ง',bp_monitor:'BP Monitor',o2:'O2 Tank',suction:'Suction'};
     body.innerHTML=list.map(e=>{
       const stCls = e.status==='active'?'status-active':e.status==='repair'?'status-repair':'status-spare';
@@ -507,9 +510,39 @@ function loadEquipment(){
         <td>${e.bed||'-'}</td>
         <td><span class="status-badge ${stCls}">${stLabel}</span></td>
         <td>${e.next_pm||'-'}</td>
+        <td style="white-space:nowrap">
+          <button onclick="editEquip(${e.id})" style="border:none;background:none;cursor:pointer;font-size:.85rem" title="แก้ไข">✏️</button>
+          <button onclick="deleteEquip(${e.id},'${(e.brand||'').replace(/'/g,"\\'")} ${(e.model||'').replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;font-size:.85rem" title="ลบ">🗑️</button>
+        </td>
       </tr>`;
     }).join('');
   }).catch(()=>{});
+}
+
+function editEquip(id){
+  const e = _equipData.find(x=>x.id===id);
+  if(!e) return;
+  document.getElementById('eq_edit_id').value = e.id;
+  document.getElementById('eq_type').value = e.type||'dialysis_machine';
+  document.getElementById('eq_brand').value = e.brand||'';
+  document.getElementById('eq_model').value = e.model||'';
+  document.getElementById('eq_serial').value = e.serial||'';
+  document.getElementById('eq_bed').value = e.bed||'';
+  document.getElementById('eq_status').value = e.status||'active';
+  document.getElementById('eq_last_pm').value = e.last_pm||'';
+  document.getElementById('eq_next_pm').value = e.next_pm||'';
+  document.getElementById('eq_notes').value = e.notes||'';
+  document.getElementById('equipModal').classList.add('open');
+}
+
+function deleteEquip(id, name){
+  if(!confirm('ลบอุปกรณ์ "'+name+'" ?\n\nข้อมูลจะถูกลบถาวร')) return;
+  hdFetch('/hd/api/v1/clinic-profile/equipment/'+id,{method:'DELETE'})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('ลบสำเร็จ','success');
+      loadEquipment();
+    }).catch(()=>showToast('ลบไม่สำเร็จ','danger'));
 }
 
 /* Self Assessment — ศ.ร.ต. Checklist */
@@ -586,6 +619,8 @@ function saveSelfAssessment(){
 
 /* ── Equipment Modal ── */
 function openEquipModal(){
+  document.getElementById('eq_edit_id').value='';
+  document.getElementById('equipModalTitle').textContent='➕ เพิ่มอุปกรณ์';
   ['eq_brand','eq_model','eq_serial','eq_bed','eq_last_pm','eq_next_pm','eq_notes'].forEach(id=>{
     const el=document.getElementById(id); if(el) el.value='';
   });
@@ -594,7 +629,9 @@ function openEquipModal(){
   document.getElementById('equipModal').classList.add('open');
 }
 function saveEquipment(){
+  const editId = document.getElementById('eq_edit_id').value;
   const data={
+    id: editId||null,
     type: document.getElementById('eq_type').value,
     brand: document.getElementById('eq_brand').value,
     model: document.getElementById('eq_model').value,

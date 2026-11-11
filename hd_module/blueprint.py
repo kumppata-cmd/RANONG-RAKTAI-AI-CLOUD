@@ -4909,6 +4909,26 @@ def save_equipment():
         return jsonify({"error": str(e)}), 500
 
 
+@hd_bp.route("/clinic-profile/equipment/<int:equip_id>", methods=["DELETE"])
+@require_role("physician", "admin")
+def delete_equipment(equip_id):
+    """Delete equipment by ID."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM hd_equipment WHERE id = %s", (equip_id,))
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.warning("equipment DELETE: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/clinic-profile/water-quality", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def get_water_quality():
