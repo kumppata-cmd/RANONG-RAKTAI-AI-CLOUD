@@ -4710,35 +4710,25 @@ def get_clinic_profile():
     if not db_url:
         return jsonify({"sections": sections})
     try:
+        # Fix schema with separate autocommit connection
+        ddl_conn = psycopg2.connect(db_url, connect_timeout=5)
+        ddl_conn.autocommit = True
+        with ddl_conn.cursor() as ddl:
+            ddl.execute("""SELECT con.conname FROM pg_constraint con
+                JOIN pg_attribute att ON att.attnum = ANY(con.conkey) AND att.attrelid = con.conrelid
+                WHERE con.conrelid = 'hd_clinic_profile'::regclass
+                AND att.attname = 'updated_by' AND con.contype = 'f'""")
+            for row in ddl.fetchall():
+                ddl.execute(f"ALTER TABLE hd_clinic_profile DROP CONSTRAINT IF EXISTS {row[0]}")
+            ddl.execute("""SELECT data_type FROM information_schema.columns
+                WHERE table_name='hd_clinic_profile' AND column_name='updated_by'""")
+            ci = ddl.fetchone()
+            if ci and ci[0] == 'integer':
+                ddl.execute("ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100) USING updated_by::text")
+        ddl_conn.close()
+
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
-            # Auto-create table
-            cur.execute("""CREATE TABLE IF NOT EXISTS hd_clinic_profile (
-                id SERIAL PRIMARY KEY, section VARCHAR(30) NOT NULL, item_key VARCHAR(80) NOT NULL,
-                item_value TEXT, file_url VARCHAR(500), expires_at DATE,
-                updated_by VARCHAR(100), updated_at TIMESTAMP DEFAULT NOW(),
-                UNIQUE(section, item_key))""")
-            conn.commit()
-            # Always drop FK + fix column type if needed
-            conn.autocommit = True
-            try:
-                cur.execute("""SELECT tc.constraint_name FROM information_schema.table_constraints tc
-                    JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-                    WHERE tc.table_name='hd_clinic_profile' AND kcu.column_name='updated_by'
-                    AND tc.constraint_type='FOREIGN KEY'""")
-                for fk in cur.fetchall():
-                    cur.execute(f"ALTER TABLE hd_clinic_profile DROP CONSTRAINT {fk[0]}")
-            except Exception:
-                pass
-            try:
-                cur.execute("""SELECT data_type FROM information_schema.columns
-                    WHERE table_name='hd_clinic_profile' AND column_name='updated_by'""")
-                ci = cur.fetchone()
-                if ci and ci[0] != 'character varying':
-                    cur.execute("ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100) USING updated_by::text")
-            except Exception:
-                pass
-            conn.autocommit = False
             cur.execute("SELECT section, item_key, item_value, file_url, expires_at FROM hd_clinic_profile ORDER BY section, id")
             for r in cur.fetchall():
                 sec = r[0]
@@ -5113,10 +5103,26 @@ def save_water_quality():
     has_file = False
 
     try:
+        # Step 1: Add missing columns with separate autocommit connection
+        ddl_conn = psycopg2.connect(db_url, connect_timeout=5)
+        ddl_conn.autocommit = True
+        with ddl_conn.cursor() as ddl:
+            for col, ctype in [('parameter','VARCHAR(100)'),('method','VARCHAR(100)'),
+                               ('tested_by','VARCHAR(100)'),('send_date','DATE')]:
+                ddl.execute(f"ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS {col} {ctype}")
+            # Fix recorded_by FK if exists
+            ddl.execute("""SELECT con.conname FROM pg_constraint con
+                JOIN pg_attribute att ON att.attnum = ANY(con.conkey) AND att.attrelid = con.conrelid
+                WHERE con.conrelid = 'hd_water_quality'::regclass
+                AND att.attname = 'recorded_by' AND con.contype = 'f'""")
+            for row in ddl.fetchall():
+                ddl.execute(f"ALTER TABLE hd_water_quality DROP CONSTRAINT IF EXISTS {row[0]}")
+        ddl_conn.close()
+
+        # Step 2: INSERT with normal connection
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
-            # Use only columns that the migration created
-            # Migration schema: test_date, test_type, result_value, unit, pass_fail, lab_name, notes, recorded_by
+            # Check actual columns
             cur.execute("""SELECT column_name FROM information_schema.columns
                 WHERE table_name='hd_water_quality'""")
             existing = {r[0] for r in cur.fetchall()}
@@ -5256,48 +5262,34 @@ def save_incident():
         return jsonify({"error": "no db"}), 500
     data = request.get_json(force=True)
     try:
+        # Step 1: Fix schema with SEPARATE autocommit connection
+        ddl_conn = psycopg2.connect(db_url, connect_timeout=5)
+        ddl_conn.autocommit = True
+        with ddl_conn.cursor() as ddl:
+            # Drop FK constraint on reported_by (root cause of all errors)
+            ddl.execute("""SELECT con.conname FROM pg_constraint con
+                JOIN pg_attribute att ON att.attnum = ANY(con.conkey) AND att.attrelid = con.conrelid
+                WHERE con.conrelid = 'hd_incidents'::regclass
+                AND att.attname = 'reported_by' AND con.contype = 'f'""")
+            for row in ddl.fetchall():
+                ddl.execute(f"ALTER TABLE hd_incidents DROP CONSTRAINT IF EXISTS {row[0]}")
+                logger.info("Dropped FK: %s", row[0])
+            # Ensure reported_by is VARCHAR
+            ddl.execute("""SELECT data_type FROM information_schema.columns
+                WHERE table_name='hd_incidents' AND column_name='reported_by'""")
+            ct = ddl.fetchone()
+            if ct and ct[0] == 'integer':
+                ddl.execute("ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100) USING reported_by::text")
+                logger.info("ALTER hd_incidents.reported_by → VARCHAR")
+            # Add resolved_at if missing
+            ddl.execute("ALTER TABLE hd_incidents ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP")
+        ddl_conn.close()
+
+        # Step 2: INSERT with normal connection
+        inc_date = data.get("date") or _thai_today().isoformat()
+        reported_name = data.get("reported_by", "")
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
-            cur.execute("""CREATE TABLE IF NOT EXISTS hd_incidents (
-                id SERIAL PRIMARY KEY, incident_date TIMESTAMP NOT NULL,
-                incident_type VARCHAR(30) NOT NULL, severity VARCHAR(20) DEFAULT 'minor',
-                description TEXT, action_taken TEXT, reported_by VARCHAR(100),
-                status VARCHAR(20) DEFAULT 'open', resolved_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT NOW())""")
-            inc_date = data.get("date") or _thai_today().isoformat()
-            reported_name = data.get("reported_by", "")
-
-            # Always drop FK constraint on reported_by if it exists (fixes type mismatch)
-            conn.autocommit = True
-            try:
-                cur.execute("""SELECT tc.constraint_name FROM information_schema.table_constraints tc
-                    JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
-                    WHERE tc.table_name='hd_incidents' AND kcu.column_name='reported_by'
-                    AND tc.constraint_type='FOREIGN KEY'""")
-                for fk in cur.fetchall():
-                    cur.execute(f"ALTER TABLE hd_incidents DROP CONSTRAINT {fk[0]}")
-                    logger.info("Dropped FK constraint: %s", fk[0])
-            except Exception as fke:
-                logger.warning("Drop FK: %s", fke)
-            # Ensure reported_by is VARCHAR
-            try:
-                cur.execute("""SELECT data_type FROM information_schema.columns
-                    WHERE table_name='hd_incidents' AND column_name='reported_by'""")
-                col_type = cur.fetchone()
-                if col_type and col_type[0] != 'character varying':
-                    cur.execute("ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100) USING reported_by::text")
-                    logger.info("Fixed hd_incidents.reported_by → VARCHAR(100)")
-            except Exception as ate:
-                logger.warning("ALTER reported_by: %s", ate)
-            conn.autocommit = False
-
-            # Add resolved_at if missing
-            cur.execute("""SELECT 1 FROM information_schema.columns
-                WHERE table_name='hd_incidents' AND column_name='resolved_at'""")
-            if not cur.fetchone():
-                cur.execute("ALTER TABLE hd_incidents ADD COLUMN resolved_at TIMESTAMP")
-                conn.commit()
-
             cur.execute("""INSERT INTO hd_incidents (incident_date, incident_type, severity,
                 description, action_taken, reported_by, status)
                 VALUES (%s::date, %s, %s, %s, %s, %s, 'open') RETURNING id""",
