@@ -52,7 +52,7 @@
 .bed-critical { border-color: var(--danger); background: rgba(231,76,60,.08); animation: pulse 1.5s infinite; }
 .bed-critical .bed-status::before { content: '🔴'; }
 @keyframes pulse { 0%,100% { box-shadow: 0 0 0 0 rgba(231,76,60,.3); } 50% { box-shadow: 0 0 0 8px rgba(231,76,60,0); } }
-.bed-done { border-color: #95a5a6; opacity: .5; }
+.bed-done { border-color: #27ae60; background: rgba(39,174,96,.06); opacity: .75; }
 .bed-done .bed-status::before { content: '✅'; }
 /* Stats bar */
 .stats-bar { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
@@ -399,7 +399,8 @@ function renderBeds(beds){
 
     if(b.status==='active') counts.active++;
     else if(b.status==='pre_hd') counts.pre++;
-    else if(b.status==='available'||b.status==='done') counts.available++;
+    else if(b.status==='done') counts.done = (counts.done||0)+1;
+    else if(b.status==='available') counts.available++;
     if(b.status==='warning') counts.warning++;
     if(b.status==='critical') counts.critical++;
   });

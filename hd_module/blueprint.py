@@ -1720,13 +1720,14 @@ def bed_dashboard():
                            s.shift as saved_shift
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
-                    WHERE s.status IN ('scheduled', 'in_progress')
+                    WHERE s.status IN ('scheduled', 'in_progress', 'completed')
                       AND s.session_date = %s
                       AND (s.shift = %s OR (s.shift IS NULL AND %s = 'morning'))
                     ORDER BY s.bed_number,
                              CASE s.status
                                WHEN 'scheduled' THEN 0
-                               WHEN 'in_progress' THEN 1
+                               WHEN 'completed' THEN 1
+                               WHEN 'in_progress' THEN 2
                              END
                 """, (target_date.isoformat(), current_shift, current_shift))
                 rows = cur.fetchall()
@@ -1738,9 +1739,10 @@ def bed_dashboard():
                     if 1 <= bed_num <= HdConfig.TOTAL_BEDS:
                         db_status = row[2]
                         js_status = {"in_progress": "active", "scheduled": "pre_hd", "completed": "done"}.get(db_status, db_status)
-                        # Priority: in_progress > scheduled on same bed
+                        # Priority: in_progress > completed > scheduled on same bed
                         current_bed = beds[bed_num - 1]
-                        if current_bed.get("status") == "active" and js_status == "pre_hd":
+                        cur_st = current_bed.get("status")
+                        if cur_st == "active" and js_status in ("pre_hd", "done"):
                             # Bed already active — mark next_scheduled instead
                             beds[bed_num - 1]["next_scheduled"] = row[4]  # patient_name
                             beds[bed_num - 1]["next_scheduled_hn"] = row[3]
@@ -1945,7 +1947,7 @@ def debug_sessions_today():
             for shift in ["morning", "afternoon", "evening"]:
                 cur.execute("""
                     SELECT COUNT(*) FROM hd_sessions s
-                    WHERE s.status IN ('scheduled', 'in_progress')
+                    WHERE s.status IN ('scheduled', 'in_progress', 'completed')
                       AND s.session_date = %s
                       AND (s.shift = %s OR (s.shift IS NULL AND %s = 'morning'))
                 """, (today.isoformat(), shift, shift))
