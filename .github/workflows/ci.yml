@@ -23,7 +23,7 @@ jobs:
   # ---------------------------------------------------------------------------
   lint:
     name: "Lint & Syntax Check"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -81,7 +81,7 @@ jobs:
   # ---------------------------------------------------------------------------
   test:
     name: "Tests"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: lint
 
     steps:
@@ -95,8 +95,13 @@ jobs:
 
       - name: Install Tesseract OCR
         run: |
-          sudo apt-get update
-          sudo apt-get install -y tesseract-ocr tesseract-ocr-tha tesseract-ocr-eng
+          # Retry: GitHub's apt mirrors occasionally fail DNS resolution
+          for i in 1 2 3 4 5; do
+            sudo apt-get update -o Acquire::Retries=3 && \
+            sudo apt-get install -y -o Acquire::Retries=3 tesseract-ocr tesseract-ocr-tha tesseract-ocr-eng && break
+            echo "apt attempt $i failed — retrying in 20s"; sleep 20
+          done
+          tesseract --version | head -1
 
       - name: Install dependencies
         run: |
@@ -156,7 +161,7 @@ jobs:
   # ---------------------------------------------------------------------------
   security:
     name: "Security Checks"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -283,7 +288,7 @@ jobs:
   # ---------------------------------------------------------------------------
   dependency-check:
     name: "Dependency Check"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout code
@@ -325,7 +330,7 @@ jobs:
   # ---------------------------------------------------------------------------
   docker-boot:
     name: "Docker Build & Boot"
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: lint
 
     steps:
