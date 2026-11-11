@@ -282,7 +282,7 @@ def hd_health():
 
 @hd_bp.route("/auth/login", methods=["POST"])
 def hd_login():
-    """Login and receive JWT token."""
+    """Login with username+password OR PIN."""
     import os
     from .auth import verify_password, create_token
     from .config import HdConfig
@@ -290,8 +290,9 @@ def hd_login():
     data = request.get_json(silent=True) or {}
     username = data.get("username", "")
     password = data.get("password", "")
+    pin = data.get("pin", "")
 
-    if not username or not password:
+    if not pin and (not username or not password):
         return jsonify({"error": "Username and password required"}), 400
 
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
@@ -301,6 +302,49 @@ def hd_login():
     try:
         import psycopg2
         conn = psycopg2.connect(db_url, connect_timeout=5)
+
+        # ── PIN login ──
+        if pin:
+            with conn.cursor() as cur:
+                # Check if pin_hash column exists
+                cur.execute("""SELECT 1 FROM information_schema.columns
+                    WHERE table_name='hd_users' AND column_name='pin_hash'""")
+                if not cur.fetchone():
+                    conn.close()
+                    return jsonify({"error": "ระบบ PIN ยังไม่พร้อม — กรุณาใช้ username/password"}), 400
+
+                # Find user by PIN
+                cur.execute("""SELECT id, username, pin_hash, full_name, role,
+                    is_active, failed_attempts, locked_until
+                    FROM hd_users WHERE pin_hash IS NOT NULL AND is_active = TRUE""")
+                pin_matched = False
+                for prow in cur.fetchall():
+                    if verify_password(pin, prow[2]):
+                        user_id, uname, _, full_name, role = prow[0], prow[1], prow[2], prow[3], prow[4]
+                        is_active, failed_attempts, locked_until = prow[5], prow[6], prow[7]
+                        pin_matched = True
+                        break
+                if not pin_matched:
+                    conn.close()
+                    return jsonify({"error": "PIN ไม่ถูกต้อง"}), 401
+
+                from datetime import datetime, timezone
+                if locked_until and locked_until > datetime.now(timezone.utc):
+                    conn.close()
+                    return jsonify({"error": "บัญชีถูกล็อกชั่วคราว"}), 403
+
+                # PIN success
+                cur.execute("UPDATE hd_users SET failed_attempts = 0, locked_until = NULL, last_login = NOW() WHERE id = %s", (user_id,))
+                conn.commit()
+            conn.close()
+            token = create_token(user_id, uname, role)
+            return jsonify({
+                "token": token,
+                "expires_in": HdConfig.JWT_EXPIRY_MINUTES * 60,
+                "user": {"id": user_id, "username": uname, "full_name": full_name, "role": role},
+            })
+
+        # ── Username/password login ──
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, username, password_hash, full_name, role,
@@ -373,6 +417,32 @@ def hd_login():
     except Exception as e:
         logger.error("HD login error: %s", e)
         return jsonify({"error": "ระบบขัดข้อง กรุณาลองใหม่"}), 500
+
+
+@hd_bp.route("/auth/set-pin", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def hd_set_pin():
+    """Set or change PIN for quick login."""
+    import os, psycopg2
+    from .auth import hash_password
+    data = request.get_json(silent=True) or {}
+    new_pin = data.get("pin", "")
+    if not new_pin or len(new_pin) < 4 or len(new_pin) > 8:
+        return jsonify({"error": "PIN ต้องมี 4-8 หลัก"}), 400
+    if not new_pin.isdigit():
+        return jsonify({"error": "PIN ต้องเป็นตัวเลขเท่านั้น"}), 400
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hd_users SET pin_hash = %s WHERE id = %s",
+                        (hash_password(new_pin), g.get("hd_user_id")))
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "message": "ตั้ง PIN สำเร็จ"})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @hd_bp.route("/auth/refresh", methods=["POST"])

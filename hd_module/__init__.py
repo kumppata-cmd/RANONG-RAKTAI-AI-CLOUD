@@ -134,6 +134,8 @@ def _run_hd_migrations():
                 "ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS send_date DATE",
                 # Add resolved_at to incidents
                 "ALTER TABLE hd_incidents ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP",
+                # Add pin_hash to hd_users for PIN login
+                "ALTER TABLE hd_users ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255)",
                 # Create SOP files table
                 """CREATE TABLE IF NOT EXISTS hd_sop_files (
                     id SERIAL PRIMARY KEY, sop_key VARCHAR(80) NOT NULL,

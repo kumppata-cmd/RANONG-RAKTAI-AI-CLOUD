@@ -17,6 +17,28 @@
 {% endblock %}
 
 {% block content %}
+<!-- PIN Setup -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🔢 ตั้ง PIN เข้าสู่ระบบ</span>
+    <button class="btn btn-primary save-btn" onclick="savePin()">💾 ตั้ง PIN</button>
+  </div>
+  <div style="margin-top:12px;">
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="form-group">
+        <label class="form-label">PIN ใหม่ (4-8 หลัก)</label>
+        <input type="password" class="form-control" id="new_pin" placeholder="เช่น 1234" inputmode="numeric" maxlength="8" pattern="[0-9]*">
+      </div>
+      <div class="form-group">
+        <label class="form-label">ยืนยัน PIN</label>
+        <input type="password" class="form-control" id="confirm_pin" placeholder="กรอกอีกครั้ง" inputmode="numeric" maxlength="8" pattern="[0-9]*">
+      </div>
+    </div>
+    <div class="setting-desc">ตั้ง PIN แล้วใช้กดเข้าระบบได้เร็วแทนพิมพ์ username/password</div>
+    <div class="setting-status" id="pinStatus"></div>
+  </div>
+</div>
+
 <!-- Alert Recipients -->
 <div class="card setting-card">
   <div class="card-header">
@@ -146,6 +168,27 @@
       document.getElementById('healthInfo').innerHTML = 'สถานะ: <strong style="color:var(--danger);">ไม่สามารถเชื่อมต่อ</strong>';
     });
 })();
+
+/* ── PIN Setup ── */
+function savePin(){
+  const p1 = document.getElementById('new_pin').value;
+  const p2 = document.getElementById('confirm_pin').value;
+  if(!p1 || p1.length<4 || p1.length>8){showToast('PIN ต้องมี 4-8 หลัก','danger');return}
+  if(!/^\d+$/.test(p1)){showToast('PIN ต้องเป็นตัวเลขเท่านั้น','danger');return}
+  if(p1!==p2){showToast('PIN ไม่ตรงกัน','danger');return}
+  hdFetch('/hd/api/v1/auth/set-pin',{method:'POST',body:JSON.stringify({pin:p1})})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){
+        showToast('✅ ตั้ง PIN สำเร็จ — ใช้ PIN เข้าสู่ระบบได้แล้ว','success');
+        document.getElementById('new_pin').value='';
+        document.getElementById('confirm_pin').value='';
+        document.getElementById('pinStatus').innerHTML='✅ ตั้ง PIN แล้ว';
+        document.getElementById('pinStatus').style.color='var(--success)';
+      } else {
+        showToast(d.error||'ตั้ง PIN ไม่สำเร็จ','danger');
+      }
+    }).catch(()=>showToast('ตั้ง PIN ไม่สำเร็จ','danger'));
+}
 
 function saveSetting(key){
   const el = document.getElementById('setting_'+key);
