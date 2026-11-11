@@ -179,8 +179,13 @@ def notify_physician(push_fn, recipients, ctx, alerts, base_url):
         ok_any = False
         for uid in recipients:
             try:
-                push_fn(uid, msg)
-                ok_any = True
+                # push_message() returns False (and logs) on LINE API failure
+                # instead of raising — treat that as not sent so cooldown is
+                # not armed and the next reading retries.
+                if push_fn(uid, msg) is not False:
+                    ok_any = True
+                else:
+                    logger.warning("alert push to %s returned False (LINE API error / token missing)", str(uid)[:6])
             except Exception as e:   # never let LINE failure break the vital save
                 logger.warning("alert push to %s failed: %s", str(uid)[:6], e)
         if ok_any:

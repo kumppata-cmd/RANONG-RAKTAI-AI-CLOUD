@@ -50,6 +50,10 @@
     <input type="text" class="form-control" id="setting_alert_recipients" placeholder="Uxxxxxxxxxxxxxxxxx">
     <div class="setting-desc">ใส่ LINE userId จริงของแพทย์ (เริ่มต้นด้วย U) — เมื่อมี critical/warning alert ระบบจะ push LINE ไปหาทันที</div>
     <div class="setting-status" id="status_alert_recipients"></div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn btn-secondary" onclick="testLine()" id="btn_test_line">📨 ทดสอบส่ง LINE ถึงผู้รับ</button>
+      <span class="setting-status" id="status_test_line"></span>
+    </div>
   </div>
   <div class="how-to">
     <strong>วิธีหา LINE User ID ของตัวเอง:</strong>
@@ -188,6 +192,27 @@ function savePin(){
         showToast(d.error||'ตั้ง PIN ไม่สำเร็จ','danger');
       }
     }).catch(()=>showToast('ตั้ง PIN ไม่สำเร็จ','danger'));
+}
+
+/* ── Test LINE push to alert recipients ── */
+function testLine(){
+  const st = document.getElementById('status_test_line');
+  const btn = document.getElementById('btn_test_line');
+  btn.disabled = true; st.textContent = '⏳ กำลังส่ง…'; st.style.color = '';
+  hdFetch('/hd/api/v1/settings/test-line',{method:'POST',body:'{}'})
+    .then(r=>r.json()).then(d=>{
+      if(d.ok){
+        st.textContent = '✅ ส่งแล้ว — เช็ค LINE ของคุณ'; st.style.color='var(--success)';
+        showToast('✅ ส่ง LINE ทดสอบแล้ว','success');
+      } else {
+        const c = d.checks||{};
+        st.textContent = '❌ ' + (d.error||d.hint||'ส่งไม่สำเร็จ') +
+          ` (push_fn=${c.push_fn?'✓':'✗'} token=${c.channel_token?'✓':'✗'} ผู้รับ=${c.recipients??0})`;
+        st.style.color='var(--danger)';
+        showToast(d.error||d.hint||'ส่ง LINE ไม่สำเร็จ','danger');
+      }
+    }).catch(()=>{st.textContent='❌ เรียก API ไม่ได้'; st.style.color='var(--danger)';})
+    .finally(()=>{btn.disabled=false;});
 }
 
 function saveSetting(key){

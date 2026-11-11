@@ -2448,6 +2448,42 @@ def get_settings():
         return jsonify({"settings": {}, "error": str(e)})
 
 
+@hd_bp.route("/settings/test-line", methods=["POST"])
+@require_role("physician", "admin")
+def test_line_push():
+    """Send a test LINE push to the alert recipients so the physician can
+    verify the whole chain (token → Messaging API → userId) without entering
+    a vital on a real patient."""
+    import os
+    from flask import current_app
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+    recipients = [r.strip() for r in ids.split(",") if r.strip()]
+    checks = {
+        "push_fn": bool(push_fn),
+        "channel_token": bool(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN")),
+        "recipients": len(recipients),
+    }
+    if not push_fn:
+        return jsonify({"ok": False, "checks": checks, "error": "LINE_PUSH_FN ไม่ได้ตั้งค่าใน server"}), 500
+    if not checks["channel_token"]:
+        return jsonify({"ok": False, "checks": checks, "error": "ไม่มี LINE_CHANNEL_ACCESS_TOKEN บน Render"}), 500
+    if not recipients:
+        return jsonify({"ok": False, "checks": checks, "error": "ยังไม่ตั้งค่า alert_recipients"}), 400
+    msg = (f"🧪 ทดสอบระบบแจ้งเตือน HD Smart Monitoring\n"
+           f"ส่งโดย {g.get('hd_username') or 'HD'} · {_thai_now().strftime('%d/%m %H:%M')} น.\n"
+           f"ถ้าเห็นข้อความนี้ = alert ความดันตก/วิกฤตจะส่งถึงคุณได้")
+    results = {}
+    for uid in recipients:
+        try:
+            results[uid[:6] + "…"] = push_fn(uid, msg) is not False
+        except Exception as e:
+            results[uid[:6] + "…"] = f"error: {e}"
+    ok = any(v is True for v in results.values())
+    return jsonify({"ok": ok, "checks": checks, "results": results,
+                    "hint": None if ok else "LINE API ปฏิเสธ — ดู Render log บรรทัด [PUSH] (token หมดอายุ / userId ไม่ได้ add เพื่อน OA)"})
+
+
 @hd_bp.route("/settings", methods=["POST"])
 @require_role("physician", "admin")
 def update_settings():
