@@ -4719,20 +4719,26 @@ def get_clinic_profile():
                 updated_by VARCHAR(100), updated_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(section, item_key))""")
             conn.commit()
-            # Fix column type if migration created it as INTEGER
-            cur.execute("""SELECT data_type FROM information_schema.columns
-                WHERE table_name='hd_clinic_profile' AND column_name='updated_by'""")
-            col_info = cur.fetchone()
-            if col_info and col_info[0] == 'integer':
+            # Always drop FK + fix column type if needed
+            conn.autocommit = True
+            try:
                 cur.execute("""SELECT tc.constraint_name FROM information_schema.table_constraints tc
-                    JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
-                    WHERE tc.table_name='hd_clinic_profile' AND ccu.column_name='updated_by'
+                    JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+                    WHERE tc.table_name='hd_clinic_profile' AND kcu.column_name='updated_by'
                     AND tc.constraint_type='FOREIGN KEY'""")
                 for fk in cur.fetchall():
                     cur.execute(f"ALTER TABLE hd_clinic_profile DROP CONSTRAINT {fk[0]}")
-                cur.execute("ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100) USING updated_by::text")
-                conn.commit()
-                logger.info("Fixed hd_clinic_profile.updated_by: INTEGER → VARCHAR(100)")
+            except Exception:
+                pass
+            try:
+                cur.execute("""SELECT data_type FROM information_schema.columns
+                    WHERE table_name='hd_clinic_profile' AND column_name='updated_by'""")
+                ci = cur.fetchone()
+                if ci and ci[0] != 'character varying':
+                    cur.execute("ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100) USING updated_by::text")
+            except Exception:
+                pass
+            conn.autocommit = False
             cur.execute("SELECT section, item_key, item_value, file_url, expires_at FROM hd_clinic_profile ORDER BY section, id")
             for r in cur.fetchall():
                 sec = r[0]
@@ -5261,22 +5267,29 @@ def save_incident():
             inc_date = data.get("date") or _thai_today().isoformat()
             reported_name = data.get("reported_by", "")
 
-            # Fix column type: drop FK constraint + alter to VARCHAR
-            # Check if reported_by is still INTEGER
-            cur.execute("""SELECT data_type FROM information_schema.columns
-                WHERE table_name='hd_incidents' AND column_name='reported_by'""")
-            col_type = cur.fetchone()
-            if col_type and col_type[0] == 'integer':
-                # Drop foreign key constraint first
+            # Always drop FK constraint on reported_by if it exists (fixes type mismatch)
+            conn.autocommit = True
+            try:
                 cur.execute("""SELECT tc.constraint_name FROM information_schema.table_constraints tc
-                    JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
-                    WHERE tc.table_name='hd_incidents' AND ccu.column_name='reported_by'
+                    JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+                    WHERE tc.table_name='hd_incidents' AND kcu.column_name='reported_by'
                     AND tc.constraint_type='FOREIGN KEY'""")
                 for fk in cur.fetchall():
                     cur.execute(f"ALTER TABLE hd_incidents DROP CONSTRAINT {fk[0]}")
-                cur.execute("ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100) USING reported_by::text")
-                conn.commit()
-                logger.info("Fixed hd_incidents.reported_by: INTEGER → VARCHAR(100)")
+                    logger.info("Dropped FK constraint: %s", fk[0])
+            except Exception as fke:
+                logger.warning("Drop FK: %s", fke)
+            # Ensure reported_by is VARCHAR
+            try:
+                cur.execute("""SELECT data_type FROM information_schema.columns
+                    WHERE table_name='hd_incidents' AND column_name='reported_by'""")
+                col_type = cur.fetchone()
+                if col_type and col_type[0] != 'character varying':
+                    cur.execute("ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100) USING reported_by::text")
+                    logger.info("Fixed hd_incidents.reported_by → VARCHAR(100)")
+            except Exception as ate:
+                logger.warning("ALTER reported_by: %s", ate)
+            conn.autocommit = False
 
             # Add resolved_at if missing
             cur.execute("""SELECT 1 FROM information_schema.columns
