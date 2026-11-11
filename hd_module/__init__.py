@@ -110,6 +110,18 @@ def _run_hd_migrations():
                 "ALTER TABLE hd_incidents ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP",
                 # Add pin_hash to hd_users for PIN login
                 "ALTER TABLE hd_users ADD COLUMN IF NOT EXISTS pin_hash VARCHAR(255)",
+                # hd_clinical_alerts: code reads/writes title + acknowledged but the
+                # migration never created them → patient list API and alert inserts failed
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS title VARCHAR(200)",
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS acknowledged BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE hd_clinical_alerts ALTER COLUMN alert_type DROP NOT NULL",
+                "ALTER TABLE hd_clinical_alerts ALTER COLUMN alert_type SET DEFAULT 'clinical'",
+                # columns used by alert_push.py / bi_reporting.py
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS rule_id VARCHAR(50)",
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS details TEXT",
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS triggered_at TIMESTAMP DEFAULT NOW()",
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS is_acknowledged BOOLEAN NOT NULL DEFAULT FALSE",
+                "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS acknowledged_at TIMESTAMP",
                 # Create SOP files table
                 """CREATE TABLE IF NOT EXISTS hd_sop_files (
                     id SERIAL PRIMARY KEY, sop_key VARCHAR(80) NOT NULL,

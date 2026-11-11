@@ -602,50 +602,58 @@ def create_session():
             ))
             session_id = cur.fetchone()[0]
 
-            # Save Dialyzer tracking (upsert active dialyzer)
+            # Save Dialyzer tracking (upsert active dialyzer).
+            # Each optional save runs inside a SAVEPOINT: in PostgreSQL a failed
+            # statement aborts the whole transaction, which previously made the
+            # session INSERT itself roll back whenever these failed.
             d_type = data.get("dialyzer_type")
             if d_type:
-                d_reuse = data.get("dialyzer_reuse", 1)
-                d_max = data.get("dialyzer_max", 20)
+                d_reuse = _safe_int(data.get("dialyzer_reuse")) or 1
+                d_max = _safe_int(data.get("dialyzer_max")) or 20
+                cur.execute("SAVEPOINT sp_dialyzer")
                 try:
-                    # Check if active dialyzer exists for this patient
                     cur.execute("""
                         SELECT id FROM hd_dialyzer_tracking
                         WHERE patient_id = %s AND status = 'active'
-                        ORDER BY registered_at DESC LIMIT 1
+                        ORDER BY id DESC LIMIT 1
                     """, (patient_id,))
                     existing = cur.fetchone()
                     if existing:
                         cur.execute("""
                             UPDATE hd_dialyzer_tracking
-                            SET dialyzer_type = %s, use_count = %s, max_uses = %s,
+                            SET dialyzer_type = %s, reuse_count = %s, max_reuse = %s,
                                 last_used_session = %s
                             WHERE id = %s
                         """, (d_type, d_reuse, d_max, session_id, existing[0]))
                     else:
                         cur.execute("""
                             INSERT INTO hd_dialyzer_tracking
-                                (patient_id, dialyzer_type, use_count, max_uses,
-                                 status, last_used_session, registered_at)
-                            VALUES (%s, %s, %s, %s, 'active', %s, NOW())
+                                (patient_id, dialyzer_type, reuse_count, max_reuse,
+                                 status, last_used_session, first_use_date)
+                            VALUES (%s, %s, %s, %s, 'active', %s, CURRENT_DATE)
                         """, (patient_id, d_type, d_reuse, d_max, session_id))
+                    cur.execute("RELEASE SAVEPOINT sp_dialyzer")
                 except Exception as e:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_dialyzer")
                     logger.warning("dialyzer save error: %s", e)
 
             # Save Heparin protocol
             hep_drug = data.get("hep_drug")
             if hep_drug:
+                cur.execute("SAVEPOINT sp_heparin")
                 try:
                     cur.execute("""
                         INSERT INTO hd_anticoagulation
-                            (session_id, drug, bolus_dose, maintenance_dose,
+                            (session_id, protocol, loading_dose, maintenance_dose,
                              recorded_by, recorded_at)
                         VALUES (%s, %s, %s, %s, %s, NOW())
-                    """, (session_id, hep_drug,
-                          data.get("hep_bolus"),
-                          data.get("hep_maintenance"),
-                          g.get("hd_user_id")))
+                    """, (session_id, str(hep_drug)[:30],
+                          _safe_int(data.get("hep_bolus")),
+                          _safe_int(data.get("hep_maintenance")),
+                          _safe_int(g.get("hd_user_id"))))
+                    cur.execute("RELEASE SAVEPOINT sp_heparin")
                 except Exception as e:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_heparin")
                     logger.warning("heparin save error: %s", e)
 
             # Update VA + VA Location on patient record if provided
@@ -1708,10 +1716,10 @@ def get_patient_last_clinical(hn):
 
             # Last active dialyzer
             cur.execute("""
-                SELECT dialyzer_type, use_count, max_uses
+                SELECT dialyzer_type, reuse_count, max_reuse
                 FROM hd_dialyzer_tracking
                 WHERE patient_id = %s AND status = 'active'
-                ORDER BY registered_at DESC LIMIT 1
+                ORDER BY id DESC LIMIT 1
             """, (pid,))
             d = cur.fetchone()
             if d:
@@ -1721,7 +1729,7 @@ def get_patient_last_clinical(hn):
 
             # Last heparin protocol from most recent session
             cur.execute("""
-                SELECT a.drug, a.bolus_dose, a.maintenance_dose
+                SELECT a.protocol, a.loading_dose, a.maintenance_dose
                 FROM hd_anticoagulation a
                 JOIN hd_sessions s ON s.id = a.session_id
                 WHERE s.patient_id = %s
@@ -1937,10 +1945,10 @@ def bed_dashboard():
                         pid_row = cur.fetchone()
                         if pid_row and pid_row[0]:
                             cur.execute("""
-                                SELECT dialyzer_type, use_count, max_uses
+                                SELECT dialyzer_type, reuse_count, max_reuse
                                 FROM hd_dialyzer_tracking
                                 WHERE patient_id = %s AND status = 'active'
-                                ORDER BY registered_at DESC LIMIT 1
+                                ORDER BY id DESC LIMIT 1
                             """, (pid_row[0],))
                             drow = cur.fetchone()
                             if drow and 1 <= bnum <= len(beds):
@@ -1954,7 +1962,7 @@ def bed_dashboard():
                 for sid, bnum in session_ids:
                     try:
                         cur.execute("""
-                            SELECT drug, bolus_dose, maintenance_dose
+                            SELECT protocol, loading_dose, maintenance_dose
                             FROM hd_anticoagulation
                             WHERE session_id = %s
                             ORDER BY recorded_at DESC LIMIT 1
@@ -4790,11 +4798,11 @@ def morning_brief_data():
             # Dialyzers near max reuse
             try:
                 cur.execute("""
-                    SELECT d.dialyzer_type, d.use_count, d.max_uses, p.patient_name, p.hn
+                    SELECT d.dialyzer_type, d.reuse_count, d.max_reuse, p.patient_name, p.hn
                     FROM hd_dialyzer_tracking d
                     JOIN hd_patient_mapping p ON p.id = d.patient_id
-                    WHERE d.status = 'active' AND d.use_count >= d.max_uses * 0.8
-                    ORDER BY d.use_count DESC LIMIT 10
+                    WHERE d.status = 'active' AND d.reuse_count >= d.max_reuse * 0.8
+                    ORDER BY d.reuse_count DESC LIMIT 10
                 """)
                 result["dialyzer_warnings"] = [
                     {"patient": r[3], "hn": r[4], "type": r[0], "use": r[1], "max": r[2]}
