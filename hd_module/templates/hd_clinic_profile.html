@@ -247,6 +247,100 @@
     <button class="save-btn" onclick="saveStaff()">💾 บันทึก</button>
   </div>
 </div>
+
+<!-- Add Equipment Modal -->
+<div class="cp-modal" id="equipModal" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="cp-sheet">
+    <h3>➕ เพิ่มอุปกรณ์</h3>
+    <div class="field-grid">
+      <div class="cp-field"><div class="flabel">ประเภท</div><select id="eq_type">
+        <option value="dialysis_machine">เครื่องฟอกเลือด</option>
+        <option value="defibrillator">Defibrillator</option>
+        <option value="ro_system">ระบบ RO</option>
+        <option value="scale">เครื่องชั่งน้ำหนัก</option>
+        <option value="bp_monitor">BP Monitor</option>
+        <option value="o2">O2 Tank</option>
+        <option value="suction">Suction</option>
+        <option value="other">อื่นๆ</option>
+      </select></div>
+      <div class="cp-field"><div class="flabel">สถานะ</div><select id="eq_status">
+        <option value="active">ใช้งาน</option>
+        <option value="spare">สำรอง</option>
+        <option value="repair">ซ่อม</option>
+        <option value="retired">ปลดระวาง</option>
+      </select></div>
+      <div class="cp-field"><div class="flabel">ยี่ห้อ</div><input id="eq_brand" placeholder="เช่น Nikkiso, Fresenius"></div>
+      <div class="cp-field"><div class="flabel">รุ่น</div><input id="eq_model" placeholder="เช่น DBB-27"></div>
+      <div class="cp-field"><div class="flabel">Serial Number</div><input id="eq_serial"></div>
+      <div class="cp-field"><div class="flabel">ประจำเตียง</div><input id="eq_bed" type="number" min="1" max="25" placeholder="1-25"></div>
+      <div class="cp-field"><div class="flabel">PM ล่าสุด</div><input type="date" id="eq_last_pm"></div>
+      <div class="cp-field"><div class="flabel">PM ถัดไป</div><input type="date" id="eq_next_pm"></div>
+      <div class="cp-field" style="grid-column:1/-1"><div class="flabel">หมายเหตุ</div><input id="eq_notes" placeholder="รายละเอียดเพิ่มเติม"></div>
+    </div>
+    <button class="save-btn" onclick="saveEquipment()">💾 บันทึก</button>
+  </div>
+</div>
+
+<!-- Add Water Quality Modal -->
+<div class="cp-modal" id="waterModal" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="cp-sheet">
+    <h3>🧪 เพิ่มผลตรวจคุณภาพน้ำ</h3>
+    <div class="field-grid">
+      <div class="cp-field"><div class="flabel">วันที่ตรวจ</div><input type="date" id="wq_date"></div>
+      <div class="cp-field"><div class="flabel">ประเภทตรวจ</div><select id="wq_type">
+        <option value="bacteria">Bacteria (TVC)</option>
+        <option value="endotoxin">Endotoxin (LAL)</option>
+        <option value="chemical">Chemical Analysis</option>
+        <option value="conductivity">Conductivity</option>
+        <option value="chlorine">Chlorine</option>
+        <option value="hardness">Hardness</option>
+      </select></div>
+      <div class="cp-field"><div class="flabel">พารามิเตอร์</div><input id="wq_param" placeholder="เช่น TVC, LAL, Conductivity"></div>
+      <div class="cp-field"><div class="flabel">ผลตรวจ</div><input id="wq_value" placeholder="เช่น <100, 0.25"></div>
+      <div class="cp-field"><div class="flabel">หน่วย</div><input id="wq_unit" placeholder="CFU/mL, EU/mL, μS/cm"></div>
+      <div class="cp-field"><div class="flabel">ผ่าน/ไม่ผ่าน</div><select id="wq_pass">
+        <option value="pass">✅ ผ่าน</option>
+        <option value="fail">❌ ไม่ผ่าน</option>
+      </select></div>
+      <div class="cp-field"><div class="flabel">วิธีตรวจ</div><input id="wq_method" placeholder="เช่น Pour Plate, LAL Gel Clot"></div>
+      <div class="cp-field"><div class="flabel">ตรวจโดย</div><input id="wq_by" placeholder="ชื่อผู้ตรวจ/บริษัท"></div>
+      <div class="cp-field" style="grid-column:1/-1"><div class="flabel">หมายเหตุ</div><input id="wq_notes" placeholder="รายละเอียดเพิ่มเติม"></div>
+    </div>
+    <button class="save-btn" onclick="saveWaterLog()">💾 บันทึกผลตรวจ</button>
+  </div>
+</div>
+
+<!-- Add Incident Modal -->
+<div class="cp-modal" id="incidentModal" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="cp-sheet">
+    <h3>📋 รายงานอุบัติการณ์</h3>
+    <div class="field-grid">
+      <div class="cp-field"><div class="flabel">ประเภท</div><select id="inc_type">
+        <option value="needle_stick">เข็มตำ (Needle Stick)</option>
+        <option value="blood_spill">เลือดหก (Blood Spill)</option>
+        <option value="idh">ความดันต่ำ (IDH)</option>
+        <option value="fall">พลัดตกหกล้ม (Fall)</option>
+        <option value="air_embolism">อากาศเข้าหลอดเลือด</option>
+        <option value="dialyzer_rupture">Dialyzer Rupture</option>
+        <option value="blood_leak">Blood Leak</option>
+        <option value="clotting">Clotting</option>
+        <option value="allergic">แพ้ยา/Allergic</option>
+        <option value="infection">การติดเชื้อ</option>
+        <option value="other">อื่นๆ</option>
+      </select></div>
+      <div class="cp-field"><div class="flabel">ความรุนแรง</div><select id="inc_severity">
+        <option value="minor">เล็กน้อย (Minor)</option>
+        <option value="moderate">ปานกลาง (Moderate)</option>
+        <option value="major">รุนแรง (Major)</option>
+        <option value="sentinel">Sentinel Event</option>
+      </select></div>
+      <div class="cp-field" style="grid-column:1/-1"><div class="flabel">รายละเอียด</div><textarea id="inc_desc" rows="3" placeholder="บรรยายเหตุการณ์..."></textarea></div>
+      <div class="cp-field" style="grid-column:1/-1"><div class="flabel">การจัดการ/แก้ไข</div><textarea id="inc_action" rows="2" placeholder="ดำเนินการอะไรบ้าง..."></textarea></div>
+      <div class="cp-field"><div class="flabel">ผู้รายงาน</div><input id="inc_by" placeholder="ชื่อผู้รายงาน"></div>
+    </div>
+    <button class="save-btn" onclick="saveIncident()">💾 บันทึกรายงาน</button>
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -258,6 +352,8 @@ function switchCpTab(tab){
   /* Load tab data */
   if(tab==='staff') loadStaff();
   else if(tab==='equipment') loadEquipment();
+  else if(tab==='water') loadWaterLogs();
+  else if(tab==='ic') loadIncidents();
   else if(tab==='assess') loadSelfAssessment();
   /* Save to localStorage */
   try{localStorage.setItem('cp_tab',tab)}catch(e){}
@@ -487,10 +583,141 @@ function saveSelfAssessment(){
   showToast('บันทึกผลประเมินตนเองสำเร็จ','success');
 }
 
-/* Placeholder functions for modals not yet built */
-function openWaterLogModal(){ showToast('ฟังก์ชันเพิ่มผลน้ำ — กำลังพัฒนา','info'); }
-function openEquipModal(){ showToast('ฟังก์ชันเพิ่มอุปกรณ์ — กำลังพัฒนา','info'); }
-function openIncidentModal(){ showToast('ฟังก์ชันรายงานอุบัติการณ์ — กำลังพัฒนา','info'); }
+/* ── Equipment Modal ── */
+function openEquipModal(){
+  ['eq_brand','eq_model','eq_serial','eq_bed','eq_last_pm','eq_next_pm','eq_notes'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  document.getElementById('eq_type').value='dialysis_machine';
+  document.getElementById('eq_status').value='active';
+  document.getElementById('equipModal').classList.add('open');
+}
+function saveEquipment(){
+  const data={
+    type: document.getElementById('eq_type').value,
+    brand: document.getElementById('eq_brand').value,
+    model: document.getElementById('eq_model').value,
+    serial: document.getElementById('eq_serial').value,
+    bed: parseInt(document.getElementById('eq_bed').value)||null,
+    status: document.getElementById('eq_status').value,
+    last_pm: document.getElementById('eq_last_pm').value||null,
+    next_pm: document.getElementById('eq_next_pm').value||null,
+    notes: document.getElementById('eq_notes').value,
+  };
+  if(!data.brand){showToast('กรุณาระบุยี่ห้อ','danger');return}
+  hdFetch('/hd/api/v1/clinic-profile/equipment',{method:'POST',body:JSON.stringify(data)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('บันทึกอุปกรณ์สำเร็จ','success');
+      document.getElementById('equipModal').classList.remove('open');
+      loadEquipment();
+    }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
+
+/* ── Water Quality Logs ── */
+function loadWaterLogs(){
+  hdFetch('/hd/api/v1/clinic-profile/water-quality').then(r=>r.json()).then(d=>{
+    const el=document.getElementById('waterLogs');
+    const list=d.logs||[];
+    if(!list.length){el.innerHTML='<div class="cp-empty">ยังไม่มีผลตรวจ — กด ➕ เพิ่มผล</div>';return}
+    const typeMap={bacteria:'🦠 Bacteria',endotoxin:'💉 Endotoxin',chemical:'🧪 Chemical',conductivity:'⚡ Conductivity',chlorine:'💧 Chlorine',hardness:'🪨 Hardness'};
+    el.innerHTML=list.map(l=>{
+      const badge=l.pass_fail==='pass'?'<span class="log-badge pass">ผ่าน</span>':'<span class="log-badge fail">ไม่ผ่าน</span>';
+      return `<div class="log-item">
+        <div class="log-date">${l.date||'-'}</div>
+        <div class="log-body"><strong>${typeMap[l.type]||l.type}</strong> ${l.parameter||''}<br>
+          <span style="font-size:.75rem">ผล: <strong>${l.value||'-'}</strong> ${l.unit||''}</span>
+          ${l.tested_by?' · '+l.tested_by:''}</div>
+        ${badge}
+      </div>`;
+    }).join('');
+  }).catch(()=>{
+    document.getElementById('waterLogs').innerHTML='<div class="cp-empty">โหลดไม่สำเร็จ</div>';
+  });
+}
+function openWaterLogModal(){
+  const today=new Date().toISOString().split('T')[0];
+  document.getElementById('wq_date').value=today;
+  ['wq_param','wq_value','wq_unit','wq_method','wq_by','wq_notes'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  document.getElementById('wq_type').value='bacteria';
+  document.getElementById('wq_pass').value='pass';
+  document.getElementById('waterModal').classList.add('open');
+}
+function saveWaterLog(){
+  const data={
+    date: document.getElementById('wq_date').value,
+    type: document.getElementById('wq_type').value,
+    parameter: document.getElementById('wq_param').value,
+    value: document.getElementById('wq_value').value,
+    unit: document.getElementById('wq_unit').value,
+    pass_fail: document.getElementById('wq_pass').value,
+    method: document.getElementById('wq_method').value,
+    tested_by: document.getElementById('wq_by').value,
+    notes: document.getElementById('wq_notes').value,
+  };
+  if(!data.date){showToast('กรุณาระบุวันที่ตรวจ','danger');return}
+  if(!data.value){showToast('กรุณาระบุผลตรวจ','danger');return}
+  hdFetch('/hd/api/v1/clinic-profile/water-quality',{method:'POST',body:JSON.stringify(data)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('บันทึกผลตรวจน้ำสำเร็จ','success');
+      document.getElementById('waterModal').classList.remove('open');
+      loadWaterLogs();
+    }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
+
+/* ── Incidents ── */
+function loadIncidents(){
+  hdFetch('/hd/api/v1/clinic-profile/incidents').then(r=>r.json()).then(d=>{
+    const el=document.getElementById('incidentList');
+    const list=d.incidents||[];
+    if(!list.length){el.innerHTML='<div class="cp-empty">ยังไม่มีรายงาน — กด ➕ รายงาน</div>';return}
+    const typeMap={needle_stick:'🩸 เข็มตำ',blood_spill:'💧 เลือดหก',idh:'📉 IDH',fall:'🚶 พลัดตก',
+      air_embolism:'💨 Air Embolism',dialyzer_rupture:'💥 Dialyzer Rupture',blood_leak:'🩸 Blood Leak',
+      clotting:'🧬 Clotting',allergic:'💊 แพ้ยา',infection:'🦠 ติดเชื้อ',other:'📋 อื่นๆ'};
+    const sevMap={minor:'🟢',moderate:'🟡',major:'🔴',sentinel:'🚨'};
+    el.innerHTML=list.map(i=>{
+      const dt=i.date?new Date(i.date).toLocaleDateString('th-TH',{day:'2-digit',month:'short',year:'2-digit'}):'?';
+      return `<div class="log-item">
+        <div class="log-date">${dt}<br>${sevMap[i.severity]||''}</div>
+        <div class="log-body"><strong>${typeMap[i.type]||i.type}</strong><br>
+          <span style="font-size:.75rem">${i.description||'-'}</span>
+          ${i.action?'<br><span style="font-size:.7rem;color:var(--success)">จัดการ: '+i.action+'</span>':''}
+          ${i.reported_by?' · <span style="font-size:.7rem">โดย '+i.reported_by+'</span>':''}</div>
+        <span class="log-badge ${i.status==='open'?'fail':'pass'}">${i.status==='open'?'เปิด':'ปิด'}</span>
+      </div>`;
+    }).join('');
+  }).catch(()=>{
+    document.getElementById('incidentList').innerHTML='<div class="cp-empty">โหลดไม่สำเร็จ</div>';
+  });
+}
+function openIncidentModal(){
+  ['inc_desc','inc_action','inc_by'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.value='';
+  });
+  document.getElementById('inc_type').value='needle_stick';
+  document.getElementById('inc_severity').value='minor';
+  document.getElementById('incidentModal').classList.add('open');
+}
+function saveIncident(){
+  const data={
+    type: document.getElementById('inc_type').value,
+    severity: document.getElementById('inc_severity').value,
+    description: document.getElementById('inc_desc').value,
+    action: document.getElementById('inc_action').value,
+    reported_by: document.getElementById('inc_by').value,
+  };
+  if(!data.description){showToast('กรุณาระบุรายละเอียด','danger');return}
+  hdFetch('/hd/api/v1/clinic-profile/incidents',{method:'POST',body:JSON.stringify(data)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('บันทึกรายงานสำเร็จ','success');
+      document.getElementById('incidentModal').classList.remove('open');
+      loadIncidents();
+    }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
 
 /* Init */
 loadProfileData();
