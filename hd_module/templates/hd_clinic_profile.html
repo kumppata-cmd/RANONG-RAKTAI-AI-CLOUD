@@ -204,16 +204,47 @@
 <!-- Tab 9: SOP -->
 <div class="cp-panel" id="panel-sop">
   <div class="cp-card">
-    <h3>📚 คู่มือปฏิบัติงาน (SOP)</h3>
+    <h3>📚 คู่มือปฏิบัติงาน (SOP) <button class="add-btn" onclick="openSopModal()" style="margin-left:auto">➕ เพิ่มคู่มือ</button></h3>
     <div style="display:flex;flex-direction:column;gap:8px" id="sopList">
-      <div class="log-item"><span style="font-size:1.2rem">📋</span><div class="log-body"><strong>คู่มือฟอกเลือด HD</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">ขั้นตอนเตรียมเครื่อง, เริ่มฟอก, จบรอบ</span></div></div>
-      <div class="log-item"><span style="font-size:1.2rem">🚨</span><div class="log-body"><strong>คู่มือฉุกเฉิน</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">CPR, Anaphylaxis, Air embolism, Dialyzer rupture</span></div></div>
-      <div class="log-item"><span style="font-size:1.2rem">💧</span><div class="log-body"><strong>คู่มือระบบน้ำ</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">เปลี่ยน filter, Disinfection, Water sampling</span></div></div>
-      <div class="log-item"><span style="font-size:1.2rem">🧤</span><div class="log-body"><strong>คู่มือ IC</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">Hand hygiene, Cleaning, Waste management</span></div></div>
-      <div class="log-item"><span style="font-size:1.2rem">💊</span><div class="log-body"><strong>คู่มือยา</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">ESA, Heparin, Iron, Emergency drugs</span></div></div>
-      <div class="log-item"><span style="font-size:1.2rem">📄</span><div class="log-body"><strong>แบบฟอร์ม</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">Consent form, ใบส่งตรวจ Lab, ใบส่งต่อ</span></div></div>
+      <div class="cp-empty">กำลังโหลด...</div>
     </div>
-    <p style="font-size:.75rem;color:var(--fg-muted);margin-top:12px">💡 อัปโหลดไฟล์ SOP (PDF/รูปภาพ) ได้ในอนาคต</p>
+  </div>
+</div>
+
+<!-- SOP View Modal -->
+<div class="cp-modal" id="sopViewModal" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="cp-sheet" style="max-height:90vh">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <h3 id="sopViewTitle" style="margin:0;font-size:1rem">📚 คู่มือ</h3>
+      <button onclick="document.getElementById('sopViewModal').classList.remove('open')" style="border:none;background:none;font-size:1.2rem;cursor:pointer">✕</button>
+    </div>
+    <div id="sopViewContent" style="font-size:.85rem;line-height:1.7;white-space:pre-wrap;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px;min-height:120px"></div>
+    <div style="display:flex;gap:8px;margin-top:12px">
+      <button class="save-btn" style="background:var(--accent)" onclick="editCurrentSop()">✏️ แก้ไข</button>
+    </div>
+  </div>
+</div>
+
+<!-- SOP Edit Modal -->
+<div class="cp-modal" id="sopEditModal" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="cp-sheet" style="max-height:90vh">
+    <h3 id="sopEditTitle">📚 แก้ไขคู่มือ</h3>
+    <input type="hidden" id="sop_edit_key">
+    <div class="field-grid">
+      <div class="cp-field"><div class="flabel">ชื่อคู่มือ</div><input id="sop_title" placeholder="เช่น คู่มือฟอกเลือด HD"></div>
+      <div class="cp-field"><div class="flabel">ไอคอน</div><select id="sop_icon">
+        <option value="📋">📋 เอกสาร</option><option value="🚨">🚨 ฉุกเฉิน</option>
+        <option value="💧">💧 น้ำ</option><option value="🧤">🧤 IC</option>
+        <option value="💊">💊 ยา</option><option value="📄">📄 แบบฟอร์ม</option>
+        <option value="🩺">🩺 การรักษา</option><option value="⚙️">⚙️ เครื่องมือ</option>
+        <option value="📝">📝 บันทึก</option><option value="🔬">🔬 แล็บ</option>
+      </select></div>
+      <div class="cp-field" style="grid-column:1/-1"><div class="flabel">คำอธิบายสั้น</div><input id="sop_desc" placeholder="สรุปสั้นๆ เช่น ขั้นตอนเตรียมเครื่อง, เริ่มฟอก"></div>
+      <div class="cp-field" style="grid-column:1/-1"><div class="flabel">เนื้อหา (พิมพ์ขั้นตอนทั้งหมด)</div>
+        <textarea id="sop_content" rows="12" style="min-height:200px" placeholder="พิมพ์เนื้อหาคู่มือที่นี่...&#10;&#10;เช่น:&#10;1. ขั้นตอนเตรียมเครื่อง&#10;   - เปิดเครื่อง ตรวจสอบระบบ&#10;   - ต่อ dialyzer และ bloodline&#10;   - prime ระบบ&#10;&#10;2. ขั้นตอนเริ่มฟอก&#10;   - ..."></textarea>
+      </div>
+    </div>
+    <button class="save-btn" onclick="saveSop()">💾 บันทึกคู่มือ</button>
   </div>
 </div>
 
@@ -356,6 +387,7 @@ function switchCpTab(tab){
   else if(tab==='equipment') loadEquipment();
   else if(tab==='water') loadWaterLogs();
   else if(tab==='ic') loadIncidents();
+  else if(tab==='sop') loadSops();
   else if(tab==='assess') loadSelfAssessment();
   /* Save to localStorage */
   try{localStorage.setItem('cp_tab',tab)}catch(e){}
@@ -816,6 +848,127 @@ function saveIncident(){
       document.getElementById('incidentModal').classList.remove('open');
       loadIncidents();
     }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
+
+/* ── SOP ── */
+const SOP_DEFAULTS = [
+  {key:'hd_procedure',icon:'📋',title:'คู่มือฟอกเลือด HD',desc:'ขั้นตอนเตรียมเครื่อง, เริ่มฟอก, จบรอบ'},
+  {key:'emergency',icon:'🚨',title:'คู่มือฉุกเฉิน',desc:'CPR, Anaphylaxis, Air embolism, Dialyzer rupture'},
+  {key:'water_system',icon:'💧',title:'คู่มือระบบน้ำ',desc:'เปลี่ยน filter, Disinfection, Water sampling'},
+  {key:'ic',icon:'🧤',title:'คู่มือ IC',desc:'Hand hygiene, Cleaning, Waste management'},
+  {key:'medication',icon:'💊',title:'คู่มือยา',desc:'ESA, Heparin, Iron, Emergency drugs'},
+  {key:'forms',icon:'📄',title:'แบบฟอร์ม',desc:'Consent form, ใบส่งตรวจ Lab, ใบส่งต่อ'},
+];
+let _sopData = {};
+
+function loadSops(){
+  hdFetch('/hd/api/v1/clinic-profile?section=sop').then(r=>r.json()).then(d=>{
+    const items = (d.sections||{}).sop || [];
+    _sopData = {};
+    items.forEach(i=>{ _sopData[i.key] = i; });
+    renderSopList();
+  }).catch(()=>renderSopList());
+}
+
+function renderSopList(){
+  const el = document.getElementById('sopList');
+  /* Merge defaults with DB data + any custom SOPs */
+  const allKeys = new Set(SOP_DEFAULTS.map(d=>d.key));
+  Object.keys(_sopData).forEach(k=>allKeys.add(k));
+
+  let html = '';
+  /* Defaults first */
+  SOP_DEFAULTS.forEach(def=>{
+    const db = _sopData[def.key];
+    const title = db ? (db.value ? def.title : def.title) : def.title;
+    const hasContent = db && db.value;
+    const badge = hasContent ? '<span class="log-badge pass" style="font-size:.6rem">มีเนื้อหา</span>' : '<span class="log-badge fail" style="font-size:.6rem">ว่าง</span>';
+    html += `<div class="log-item" style="cursor:pointer" onclick="viewSop('${def.key}','${def.icon}','${def.title.replace(/'/g,"\\'")}')">
+      <span style="font-size:1.2rem">${def.icon}</span>
+      <div class="log-body"><strong>${def.title}</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">${def.desc}</span></div>
+      ${badge}
+    </div>`;
+  });
+  /* Custom SOPs (not in defaults) */
+  Object.keys(_sopData).forEach(k=>{
+    if(SOP_DEFAULTS.find(d=>d.key===k)) return;
+    const db = _sopData[k];
+    const icon = db.file_url || '📝';
+    const title = k.replace(/_/g,' ');
+    html += `<div class="log-item" style="cursor:pointer" onclick="viewSop('${k}','${icon}','${title.replace(/'/g,"\\'")}')">
+      <span style="font-size:1.2rem">${icon}</span>
+      <div class="log-body"><strong>${title}</strong></div>
+      <span class="log-badge pass" style="font-size:.6rem">มีเนื้อหา</span>
+      <button onclick="event.stopPropagation();deleteSop('${k}')" style="border:none;background:none;cursor:pointer;font-size:.8rem" title="ลบ">🗑️</button>
+    </div>`;
+  });
+  el.innerHTML = html || '<div class="cp-empty">ไม่มีคู่มือ</div>';
+}
+
+let _currentSopKey = '';
+function viewSop(key, icon, title){
+  _currentSopKey = key;
+  document.getElementById('sopViewTitle').textContent = icon+' '+title;
+  const db = _sopData[key];
+  const content = db ? db.value : '';
+  document.getElementById('sopViewContent').textContent = content || '(ยังไม่มีเนื้อหา — กด ✏️ แก้ไข เพื่อเพิ่ม)';
+  document.getElementById('sopViewModal').classList.add('open');
+}
+
+function editCurrentSop(){
+  document.getElementById('sopViewModal').classList.remove('open');
+  const def = SOP_DEFAULTS.find(d=>d.key===_currentSopKey);
+  document.getElementById('sop_edit_key').value = _currentSopKey;
+  document.getElementById('sop_title').value = def ? def.title : _currentSopKey.replace(/_/g,' ');
+  document.getElementById('sop_icon').value = def ? def.icon : '📝';
+  document.getElementById('sop_desc').value = def ? def.desc : '';
+  const db = _sopData[_currentSopKey];
+  document.getElementById('sop_content').value = db ? (db.value||'') : '';
+  document.getElementById('sopEditTitle').textContent = '✏️ แก้ไข: '+(def?def.title:_currentSopKey);
+  document.getElementById('sopEditModal').classList.add('open');
+}
+
+function openSopModal(){
+  _currentSopKey = '';
+  document.getElementById('sop_edit_key').value = '';
+  document.getElementById('sop_title').value = '';
+  document.getElementById('sop_icon').value = '📋';
+  document.getElementById('sop_desc').value = '';
+  document.getElementById('sop_content').value = '';
+  document.getElementById('sopEditTitle').textContent = '➕ เพิ่มคู่มือใหม่';
+  document.getElementById('sopEditModal').classList.add('open');
+}
+
+function saveSop(){
+  let key = document.getElementById('sop_edit_key').value;
+  const title = document.getElementById('sop_title').value;
+  const icon = document.getElementById('sop_icon').value;
+  const desc = document.getElementById('sop_desc').value;
+  const content = document.getElementById('sop_content').value;
+  if(!title){showToast('กรุณาระบุชื่อคู่มือ','danger');return}
+  if(!key) key = title.replace(/[^a-zA-Z0-9ก-๙]/g,'_').toLowerCase().substring(0,50);
+
+  /* Save content as clinic_profile section=sop, key=<sop_key> */
+  const saves = [
+    hdFetch('/hd/api/v1/clinic-profile',{method:'POST',body:JSON.stringify({section:'sop',key:key,value:content,file_url:icon})}),
+  ];
+  /* Also save desc if custom */
+  if(!SOP_DEFAULTS.find(d=>d.key===key)){
+    saves.push(hdFetch('/hd/api/v1/clinic-profile',{method:'POST',body:JSON.stringify({section:'sop_meta',key:key,value:JSON.stringify({title,icon,desc})})}));
+  }
+  Promise.all(saves).then(()=>{
+    showToast('บันทึกคู่มือสำเร็จ','success');
+    document.getElementById('sopEditModal').classList.remove('open');
+    loadSops();
+  }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
+
+function deleteSop(key){
+  if(!confirm('ลบคู่มือนี้?'))return;
+  /* Delete by saving empty value — or we can use section delete */
+  hdFetch('/hd/api/v1/clinic-profile',{method:'POST',body:JSON.stringify({section:'sop',key:key,value:''})})
+    .then(()=>{showToast('ลบสำเร็จ','success');loadSops();})
+    .catch(()=>showToast('ลบไม่สำเร็จ','danger'));
 }
 
 /* Init */
