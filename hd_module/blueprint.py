@@ -2152,6 +2152,8 @@ def update_settings():
     allowed_keys = [
         "alert_recipients",        # LINE userId for alerts
         "physician_line_id",       # physician LINE userId (raw, for push)
+        "line_notify_token",       # LINE Notify token (for group alerts)
+        "nurse_group_token",       # LINE Notify token (nurse group)
         "clinic_name",             # clinic display name
         "default_duration_hours",  # default dialysis duration
         "alert_sbp_drop",          # IDH SBP drop threshold
