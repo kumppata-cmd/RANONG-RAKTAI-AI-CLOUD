@@ -315,6 +315,7 @@
   <div class="cp-sheet">
     <h3>📋 รายงานอุบัติการณ์</h3>
     <div class="field-grid">
+      <div class="cp-field"><div class="flabel">วันที่เกิดเหตุ</div><input type="datetime-local" id="inc_date"></div>
       <div class="cp-field"><div class="flabel">ประเภท</div><select id="inc_type">
         <option value="needle_stick">เข็มตำ (Needle Stick)</option>
         <option value="blood_spill">เลือดหก (Blood Spill)</option>
@@ -697,12 +698,16 @@ function openIncidentModal(){
   ['inc_desc','inc_action','inc_by'].forEach(id=>{
     const el=document.getElementById(id); if(el) el.value='';
   });
+  /* Set default date to now in Thai time */
+  const now=new Date(Date.now()+7*3600000);
+  document.getElementById('inc_date').value=now.toISOString().slice(0,16);
   document.getElementById('inc_type').value='needle_stick';
   document.getElementById('inc_severity').value='minor';
   document.getElementById('incidentModal').classList.add('open');
 }
 function saveIncident(){
   const data={
+    date: document.getElementById('inc_date').value||null,
     type: document.getElementById('inc_type').value,
     severity: document.getElementById('inc_severity').value,
     description: document.getElementById('inc_desc').value,

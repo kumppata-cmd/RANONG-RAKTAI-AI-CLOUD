@@ -5029,14 +5029,49 @@ def save_incident():
                 description TEXT, action_taken TEXT, reported_by VARCHAR(100),
                 status VARCHAR(20) DEFAULT 'open', resolved_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT NOW())""")
+            inc_date = data.get("date") or None
             cur.execute("""INSERT INTO hd_incidents (incident_date, incident_type, severity,
                 description, action_taken, reported_by, status)
-                VALUES (NOW(), %s, %s, %s, %s, %s, 'open') RETURNING id""",
-                (data.get("type","other"), data.get("severity","minor"),
+                VALUES (COALESCE(%s::timestamp, NOW()), %s, %s, %s, %s, %s, 'open') RETURNING id""",
+                (inc_date, data.get("type","other"), data.get("severity","minor"),
                  data.get("description"), data.get("action"), data.get("reported_by")))
             new_id = cur.fetchone()[0]
             conn.commit()
         conn.close()
+
+        # ── Send LINE alert to physician ──
+        try:
+            from flask import current_app
+            push_fn = current_app.config.get("LINE_PUSH_FN")
+            if push_fn:
+                alert_ids = get_setting_value("alert_recipients", "")
+                if not alert_ids:
+                    alert_ids = get_setting_value("physician_line_id", "")
+                recipients = [r.strip() for r in alert_ids.split(",") if r.strip()] if alert_ids else []
+                if recipients:
+                    sev_map = {"minor": "🟢 เล็กน้อย", "moderate": "🟡 ปานกลาง",
+                               "major": "🔴 รุนแรง", "sentinel": "🚨 Sentinel"}
+                    type_map = {"needle_stick": "เข็มตำ", "blood_spill": "เลือดหก",
+                                "idh": "IDH", "fall": "พลัดตก", "air_embolism": "Air Embolism",
+                                "dialyzer_rupture": "Dialyzer Rupture", "blood_leak": "Blood Leak",
+                                "clotting": "Clotting", "allergic": "แพ้ยา", "infection": "ติดเชื้อ"}
+                    msg = (f"🛡 รายงานอุบัติการณ์ HD\n"
+                           f"━━━━━━━━━━━\n"
+                           f"ประเภท: {type_map.get(data.get('type'), data.get('type','อื่นๆ'))}\n"
+                           f"ความรุนแรง: {sev_map.get(data.get('severity'), data.get('severity'))}\n"
+                           f"รายละเอียด: {data.get('description','')[:100]}\n"
+                           f"จัดการ: {data.get('action','')[:100]}\n"
+                           f"ผู้รายงาน: {data.get('reported_by','')}\n"
+                           f"━━━━━━━━━━━\n"
+                           f"📋 ดูรายละเอียด:\nranong-raktai-ai-cloud.onrender.com/hd/clinic-profile")
+                    for r in recipients:
+                        try:
+                            push_fn(r, msg)
+                        except Exception:
+                            pass
+        except Exception as e2:
+            logger.warning("incident LINE notify: %s", e2)
+
         return jsonify({"ok": True, "id": new_id})
     except Exception as e:
         logger.warning("incidents POST: %s", e)
