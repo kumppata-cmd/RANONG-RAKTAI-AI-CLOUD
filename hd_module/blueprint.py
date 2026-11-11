@@ -21,6 +21,16 @@ logger = logging.getLogger(__name__)
 _THAI_TZ = timezone(offset=__import__('datetime').timedelta(hours=7))
 
 
+def _safe_int(val):
+    """Return int or None — prevents 'invalid input syntax for type integer'."""
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return None
+
+
 def _thai_now():
     """Current datetime in Thai timezone (UTC+7)."""
     return datetime.now(_THAI_TZ)
@@ -4704,9 +4714,15 @@ def get_clinic_profile():
             cur.execute("""CREATE TABLE IF NOT EXISTS hd_clinic_profile (
                 id SERIAL PRIMARY KEY, section VARCHAR(30) NOT NULL, item_key VARCHAR(80) NOT NULL,
                 item_value TEXT, file_url VARCHAR(500), expires_at DATE,
-                updated_by INTEGER REFERENCES hd_users(id), updated_at TIMESTAMP DEFAULT NOW(),
+                updated_by VARCHAR(100), updated_at TIMESTAMP DEFAULT NOW(),
                 UNIQUE(section, item_key))""")
             conn.commit()
+            # Fix column type if migration created it as INTEGER
+            try:
+                cur.execute("ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100)")
+                conn.commit()
+            except Exception:
+                conn.rollback()
             cur.execute("SELECT section, item_key, item_value, file_url, expires_at FROM hd_clinic_profile ORDER BY section, id")
             for r in cur.fetchall():
                 sec = r[0]
@@ -4747,7 +4763,7 @@ def save_clinic_profile():
                 ON CONFLICT (section, item_key) DO UPDATE
                 SET item_value = EXCLUDED.item_value, file_url = EXCLUDED.file_url,
                     expires_at = EXCLUDED.expires_at, updated_by = EXCLUDED.updated_by, updated_at = NOW()
-            """, (section, key, value, file_url, expires, g.get("hd_user_id")))
+            """, (section, key, value, file_url, expires, g.get("hd_username") or str(g.get("hd_user_id") or "")))
         conn.commit()
         conn.close()
         return jsonify({"saved": True})
@@ -5109,18 +5125,46 @@ def save_incident():
                 description TEXT, action_taken TEXT, reported_by VARCHAR(100),
                 status VARCHAR(20) DEFAULT 'open', resolved_at TIMESTAMP,
                 created_at TIMESTAMP DEFAULT NOW())""")
-            inc_date = data.get("date") or None
+            inc_date = data.get("date") or _thai_today().isoformat()
+            reported_name = data.get("reported_by", "")
+            # Migration created reported_by as INTEGER REFERENCES hd_users(id)
+            # so we need to alter the column to accept text names
+            try:
+                cur.execute("ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100)")
+            except Exception:
+                conn.rollback()
+            # Also add resolved_at if missing
+            try:
+                cur.execute("ALTER TABLE hd_incidents ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP")
+            except Exception:
+                conn.rollback()
             cur.execute("""INSERT INTO hd_incidents (incident_date, incident_type, severity,
                 description, action_taken, reported_by, status)
-                VALUES (COALESCE(%s::timestamp, NOW()), %s, %s, %s, %s, %s, 'open') RETURNING id""",
+                VALUES (%s::date, %s, %s, %s, %s, %s, 'open') RETURNING id""",
                 (inc_date, data.get("type","other"), data.get("severity","minor"),
-                 data.get("description"), data.get("action"), data.get("reported_by")))
+                 data.get("description"), data.get("action"), reported_name))
             new_id = cur.fetchone()[0]
             conn.commit()
         conn.close()
 
-        # ── Send LINE alert to physician ──
+        # ── Send LINE alert ──
         try:
+            sev_map = {"minor": "🟢 เล็กน้อย", "moderate": "🟡 ปานกลาง",
+                       "major": "🔴 รุนแรง", "sentinel": "🚨 Sentinel"}
+            type_map = {"needle_stick": "เข็มตำ", "blood_spill": "เลือดหก",
+                        "idh": "IDH", "fall": "พลัดตก", "air_embolism": "Air Embolism",
+                        "dialyzer_rupture": "Dialyzer Rupture", "blood_leak": "Blood Leak",
+                        "clotting": "Clotting", "allergic": "แพ้ยา", "infection": "ติดเชื้อ"}
+            msg = (f"\n🛡 รายงานอุบัติการณ์ HD\n"
+                   f"━━━━━━━━━━━\n"
+                   f"ประเภท: {type_map.get(data.get('type'), data.get('type','อื่นๆ'))}\n"
+                   f"ความรุนแรง: {sev_map.get(data.get('severity'), data.get('severity'))}\n"
+                   f"รายละเอียด: {data.get('description','')[:100]}\n"
+                   f"จัดการ: {data.get('action','')[:100]}\n"
+                   f"ผู้รายงาน: {data.get('reported_by','')}\n"
+                   f"━━━━━━━━━━━")
+            sent = False
+            # Method 1: LINE Push (if configured via LINE Messaging API)
             from flask import current_app
             push_fn = current_app.config.get("LINE_PUSH_FN")
             if push_fn:
@@ -5128,27 +5172,27 @@ def save_incident():
                 if not alert_ids:
                     alert_ids = get_setting_value("physician_line_id", "")
                 recipients = [r.strip() for r in alert_ids.split(",") if r.strip()] if alert_ids else []
-                if recipients:
-                    sev_map = {"minor": "🟢 เล็กน้อย", "moderate": "🟡 ปานกลาง",
-                               "major": "🔴 รุนแรง", "sentinel": "🚨 Sentinel"}
-                    type_map = {"needle_stick": "เข็มตำ", "blood_spill": "เลือดหก",
-                                "idh": "IDH", "fall": "พลัดตก", "air_embolism": "Air Embolism",
-                                "dialyzer_rupture": "Dialyzer Rupture", "blood_leak": "Blood Leak",
-                                "clotting": "Clotting", "allergic": "แพ้ยา", "infection": "ติดเชื้อ"}
-                    msg = (f"🛡 รายงานอุบัติการณ์ HD\n"
-                           f"━━━━━━━━━━━\n"
-                           f"ประเภท: {type_map.get(data.get('type'), data.get('type','อื่นๆ'))}\n"
-                           f"ความรุนแรง: {sev_map.get(data.get('severity'), data.get('severity'))}\n"
-                           f"รายละเอียด: {data.get('description','')[:100]}\n"
-                           f"จัดการ: {data.get('action','')[:100]}\n"
-                           f"ผู้รายงาน: {data.get('reported_by','')}\n"
-                           f"━━━━━━━━━━━\n"
-                           f"📋 ดูรายละเอียด:\nranong-raktai-ai-cloud.onrender.com/hd/clinic-profile")
-                    for r in recipients:
-                        try:
-                            push_fn(r, msg)
-                        except Exception:
-                            pass
+                for r in recipients:
+                    try:
+                        push_fn(r, msg)
+                        sent = True
+                    except Exception:
+                        pass
+            # Method 2: LINE Notify (fallback — uses group token from hd_settings)
+            if not sent:
+                notify_token = get_setting_value("line_notify_token", "")
+                if not notify_token:
+                    notify_token = get_setting_value("nurse_group_token", "")
+                if notify_token:
+                    try:
+                        import requests as req
+                        req.post("https://notify-api.line.me/api/notify",
+                                 headers={"Authorization": f"Bearer {notify_token}"},
+                                 data={"message": msg}, timeout=10)
+                        sent = True
+                    except Exception as ne:
+                        logger.warning("incident LINE Notify: %s", ne)
+            logger.info("incident LINE alert sent=%s", sent)
         except Exception as e2:
             logger.warning("incident LINE notify: %s", e2)
 
