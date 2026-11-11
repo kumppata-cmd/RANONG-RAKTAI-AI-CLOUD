@@ -1723,8 +1723,11 @@ def bed_dashboard():
                                WHEN 'in_progress' THEN 1
                              END
                 """, (target_date.isoformat(), current_shift, current_shift))
+                rows = cur.fetchall()
+                logger.info("bed_dashboard: date=%s shift=%s rows=%d",
+                            target_date.isoformat(), current_shift, len(rows))
                 session_ids = []
-                for row in cur.fetchall():
+                for row in rows:
                     bed_num = row[0]
                     if 1 <= bed_num <= HdConfig.TOTAL_BEDS:
                         db_status = row[2]
@@ -1819,7 +1822,8 @@ def bed_dashboard():
 
             conn.close()
         except Exception as e:
-            logger.warning("bed_dashboard DB error: %s", e)
+            import traceback
+            logger.error("bed_dashboard DB error: %s\n%s", e, traceback.format_exc())
 
     # Get today's scheduled patients from DB
     today_count = 0
@@ -1862,6 +1866,28 @@ def bed_dashboard():
             pass
 
     active_count = sum(1 for b in beds if b.get("status") not in ("available", None))
+
+    # DEBUG: Also count total sessions today (all shifts) to confirm DB has data
+    debug_total = 0
+    debug_detail = ''
+    if db_url:
+        try:
+            import psycopg2
+            dconn = psycopg2.connect(db_url, connect_timeout=5)
+            with dconn.cursor() as dcur:
+                dcur.execute("""
+                    SELECT COUNT(*), string_agg(
+                        COALESCE(shift,'NULL') || ':' || status || ':bed' || COALESCE(bed_number::text,'?'), ', '
+                    )
+                    FROM hd_sessions WHERE session_date = %s
+                """, (target_date.isoformat(),))
+                drow = dcur.fetchone()
+                debug_total = drow[0] if drow else 0
+                debug_detail = drow[1] if drow and drow[1] else ''
+            dconn.close()
+        except Exception as de:
+            debug_detail = 'db_error: ' + str(de)
+
     return jsonify({
         "beds": beds,
         "total": HdConfig.TOTAL_BEDS,
@@ -1870,6 +1896,8 @@ def bed_dashboard():
         "active_in_shift": active_count,
         "today_scheduled": today_count,
         "today_patients": today_patients,
+        "_debug_sessions_today": debug_total,
+        "_debug_detail": debug_detail,
     })
 
 

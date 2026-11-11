@@ -485,13 +485,16 @@ function fetchBeds(){
       const beds = data.beds || [];
       /* Always render — the grid must reflect the current shift state */
       renderBeds(beds);
-      /* Show shift info for debugging */
+      /* Show debug info */
       const shiftNames = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
       const activeCount = data.active_in_shift || 0;
+      const dbTotal = data._debug_sessions_today || 0;
+      const dbDetail = data._debug_detail || '-';
       document.getElementById('lastUpdated').textContent =
         new Date().toLocaleTimeString('th-TH') +
         ' | รอบ' + (shiftNames[data.shift]||data.shift) +
-        ' | ฟอก ' + activeCount + ' คน';
+        ' | ฟอก ' + activeCount +
+        ' | DB: ' + dbTotal + ' sessions [' + dbDetail + ']';
       if(data.today_scheduled !== undefined) document.getElementById('statScheduled').textContent = data.today_scheduled;
       /* Show today's scheduled patients */
       if(data.today_patients && data.today_patients.length){
