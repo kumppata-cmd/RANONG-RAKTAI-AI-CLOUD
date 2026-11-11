@@ -147,7 +147,7 @@ function initSheet(){
       /* Generate time slots from started_at */
       let startH = 7, startM = 0;
       if(s.started_at){
-        try { const t = new Date(s.started_at+'Z'); startH = t.getHours(); startM = t.getMinutes(); } catch(e){}
+        try { const t = hdParseUtc(s.started_at); if(t){ startH = t.getHours(); startM = t.getMinutes(); } } catch(e){}
       }
       startM = startM < 15 ? 0 : 30;
       const slots = [];

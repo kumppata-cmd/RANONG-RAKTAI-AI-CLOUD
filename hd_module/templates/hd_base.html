@@ -295,6 +295,17 @@ function toggleTheme(){
 try { const t=localStorage.getItem('hd-theme'); if(t) document.documentElement.dataset.theme=t; } catch(e){}
 
 /* ── Auth helper: auto-attach JWT to every API call ── */
+/* Parse a server timestamp. The API stores UTC and (since 11 Nov 2026) emits
+   ISO strings ending in "Z"; older endpoints omit it. Never append "Z" twice. */
+function hdParseUtc(ts){
+  if(!ts) return null;
+  if(ts instanceof Date) return ts;
+  let s = String(ts).trim();
+  if(!/(Z|[+-]\d\d:?\d\d)$/i.test(s)) s += 'Z';
+  const d = new Date(s);
+  return isNaN(d.getTime()) ? null : d;
+}
+function hdTime(ts){ const d = hdParseUtc(ts); return d ? d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) : '-'; }
 function getHdToken(){
   try { return sessionStorage.getItem('hd_token') || localStorage.getItem('hd_token') || ''; } catch(e){ return ''; }
 }
