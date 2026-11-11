@@ -53,7 +53,8 @@
 
 <!-- Summary Table -->
 <div class="summary-wrap">
-  <table class="summary-tbl">
+  <div class="sync-legend" style="font-size:.7rem;color:var(--fg-muted);margin:0 0 6px">✅ บันทึกจากแผ่นนี้ · 🔗 มาจากหน้ารอบฟอก / ปุ่มวัด BP / ปุ่มบันทึก UF (ข้อมูลเดียวกันทั้ง 2 หน้า)</div>
+<table class="summary-tbl">
     <thead>
       <tr>
         <th class="time-col">เวลา</th>
@@ -172,6 +173,7 @@ function initSheet(){
           ufr: r.ufr||'', total_uf: r.total_uf||'',
           remark: r.remark||'',
           saved: !!r.id,
+          synced: !!r.synced,   /* came from session page / quick BP / UF button */
         };
       });
       renderSummary();
@@ -186,8 +188,8 @@ function renderSummary(){
   const tbody = document.getElementById('summaryBody');
   tbody.innerHTML = sheetData.map((r,i)=>{
     const bp = r.sbp ? r.sbp+'/'+r.dbp : '';
-    const cls = r.saved ? 'saved' : '';
-    const check = r.saved ? '✅' : '';
+    const cls = r.saved ? 'saved' : (r.synced ? 'saved' : '');
+    const check = r.saved ? '✅' : (r.synced ? '<span title="บันทึกจากหน้ารอบฟอก/ปุ่มวัด BP">🔗</span>' : '');
     const bpCls = r.sbp && (parseInt(r.sbp)<90||parseInt(r.sbp)>180) ? 'style="color:var(--danger);font-weight:700;"' : '';
     return `<tr class="${cls}" onclick="openEntry('${r.slot_time}',${i})">
       <td class="time-col">${r.slot_time}</td>

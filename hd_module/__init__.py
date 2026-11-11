@@ -126,6 +126,12 @@ def _run_hd_migrations():
                 "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS physician_order TEXT",
                 "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS order_by VARCHAR(100)",
                 "ALTER TABLE hd_clinical_alerts ADD COLUMN IF NOT EXISTS order_at TIMESTAMP",
+                # hd_uf_records is defined twice in migrations (v1.0.0 shape won):
+                # make it match what the UF endpoints insert
+                "ALTER TABLE hd_uf_records ADD COLUMN IF NOT EXISTS slot_time VARCHAR(5)",
+                "ALTER TABLE hd_uf_records ADD COLUMN IF NOT EXISTS notes VARCHAR(200)",
+                "ALTER TABLE hd_uf_records ALTER COLUMN recorded_at SET DEFAULT NOW()",
+                "ALTER TABLE hd_uf_records ALTER COLUMN recorded_at DROP NOT NULL",
                 # Create SOP files table
                 """CREATE TABLE IF NOT EXISTS hd_sop_files (
                     id SERIAL PRIMARY KEY, sop_key VARCHAR(80) NOT NULL,

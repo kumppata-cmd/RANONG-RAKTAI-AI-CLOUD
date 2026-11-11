@@ -3058,13 +3058,27 @@ def get_flowsheet(session_id):
                 WHERE s.id = %s
             """, (session_id,))
             srow = cur.fetchone()
+            # Everything recorded elsewhere for this session (session page,
+            # quick "วัด BP" on the dashboard, UF button) — merged into slots below
+            cur.execute("""SELECT sbp, dbp, heart_rate, temperature, spo2, recorded_at
+                           FROM hd_vital_signs WHERE session_id = %s AND recorded_at IS NOT NULL
+                           ORDER BY recorded_at""", (session_id,))
+            vrows = cur.fetchall()
+            try:
+                cur.execute("""SELECT uf_removed, uf_rate, recorded_at FROM hd_uf_records
+                               WHERE session_id = %s AND recorded_at IS NOT NULL ORDER BY recorded_at""",
+                            (session_id,))
+                urows = cur.fetchall()
+            except Exception:
+                conn.rollback()
+                urows = []
         conn.close()
 
         entries = []
         for r in rows:
             entries.append({
                 "id": r[0], "slot_time": r[1],
-                "recorded_at": r[2].isoformat() if r[2] else None,
+                "recorded_at": (r[2].isoformat() + "Z") if r[2] else None,
                 "sbp": r[3], "dbp": r[4], "pr": r[5], "rr": r[6],
                 "temp": float(r[7]) if r[7] else None,
                 "spo2": r[8],
@@ -3074,6 +3088,61 @@ def get_flowsheet(session_id):
                 "ufr": r[15], "total_uf": r[16],
                 "remark": r[17],
             })
+
+        # ── Merge: vitals / UF recorded on the session page land in the sheet ──
+        started = srow[2] if srow else None
+        if started:
+            from datetime import timedelta
+            by_slot = {e["slot_time"]: e for e in entries}
+
+            def slot_for(ts):
+                """Same 30-min grid the sheet page draws: start rounded (<15 → :00, else :30)."""
+                thai_start = started + timedelta(hours=7)
+                base = thai_start.replace(second=0, microsecond=0,
+                                          minute=0 if thai_start.minute < 15 else 30)
+                delta = (ts + timedelta(hours=7)) - base
+                idx = int(round(delta.total_seconds() / 1800.0))
+                idx = max(0, min(idx, 11))
+                t = base + timedelta(minutes=30 * idx)
+                return t.strftime("%H:%M")
+
+            for sbp, dbp, hr, temp, spo2, rec in vrows:
+                st = slot_for(rec)
+                e = by_slot.get(st)
+                if e is None:
+                    e = {"id": None, "slot_time": st, "recorded_at": rec.isoformat() + "Z",
+                         "sbp": None, "dbp": None, "pr": None, "rr": None, "temp": None, "spo2": None,
+                         "bfr": None, "vp": None, "tmp": None, "ap": None, "conductivity": None,
+                         "dialysate_temp": None, "ufr": None, "total_uf": None, "remark": None}
+                    by_slot[st] = e
+                    entries.append(e)
+                # latest reading in the slot wins for fields the sheet row doesn't have
+                if sbp is not None:
+                    e["sbp"], e["dbp"] = sbp, dbp
+                if hr is not None:
+                    e["pr"] = hr
+                if temp is not None and e.get("temp") is None:
+                    e["temp"] = float(temp)
+                if spo2 is not None and e.get("spo2") is None:
+                    e["spo2"] = spo2
+                e["synced"] = True
+            for uf_removed, uf_rate, rec in urows:
+                st = slot_for(rec)
+                e = by_slot.get(st)
+                if e is None:
+                    e = {"id": None, "slot_time": st, "recorded_at": rec.isoformat() + "Z",
+                         "sbp": None, "dbp": None, "pr": None, "rr": None, "temp": None, "spo2": None,
+                         "bfr": None, "vp": None, "tmp": None, "ap": None, "conductivity": None,
+                         "dialysate_temp": None, "ufr": None, "total_uf": None, "remark": None}
+                    by_slot[st] = e
+                    entries.append(e)
+                if uf_removed is not None and (e.get("total_uf") is None or uf_removed > (e.get("total_uf") or 0)):
+                    e["total_uf"] = int(uf_removed)
+                if uf_rate is not None and e.get("ufr") is None:
+                    e["ufr"] = int(uf_rate)
+                e["synced"] = True
+            entries.sort(key=lambda e: e["slot_time"])
+
         return jsonify({
             "rows": entries,
             "session": {
@@ -3170,25 +3239,45 @@ def save_flowsheet_row(session_id):
                     (params["total_uf"], session_id)
                 )
 
-            # Sync vitals to hd_vital_signs for timeline display
-            if params["sbp"]:
-                cur.execute("""
-                    INSERT INTO hd_vital_signs
-                        (session_id, phase, sbp, dbp, heart_rate, recorded_at)
-                    VALUES (%s, 'intra', %s, %s, %s, NOW())
-                """, (session_id, params["sbp"], params["dbp"], params["pr"]))
-
-            # Generate alert if BP abnormal
+            # Mirror to hd_vital_signs so the session page timeline + dashboard see it
             alert = None
-            if params["sbp"] and (int(params["sbp"]) < 90 or int(params["sbp"]) > 180):
-                severity = "critical" if int(params["sbp"]) < 80 or int(params["sbp"]) > 200 else "warning"
-                title = f"BP ผิดปกติ: {params['sbp']}/{params['dbp'] or '-'} ({slot_time})"
-                cur.execute("""
-                    INSERT INTO hd_clinical_alerts (session_id, severity, title, message, acknowledged)
-                    VALUES (%s, %s, %s, %s, FALSE)
-                """, (session_id, severity, title,
-                      f"BP {params['sbp']}/{params['dbp'] or '-'} at {slot_time}"))
-                alert = {"severity": severity, "title": title}
+            if params["sbp"]:
+                cur.execute("SAVEPOINT sp_sheet_vital")
+                try:
+                    cur.execute("""
+                        INSERT INTO hd_vital_signs
+                            (session_id, phase, sbp, dbp, heart_rate, temperature, spo2, recorded_at)
+                        VALUES (%s, 'intra', %s, %s, %s, %s, %s, NOW())
+                    """, (session_id, params["sbp"], params["dbp"], params["pr"],
+                          params["temp"], params["spo2"]))
+                    cur.execute("RELEASE SAVEPOINT sp_sheet_vital")
+                except Exception as ve:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_sheet_vital")
+                    logger.warning("sheet→vital mirror failed: %s", ve)
+                # Same rules + LINE as the session page / quick BP
+                new_alerts = _process_vital_alerts(cur, session_id, sbp=params["sbp"], dbp=params["dbp"],
+                                                   hr=params["pr"], spo2=params["spo2"], temp=params["temp"])
+                if new_alerts:
+                    worst = sorted(new_alerts, key=lambda a: 0 if a["severity"] == "critical" else 1)[0]
+                    alert = {"severity": worst["severity"], "title": worst["title"]}
+
+            # Mirror UF to hd_uf_records so the session page UF progress updates
+            if params["total_uf"] or params["ufr"]:
+                cur.execute("SAVEPOINT sp_sheet_uf")
+                try:
+                    cur.execute("SELECT uf_goal FROM hd_sessions WHERE id = %s", (session_id,))
+                    gr = cur.fetchone()
+                    goal = int(gr[0]) if gr and gr[0] else 0
+                    removed = int(params["total_uf"] or 0)
+                    cur.execute("""
+                        INSERT INTO hd_uf_records (session_id, slot_time, uf_removed, uf_rate, uf_remaining, recorded_at)
+                        VALUES (%s, %s, %s, %s, %s, NOW())
+                    """, (session_id, slot_time, removed, int(params["ufr"] or 0),
+                          max(goal - removed, 0) if goal else 0))
+                    cur.execute("RELEASE SAVEPOINT sp_sheet_uf")
+                except Exception as ue:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_sheet_uf")
+                    logger.warning("sheet→uf mirror failed: %s", ue)
 
         conn.commit()
         conn.close()
