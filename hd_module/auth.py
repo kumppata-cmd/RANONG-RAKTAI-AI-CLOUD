@@ -176,10 +176,13 @@ def require_role(*allowed_roles):
             from flask import request, jsonify, g
 
             auth_header = request.headers.get("Authorization", "")
-            if not auth_header.startswith("Bearer "):
+            if auth_header.startswith("Bearer "):
+                token = auth_header[7:]
+            else:
+                # Fallback: token in query parameter (for file downloads in new tabs)
+                token = request.args.get("token", "")
+            if not token:
                 return jsonify({"error": "Missing or invalid Authorization header"}), 401
-
-            token = auth_header[7:]
             payload = decode_token(token)
             if payload is None:
                 return jsonify({"error": "Invalid or expired token"}), 401

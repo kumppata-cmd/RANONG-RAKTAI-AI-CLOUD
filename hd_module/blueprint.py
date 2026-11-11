@@ -5103,17 +5103,19 @@ def save_water_quality():
             conn.commit()
 
             # Add ALL missing columns (migration may have created table with fewer cols)
+            # Use autocommit connection for DDL to avoid transaction issues
+            conn.autocommit = True
             new_cols = [
                 ('parameter','VARCHAR(100)'),('method','VARCHAR(100)'),('tested_by','VARCHAR(100)'),
                 ('send_date','DATE'),('file_data','BYTEA'),('file_name','VARCHAR(255)'),('file_type','VARCHAR(100)'),
             ]
             for col, ctype in new_cols:
-                cur.execute("""SELECT 1 FROM information_schema.columns
-                    WHERE table_name='hd_water_quality' AND column_name=%s""", (col,))
-                if not cur.fetchone():
-                    cur.execute(f"ALTER TABLE hd_water_quality ADD COLUMN {col} {ctype}")
-                    conn.commit()
-                    logger.info("Added column hd_water_quality.%s", col)
+                try:
+                    cur.execute(f"ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS {col} {ctype}")
+                    logger.info("Ensured column hd_water_quality.%s exists", col)
+                except Exception as ae:
+                    logger.warning("ALTER hd_water_quality.%s: %s", col, ae)
+            conn.autocommit = False
 
             # Read file if present
             file_data_bin = None

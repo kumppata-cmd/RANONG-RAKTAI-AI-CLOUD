@@ -751,7 +751,8 @@ function loadWaterLogs(){
     el.innerHTML=list.map(l=>{
       const badge=l.pass_fail==='pass'?'<span class="log-badge pass">ผ่าน</span>':'<span class="log-badge fail">ไม่ผ่าน</span>';
       const sendInfo = l.send_date ? `<br><span style="font-size:.65rem;color:var(--fg-muted)">ส่ง: ${l.send_date}</span>` : '';
-      const fileLink = l.file_id ? `<a href="/hd/api/v1/clinic-profile/water-quality/${l.id}/file" target="_blank" style="font-size:.65rem;color:var(--accent);text-decoration:none">📎 ดูไฟล์</a>` : '';
+      const _tk = getHdToken()||'';
+      const fileLink = l.file_id ? `<a href="/hd/api/v1/clinic-profile/water-quality/${l.id}/file?token=${_tk}" target="_blank" style="font-size:.65rem;color:var(--accent);text-decoration:none">📎 ดูไฟล์</a>` : '';
       return `<div class="log-item">
         <div class="log-date">${l.date||'-'}${sendInfo}</div>
         <div class="log-body"><strong>${typeMap[l.type]||l.type}</strong> ${l.parameter||''}<br>
@@ -982,7 +983,7 @@ function loadSopFiles(key){
           <div style="font-size:.8rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.filename}</div>
           <div style="font-size:.65rem;color:var(--fg-muted)">${sizeKB} KB · ${dt} ${f.uploaded_by?'· '+f.uploaded_by:''}</div>
         </div>
-        <a href="/hd/api/v1/clinic-profile/sop-files/${f.id}/download" target="_blank" style="border:none;background:var(--accent);color:#fff;padding:4px 10px;border-radius:6px;font-size:.7rem;font-weight:600;text-decoration:none;white-space:nowrap">📥 ดาวน์โหลด</a>
+        <a href="/hd/api/v1/clinic-profile/sop-files/${f.id}/download?token=${getHdToken()||''}" target="_blank" style="border:none;background:var(--accent);color:#fff;padding:4px 10px;border-radius:6px;font-size:.7rem;font-weight:600;text-decoration:none;white-space:nowrap">📥 ดาวน์โหลด</a>
         <button onclick="deleteSopFile(${f.id},'${f.filename.replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;font-size:.8rem" title="ลบ">🗑️</button>
       </div>`;
     }).join('');
