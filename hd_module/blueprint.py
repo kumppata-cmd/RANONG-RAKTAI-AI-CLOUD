@@ -205,6 +205,12 @@ def morning_brief_page():
     return render_template("hd_morning_brief.html")
 
 
+@hd_web.route("/clinic-profile")
+def clinic_profile_page():
+    """Clinic Profile & Accreditation — 10 tabs."""
+    return render_template("hd_clinic_profile.html")
+
+
 # ── Health / Status ───────────────────────────────────────
 
 @hd_bp.route("/health", methods=["GET"])
@@ -4676,3 +4682,418 @@ def morning_brief_data():
         logger.warning("morning_brief_data error: %s", e)
 
     return jsonify(result)
+
+
+# ── Clinic Profile API ────────────────────────────────────
+
+@hd_bp.route("/clinic-profile", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_clinic_profile():
+    """Get all clinic profile data grouped by section."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    sections = {}
+    if not db_url:
+        return jsonify({"sections": sections})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Auto-create table
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_clinic_profile (
+                id SERIAL PRIMARY KEY, section VARCHAR(30) NOT NULL, item_key VARCHAR(80) NOT NULL,
+                item_value TEXT, file_url VARCHAR(500), expires_at DATE,
+                updated_by INTEGER REFERENCES hd_users(id), updated_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(section, item_key))""")
+            conn.commit()
+            cur.execute("SELECT section, item_key, item_value, file_url, expires_at FROM hd_clinic_profile ORDER BY section, id")
+            for r in cur.fetchall():
+                sec = r[0]
+                if sec not in sections:
+                    sections[sec] = []
+                sections[sec].append({
+                    "key": r[1], "value": r[2], "file_url": r[3],
+                    "expires_at": r[4].isoformat() if r[4] else None,
+                })
+        conn.close()
+    except Exception as e:
+        logger.warning("clinic_profile GET: %s", e)
+    return jsonify({"sections": sections})
+
+
+@hd_bp.route("/clinic-profile", methods=["POST"])
+@require_role("physician", "admin")
+def save_clinic_profile():
+    """Save/update a clinic profile item."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    data = request.get_json(force=True, silent=True) or {}
+    section = data.get("section")
+    key = data.get("key")
+    value = data.get("value", "")
+    file_url = data.get("file_url")
+    expires = data.get("expires_at")
+    if not section or not key:
+        return jsonify({"error": "section and key required"}), 400
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO hd_clinic_profile (section, item_key, item_value, file_url, expires_at, updated_by, updated_at)
+                VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                ON CONFLICT (section, item_key) DO UPDATE
+                SET item_value = EXCLUDED.item_value, file_url = EXCLUDED.file_url,
+                    expires_at = EXCLUDED.expires_at, updated_by = EXCLUDED.updated_by, updated_at = NOW()
+            """, (section, key, value, file_url, expires, g.get("hd_user_id")))
+        conn.commit()
+        conn.close()
+        return jsonify({"saved": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/staff", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_staff_registry():
+    """Get staff registry."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    staff = []
+    if not db_url:
+        return jsonify({"staff": staff})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_staff_registry (
+                id SERIAL PRIMARY KEY, user_id INTEGER, full_name VARCHAR(200) NOT NULL,
+                role VARCHAR(30) NOT NULL, license_number VARCHAR(50), license_expiry DATE,
+                specialty VARCHAR(100), hd_training_course VARCHAR(200), hd_training_year INTEGER,
+                cme_hours_this_year NUMERIC(5,1) DEFAULT 0, hbv_vaccine_status VARCHAR(30),
+                phone VARCHAR(20), is_active BOOLEAN DEFAULT TRUE, created_at TIMESTAMP DEFAULT NOW())""")
+            conn.commit()
+            cur.execute("""SELECT id, full_name, role, license_number, license_expiry, specialty,
+                           hd_training_course, hd_training_year, cme_hours_this_year, hbv_vaccine_status, phone, is_active
+                    FROM hd_staff_registry WHERE is_active = TRUE ORDER BY role, full_name""")
+            for r in cur.fetchall():
+                staff.append({
+                    "id": r[0], "name": r[1], "role": r[2], "license": r[3],
+                    "license_expiry": r[4].isoformat() if r[4] else None,
+                    "specialty": r[5], "training": r[6], "training_year": r[7],
+                    "cme_hours": float(r[8]) if r[8] else 0, "hbv_status": r[9],
+                    "phone": r[10], "active": r[11],
+                })
+        conn.close()
+    except Exception as e:
+        logger.warning("staff_registry GET: %s", e)
+    return jsonify({"staff": staff})
+
+
+@hd_bp.route("/clinic-profile/staff", methods=["POST"])
+@require_role("physician", "admin")
+def save_staff():
+    """Add/update staff member."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    data = request.get_json(force=True, silent=True) or {}
+    name = data.get("name")
+    role = data.get("role")
+    if not name or not role:
+        return jsonify({"error": "name and role required"}), 400
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            staff_id = data.get("id")
+            if staff_id:
+                cur.execute("""UPDATE hd_staff_registry SET full_name=%s, role=%s, license_number=%s,
+                    license_expiry=%s, specialty=%s, hd_training_course=%s, hd_training_year=%s,
+                    cme_hours_this_year=%s, hbv_vaccine_status=%s, phone=%s WHERE id=%s""",
+                    (name, role, data.get("license"), data.get("license_expiry"),
+                     data.get("specialty"), data.get("training"), data.get("training_year"),
+                     data.get("cme_hours", 0), data.get("hbv_status"), data.get("phone"), staff_id))
+            else:
+                cur.execute("""INSERT INTO hd_staff_registry (full_name, role, license_number, license_expiry,
+                    specialty, hd_training_course, hd_training_year, cme_hours_this_year, hbv_vaccine_status, phone)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (name, role, data.get("license"), data.get("license_expiry"),
+                     data.get("specialty"), data.get("training"), data.get("training_year"),
+                     data.get("cme_hours", 0), data.get("hbv_status"), data.get("phone")))
+                staff_id = cur.fetchone()[0]
+        conn.commit()
+        conn.close()
+        return jsonify({"saved": True, "id": staff_id})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/equipment", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_equipment():
+    """Get equipment registry."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    equipment = []
+    if not db_url:
+        return jsonify({"equipment": equipment})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_equipment (
+                id SERIAL PRIMARY KEY, equipment_type VARCHAR(30) NOT NULL, brand VARCHAR(100),
+                model VARCHAR(100), serial_number VARCHAR(100), bed_number INTEGER,
+                purchase_date DATE, status VARCHAR(20) DEFAULT 'active', last_pm_date DATE,
+                next_pm_date DATE, pm_interval_days INTEGER DEFAULT 90, notes VARCHAR(300),
+                created_at TIMESTAMP DEFAULT NOW())""")
+            conn.commit()
+            cur.execute("""SELECT id, equipment_type, brand, model, serial_number, bed_number,
+                    purchase_date, status, last_pm_date, next_pm_date, notes
+                    FROM hd_equipment ORDER BY equipment_type, bed_number""")
+            for r in cur.fetchall():
+                equipment.append({
+                    "id": r[0], "type": r[1], "brand": r[2], "model": r[3], "serial": r[4],
+                    "bed": r[5], "purchase_date": r[6].isoformat() if r[6] else None,
+                    "status": r[7], "last_pm": r[8].isoformat() if r[8] else None,
+                    "next_pm": r[9].isoformat() if r[9] else None, "notes": r[10],
+                })
+        conn.close()
+    except Exception as e:
+        logger.warning("equipment GET: %s", e)
+    return jsonify({"equipment": equipment})
+
+
+@hd_bp.route("/clinic-profile/equipment", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def save_equipment():
+    """Add or update equipment."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    data = request.get_json(force=True)
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_equipment (
+                id SERIAL PRIMARY KEY, equipment_type VARCHAR(30) NOT NULL, brand VARCHAR(100),
+                model VARCHAR(100), serial_number VARCHAR(100), bed_number INTEGER,
+                purchase_date DATE, status VARCHAR(20) DEFAULT 'active', last_pm_date DATE,
+                next_pm_date DATE, pm_interval_days INTEGER DEFAULT 90, notes VARCHAR(300),
+                created_at TIMESTAMP DEFAULT NOW())""")
+            eid = data.get("id")
+            if eid:
+                cur.execute("""UPDATE hd_equipment SET equipment_type=%s, brand=%s, model=%s,
+                    serial_number=%s, bed_number=%s, status=%s, last_pm_date=%s, next_pm_date=%s, notes=%s
+                    WHERE id=%s""",
+                    (data.get("type","dialysis_machine"), data.get("brand"), data.get("model"),
+                     data.get("serial"), data.get("bed"), data.get("status","active"),
+                     data.get("last_pm") or None, data.get("next_pm") or None,
+                     data.get("notes"), eid))
+            else:
+                cur.execute("""INSERT INTO hd_equipment (equipment_type, brand, model, serial_number,
+                    bed_number, status, last_pm_date, next_pm_date, notes)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    (data.get("type","dialysis_machine"), data.get("brand"), data.get("model"),
+                     data.get("serial"), data.get("bed"), data.get("status","active"),
+                     data.get("last_pm") or None, data.get("next_pm") or None,
+                     data.get("notes")))
+                eid = cur.fetchone()[0]
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": eid})
+    except Exception as e:
+        logger.warning("equipment POST: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/water-quality", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_water_quality():
+    """Get water quality test logs."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    logs = []
+    if not db_url:
+        return jsonify({"logs": logs})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_water_quality (
+                id SERIAL PRIMARY KEY, test_date DATE NOT NULL, test_type VARCHAR(30) NOT NULL,
+                parameter VARCHAR(100), result_value VARCHAR(100), unit VARCHAR(30),
+                pass_fail VARCHAR(10) DEFAULT 'pass', method VARCHAR(100),
+                tested_by VARCHAR(100), notes VARCHAR(300),
+                created_at TIMESTAMP DEFAULT NOW())""")
+            conn.commit()
+            cur.execute("""SELECT id, test_date, test_type, parameter, result_value, unit,
+                pass_fail, method, tested_by, notes
+                FROM hd_water_quality ORDER BY test_date DESC LIMIT 50""")
+            for r in cur.fetchall():
+                logs.append({
+                    "id": r[0], "date": r[1].isoformat() if r[1] else None,
+                    "type": r[2], "parameter": r[3], "value": r[4], "unit": r[5],
+                    "pass_fail": r[6], "method": r[7], "tested_by": r[8], "notes": r[9],
+                })
+        conn.close()
+    except Exception as e:
+        logger.warning("water_quality GET: %s", e)
+    return jsonify({"logs": logs})
+
+
+@hd_bp.route("/clinic-profile/water-quality", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def save_water_quality():
+    """Add water quality test result."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    data = request.get_json(force=True)
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_water_quality (
+                id SERIAL PRIMARY KEY, test_date DATE NOT NULL, test_type VARCHAR(30) NOT NULL,
+                parameter VARCHAR(100), result_value VARCHAR(100), unit VARCHAR(30),
+                pass_fail VARCHAR(10) DEFAULT 'pass', method VARCHAR(100),
+                tested_by VARCHAR(100), notes VARCHAR(300),
+                created_at TIMESTAMP DEFAULT NOW())""")
+            cur.execute("""INSERT INTO hd_water_quality (test_date, test_type, parameter,
+                result_value, unit, pass_fail, method, tested_by, notes)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                (data.get("date"), data.get("type","bacteria"), data.get("parameter"),
+                 data.get("value"), data.get("unit"), data.get("pass_fail","pass"),
+                 data.get("method"), data.get("tested_by"), data.get("notes")))
+            new_id = cur.fetchone()[0]
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": new_id})
+    except Exception as e:
+        logger.warning("water_quality POST: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/incidents", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_incidents():
+    """Get incident reports."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    incidents = []
+    if not db_url:
+        return jsonify({"incidents": incidents})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_incidents (
+                id SERIAL PRIMARY KEY, incident_date TIMESTAMP NOT NULL,
+                incident_type VARCHAR(30) NOT NULL, severity VARCHAR(20) DEFAULT 'minor',
+                description TEXT, action_taken TEXT, reported_by VARCHAR(100),
+                status VARCHAR(20) DEFAULT 'open', resolved_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW())""")
+            conn.commit()
+            cur.execute("""SELECT id, incident_date, incident_type, severity, description,
+                action_taken, reported_by, status, resolved_at
+                FROM hd_incidents ORDER BY incident_date DESC LIMIT 50""")
+            for r in cur.fetchall():
+                incidents.append({
+                    "id": r[0], "date": r[1].isoformat()+"Z" if r[1] else None,
+                    "type": r[2], "severity": r[3], "description": r[4],
+                    "action": r[5], "reported_by": r[6], "status": r[7],
+                    "resolved_at": r[8].isoformat()+"Z" if r[8] else None,
+                })
+        conn.close()
+    except Exception as e:
+        logger.warning("incidents GET: %s", e)
+    return jsonify({"incidents": incidents})
+
+
+@hd_bp.route("/clinic-profile/incidents", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def save_incident():
+    """Report new incident."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    data = request.get_json(force=True)
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_incidents (
+                id SERIAL PRIMARY KEY, incident_date TIMESTAMP NOT NULL,
+                incident_type VARCHAR(30) NOT NULL, severity VARCHAR(20) DEFAULT 'minor',
+                description TEXT, action_taken TEXT, reported_by VARCHAR(100),
+                status VARCHAR(20) DEFAULT 'open', resolved_at TIMESTAMP,
+                created_at TIMESTAMP DEFAULT NOW())""")
+            cur.execute("""INSERT INTO hd_incidents (incident_date, incident_type, severity,
+                description, action_taken, reported_by, status)
+                VALUES (NOW(), %s, %s, %s, %s, %s, 'open') RETURNING id""",
+                (data.get("type","other"), data.get("severity","minor"),
+                 data.get("description"), data.get("action"), data.get("reported_by")))
+            new_id = cur.fetchone()[0]
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "id": new_id})
+    except Exception as e:
+        logger.warning("incidents POST: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/self-assessment", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_self_assessment():
+    """Get self-assessment checklist data."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    items = []
+    if not db_url:
+        return jsonify({"items": items})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_self_assessment (
+                id SERIAL PRIMARY KEY, category VARCHAR(100) NOT NULL,
+                item_key VARCHAR(100) NOT NULL, checked BOOLEAN DEFAULT FALSE,
+                evidence TEXT, assessed_by VARCHAR(100), assessed_at TIMESTAMP,
+                UNIQUE(category, item_key))""")
+            conn.commit()
+            cur.execute("SELECT category, item_key, checked, evidence, assessed_by FROM hd_self_assessment ORDER BY id")
+            for r in cur.fetchall():
+                items.append({"category": r[0], "key": r[1], "checked": r[2], "evidence": r[3], "assessed_by": r[4]})
+        conn.close()
+    except Exception as e:
+        logger.warning("self_assessment GET: %s", e)
+    return jsonify({"items": items})
+
+
+@hd_bp.route("/clinic-profile/self-assessment", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def save_self_assessment():
+    """Save self-assessment checklist."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    data = request.get_json(force=True)
+    items = data.get("items", [])
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS hd_self_assessment (
+                id SERIAL PRIMARY KEY, category VARCHAR(100) NOT NULL,
+                item_key VARCHAR(100) NOT NULL, checked BOOLEAN DEFAULT FALSE,
+                evidence TEXT, assessed_by VARCHAR(100), assessed_at TIMESTAMP,
+                UNIQUE(category, item_key))""")
+            for item in items:
+                cur.execute("""INSERT INTO hd_self_assessment (category, item_key, checked, assessed_at)
+                    VALUES (%s, %s, %s, NOW())
+                    ON CONFLICT (category, item_key) DO UPDATE SET checked = EXCLUDED.checked, assessed_at = NOW()""",
+                    (item.get("category"), item.get("key"), item.get("checked", False)))
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.warning("self_assessment POST: %s", e)
+        return jsonify({"error": str(e)}), 500

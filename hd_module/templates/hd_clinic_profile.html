@@ -1,0 +1,498 @@
+{% extends "hd_base.html" %}
+{% block title %}ประวัติคลินิก / ศรต.{% endblock %}
+{% block nav_clinic %}active{% endblock %}
+{% block page_title %}🏥 ประวัติคลินิก / ศรต.{% endblock %}
+
+{% block extra_css %}
+<style>
+.cp-tabs{display:flex;gap:4px;overflow-x:auto;-webkit-overflow-scrolling:touch;padding-bottom:6px;margin-bottom:16px}
+.cp-tab{padding:8px 14px;border-radius:20px;font-size:.75rem;font-weight:600;border:1.5px solid var(--border);background:var(--bg-card);cursor:pointer;white-space:nowrap;color:var(--fg-muted);transition:all .15s}
+.cp-tab.active{background:var(--accent);color:#fff;border-color:var(--accent)}
+.cp-tab .badge{display:inline-block;min-width:16px;height:16px;line-height:16px;font-size:.6rem;border-radius:8px;background:var(--danger);color:#fff;text-align:center;margin-left:4px}
+.cp-panel{display:none}.cp-panel.active{display:block}
+.cp-card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:12px}
+.cp-card h3{font-size:.95rem;font-weight:700;margin:0 0 12px;display:flex;align-items:center;gap:8px}
+.field-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+@media(max-width:480px){.field-grid{grid-template-columns:1fr}}
+.cp-field{background:var(--bg);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px}
+.cp-field .flabel{font-size:.65rem;color:var(--fg-muted);text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px}
+.cp-field input,.cp-field select,.cp-field textarea{width:100%;border:none;background:transparent;font-size:.9rem;color:var(--fg);font-family:inherit;outline:none;resize:vertical}
+.cp-field textarea{min-height:60px}
+.cp-field .fval{font-size:.9rem;font-weight:600}
+.save-btn{width:100%;padding:14px;font-size:1rem;font-weight:700;border:none;border-radius:var(--radius-sm);cursor:pointer;background:var(--success);color:#fff;margin-top:12px}
+.save-btn:active{opacity:.8}
+/* Staff/Equipment table */
+.cp-table{width:100%;border-collapse:collapse;font-size:.75rem}
+.cp-table th{background:var(--accent);color:#fff;padding:8px 6px;text-align:left;font-size:.65rem;text-transform:uppercase;letter-spacing:.3px;position:sticky;top:0}
+.cp-table td{padding:8px 6px;border-bottom:1px solid var(--border);vertical-align:top}
+.cp-table tr:hover td{background:var(--bg)}
+.status-badge{padding:2px 8px;border-radius:8px;font-size:.65rem;font-weight:600}
+.status-active{background:rgba(34,197,94,.1);color:var(--success)}
+.status-repair{background:rgba(239,68,68,.1);color:var(--danger)}
+.status-spare{background:rgba(245,158,11,.1);color:var(--warning)}
+.cp-empty{text-align:center;color:var(--fg-muted);padding:30px;font-size:.85rem}
+.add-btn{display:inline-flex;align-items:center;gap:4px;padding:8px 16px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius-sm);font-size:.8rem;font-weight:600;cursor:pointer}
+/* Water/Incident items */
+.log-item{display:flex;gap:10px;padding:10px;background:var(--bg);border-radius:var(--radius-sm);margin-bottom:6px;align-items:center;border:1px solid var(--border)}
+.log-date{font-size:.7rem;color:var(--fg-muted);white-space:nowrap;min-width:60px}
+.log-body{flex:1;font-size:.8rem;min-width:0}
+.log-badge{font-size:.65rem;font-weight:600;padding:2px 8px;border-radius:8px}
+.pass{background:rgba(34,197,94,.1);color:var(--success)}
+.fail{background:rgba(239,68,68,.1);color:var(--danger)}
+/* Self-assessment */
+.sa-item{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--border)}
+.sa-item:last-child{border-bottom:none}
+.sa-check{width:22px;height:22px;border:2px solid var(--border);border-radius:6px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:.7rem;transition:all .15s}
+.sa-item.checked .sa-check{background:var(--success);border-color:var(--success);color:#fff}
+.sa-label{flex:1;font-size:.8rem}
+.sa-item.checked .sa-label{opacity:.6;text-decoration:line-through}
+/* Modal */
+.cp-modal{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;display:none;align-items:flex-end;justify-content:center}
+.cp-modal.open{display:flex}
+.cp-sheet{background:var(--bg-card);border-radius:16px 16px 0 0;width:100%;max-width:480px;padding:16px;padding-bottom:calc(16px + env(safe-area-inset-bottom,0px));max-height:80vh;overflow-y:auto}
+</style>
+{% endblock %}
+
+{% block content %}
+<div style="display:flex;gap:8px;margin-bottom:12px;align-items:center">
+  <a href="/hd/" class="btn" style="font-size:.8rem">← Dashboard</a>
+  <span style="font-size:.8rem;color:var(--fg-muted)">คลินิกระนอง รักษ์ไต v2.2</span>
+</div>
+
+<!-- 10 Tabs -->
+<div class="cp-tabs" id="cpTabs">
+  <div class="cp-tab active" data-tab="info" onclick="switchCpTab('info')">🏥 ข้อมูล</div>
+  <div class="cp-tab" data-tab="staff" onclick="switchCpTab('staff')">👥 บุคลากร</div>
+  <div class="cp-tab" data-tab="facility" onclick="switchCpTab('facility')">🏗 สถานที่</div>
+  <div class="cp-tab" data-tab="water" onclick="switchCpTab('water')">💧 ระบบน้ำ</div>
+  <div class="cp-tab" data-tab="equipment" onclick="switchCpTab('equipment')">⚙️ อุปกรณ์</div>
+  <div class="cp-tab" data-tab="license" onclick="switchCpTab('license')">📜 ใบอนุญาต</div>
+  <div class="cp-tab" data-tab="kpi" onclick="switchCpTab('kpi')">📊 KPI</div>
+  <div class="cp-tab" data-tab="ic" onclick="switchCpTab('ic')">🛡 IC/Safety</div>
+  <div class="cp-tab" data-tab="sop" onclick="switchCpTab('sop')">📚 SOP</div>
+  <div class="cp-tab" data-tab="assess" onclick="switchCpTab('assess')">📝 ประเมินตนเอง</div>
+</div>
+
+<!-- Tab 1: ข้อมูลคลินิก -->
+<div class="cp-panel active" id="panel-info">
+  <div class="cp-card">
+    <h3>🏥 ข้อมูลคลินิก</h3>
+    <div class="field-grid" id="infoFields">
+      <div class="cp-field"><div class="flabel">ชื่อสถานพยาบาล</div><input id="f_clinic_name" placeholder="ชื่อเต็ม"></div>
+      <div class="cp-field"><div class="flabel">รหัส Hcode</div><input id="f_hcode" placeholder="เช่น 27970"></div>
+      <div class="cp-field"><div class="flabel">วันที่ก่อตั้ง</div><input type="date" id="f_founded"></div>
+      <div class="cp-field"><div class="flabel">แพทย์ผู้รับผิดชอบ</div><input id="f_director" placeholder="ชื่อแพทย์"></div>
+      <div class="cp-field" style="grid-column:1/-1"><div class="flabel">ที่อยู่</div><textarea id="f_address" placeholder="ที่อยู่เต็ม" rows="2"></textarea></div>
+      <div class="cp-field"><div class="flabel">เบอร์โทร</div><input id="f_phone" type="tel" placeholder="077-xxxxxx"></div>
+      <div class="cp-field"><div class="flabel">FAX</div><input id="f_fax" type="tel" placeholder="077-xxxxxx"></div>
+      <div class="cp-field"><div class="flabel">Email</div><input id="f_email" type="email" placeholder="clinic@example.com"></div>
+      <div class="cp-field"><div class="flabel">LINE OA</div><input id="f_line" placeholder="@xxxxxxx"></div>
+      <div class="cp-field"><div class="flabel">จำนวนเตียง</div><input id="f_beds" type="number" value="25"></div>
+      <div class="cp-field"><div class="flabel">รอบ/วัน</div><input id="f_shifts" type="number" value="3"></div>
+      <div class="cp-field"><div class="flabel">เวลาเปิด-ปิด</div><input id="f_hours" placeholder="07:00-01:00"></div>
+      <div class="cp-field"><div class="flabel">Google Maps Link</div><input id="f_maps" placeholder="https://maps.google.com/..."></div>
+    </div>
+    <button class="save-btn" onclick="saveInfoTab()">💾 บันทึกข้อมูลคลินิก</button>
+  </div>
+</div>
+
+<!-- Tab 2: บุคลากร -->
+<div class="cp-panel" id="panel-staff">
+  <div class="cp-card">
+    <h3>👥 บุคลากร <button class="add-btn" onclick="openStaffModal()" style="margin-left:auto">➕ เพิ่ม</button></h3>
+    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+      <table class="cp-table"><thead><tr><th>ชื่อ</th><th>ตำแหน่ง</th><th>ว./ใบอนุญาต</th><th>หมดอายุ</th><th>อบรม HD</th><th>HBV</th></tr></thead>
+        <tbody id="staffBody"><tr><td colspan="6" class="cp-empty">กำลังโหลด...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Tab 3: สถานที่ -->
+<div class="cp-panel" id="panel-facility">
+  <div class="cp-card">
+    <h3>🏗 สถานที่ / Floor Plan</h3>
+    <div class="field-grid">
+      <div class="cp-field"><div class="flabel">พื้นที่รวม (ตร.ม.)</div><input id="f_area" type="number" placeholder="0"></div>
+      <div class="cp-field"><div class="flabel">พื้นที่/เตียง (ตร.ม.)</div><input id="f_area_per_bed" type="number" placeholder="0"></div>
+      <div class="cp-field"><div class="flabel">ระบบไฟฟ้า</div><input id="f_electrical" placeholder="UPS, Generator"></div>
+      <div class="cp-field"><div class="flabel">ปรับอากาศ</div><input id="f_aircon" placeholder="อุณหภูมิ/ระบบ"></div>
+      <div class="cp-field"><div class="flabel">ห้อง Isolation</div><input id="f_isolation" placeholder="HBV/HCV zone"></div>
+      <div class="cp-field"><div class="flabel">ทางออกฉุกเฉิน</div><input id="f_exit" placeholder="จำนวน/ตำแหน่ง"></div>
+      <div class="cp-field" style="grid-column:1/-1"><div class="flabel">หมายเหตุ</div><textarea id="f_facility_notes" rows="2" placeholder="รายละเอียดเพิ่มเติม"></textarea></div>
+    </div>
+    <button class="save-btn" onclick="saveFacilityTab()">💾 บันทึก</button>
+  </div>
+</div>
+
+<!-- Tab 4: ระบบน้ำ -->
+<div class="cp-panel" id="panel-water">
+  <div class="cp-card">
+    <h3>💧 ระบบน้ำ RO/DI</h3>
+    <div class="field-grid">
+      <div class="cp-field"><div class="flabel">ยี่ห้อ/รุ่น RO</div><input id="f_ro_brand" placeholder="ยี่ห้อ รุ่น"></div>
+      <div class="cp-field"><div class="flabel">กำลังผลิต (L/hr)</div><input id="f_ro_capacity" type="number"></div>
+      <div class="cp-field"><div class="flabel">บริษัทดูแล</div><input id="f_water_vendor" placeholder="เช่น TWG"></div>
+      <div class="cp-field"><div class="flabel">เบอร์ติดต่อ</div><input id="f_water_phone" type="tel"></div>
+    </div>
+    <button class="save-btn" onclick="saveWaterTab()">💾 บันทึก</button>
+  </div>
+  <div class="cp-card">
+    <h3>🧪 ผลตรวจคุณภาพน้ำ <button class="add-btn" onclick="openWaterLogModal()" style="margin-left:auto">➕ เพิ่มผล</button></h3>
+    <div id="waterLogs"><div class="cp-empty">กำลังโหลด...</div></div>
+  </div>
+</div>
+
+<!-- Tab 5: อุปกรณ์ -->
+<div class="cp-panel" id="panel-equipment">
+  <div class="cp-card">
+    <h3>⚙️ ทะเบียนอุปกรณ์ <button class="add-btn" onclick="openEquipModal()" style="margin-left:auto">➕ เพิ่ม</button></h3>
+    <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
+      <table class="cp-table"><thead><tr><th>ประเภท</th><th>ยี่ห้อ/รุ่น</th><th>S/N</th><th>เตียง</th><th>สถานะ</th><th>PM ถัดไป</th></tr></thead>
+        <tbody id="equipBody"><tr><td colspan="6" class="cp-empty">กำลังโหลด...</td></tr></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Tab 6: ใบอนุญาต -->
+<div class="cp-panel" id="panel-license">
+  <div class="cp-card">
+    <h3>📜 ใบอนุญาต / ใบรับรอง</h3>
+    <div class="field-grid">
+      <div class="cp-field"><div class="flabel">ใบอนุญาตคลินิก เลขที่</div><input id="f_lic_clinic"></div>
+      <div class="cp-field"><div class="flabel">หมดอายุ</div><input type="date" id="f_lic_clinic_exp"></div>
+      <div class="cp-field"><div class="flabel">ใบรับรอง ศ.ร.ต. เลขที่</div><input id="f_lic_srt"></div>
+      <div class="cp-field"><div class="flabel">ศ.ร.ต. หมดอายุ</div><input type="date" id="f_lic_srt_exp"></div>
+      <div class="cp-field"><div class="flabel">สปสช. hcode</div><input id="f_lic_nhso" value="27970"></div>
+      <div class="cp-field"><div class="flabel">ประกันสังคม hcode</div><input id="f_lic_sso" value="27970, 45247"></div>
+      <div class="cp-field"><div class="flabel">PDPA นโยบาย</div><input id="f_lic_pdpa" placeholder="วันที่ประกาศ"></div>
+      <div class="cp-field"><div class="flabel">อ.ย. เครื่องมือแพทย์</div><input id="f_lic_fda"></div>
+    </div>
+    <button class="save-btn" onclick="saveLicenseTab()">💾 บันทึก</button>
+  </div>
+</div>
+
+<!-- Tab 7: KPI -->
+<div class="cp-panel" id="panel-kpi">
+  <div class="cp-card">
+    <h3>📊 ตัวชี้วัดคุณภาพ (KPI)</h3>
+    <div class="cp-empty" style="padding:20px">
+      <a href="/hd/quality" class="btn btn-primary" style="font-size:1rem;padding:14px 24px">📊 เปิดหน้า Quality Indicators</a>
+      <p style="margin-top:10px;font-size:.8rem">ดึงข้อมูลอัตโนมัติจากระบบ HD — Kt/V, Hb Target, Infection Rate, ESA Response</p>
+    </div>
+  </div>
+</div>
+
+<!-- Tab 8: IC/Safety -->
+<div class="cp-panel" id="panel-ic">
+  <div class="cp-card">
+    <h3>🛡 Infection Control & Safety</h3>
+    <div class="field-grid">
+      <div class="cp-field"><div class="flabel">HBsAg/Anti-HCV Screening</div><input id="f_ic_screening" placeholder="ทุก 6 เดือน"></div>
+      <div class="cp-field"><div class="flabel">ซ้อมอพยพล่าสุด</div><input type="date" id="f_ic_drill"></div>
+      <div class="cp-field" style="grid-column:1/-1"><div class="flabel">แผน IC</div><textarea id="f_ic_plan" rows="3" placeholder="Hand hygiene, PPE, Sharps disposal, Waste management..."></textarea></div>
+    </div>
+    <button class="save-btn" onclick="saveIcTab()">💾 บันทึก</button>
+  </div>
+  <div class="cp-card">
+    <h3>📋 อุบัติการณ์ (Incidents) <button class="add-btn" onclick="openIncidentModal()" style="margin-left:auto">➕ รายงาน</button></h3>
+    <div id="incidentList"><div class="cp-empty">กำลังโหลด...</div></div>
+  </div>
+</div>
+
+<!-- Tab 9: SOP -->
+<div class="cp-panel" id="panel-sop">
+  <div class="cp-card">
+    <h3>📚 คู่มือปฏิบัติงาน (SOP)</h3>
+    <div style="display:flex;flex-direction:column;gap:8px" id="sopList">
+      <div class="log-item"><span style="font-size:1.2rem">📋</span><div class="log-body"><strong>คู่มือฟอกเลือด HD</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">ขั้นตอนเตรียมเครื่อง, เริ่มฟอก, จบรอบ</span></div></div>
+      <div class="log-item"><span style="font-size:1.2rem">🚨</span><div class="log-body"><strong>คู่มือฉุกเฉิน</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">CPR, Anaphylaxis, Air embolism, Dialyzer rupture</span></div></div>
+      <div class="log-item"><span style="font-size:1.2rem">💧</span><div class="log-body"><strong>คู่มือระบบน้ำ</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">เปลี่ยน filter, Disinfection, Water sampling</span></div></div>
+      <div class="log-item"><span style="font-size:1.2rem">🧤</span><div class="log-body"><strong>คู่มือ IC</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">Hand hygiene, Cleaning, Waste management</span></div></div>
+      <div class="log-item"><span style="font-size:1.2rem">💊</span><div class="log-body"><strong>คู่มือยา</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">ESA, Heparin, Iron, Emergency drugs</span></div></div>
+      <div class="log-item"><span style="font-size:1.2rem">📄</span><div class="log-body"><strong>แบบฟอร์ม</strong><br><span style="font-size:.7rem;color:var(--fg-muted)">Consent form, ใบส่งตรวจ Lab, ใบส่งต่อ</span></div></div>
+    </div>
+    <p style="font-size:.75rem;color:var(--fg-muted);margin-top:12px">💡 อัปโหลดไฟล์ SOP (PDF/รูปภาพ) ได้ในอนาคต</p>
+  </div>
+</div>
+
+<!-- Tab 10: Self Assessment -->
+<div class="cp-panel" id="panel-assess">
+  <div class="cp-card">
+    <h3>📝 ประเมินตนเอง ตามเกณฑ์ ศ.ร.ต.</h3>
+    <div id="saBody">
+      <div class="cp-empty">กำลังโหลด...</div>
+    </div>
+    <button class="save-btn" onclick="saveSelfAssessment()">💾 บันทึกผลประเมิน</button>
+  </div>
+</div>
+
+<!-- Add Staff Modal -->
+<div class="cp-modal" id="staffModal" onclick="if(event.target===this)this.classList.remove('open')">
+  <div class="cp-sheet">
+    <h3>➕ เพิ่ม/แก้ไข บุคลากร</h3>
+    <input type="hidden" id="sm_id">
+    <div class="field-grid">
+      <div class="cp-field"><div class="flabel">ชื่อ-นามสกุล</div><input id="sm_name"></div>
+      <div class="cp-field"><div class="flabel">ตำแหน่ง</div><select id="sm_role"><option value="physician">แพทย์</option><option value="nurse">พยาบาล HD</option><option value="technician">ช่างเทคนิค</option><option value="admin">ธุรการ</option></select></div>
+      <div class="cp-field"><div class="flabel">เลขที่ ว./ใบอนุญาต</div><input id="sm_license"></div>
+      <div class="cp-field"><div class="flabel">หมดอายุ</div><input type="date" id="sm_expiry"></div>
+      <div class="cp-field"><div class="flabel">วุฒิบัตร/สาขา</div><input id="sm_specialty"></div>
+      <div class="cp-field"><div class="flabel">อบรม HD (ชื่อหลักสูตร)</div><input id="sm_training"></div>
+      <div class="cp-field"><div class="flabel">ปีที่อบรม</div><input type="number" id="sm_year"></div>
+      <div class="cp-field"><div class="flabel">HBV Vaccine</div><select id="sm_hbv"><option value="">--</option><option value="completed">ครบ</option><option value="incomplete">ไม่ครบ</option><option value="pending">รอฉีด</option></select></div>
+      <div class="cp-field"><div class="flabel">เบอร์โทร</div><input id="sm_phone" type="tel"></div>
+    </div>
+    <button class="save-btn" onclick="saveStaff()">💾 บันทึก</button>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+/* Tab switching */
+function switchCpTab(tab){
+  document.querySelectorAll('.cp-tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===tab));
+  document.querySelectorAll('.cp-panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+tab));
+  /* Load tab data */
+  if(tab==='staff') loadStaff();
+  else if(tab==='equipment') loadEquipment();
+  else if(tab==='assess') loadSelfAssessment();
+  /* Save to localStorage */
+  try{localStorage.setItem('cp_tab',tab)}catch(e){}
+}
+
+/* Restore last tab */
+try{const t=localStorage.getItem('cp_tab');if(t)switchCpTab(t)}catch(e){}
+
+/* Load profile data on init */
+function loadProfileData(){
+  hdFetch('/hd/api/v1/clinic-profile').then(r=>r.json()).then(d=>{
+    const s = d.sections || {};
+    function fill(id, section, key){
+      const items = s[section]||[];
+      const item = items.find(i=>i.key===key);
+      if(item && item.value){
+        const el = document.getElementById(id);
+        if(el) el.value = item.value;
+      }
+    }
+    /* Tab 1: Info */
+    fill('f_clinic_name','info','clinic_name');
+    fill('f_hcode','info','hcode');
+    fill('f_founded','info','founded');
+    fill('f_director','info','director');
+    fill('f_address','info','address');
+    fill('f_phone','info','phone');
+    fill('f_fax','info','fax');
+    fill('f_email','info','email');
+    fill('f_line','info','line_oa');
+    fill('f_beds','info','beds');
+    fill('f_shifts','info','shifts');
+    fill('f_hours','info','hours');
+    fill('f_maps','info','maps_url');
+    /* Tab 3: Facility */
+    fill('f_area','facility','total_area');
+    fill('f_area_per_bed','facility','area_per_bed');
+    fill('f_electrical','facility','electrical');
+    fill('f_aircon','facility','aircon');
+    fill('f_isolation','facility','isolation');
+    fill('f_exit','facility','emergency_exit');
+    fill('f_facility_notes','facility','notes');
+    /* Tab 4: Water */
+    fill('f_ro_brand','water','ro_brand');
+    fill('f_ro_capacity','water','ro_capacity');
+    fill('f_water_vendor','water','vendor');
+    fill('f_water_phone','water','vendor_phone');
+    /* Tab 6: License */
+    fill('f_lic_clinic','license','clinic_license');
+    fill('f_lic_clinic_exp','license','clinic_license_exp');
+    fill('f_lic_srt','license','srt_number');
+    fill('f_lic_srt_exp','license','srt_expiry');
+    fill('f_lic_nhso','license','nhso_hcode');
+    fill('f_lic_sso','license','sso_hcode');
+    fill('f_lic_pdpa','license','pdpa');
+    fill('f_lic_fda','license','fda');
+    /* Tab 8: IC */
+    fill('f_ic_screening','ic','screening');
+    fill('f_ic_drill','ic','drill_date');
+    fill('f_ic_plan','ic','plan');
+  }).catch(()=>{});
+}
+
+function saveSection(section, fields){
+  const promises = fields.map(([id,key])=>{
+    const el = document.getElementById(id);
+    const val = el ? el.value : '';
+    return hdFetch('/hd/api/v1/clinic-profile',{method:'POST',body:JSON.stringify({section,key,value:val})});
+  });
+  Promise.all(promises).then(()=>showToast('บันทึกสำเร็จ','success')).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
+
+function saveInfoTab(){
+  saveSection('info',[['f_clinic_name','clinic_name'],['f_hcode','hcode'],['f_founded','founded'],['f_director','director'],
+    ['f_address','address'],['f_phone','phone'],['f_fax','fax'],['f_email','email'],['f_line','line_oa'],
+    ['f_beds','beds'],['f_shifts','shifts'],['f_hours','hours'],['f_maps','maps_url']]);
+}
+function saveFacilityTab(){
+  saveSection('facility',[['f_area','total_area'],['f_area_per_bed','area_per_bed'],['f_electrical','electrical'],
+    ['f_aircon','aircon'],['f_isolation','isolation'],['f_exit','emergency_exit'],['f_facility_notes','notes']]);
+}
+function saveWaterTab(){
+  saveSection('water',[['f_ro_brand','ro_brand'],['f_ro_capacity','ro_capacity'],['f_water_vendor','vendor'],['f_water_phone','vendor_phone']]);
+}
+function saveLicenseTab(){
+  saveSection('license',[['f_lic_clinic','clinic_license'],['f_lic_clinic_exp','clinic_license_exp'],
+    ['f_lic_srt','srt_number'],['f_lic_srt_exp','srt_expiry'],['f_lic_nhso','nhso_hcode'],
+    ['f_lic_sso','sso_hcode'],['f_lic_pdpa','pdpa'],['f_lic_fda','fda']]);
+}
+function saveIcTab(){
+  saveSection('ic',[['f_ic_screening','screening'],['f_ic_drill','drill_date'],['f_ic_plan','plan']]);
+}
+
+/* Staff */
+function loadStaff(){
+  hdFetch('/hd/api/v1/clinic-profile/staff').then(r=>r.json()).then(d=>{
+    const body = document.getElementById('staffBody');
+    const list = d.staff||[];
+    if(!list.length){body.innerHTML='<tr><td colspan="6" class="cp-empty">ยังไม่มีข้อมูล — กด ➕ เพิ่ม</td></tr>';return}
+    const roleMap={physician:'แพทย์',nurse:'พยาบาล',technician:'ช่าง',admin:'ธุรการ'};
+    const hbvMap={completed:'✅ ครบ',incomplete:'⚠️ ไม่ครบ',pending:'⏳ รอ'};
+    body.innerHTML=list.map(s=>`<tr>
+      <td style="font-weight:600">${s.name}</td>
+      <td>${roleMap[s.role]||s.role}</td>
+      <td>${s.license||'-'}</td>
+      <td>${s.license_expiry||'-'}</td>
+      <td>${s.training?(s.training+' ('+s.training_year+')'):'-'}</td>
+      <td>${hbvMap[s.hbv_status]||'-'}</td>
+    </tr>`).join('');
+  }).catch(()=>{});
+}
+
+function openStaffModal(){ document.getElementById('staffModal').classList.add('open'); }
+function saveStaff(){
+  const data = {
+    id: document.getElementById('sm_id').value||null,
+    name: document.getElementById('sm_name').value,
+    role: document.getElementById('sm_role').value,
+    license: document.getElementById('sm_license').value,
+    license_expiry: document.getElementById('sm_expiry').value||null,
+    specialty: document.getElementById('sm_specialty').value,
+    training: document.getElementById('sm_training').value,
+    training_year: parseInt(document.getElementById('sm_year').value)||null,
+    hbv_status: document.getElementById('sm_hbv').value,
+    phone: document.getElementById('sm_phone').value,
+  };
+  hdFetch('/hd/api/v1/clinic-profile/staff',{method:'POST',body:JSON.stringify(data)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){showToast(d.error,'danger');return}
+      showToast('บันทึกสำเร็จ','success');
+      document.getElementById('staffModal').classList.remove('open');
+      loadStaff();
+    }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+}
+
+/* Equipment */
+function loadEquipment(){
+  hdFetch('/hd/api/v1/clinic-profile/equipment').then(r=>r.json()).then(d=>{
+    const body = document.getElementById('equipBody');
+    const list = d.equipment||[];
+    if(!list.length){body.innerHTML='<tr><td colspan="6" class="cp-empty">ยังไม่มีข้อมูล — กด ➕ เพิ่ม</td></tr>';return}
+    const typeMap={dialysis_machine:'เครื่องฟอก',defibrillator:'Defibrillator',ro_system:'RO System',scale:'เครื่องชั่ง',bp_monitor:'BP Monitor',o2:'O2 Tank',suction:'Suction'};
+    body.innerHTML=list.map(e=>{
+      const stCls = e.status==='active'?'status-active':e.status==='repair'?'status-repair':'status-spare';
+      const stLabel = {active:'ใช้งาน',spare:'สำรอง',repair:'ซ่อม',retired:'ปลดระวาง'}[e.status]||e.status;
+      return `<tr>
+        <td>${typeMap[e.type]||e.type}</td>
+        <td style="font-weight:600">${e.brand||'-'} ${e.model||''}</td>
+        <td style="font-size:.7rem">${e.serial||'-'}</td>
+        <td>${e.bed||'-'}</td>
+        <td><span class="status-badge ${stCls}">${stLabel}</span></td>
+        <td>${e.next_pm||'-'}</td>
+      </tr>`;
+    }).join('');
+  }).catch(()=>{});
+}
+
+/* Self Assessment — ศ.ร.ต. Checklist */
+const SA_ITEMS = {
+  'หมวด 1: บุคลากร': ['มีแพทย์เฉพาะทางโรคไต/อายุรแพทย์','พยาบาลผ่านอบรม HD ทุกคน','อัตราส่วนพยาบาล:ผู้ป่วย ≤ 1:4','มีช่างเทคนิคประจำ/on-call','บุคลากรมี CPD/CME ตามเกณฑ์'],
+  'หมวด 2: สถานที่': ['พื้นที่ ≥ 4 ตร.ม./เตียง','ระบบไฟฟ้าสำรอง (UPS/Generator)','ทางออกฉุกเฉินชัดเจน','ระบบปรับอากาศเพียงพอ','มีห้อง Isolation สำหรับ HBV/HCV'],
+  'หมวด 3: ระบบน้ำ': ['ตรวจคุณภาพน้ำ bacteria ทุกเดือน','ตรวจ endotoxin ตามกำหนด','ตรวจเคมีน้ำทุก 6 เดือน','บันทึก conductivity ประจำวัน','PM ระบบ RO ตามกำหนด'],
+  'หมวด 4: อุปกรณ์': ['PM เครื่องฟอกตามกำหนด','Calibrate เครื่องมือวัดทุกปี','มีเครื่องฟอกสำรอง','อุปกรณ์ฉุกเฉินพร้อม (Defibrillator, O2)','บันทึก PM ครบถ้วน'],
+  'หมวด 5: การดูแลผู้ป่วย': ['ตรวจ Lab ครบตาม KDOQI','Kt/V ≥ 1.2 ใน ≥80% ผู้ป่วย','Hb 10-12 g/dL ตามเป้า','ติดตาม VA assessment สม่ำเสมอ','บันทึก HD Record ครบถ้วน'],
+  'หมวด 6: IC/Safety': ['Hand hygiene compliance >80%','ตรวจ HBsAg/Anti-HCV ตามกำหนด','Staff ฉีดวัคซีน HBV ครบ','ซ้อมอพยพปีละ 1 ครั้ง','จัดการขยะติดเชื้อถูกต้อง'],
+  'หมวด 7: เอกสาร/SOP': ['มี SOP ครบทุกขั้นตอน','ทบทวน SOP ปีละ 1 ครั้ง','มี Consent form ครบ','มีแบบฟอร์มมาตรฐาน','มีระบบ Audit/QA'],
+};
+
+function loadSelfAssessment(){
+  const body = document.getElementById('saBody');
+  let html = '';
+  let total = 0, passed = 0;
+  Object.entries(SA_ITEMS).forEach(([cat, items])=>{
+    html += `<div style="font-weight:700;font-size:.85rem;margin:16px 0 8px;color:var(--accent)">${cat}</div>`;
+    items.forEach((label, i)=>{
+      const key = cat.replace(/[^a-zA-Z0-9]/g,'_')+'_'+i;
+      html += `<div class="sa-item" id="sa_${key}" onclick="toggleSA('${key}')">
+        <div class="sa-check"></div>
+        <div class="sa-label">${label}</div>
+      </div>`;
+      total++;
+    });
+  });
+  body.innerHTML = html;
+  /* Restore from localStorage */
+  try{
+    const saved = JSON.parse(localStorage.getItem('sa_data')||'{}');
+    Object.keys(saved).forEach(k=>{
+      if(saved[k]){
+        const el = document.getElementById('sa_'+k);
+        if(el){el.classList.add('checked');passed++}
+      }
+    });
+  }catch(e){}
+  updateSaScore();
+}
+
+function toggleSA(key){
+  const el = document.getElementById('sa_'+key);
+  el.classList.toggle('checked');
+  /* Save to localStorage */
+  try{
+    const saved = JSON.parse(localStorage.getItem('sa_data')||'{}');
+    saved[key] = el.classList.contains('checked');
+    localStorage.setItem('sa_data',JSON.stringify(saved));
+  }catch(e){}
+  updateSaScore();
+}
+
+function updateSaScore(){
+  const all = document.querySelectorAll('.sa-item');
+  const checked = document.querySelectorAll('.sa-item.checked');
+  const pct = all.length ? Math.round(checked.length/all.length*100) : 0;
+  const existing = document.getElementById('saScoreBar');
+  if(existing) existing.remove();
+  const bar = document.createElement('div');
+  bar.id = 'saScoreBar';
+  bar.style.cssText = 'text-align:center;padding:12px;background:var(--bg);border-radius:8px;margin-bottom:12px;border:1px solid var(--border)';
+  const color = pct>=80?'var(--success)':pct>=50?'var(--warning)':'var(--danger)';
+  bar.innerHTML = `<div style="font-size:1.8rem;font-weight:800;color:${color}">${pct}%</div>
+    <div style="font-size:.8rem;color:var(--fg-muted)">${checked.length} / ${all.length} ข้อ</div>
+    <div style="height:6px;border-radius:3px;background:var(--border);margin-top:6px;overflow:hidden"><div style="height:100%;width:${pct}%;border-radius:3px;background:${color}"></div></div>`;
+  document.getElementById('saBody').prepend(bar);
+}
+
+function saveSelfAssessment(){
+  showToast('บันทึกผลประเมินตนเองสำเร็จ','success');
+}
+
+/* Placeholder functions for modals not yet built */
+function openWaterLogModal(){ showToast('ฟังก์ชันเพิ่มผลน้ำ — กำลังพัฒนา','info'); }
+function openEquipModal(){ showToast('ฟังก์ชันเพิ่มอุปกรณ์ — กำลังพัฒนา','info'); }
+function openIncidentModal(){ showToast('ฟังก์ชันรายงานอุบัติการณ์ — กำลังพัฒนา','info'); }
+
+/* Init */
+loadProfileData();
+</script>
+{% endblock %}

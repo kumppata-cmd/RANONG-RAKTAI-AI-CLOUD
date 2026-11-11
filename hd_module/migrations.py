@@ -490,6 +490,101 @@ ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS va_location VARCHAR(50);
 INSERT INTO hd_schema_version (version, description)
 VALUES ('1.9.0', 'VA location field on patient mapping')
 ON CONFLICT (version) DO NOTHING;
+
+-- v2.0.0: Clinic Profile & Accreditation Module
+CREATE TABLE IF NOT EXISTS hd_clinic_profile (
+    id SERIAL PRIMARY KEY,
+    section VARCHAR(30) NOT NULL,        -- 'info','staff','facility','water','equipment','license','ic','sop'
+    item_key VARCHAR(80) NOT NULL,
+    item_value TEXT,
+    file_url VARCHAR(500),               -- uploaded document/image URL
+    expires_at DATE,                     -- for licenses/certifications
+    updated_by INTEGER REFERENCES hd_users(id),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    UNIQUE(section, item_key)
+);
+CREATE INDEX IF NOT EXISTS idx_hd_clinic_section ON hd_clinic_profile(section);
+
+-- Self Assessment checklist
+CREATE TABLE IF NOT EXISTS hd_self_assessment (
+    id SERIAL PRIMARY KEY,
+    assessment_date DATE NOT NULL,
+    category VARCHAR(30) NOT NULL,       -- 'cat1' through 'cat9'
+    item_key VARCHAR(80) NOT NULL,
+    item_label VARCHAR(300) NOT NULL,
+    passed BOOLEAN DEFAULT FALSE,
+    notes VARCHAR(500),
+    assessed_by INTEGER REFERENCES hd_users(id),
+    assessed_at TIMESTAMP,
+    UNIQUE(assessment_date, item_key)
+);
+
+-- Equipment registry
+CREATE TABLE IF NOT EXISTS hd_equipment (
+    id SERIAL PRIMARY KEY,
+    equipment_type VARCHAR(30) NOT NULL,  -- 'dialysis_machine','defibrillator','ro_system','scale','bp_monitor'
+    brand VARCHAR(100),
+    model VARCHAR(100),
+    serial_number VARCHAR(100),
+    bed_number INTEGER,
+    purchase_date DATE,
+    status VARCHAR(20) DEFAULT 'active',  -- 'active','spare','repair','retired'
+    last_pm_date DATE,
+    next_pm_date DATE,
+    pm_interval_days INTEGER DEFAULT 90,
+    notes VARCHAR(300),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Staff registry
+CREATE TABLE IF NOT EXISTS hd_staff_registry (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER REFERENCES hd_users(id),
+    full_name VARCHAR(200) NOT NULL,
+    role VARCHAR(30) NOT NULL,            -- 'physician','nurse','technician','admin'
+    license_number VARCHAR(50),
+    license_expiry DATE,
+    specialty VARCHAR(100),
+    hd_training_course VARCHAR(200),
+    hd_training_year INTEGER,
+    cme_hours_this_year NUMERIC(5,1) DEFAULT 0,
+    hbv_vaccine_status VARCHAR(30),       -- 'completed','incomplete','pending'
+    phone VARCHAR(20),
+    is_active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Water quality log
+CREATE TABLE IF NOT EXISTS hd_water_quality (
+    id SERIAL PRIMARY KEY,
+    test_date DATE NOT NULL,
+    test_type VARCHAR(30) NOT NULL,       -- 'bacteria','endotoxin','chemical','conductivity'
+    result_value VARCHAR(50),
+    unit VARCHAR(20),
+    pass_fail VARCHAR(10),                -- 'pass','fail'
+    lab_name VARCHAR(100),
+    notes VARCHAR(300),
+    recorded_by INTEGER REFERENCES hd_users(id),
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+-- Incident reports
+CREATE TABLE IF NOT EXISTS hd_incidents (
+    id SERIAL PRIMARY KEY,
+    incident_date DATE NOT NULL,
+    incident_type VARCHAR(50) NOT NULL,   -- 'needle_stick','blood_spill','idh','fall','air_embolism','other'
+    severity VARCHAR(20) DEFAULT 'minor', -- 'minor','moderate','serious'
+    description TEXT,
+    patient_hn VARCHAR(20),
+    action_taken TEXT,
+    reported_by INTEGER REFERENCES hd_users(id),
+    status VARCHAR(20) DEFAULT 'open',    -- 'open','investigating','resolved'
+    created_at TIMESTAMP DEFAULT NOW()
+);
+
+INSERT INTO hd_schema_version (version, description)
+VALUES ('2.0.0', 'Clinic Profile & Accreditation — profile, staff, equipment, water, incidents, self-assessment')
+ON CONFLICT (version) DO NOTHING;
 """
 
 # ── Rollback migration ────────────────────────────────────
