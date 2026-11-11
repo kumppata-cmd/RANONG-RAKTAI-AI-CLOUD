@@ -86,6 +86,75 @@ def _run_hd_migrations():
     except Exception as e:
         logger.error("HD migrations: failed — %s", e)
 
+    # ── Post-migration fixes (run every boot, safe to repeat) ──
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=10)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            fixes = [
+                # Drop FK constraints that block VARCHAR columns
+                """DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hd_incidents_reported_by_fkey') THEN
+                        ALTER TABLE hd_incidents DROP CONSTRAINT hd_incidents_reported_by_fkey;
+                    END IF;
+                END $$""",
+                """DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hd_clinic_profile_updated_by_fkey') THEN
+                        ALTER TABLE hd_clinic_profile DROP CONSTRAINT hd_clinic_profile_updated_by_fkey;
+                    END IF;
+                END $$""",
+                """DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'hd_water_quality_recorded_by_fkey') THEN
+                        ALTER TABLE hd_water_quality DROP CONSTRAINT hd_water_quality_recorded_by_fkey;
+                    END IF;
+                END $$""",
+                # Change INTEGER columns to VARCHAR
+                """DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name='hd_incidents' AND column_name='reported_by' AND data_type='integer') THEN
+                        ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100) USING reported_by::text;
+                    END IF;
+                END $$""",
+                """DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name='hd_clinic_profile' AND column_name='updated_by' AND data_type='integer') THEN
+                        ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100) USING updated_by::text;
+                    END IF;
+                END $$""",
+                """DO $$ BEGIN
+                    IF EXISTS (SELECT 1 FROM information_schema.columns
+                        WHERE table_name='hd_water_quality' AND column_name='recorded_by' AND data_type='integer') THEN
+                        ALTER TABLE hd_water_quality ALTER COLUMN recorded_by TYPE VARCHAR(100) USING recorded_by::text;
+                    END IF;
+                END $$""",
+                # Add missing columns to hd_water_quality
+                "ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS parameter VARCHAR(100)",
+                "ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS method VARCHAR(100)",
+                "ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS tested_by VARCHAR(100)",
+                "ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS send_date DATE",
+                # Add resolved_at to incidents
+                "ALTER TABLE hd_incidents ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP",
+                # Create SOP files table
+                """CREATE TABLE IF NOT EXISTS hd_sop_files (
+                    id SERIAL PRIMARY KEY, sop_key VARCHAR(80) NOT NULL,
+                    filename VARCHAR(255) NOT NULL, content_type VARCHAR(100),
+                    file_size INTEGER, file_data BYTEA NOT NULL,
+                    uploaded_by VARCHAR(100), uploaded_at TIMESTAMP DEFAULT NOW())""",
+                # Set alert_recipients
+                """INSERT INTO hd_settings (key, value, description, updated_at)
+                    VALUES ('alert_recipients', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId แพทย์', NOW())
+                    ON CONFLICT (key) DO NOTHING""",
+            ]
+            for sql in fixes:
+                try:
+                    cur.execute(sql)
+                except Exception as fix_err:
+                    logger.warning("HD fix: %s — %s", sql[:60], fix_err)
+        conn.close()
+        logger.info("HD post-migration fixes: done")
+    except Exception as e:
+        logger.error("HD post-migration fixes: %s", e)
+
 
 def sync_patients_to_hd_db(master_registry):
     """Sync patients from GCS MasterPatientRegistry → HD PostgreSQL.
