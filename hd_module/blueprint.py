@@ -5048,10 +5048,26 @@ def get_water_quality():
                     col_list.append(c)
 
             cur.execute(f"SELECT {','.join(col_list)} FROM hd_water_quality ORDER BY test_date DESC LIMIT 50")
-            for r in cur.fetchall():
+            wq_rows = cur.fetchall()
+
+            # Check which water_quality IDs have files in hd_sop_files
+            file_map = {}
+            try:
+                cur.execute("""SELECT sop_key, filename FROM hd_sop_files WHERE sop_key LIKE 'water_quality_%'""")
+                for fr in cur.fetchall():
+                    wq_id_str = fr[0].replace('water_quality_', '')
+                    try:
+                        file_map[int(wq_id_str)] = fr[1]
+                    except ValueError:
+                        pass
+            except Exception:
+                pass
+
+            for r in wq_rows:
                 row = dict(zip(col_list, r))
+                wq_id = row.get('id')
                 entry = {
-                    "id": row.get('id'),
+                    "id": wq_id,
                     "date": row['test_date'].isoformat() if row.get('test_date') else None,
                     "type": row.get('test_type'),
                     "parameter": row.get('parameter',''),
@@ -5062,8 +5078,8 @@ def get_water_quality():
                     "tested_by": row.get('tested_by') or row.get('lab_name',''),
                     "notes": row.get('notes',''),
                     "send_date": row['send_date'].isoformat() if row.get('send_date') else None,
-                    "file_id": row['id'] if row.get('file_name') else None,
-                    "file_name": row.get('file_name'),
+                    "file_id": wq_id if wq_id in file_map else None,
+                    "file_name": file_map.get(wq_id),
                 }
                 logs.append(entry)
         conn.close()
@@ -5093,56 +5109,66 @@ def save_water_quality():
     try:
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
-            # Ensure table exists
-            cur.execute("""CREATE TABLE IF NOT EXISTS hd_water_quality (
-                id SERIAL PRIMARY KEY, test_date DATE NOT NULL, test_type VARCHAR(30) NOT NULL,
-                parameter VARCHAR(100), result_value VARCHAR(100), unit VARCHAR(30),
-                pass_fail VARCHAR(10) DEFAULT 'pass', method VARCHAR(100),
-                tested_by VARCHAR(100), notes VARCHAR(300),
-                created_at TIMESTAMP DEFAULT NOW())""")
+            # Use only columns that the migration created
+            # Migration schema: test_date, test_type, result_value, unit, pass_fail, lab_name, notes, recorded_by
+            cur.execute("""SELECT column_name FROM information_schema.columns
+                WHERE table_name='hd_water_quality'""")
+            existing = {r[0] for r in cur.fetchall()}
+            logger.info("water_quality columns: %s", existing)
+
+            # Build INSERT with only existing columns
+            col_map = [
+                ('test_date', data.get("date")),
+                ('test_type', data.get("type", "bacteria")),
+            ]
+            # Use whatever columns exist
+            if 'result_value' in existing:
+                col_map.append(('result_value', data.get("value")))
+            if 'unit' in existing:
+                col_map.append(('unit', data.get("unit")))
+            if 'pass_fail' in existing:
+                col_map.append(('pass_fail', data.get("pass_fail", "pass")))
+            if 'lab_name' in existing:
+                col_map.append(('lab_name', data.get("tested_by")))
+            if 'notes' in existing:
+                col_map.append(('notes', data.get("notes")))
+            # These columns may or may not exist
+            if 'parameter' in existing:
+                col_map.append(('parameter', data.get("parameter")))
+            if 'method' in existing:
+                col_map.append(('method', data.get("method")))
+            if 'tested_by' in existing:
+                col_map.append(('tested_by', data.get("tested_by")))
+            if 'send_date' in existing:
+                col_map.append(('send_date', data.get("send_date") or None))
+
+            cols_str = ', '.join(c[0] for c in col_map)
+            vals_str = ', '.join(['%s'] * len(col_map))
+            vals = tuple(c[1] for c in col_map)
+
+            cur.execute(f"INSERT INTO hd_water_quality ({cols_str}) VALUES ({vals_str}) RETURNING id", vals)
+            new_id = cur.fetchone()[0]
             conn.commit()
 
-            # Add ALL missing columns (migration may have created table with fewer cols)
-            # Use autocommit connection for DDL to avoid transaction issues
-            conn.autocommit = True
-            new_cols = [
-                ('parameter','VARCHAR(100)'),('method','VARCHAR(100)'),('tested_by','VARCHAR(100)'),
-                ('send_date','DATE'),('file_data','BYTEA'),('file_name','VARCHAR(255)'),('file_type','VARCHAR(100)'),
-            ]
-            for col, ctype in new_cols:
-                try:
-                    cur.execute(f"ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS {col} {ctype}")
-                    logger.info("Ensured column hd_water_quality.%s exists", col)
-                except Exception as ae:
-                    logger.warning("ALTER hd_water_quality.%s: %s", col, ae)
-            conn.autocommit = False
-
-            # Read file if present
-            file_data_bin = None
-            file_name = None
-            file_type = None
+            # Save file separately in hd_sop_files (reuse as general file storage)
             if uploaded_file and uploaded_file.filename:
                 file_data_bin = uploaded_file.read()
                 if len(file_data_bin) > 10 * 1024 * 1024:
                     return jsonify({"error": "ไฟล์ใหญ่เกิน 10 MB"}), 400
-                file_name = uploaded_file.filename
-                file_type = uploaded_file.content_type
+                cur.execute("""CREATE TABLE IF NOT EXISTS hd_sop_files (
+                    id SERIAL PRIMARY KEY, sop_key VARCHAR(80) NOT NULL,
+                    filename VARCHAR(255) NOT NULL, content_type VARCHAR(100),
+                    file_size INTEGER, file_data BYTEA NOT NULL,
+                    uploaded_by VARCHAR(100), uploaded_at TIMESTAMP DEFAULT NOW())""")
+                cur.execute("""INSERT INTO hd_sop_files (sop_key, filename, content_type, file_size, file_data, uploaded_by)
+                    VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+                    (f"water_quality_{new_id}", uploaded_file.filename, uploaded_file.content_type,
+                     len(file_data_bin), psycopg2.Binary(file_data_bin), data.get("tested_by","")))
+                file_id = cur.fetchone()[0]
+                conn.commit()
                 has_file = True
-                logger.info("water_quality file: %s (%s, %d bytes)", file_name, file_type, len(file_data_bin))
+                logger.info("water_quality file saved: wq_id=%d file_id=%d name=%s", new_id, file_id, uploaded_file.filename)
 
-            # Insert
-            cur.execute("""INSERT INTO hd_water_quality (test_date, test_type, parameter,
-                result_value, unit, pass_fail, method, tested_by, notes, send_date,
-                file_data, file_name, file_type)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-                (data.get("date"), data.get("type","bacteria"), data.get("parameter"),
-                 data.get("value"), data.get("unit"), data.get("pass_fail","pass"),
-                 data.get("method"), data.get("tested_by"), data.get("notes"),
-                 data.get("send_date") or None,
-                 psycopg2.Binary(file_data_bin) if file_data_bin else None,
-                 file_name, file_type))
-            new_id = cur.fetchone()[0]
-            conn.commit()
             logger.info("water_quality saved: id=%d has_file=%s", new_id, has_file)
         conn.close()
         return jsonify({"ok": True, "id": new_id, "has_file": has_file})
@@ -5154,7 +5180,7 @@ def save_water_quality():
 @hd_bp.route("/clinic-profile/water-quality/<int:wq_id>/file", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def download_water_quality_file(wq_id):
-    """Download water quality test result file."""
+    """Download water quality test result file (stored in hd_sop_files)."""
     import os, psycopg2
     from flask import Response
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
@@ -5163,15 +5189,19 @@ def download_water_quality_file(wq_id):
     try:
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
-            cur.execute("SELECT file_name, file_type, file_data FROM hd_water_quality WHERE id = %s", (wq_id,))
+            # Files stored in hd_sop_files with sop_key = 'water_quality_<id>'
+            cur.execute("""SELECT filename, content_type, file_data FROM hd_sop_files
+                WHERE sop_key = %s ORDER BY id DESC LIMIT 1""", (f"water_quality_{wq_id}",))
             r = cur.fetchone()
         conn.close()
         if not r or not r[2]:
             return jsonify({"error": "ไม่พบไฟล์"}), 404
         resp = Response(bytes(r[2]), content_type=r[1] or 'application/octet-stream')
         resp.headers["Content-Disposition"] = f'inline; filename="{r[0] or "water_quality.pdf"}"'
+        resp.headers["Content-Length"] = str(len(bytes(r[2])))
         return resp
     except Exception as e:
+        logger.warning("water_quality file download: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
