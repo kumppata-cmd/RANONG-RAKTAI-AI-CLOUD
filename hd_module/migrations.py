@@ -586,12 +586,8 @@ INSERT INTO hd_schema_version (version, description)
 VALUES ('2.0.0', 'Clinic Profile & Accreditation — profile, staff, equipment, water, incidents, self-assessment')
 ON CONFLICT (version) DO NOTHING;
 
--- v2.0.1: Set LINE alert recipients + fix column types
-ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100);
-ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100);
-
-INSERT INTO hd_settings (key, value, description, updated_at)
-VALUES ('alert_recipients', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId แพทย์ผู้รับผิดชอบ (Dr. Kamphon)', NOW())
+-- v2.0.1: Fixes are applied by __init__.py post-migration script (runs every boot)
+-- See _run_hd_migrations() in __init__.py for DROP CONSTRAINT + ALTER + ADD COLUMN
 ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
 
 INSERT INTO hd_settings (key, value, description, updated_at)

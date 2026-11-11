@@ -4710,25 +4710,9 @@ def get_clinic_profile():
     if not db_url:
         return jsonify({"sections": sections})
     try:
-        # Fix schema with separate autocommit connection
-        ddl_conn = psycopg2.connect(db_url, connect_timeout=5)
-        ddl_conn.autocommit = True
-        with ddl_conn.cursor() as ddl:
-            ddl.execute("""SELECT con.conname FROM pg_constraint con
-                JOIN pg_attribute att ON att.attnum = ANY(con.conkey) AND att.attrelid = con.conrelid
-                WHERE con.conrelid = 'hd_clinic_profile'::regclass
-                AND att.attname = 'updated_by' AND con.contype = 'f'""")
-            for row in ddl.fetchall():
-                ddl.execute(f"ALTER TABLE hd_clinic_profile DROP CONSTRAINT IF EXISTS {row[0]}")
-            ddl.execute("""SELECT data_type FROM information_schema.columns
-                WHERE table_name='hd_clinic_profile' AND column_name='updated_by'""")
-            ci = ddl.fetchone()
-            if ci and ci[0] == 'integer':
-                ddl.execute("ALTER TABLE hd_clinic_profile ALTER COLUMN updated_by TYPE VARCHAR(100) USING updated_by::text")
-        ddl_conn.close()
-
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
+            # Table created by migration; schema fixed by boot script
             cur.execute("SELECT section, item_key, item_value, file_url, expires_at FROM hd_clinic_profile ORDER BY section, id")
             for r in cur.fetchall():
                 sec = r[0]
@@ -5103,23 +5087,7 @@ def save_water_quality():
     has_file = False
 
     try:
-        # Step 1: Add missing columns with separate autocommit connection
-        ddl_conn = psycopg2.connect(db_url, connect_timeout=5)
-        ddl_conn.autocommit = True
-        with ddl_conn.cursor() as ddl:
-            for col, ctype in [('parameter','VARCHAR(100)'),('method','VARCHAR(100)'),
-                               ('tested_by','VARCHAR(100)'),('send_date','DATE')]:
-                ddl.execute(f"ALTER TABLE hd_water_quality ADD COLUMN IF NOT EXISTS {col} {ctype}")
-            # Fix recorded_by FK if exists
-            ddl.execute("""SELECT con.conname FROM pg_constraint con
-                JOIN pg_attribute att ON att.attnum = ANY(con.conkey) AND att.attrelid = con.conrelid
-                WHERE con.conrelid = 'hd_water_quality'::regclass
-                AND att.attname = 'recorded_by' AND con.contype = 'f'""")
-            for row in ddl.fetchall():
-                ddl.execute(f"ALTER TABLE hd_water_quality DROP CONSTRAINT IF EXISTS {row[0]}")
-        ddl_conn.close()
-
-        # Step 2: INSERT with normal connection
+        # Schema fixed by boot script in __init__.py
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
             # Check actual columns
@@ -5261,39 +5229,31 @@ def save_incident():
         return jsonify({"error": "no db"}), 500
     data = request.get_json(force=True)
     try:
-        # Step 1: Fix schema with SEPARATE autocommit connection
-        ddl_conn = psycopg2.connect(db_url, connect_timeout=5)
-        ddl_conn.autocommit = True
-        with ddl_conn.cursor() as ddl:
-            # Drop FK constraint on reported_by (root cause of all errors)
-            ddl.execute("""SELECT con.conname FROM pg_constraint con
-                JOIN pg_attribute att ON att.attnum = ANY(con.conkey) AND att.attrelid = con.conrelid
-                WHERE con.conrelid = 'hd_incidents'::regclass
-                AND att.attname = 'reported_by' AND con.contype = 'f'""")
-            for row in ddl.fetchall():
-                ddl.execute(f"ALTER TABLE hd_incidents DROP CONSTRAINT IF EXISTS {row[0]}")
-                logger.info("Dropped FK: %s", row[0])
-            # Ensure reported_by is VARCHAR
-            ddl.execute("""SELECT data_type FROM information_schema.columns
-                WHERE table_name='hd_incidents' AND column_name='reported_by'""")
-            ct = ddl.fetchone()
-            if ct and ct[0] == 'integer':
-                ddl.execute("ALTER TABLE hd_incidents ALTER COLUMN reported_by TYPE VARCHAR(100) USING reported_by::text")
-                logger.info("ALTER hd_incidents.reported_by → VARCHAR")
-            # Add resolved_at if missing
-            ddl.execute("ALTER TABLE hd_incidents ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMP")
-        ddl_conn.close()
-
-        # Step 2: INSERT with normal connection
         inc_date = data.get("date") or _thai_today().isoformat()
         reported_name = data.get("reported_by", "")
+
+        # Use only columns that exist (boot script adds missing ones)
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
-            cur.execute("""INSERT INTO hd_incidents (incident_date, incident_type, severity,
-                description, action_taken, reported_by, status)
-                VALUES (%s::date, %s, %s, %s, %s, %s, 'open') RETURNING id""",
-                (inc_date, data.get("type","other"), data.get("severity","minor"),
-                 data.get("description"), data.get("action"), reported_name))
+            cur.execute("""SELECT column_name FROM information_schema.columns
+                WHERE table_name='hd_incidents'""")
+            cols = {r[0] for r in cur.fetchall()}
+
+            col_map = [('incident_date', inc_date),
+                       ('incident_type', data.get("type", "other")),
+                       ('severity', data.get("severity", "minor")),
+                       ('status', 'open')]
+            if 'description' in cols:
+                col_map.append(('description', data.get("description")))
+            if 'action_taken' in cols:
+                col_map.append(('action_taken', data.get("action")))
+            if 'reported_by' in cols:
+                col_map.append(('reported_by', reported_name))
+
+            col_names = ', '.join(c[0] for c in col_map)
+            placeholders = ', '.join(['%s'] * len(col_map))
+            values = tuple(c[1] for c in col_map)
+            cur.execute(f"INSERT INTO hd_incidents ({col_names}) VALUES ({placeholders}) RETURNING id", values)
             new_id = cur.fetchone()[0]
             conn.commit()
         conn.close()
