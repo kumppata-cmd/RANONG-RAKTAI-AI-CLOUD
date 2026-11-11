@@ -93,15 +93,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install Tesseract OCR
+      # Optional: no test calls the tesseract binary (they only assert the
+      # Dockerfile text), so an apt outage on GitHub's runners must not block CI.
+      - name: Install Tesseract OCR (optional)
+        continue-on-error: true
+        timeout-minutes: 3
         run: |
-          # Retry: GitHub's apt mirrors occasionally fail DNS resolution
-          for i in 1 2 3 4 5; do
-            sudo apt-get update -o Acquire::Retries=3 && \
-            sudo apt-get install -y -o Acquire::Retries=3 tesseract-ocr tesseract-ocr-tha tesseract-ocr-eng && break
-            echo "apt attempt $i failed — retrying in 20s"; sleep 20
-          done
-          tesseract --version | head -1
+          sudo apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=15 \
+            && sudo apt-get install -y -o Acquire::Retries=2 -o Acquire::http::Timeout=15 \
+               tesseract-ocr tesseract-ocr-tha tesseract-ocr-eng \
+            && tesseract --version | head -1 \
+            || echo "::warning::Tesseract install skipped (apt unavailable) — tests do not require the binary"
 
       - name: Install dependencies
         run: |
