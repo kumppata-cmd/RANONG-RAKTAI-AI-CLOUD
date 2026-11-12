@@ -142,6 +142,18 @@ def _run_hd_migrations():
                     filename VARCHAR(255) NOT NULL, content_type VARCHAR(100),
                     file_size INTEGER, file_data BYTEA NOT NULL,
                     uploaded_by VARCHAR(100), uploaded_at TIMESTAMP DEFAULT NOW())""",
+                # B6: lab results copied from the document system (hd_module/lab_sync.py)
+                """CREATE TABLE IF NOT EXISTS hd_lab_results (
+                    id SERIAL PRIMARY KEY, patient_id INTEGER REFERENCES hd_patient_mapping(id),
+                    hn VARCHAR(20) NOT NULL, doc_id VARCHAR(80) UNIQUE NOT NULL,
+                    specimen_date DATE, doc_date DATE, status VARCHAR(30),
+                    hb NUMERIC(5,1), hct NUMERIC(5,1), k NUMERIC(4,2), na NUMERIC(5,1), ca NUMERIC(5,2),
+                    phos NUMERIC(5,2), albumin NUMERIC(4,2), pth NUMERIC(8,1), ferritin NUMERIC(8,1),
+                    tsat NUMERIC(5,1), ktv NUMERIC(4,2), urr NUMERIC(5,1), creatinine NUMERIC(6,2),
+                    bun NUMERIC(6,1), glucose NUMERIC(6,1),
+                    hbsag VARCHAR(20), antihcv VARCHAR(20), antihbs VARCHAR(20),
+                    synced_at TIMESTAMP DEFAULT NOW())""",
+                "CREATE INDEX IF NOT EXISTS ix_hd_lab_hn_date ON hd_lab_results(hn, specimen_date DESC)",
                 # Set alert_recipients
                 """INSERT INTO hd_settings (key, value, description, updated_at)
                     VALUES ('alert_recipients', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId แพทย์', NOW())
@@ -485,11 +497,23 @@ def _start_daily_reminder_scheduler(app):
             _auto_backup_hd_tables()
         except Exception as e:
             logger.error("HD boot backup error: %s", e)
+        lab_tick = 0
         while True:
             try:
                 from datetime import timezone as _tz, timedelta as _td
                 _thai_tz = _tz(_td(hours=7))
                 now = datetime.now(_thai_tz)
+                # Every 30 min (first pass right away): lab documents → hd_lab_results
+                if lab_tick % 6 == 0:
+                    with app.app_context():
+                        try:
+                            from .blueprint import run_lab_sync
+                            st = run_lab_sync()
+                            if st.get("inserted"):
+                                logger.info("Lab sync: %s", st)
+                        except Exception as ex:
+                            logger.warning("Lab sync failed: %s", ex)
+                lab_tick += 1
                 # Send at 18:00 Thai time
                 if now.hour == 18 and now.minute < 5 and last_sent_date != now.date():
                     last_sent_date = now.date()

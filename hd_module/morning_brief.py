@@ -74,6 +74,21 @@ def collect(conn, today=None):
             ORDER BY p.id, s.session_date DESC""", ((today - timedelta(days=45)).isoformat(),))
         out["low_hb"] = sorted([r for r in out["low_hb"] if r[2] is not None and float(r[2]) < 9.0],
                                key=lambda r: float(r[2]))[:8]
+        # Lab documents (hd_lab_results): newest row per patient within 60 days
+        out["lab_flags"] = []
+        for r in _q(cur, """
+            SELECT DISTINCT ON (l.patient_id) p.patient_name, p.hn, l.hb, l.k, l.phos, l.ca, l.hbsag,
+                   COALESCE(l.specimen_date, l.doc_date)
+            FROM hd_lab_results l JOIN hd_patient_mapping p ON p.id = l.patient_id
+            WHERE COALESCE(l.specimen_date, l.doc_date) >= %s
+            ORDER BY l.patient_id, COALESCE(l.specimen_date, l.doc_date) DESC, l.id DESC""",
+                     ((today - timedelta(days=60)).isoformat(),)):
+            from .lab_sync import flags_for
+            fl = flags_for({"hb": r[2], "k": r[3], "phos": r[4], "ca": r[5], "hbsag": r[6]})
+            fl = [f for f in fl if f["sev"] in ("critical", "warning")]
+            if fl:
+                out["lab_flags"].append((r[0], r[1], r[7], fl))
+        out["lab_flags"].sort(key=lambda x: 0 if any(f["sev"] == "critical" for f in x[3]) else 1)
         r = _q(cur, "SELECT MAX(COALESCE(send_date, test_date)) FROM hd_water_quality")
         last_water = r[0][0] if r and r[0] else None
         if last_water is None:
@@ -113,6 +128,11 @@ def build_message(data, base_url=""):
         L.append(f"\n🩸 Hb < 9 ({len(data['low_hb'])} คน) — ทบทวน ESA")
         for r in data["low_hb"][:5]:
             L.append(f"  • {r[0]} (HN {r[1]}) Hb {float(r[2]):.1f}")
+
+    if data.get("lab_flags"):
+        L.append(f"\n🧪 ผลแล็บผิดปกติ ({len(data['lab_flags'])} คน) — จากเอกสารแล็บ")
+        for name, hn, d0, fl in data["lab_flags"][:6]:
+            L.append(f"  • {name} (HN {hn}) " + "; ".join(f["text"].split(" — ")[0] for f in fl))
 
     if data["dialyzer"]:
         L.append(f"\n🔧 Dialyzer ใกล้ครบ reuse ({len(data['dialyzer'])})")

@@ -182,6 +182,7 @@ body.tv-mode .ac-head { font-size: 1.1rem; }
   <button class="filter-tab" data-filter="hep" onclick="setFilter('hep')">💉 Heparin</button>
   <button class="filter-tab" data-filter="epo" onclick="setFilter('epo')">💊 ESA/EPO</button>
   <button class="filter-tab" data-filter="va" onclick="setFilter('va')">🩺 Vascular</button>
+  <button class="filter-tab" data-filter="lab" onclick="setFilter('lab')">🧪 Lab</button>
 </div>
 
 <!-- Shift selector (single mode) -->
@@ -346,6 +347,16 @@ function sparkline(b){
   const pts = t.map((v,i)=>`${(i/(t.length-1))*w},${h - ((v-mn)/(mx-mn||1))*(h-2) - 1}`).join(' ');
   const last = t[t.length-1], col = last < 90 ? 'var(--danger)' : (t[0]-last >= 20 ? 'var(--warning)' : 'var(--fg-muted)');
   return `<svg class="bed-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-label="SBP trend"><polyline fill="none" stroke="${col}" stroke-width="1.5" points="${pts}"/><circle cx="${w}" cy="${h - ((last-mn)/(mx-mn||1))*(h-2) - 1}" r="2" fill="${col}"/></svg>`;
+}
+function labLine(b){
+  const L = b.labs; if(!L) return '';
+  const hot = {}; (L.flags||[]).forEach(f=>{ hot[f.code.split('_')[0]] = f.sev; });
+  const cell = (k, label, v) => v==null ? '' : `<span style="${hot[k]==='critical'?'color:var(--danger);font-weight:800':hot[k]?'color:var(--warning);font-weight:700':''}">${label} ${Number(v).toFixed(1)}${hot[k]==='critical'?'🔴':hot[k]?'⚠':''}</span>`;
+  const parts = [cell('hb','Hb',L.hb), cell('k','K',L.k), cell('phos','P',L.phos), cell('ca','Ca',L.ca)].filter(Boolean);
+  if(L.hbsag==='positive') parts.push('<span style="color:var(--danger);font-weight:700">HBsAg+</span>');
+  if(!parts.length) return '';
+  const old = L.age_days!=null && L.age_days > 45;
+  return `<div class="bed-chk" style="margin-top:3px;${old?'opacity:.6':''}">🧪 ${parts.join(' · ')}${L.age_days!=null?' <span style="opacity:.7">('+L.age_days+'ว.)</span>':''}${L.status&&L.status!=='approved'?' ⏳':''}</div>`;
 }
 function checklist(b){
   if(!(b.status==='active'||b.status==='warning'||b.status==='critical')) return '';
@@ -513,11 +524,14 @@ function renderBeds(beds){
       case 'epo':
         filterContent = esaBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มี ESA</span>';
         break;
+      case 'lab':
+        filterContent = labLine(b) || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มีผลแล็บในระบบ</span>';
+        break;
       case 'va':
         filterContent = va ? `<span class="bed-access ${vaClass(va)}" style="font-size:.75rem;padding:3px 10px;">${va}</span>` : '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่ระบุ VA</span>';
         break;
       default:
-        filterContent = `${dialyzerBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${checklist(b)}`;
+        filterContent = `${dialyzerBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${checklist(b)}${labLine(b)}`;
     }
     if(vitalAgeMin(b) !== null && vitalAgeMin(b) >= VITAL_DUE_MIN && (b.status==='active')) card.classList.add('vital-overdue');
 
@@ -933,7 +947,7 @@ function fetchAllRounds(){
             <div class="bed-hn" style="font-size:.6rem;">${b.patient_hn?'HN '+b.patient_hn:''}</div>
             ${extraLine}
             ${(b.status==='critical'||b.status==='warning') ? '<div style="font-size:.62rem;font-weight:700;color:'+(b.status==='critical'?'var(--danger)':'var(--warning)')+';margin-top:2px">'+(b.status==='critical'?'🔴 ':'🟡 ')+(b.alert_reason||'มีการแจ้งเตือน')+'</div>' : ''}
-            ${vitalAge(b)}${ufBar(b)}
+            ${vitalAge(b)}${ufBar(b)}${labLine(b)}
           `;
           grid.appendChild(card);
         });

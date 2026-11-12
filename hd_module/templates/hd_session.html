@@ -268,6 +268,16 @@
   </div>
 
   <!-- Alerts + physician orders -->
+  <!-- B6: latest labs from the document system -->
+  <div class="card" id="labsPanel" style="display:none;margin-bottom:12px;">
+    <div class="card-header"><span>🧪 ผลแล็บล่าสุด <span id="labsDate" style="font-weight:400;font-size:.75rem;color:var(--fg-muted)"></span></span>
+      <button class="btn btn-secondary" onclick="toggleLabHistory()" style="font-size:.7rem;padding:3px 8px">ย้อนหลัง</button></div>
+    <div id="labsFlags" style="display:flex;flex-direction:column;gap:4px;margin:6px 0"></div>
+    <div id="labsGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(80px,1fr));gap:6px;font-size:.8rem"></div>
+    <div id="labsHistory" style="display:none;overflow-x:auto;margin-top:8px"></div>
+    <div style="font-size:.68rem;color:var(--fg-muted);margin-top:6px">จากเอกสารแล็บที่ส่งทาง LINE (OCR) · ⏳ = ยังไม่ผ่านการตรวจทาน · ระบบแจ้งค่าผิดปกติ ไม่สั่งการรักษา</div>
+  </div>
+
   <div class="card" id="alertsPanel" style="display:none;margin-bottom:12px;">
     <div class="card-header">🚨 การแจ้งเตือน & คำสั่งแพทย์ <span id="alertsCount" style="font-size:.7rem;color:var(--fg-muted);margin-left:6px"></span></div>
     <div id="alertsList" style="display:flex;flex-direction:column;gap:8px;margin-top:8px"></div>
@@ -903,7 +913,9 @@ function loadExistingSession(sid){
     .then(r=>r.ok?r.json():Promise.reject())
     .then(d=>{
       sessionData.session_id = d.session_id || sid;
+      sessionData.patient_id = d.patient_id || null;
       loadSessionAlerts();
+      loadLabs();
       sessionData.pre_weight = d.pre_weight || 0;
       sessionData.dry_weight = d.dry_weight || 0;
       /* Fill header */
@@ -1060,6 +1072,36 @@ function saveIntraVital(){
 function _hdRole(){
   try{ const t=getHdToken(); return JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))).role||''; }catch(e){ return ''; }
 }
+/* ── B6: labs ── */
+const LAB_SHOW = [['hb','Hb','g/dL'],['hct','Hct','%'],['k','K','mmol/L'],['na','Na',''],['ca','Ca','mg/dL'],['phos','P','mg/dL'],['albumin','Alb','g/dL'],['pth','PTH','pg/mL'],['ferritin','Ferritin',''],['tsat','TSAT','%'],['ktv','Kt/V',''],['urr','URR','%'],['creatinine','Cr',''],['bun','BUN',''],['glucose','Glu','']];
+let _labRows = [];
+function labVal(v){ return (v===null||v===undefined) ? '-' : (Number.isInteger(v) ? v : Number(v).toFixed(v<10?2:1).replace(/\.?0+$/,'')); }
+function loadLabs(){
+  if(!sessionData.patient_id) return;
+  hdFetch('/hd/api/v1/patients/'+sessionData.patient_id+'/labs').then(r=>r.json()).then(d=>{
+    const p = document.getElementById('labsPanel'); const L = d.latest;
+    _labRows = d.rows || [];
+    if(!L){ p.style.display='none'; return; }
+    p.style.display='block';
+    document.getElementById('labsDate').textContent = (L.date ? hdDate(L.date) : '') + (L.age_days!=null ? ' ('+L.age_days+' วัน)' : '') + (L.status && L.status!=='approved' ? ' ⏳' : ' ✓');
+    document.getElementById('labsFlags').innerHTML = (L.flags||[]).map(f=>`<div style="padding:5px 8px;border-radius:6px;font-size:.8rem;font-weight:600;background:${f.sev==='critical'?'rgba(231,76,60,.12)':f.sev==='warning'?'rgba(243,156,18,.12)':'rgba(52,152,219,.1)'};color:${f.sev==='critical'?'var(--danger)':f.sev==='warning'?'var(--warning)':'var(--info)'}">${f.sev==='critical'?'🔴':f.sev==='warning'?'🟡':'ℹ️'} ${f.text}</div>`).join('');
+    const flagged = new Set((L.flags||[]).map(f=>f.code.split('_')[0]));
+    document.getElementById('labsGrid').innerHTML = LAB_SHOW.filter(x=>L[x[0]]!=null || (x[0]==='hbsag')).map(x=>{
+      const hot = flagged.has(x[0]);
+      return `<div style="padding:5px 6px;border-radius:6px;background:${hot?'rgba(243,156,18,.12)':'var(--bg)'};border:1px solid var(--border)"><div style="font-size:.62rem;color:var(--fg-muted)">${x[1]}</div><div style="font-weight:700;${hot?'color:var(--warning)':''}">${labVal(L[x[0]])}</div></div>`;
+    }).join('') + ['hbsag','antihcv'].filter(c=>L[c]).map(c=>`<div style="padding:5px 6px;border-radius:6px;background:var(--bg);border:1px solid var(--border)"><div style="font-size:.62rem;color:var(--fg-muted)">${c==='hbsag'?'HBsAg':'Anti-HCV'}</div><div style="font-weight:700;color:${L[c]==='positive'?'var(--danger)':'var(--success)'}">${L[c]}</div></div>`).join('');
+  }).catch(()=>{});
+}
+function hdDate(iso){ const d=new Date(iso+'T00:00:00'); return isNaN(d)?iso:d.getDate()+'/'+(d.getMonth()+1)+'/'+(d.getFullYear()+543); }
+function toggleLabHistory(){
+  const h = document.getElementById('labsHistory');
+  if(h.style.display!=='none'){ h.style.display='none'; return; }
+  h.style.display='block';
+  const cols = LAB_SHOW.filter(x=>_labRows.some(r=>r[x[0]]!=null));
+  h.innerHTML = '<table style="border-collapse:collapse;font-size:.74rem;min-width:100%"><tr><th style="text-align:left;padding:3px 6px;color:var(--fg-muted)">วันที่</th>'+cols.map(c=>'<th style="padding:3px 6px;color:var(--fg-muted)">'+c[1]+'</th>').join('')+'</tr>'
+    + _labRows.map(r=>'<tr><td style="padding:3px 6px;white-space:nowrap">'+(r.date?hdDate(r.date):'-')+(r.status!=='approved'?' ⏳':'')+'</td>'+cols.map(c=>'<td style="padding:3px 6px;text-align:center">'+labVal(r[c[0]])+'</td>').join('')+'</tr>').join('')+'</table>';
+}
+
 function loadSessionAlerts(){
   if(!sessionData.session_id) return;
   hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/alerts').then(r=>r.json()).then(d=>{

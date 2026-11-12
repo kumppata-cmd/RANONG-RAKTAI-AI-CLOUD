@@ -693,6 +693,72 @@ def drive_disconnect():
     return jsonify({"ok": True})
 
 
+# ── B6: Lab results → bed card ─────────────────────────────
+
+def run_lab_sync():
+    """Copy recent lab documents' extracted results into hd_lab_results."""
+    import os
+    import psycopg2
+    from flask import current_app
+    from .lab_sync import sync_labs
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"error": "no database"}
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        return sync_labs(conn, current_app.config.get("STORAGE_OBJ"), current_app.config.get("DOC_INDEX"))
+    finally:
+        conn.close()
+
+
+@hd_bp.route("/labs/sync", methods=["POST"])
+@require_role("physician", "admin")
+def labs_sync_now():
+    try:
+        st = run_lab_sync()
+        log_action(user_id=g.get("hd_user_id"), action="labs.sync", resource_type="labs",
+                   new_values=st, ip_address=request.remote_addr or "")
+        return jsonify(st)
+    except Exception as e:
+        logger.error("labs sync: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/patients/<int:patient_id>/labs", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def patient_labs(patient_id):
+    """Lab history (newest first, up to 12 rows) + flags on the latest."""
+    import os
+    import psycopg2
+    from .lab_sync import NUMERIC_COLS, TEXT_COLS, flags_for, latest_for_patients
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"rows": [], "latest": None})
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"""SELECT COALESCE(specimen_date, doc_date), status, doc_id, {', '.join(NUMERIC_COLS + TEXT_COLS)}
+                            FROM hd_lab_results WHERE patient_id = %s
+                            ORDER BY COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC LIMIT 12""", (patient_id,))
+            rows = []
+            for r in cur.fetchall():
+                d = dict(zip(NUMERIC_COLS + TEXT_COLS, r[3:]))
+                for c in NUMERIC_COLS:
+                    if d[c] is not None:
+                        d[c] = float(d[c])
+                d.update({"date": r[0].isoformat() if r[0] else None, "status": r[1], "doc_id": r[2]})
+                d["flags"] = flags_for(d)
+                rows.append(d)
+            latest = latest_for_patients(cur, [patient_id]).get(patient_id)
+    except Exception as e:
+        logger.warning("patient_labs: %s", e)
+        rows, latest = [], None
+    finally:
+        conn.close()
+    return jsonify({"rows": rows, "latest": latest})
+
+
 @hd_bp.route("/daily-log/export", methods=["POST"])
 @require_role("physician", "admin")
 def daily_log_export_now():
@@ -1188,7 +1254,7 @@ def get_session(session_id):
                        s.pre_weight, s.post_weight, s.actual_uf, s.uf_goal,
                        s.started_at, s.ended_at, s.notes,
                        p.hn, p.patient_name, p.vascular_access, p.schedule_days,
-                       p.dry_weight, p.esa_drug
+                       p.dry_weight, p.esa_drug, p.id
                 FROM hd_sessions s
                 JOIN hd_patient_mapping p ON p.id = s.patient_id
                 WHERE s.id = %s
@@ -1210,7 +1276,7 @@ def get_session(session_id):
             "patient_hn": row[11], "patient_name": row[12],
             "vascular_access": row[13], "schedule_days": row[14],
             "dry_weight": float(row[15]) if row[15] else None,
-            "esa_drug": row[16], "duration_hours": 4,
+            "esa_drug": row[16], "duration_hours": 4, "patient_id": row[17],
         })
     except Exception as e:
         logger.error("get_session error: %s", e)
@@ -2598,6 +2664,23 @@ def bed_dashboard():
                             conn.rollback()
                         except Exception:
                             pass
+
+                # B6: latest lab per patient on a bed (from hd_lab_results)
+                try:
+                    from .lab_sync import latest_for_patients
+                    cur.execute("SELECT id, patient_id FROM hd_sessions WHERE id = ANY(%s)", ([sid for sid, _ in session_ids],))
+                    pid_by_sid = {r[0]: r[1] for r in cur.fetchall()}
+                    labs = latest_for_patients(cur, list({p for p in pid_by_sid.values() if p}))
+                    for sid, bnum in session_ids:
+                        lab = labs.get(pid_by_sid.get(sid))
+                        if lab and 1 <= bnum <= len(beds):
+                            beds[bnum - 1]["labs"] = lab
+                except Exception as le:
+                    logger.warning("bed labs: %s", le)
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
                 # Attach open (unacknowledged) alerts → bed status warning/critical
                 for sid, bnum in session_ids:
