@@ -1,0 +1,138 @@
+{% extends "hd_base.html" %}
+{% block title %}ESA Autopilot{% endblock %}
+{% block page_title %}💊 ESA Autopilot{% endblock %}
+{% block nav_esa %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.esa-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.esa-tabs{display:flex;gap:4px;margin-bottom:12px;border-bottom:1px solid var(--border)}
+.esa-tabs button{background:none;border:none;padding:8px 14px;cursor:pointer;color:var(--fg-muted);font-weight:600;font-size:.85rem;border-bottom:2px solid transparent}
+.esa-tabs button.on{color:var(--accent);border-bottom-color:var(--accent)}
+.esa-proto{font-size:.78rem;color:var(--fg-muted);background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;margin-bottom:14px;display:flex;flex-wrap:wrap;gap:6px 16px}
+.esa-proto b{color:var(--fg)}
+.esa-list{display:grid;gap:10px}
+.esa-item{background:var(--bg-card);border:1px solid var(--border);border-left:4px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;display:grid;grid-template-columns:1fr auto;gap:8px 14px;align-items:start}
+.esa-item.increase{border-left-color:var(--warning,#e67e22)}
+.esa-item.decrease{border-left-color:var(--accent)}
+.esa-item.hold{border-left-color:var(--danger)}
+.esa-item.resume{border-left-color:var(--success)}
+.esa-item.review{border-left-color:var(--fg-muted)}
+.esa-who{font-weight:700;font-size:.95rem}
+.esa-who small{font-weight:500;color:var(--fg-muted);margin-left:6px}
+.esa-hb{font-variant-numeric:tabular-nums;font-size:1.3rem;font-weight:800;line-height:1}
+.esa-hb small{font-size:.65rem;font-weight:600;color:var(--fg-muted);display:block;margin-top:2px}
+.esa-dose{font-size:.9rem;margin-top:4px}
+.esa-dose .arrow{color:var(--fg-muted);margin:0 6px}
+.esa-dose .new{font-weight:800}
+.esa-why{font-size:.78rem;color:var(--fg-muted);margin-top:4px}
+.esa-act{display:flex;flex-direction:column;gap:6px;min-width:190px}
+.esa-act input{padding:6px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--fg);font-size:.8rem;width:100%}
+.esa-act .row{display:flex;gap:6px}
+.esa-act .btn{flex:1;font-size:.8rem;padding:7px 8px}
+.esa-badge{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.68rem;font-weight:700;margin-left:6px}
+.b-pending{background:rgba(230,126,34,.15);color:#e67e22}
+.b-approved{background:rgba(39,174,96,.15);color:var(--success)}
+.b-rejected{background:rgba(127,140,141,.15);color:var(--fg-muted)}
+.esa-empty{padding:28px;text-align:center;color:var(--fg-muted);font-size:.9rem;background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--radius-sm)}
+.esa-note{font-size:.72rem;color:var(--fg-muted);margin-top:12px}
+@media (max-width:640px){.esa-item{grid-template-columns:1fr}.esa-act{min-width:0}}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="esa-bar">
+  <button class="btn btn-primary" id="btnRun" onclick="runNow()">🔄 รัน Autopilot ตอนนี้</button>
+  <span id="runStatus" style="font-size:.8rem;color:var(--fg-muted)"></span>
+  <span style="flex:1"></span>
+  <a class="btn btn-secondary" href="/hd/settings" style="text-decoration:none;">⚙️ ตั้งค่า Protocol</a>
+  <a class="btn btn-secondary" href="/hd/dashboard" style="text-decoration:none;">← Dashboard</a>
+</div>
+<div class="esa-proto" id="proto"></div>
+<div class="esa-tabs">
+  <button class="on" data-tab="pending" onclick="setTab('pending')">⏳ รออนุมัติ <span id="cntPending"></span></button>
+  <button data-tab="all" onclick="setTab('all')">📜 ประวัติ</button>
+</div>
+<div class="esa-list" id="list"><div class="esa-empty">กำลังโหลด…</div></div>
+<div class="esa-note">ระบบ <b>เสนอ</b> ขนาดยาตาม protocol ที่แพทย์ตั้งไว้ จาก Hb ใหม่ล่าสุด (เอกสารแล็บ/บันทึกรอบฟอก) — ไม่มีการปรับยาอัตโนมัติ
+ขนาดยาในระบบจะเปลี่ยนเฉพาะเมื่อแพทย์กด ✓ อนุมัติ (แก้ขนาดก่อนกดได้) และจะแจ้งกลุ่มพยาบาลทันที · ไม่เสนอซ้ำภายในช่วง min interval หลังการตัดสินใจครั้งล่าสุด</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const ACT_TH = {increase:'⬆️ เพิ่ม', decrease:'⬇️ ลด', hold:'⏸ งดชั่วคราว', resume:'▶️ กลับมาให้', review:'🔍 ทบทวน'};
+const ST_TH = {pending:'รออนุมัติ', approved:'อนุมัติแล้ว', rejected:'ไม่ปรับ'};
+let tab = 'pending';
+const ROLE = (function(){ try { return JSON.parse(atob((getHdToken()||'').split('.')[1]||'')).role || ''; } catch(e){ return ''; } })();
+
+function setTab(t){ tab = t; document.querySelectorAll('.esa-tabs button').forEach(b=>b.classList.toggle('on', b.dataset.tab===t)); load(); }
+
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function fmtDate(iso){ if(!iso) return ''; const d=new Date(iso); return d.toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'}); }
+
+async function load(){
+  const list = document.getElementById('list');
+  try{
+    const r = await hdFetch('/hd/api/v1/esa/proposals?status=' + (tab==='all'?'all':'pending'));
+    const d = await r.json();
+    const p = d.protocol || {};
+    document.getElementById('proto').innerHTML =
+      `<span>เป้า Hb <b>${p.esa_target_low}–${p.esa_target_high}</b> g/dL</span><span>งดเมื่อ Hb &gt; <b>${p.esa_hold_above}</b></span>` +
+      `<span>ปรับครั้งละ <b>${p.esa_step_pct}%</b></span><span>เว้นอย่างน้อย <b>${p.esa_min_interval_days}</b> วัน</span><span>กลับมาให้เมื่อ Hb &lt; <b>${p.esa_resume_below}</b></span>`;
+    const items = d.items || [];
+    if (tab==='pending') document.getElementById('cntPending').textContent = items.length ? `(${items.length})` : '';
+    if (!items.length){ list.innerHTML = `<div class="esa-empty">${tab==='pending'?'✅ ไม่มีรายการรออนุมัติ — ระบบจะเสนอเมื่อมี Hb ใหม่':'ยังไม่มีประวัติ'}</div>`; return; }
+    list.innerHTML = items.map(it=>{
+      const canAct = it.status==='pending' && ROLE==='physician';
+      const dose = it.action==='hold' ? `<span class="new">งดชั่วคราว</span>` :
+        (it.proposed_dose ? `<span class="new">${esc(it.proposed_dose)}</span>` : `<span class="new" style="color:var(--fg-muted)">ระบุขนาด</span>`);
+      return `<div class="esa-item ${it.action}">
+        <div>
+          <div class="esa-who">${esc(it.name||'')}<small>HN ${esc(it.hn||'')}</small>
+            <span class="esa-badge b-${it.status}">${ST_TH[it.status]||it.status}</span></div>
+          <div style="display:flex;gap:16px;align-items:center;margin-top:6px;flex-wrap:wrap">
+            <div class="esa-hb">${Number(it.hb).toFixed(1)}<small>Hb · ${fmtDate(it.hb_date)} · ${it.hb_source&&it.hb_source.startsWith('doc:')?'เอกสารแล็บ':'บันทึกรอบฟอก'}</small></div>
+            <div class="esa-dose">${ACT_TH[it.action]||it.action}: ${esc(it.current_drug||it.now_drug||'ESA')} ${esc(it.current_dose||'—')}<span class="arrow">→</span>${dose}</div>
+          </div>
+          <div class="esa-why">${esc(it.rationale||'')}</div>
+          ${it.status!=='pending' ? `<div class="esa-why">โดย ${esc(it.decided_by||'')} · ${fmtDate(it.decided_at)}${it.note?' · '+esc(it.note):''}</div>` : ''}
+        </div>
+        ${canAct ? `<div class="esa-act">
+          <input id="dose_${it.id}" placeholder="แก้ขนาด (ถ้าต้องการ) เช่น ${esc(it.proposed_dose||'4000 IU')}" ${it.action==='hold'?'disabled':''}>
+          <input id="note_${it.id}" placeholder="หมายเหตุ (ไม่บังคับ)">
+          <div class="row">
+            <button class="btn btn-primary" onclick="decide(${it.id},'approve')">✓ อนุมัติ</button>
+            <button class="btn btn-secondary" onclick="decide(${it.id},'reject')">✗ ไม่ปรับ</button>
+          </div></div>` : (it.status==='pending' ? `<div class="esa-act" style="font-size:.75rem;color:var(--fg-muted)">รอแพทย์อนุมัติ</div>` : '')}
+      </div>`;
+    }).join('');
+  }catch(e){ list.innerHTML = `<div class="esa-empty">โหลดไม่สำเร็จ: ${esc(e.message||e)}</div>`; }
+}
+
+async function decide(id, decision){
+  const dose = (document.getElementById('dose_'+id)||{}).value || '';
+  const note = (document.getElementById('note_'+id)||{}).value || '';
+  const btns = document.querySelectorAll(`#dose_${id} ~ .row .btn`); btns.forEach(b=>b.disabled=true);
+  try{
+    const r = await hdFetch(`/hd/api/v1/esa/proposals/${id}/decide`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({decision, dose, note})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error||r.status);
+    load();
+  }catch(e){ btns.forEach(b=>b.disabled=false); document.getElementById('runStatus').textContent = '❌ ' + (e.message||e); }
+}
+
+async function runNow(){
+  const b = document.getElementById('btnRun'), s = document.getElementById('runStatus');
+  b.disabled = true; s.textContent = 'กำลังตรวจ Hb ใหม่…';
+  try{
+    const r = await hdFetch('/hd/api/v1/esa/run', {method:'POST'});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error||r.status);
+    s.textContent = d.created ? `✅ เสนอใหม่ ${d.created} รายการ (LINE แพทย์ ${d.line_sent})` : '✅ ไม่มี Hb ใหม่ที่ต้องปรับ';
+    setTab('pending');
+  }catch(e){ s.textContent = '❌ ' + (e.message||e); }
+  b.disabled = false;
+}
+load();
+</script>
+{% endblock %}

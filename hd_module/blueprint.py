@@ -277,6 +277,12 @@ def clinic_profile_page():
     return render_template("hd_clinic_profile.html")
 
 
+@hd_web.route("/esa")
+def esa_autopilot_page():
+    """ESA Autopilot — proposals waiting for the physician."""
+    return render_template("hd_esa.html")
+
+
 @hd_web.route("/daily")
 def daily_log_page():
     """ทะเบียนประจำวัน — every session of a date, grouped by shift."""
@@ -763,6 +769,155 @@ def session_idh_risk(session_id):
                        for k, v in f.items() if k != "sbp_series"}
     out["features"]["sbp_series"] = f.get("sbp_series")
     return jsonify(out)
+
+
+# ── ว้าว #3: ESA Autopilot (propose → physician approves) ──
+
+def _esa_protocol():
+    from .esa_autopilot import DEFAULTS
+    out = {}
+    for k, dv in DEFAULTS.items():
+        v = get_setting_value(k, "")
+        try:
+            out[k] = float(v) if v not in ("", None) else dv
+        except ValueError:
+            out[k] = dv
+    return out
+
+
+def run_esa_autopilot(trigger="scheduled"):
+    """Generate proposals from new Hb values and LINE the physician once per batch."""
+    import os
+    import psycopg2
+    from flask import current_app
+    from .esa_autopilot import generate, line_summary
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"created": 0}
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        created = generate(conn, _esa_protocol())
+    finally:
+        conn.close()
+    sent = 0
+    if created:
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+        ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+        base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+        msg = line_summary(created, base)
+        for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+            try:
+                if push_fn and push_fn(uid, msg) is not False:
+                    sent += 1
+            except Exception as e:
+                logger.warning("esa autopilot push: %s", e)
+        log_action(user_id=None, action="esa.proposals_created", resource_type="esa",
+                   new_values={"count": len(created), "trigger": trigger, "line_sent": sent}, ip_address="")
+    return {"created": len(created), "line_sent": sent, "items": created}
+
+
+@hd_bp.route("/esa/proposals", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def esa_proposals():
+    import os
+    import psycopg2
+    from .esa_autopilot import CREATE_SQL
+    status = request.args.get("status", "pending")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"items": [], "protocol": _esa_protocol()})
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CREATE_SQL)
+            conn.commit()
+            q = """SELECT e.id, e.patient_id, e.hn, p.patient_name, e.hb, e.hb_date, e.hb_source, e.current_drug,
+                          e.current_dose, e.action, e.proposed_dose, e.rationale, e.status, e.created_at,
+                          e.decided_by, e.decided_at, e.note, p.esa_drug, p.esa_dose
+                   FROM hd_esa_proposals e JOIN hd_patient_mapping p ON p.id = e.patient_id"""
+            if status == "all":
+                cur.execute(q + " ORDER BY e.id DESC LIMIT 200")
+            else:
+                cur.execute(q + " WHERE e.status = %s ORDER BY e.hb ASC, e.id DESC LIMIT 200", (status,))
+            items = []
+            for r in cur.fetchall():
+                items.append({"id": r[0], "patient_id": r[1], "hn": r[2], "name": r[3], "hb": float(r[4]),
+                              "hb_date": r[5].isoformat() if r[5] else None, "hb_source": r[6],
+                              "current_drug": r[7], "current_dose": r[8], "action": r[9], "proposed_dose": r[10],
+                              "rationale": r[11], "status": r[12],
+                              "created_at": (r[13].isoformat() + "Z") if r[13] else None,
+                              "decided_by": r[14], "decided_at": (r[15].isoformat() + "Z") if r[15] else None,
+                              "note": r[16], "now_drug": r[17], "now_dose": r[18]})
+    finally:
+        conn.close()
+    return jsonify({"items": items, "protocol": _esa_protocol()})
+
+
+@hd_bp.route("/esa/proposals/<int:pid>/decide", methods=["POST"])
+@require_role("physician")
+def esa_decide(pid):
+    """Physician approves (applies the dose to the patient record) or rejects."""
+    import os
+    import psycopg2
+    data = request.get_json(silent=True) or {}
+    decision = data.get("decision")
+    note = (data.get("note") or "").strip()[:300]
+    override_dose = (data.get("dose") or "").strip()[:50]
+    if decision not in ("approve", "reject"):
+        return jsonify({"error": "decision must be approve|reject"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    who = g.get("hd_username") or str(g.get("hd_user_id") or "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT patient_id, action, proposed_dose, current_dose, status, hn FROM hd_esa_proposals WHERE id = %s", (pid,))
+            r = cur.fetchone()
+            if not r:
+                return jsonify({"error": "not found"}), 404
+            if r[4] != "pending":
+                return jsonify({"error": f"already {r[4]}"}), 409
+            patient_id, action, proposed, current, _, hn = r
+            applied = None
+            if decision == "approve":
+                new_dose = override_dose or proposed
+                if action == "hold":
+                    cur.execute("UPDATE hd_patient_mapping SET esa_dose = %s, updated_at = NOW() WHERE id = %s",
+                                (f"งดชั่วคราว (เดิม {current or '-'})", patient_id))
+                    applied = "hold"
+                elif action in ("increase", "decrease", "resume") and new_dose:
+                    cur.execute("UPDATE hd_patient_mapping SET esa_dose = %s, updated_at = NOW() WHERE id = %s",
+                                (new_dose, patient_id))
+                    applied = new_dose
+                elif action == "review" and new_dose:
+                    cur.execute("UPDATE hd_patient_mapping SET esa_dose = %s, updated_at = NOW() WHERE id = %s",
+                                (new_dose, patient_id))
+                    applied = new_dose
+            cur.execute("""UPDATE hd_esa_proposals SET status = %s, decided_by = %s, decided_at = NOW(), note = %s,
+                           proposed_dose = COALESCE(NULLIF(%s, ''), proposed_dose) WHERE id = %s""",
+                        ("approved" if decision == "approve" else "rejected", who, note, override_dose, pid))
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action=f"esa.{decision}", resource_type="esa", resource_id=pid,
+               new_values={"hn": hn, "action": action, "applied": applied, "note": note}, ip_address=request.remote_addr or "")
+    # tell the nurse group so the next session uses the new dose
+    if decision == "approve" and applied:
+        try:
+            cur_txt = f"ESA ปรับแล้ว: HN {hn} → {'งด ESA ชั่วคราว' if applied == 'hold' else applied}" + (f" ({note})" if note else "")
+            push_nurse_group(f"💊 {cur_txt}\nโดย {who} — ใช้ขนาดใหม่ตั้งแต่รอบถัดไป", fallback_recipients=False)
+        except Exception as e:
+            logger.warning("esa nurse push: %s", e)
+    return jsonify({"ok": True, "decision": decision, "applied": applied})
+
+
+@hd_bp.route("/esa/run", methods=["POST"])
+@require_role("physician", "admin")
+def esa_run_now():
+    try:
+        return jsonify(run_esa_autopilot(trigger="manual"))
+    except Exception as e:
+        logger.error("esa run: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 # ── B11: CI / deploy status → physician LINE ──────────────
@@ -3302,6 +3457,8 @@ def update_settings():
         "default_duration_hours",  # default dialysis duration
         "alert_sbp_drop",          # IDH SBP drop threshold
         "alert_severe_sbp",        # severe IDH threshold
+        "esa_target_low", "esa_target_high", "esa_hold_above",   # ESA Autopilot protocol
+        "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
     ]
     if key not in allowed_keys:
         return jsonify({"error": f"Invalid setting key: {key}"}), 400

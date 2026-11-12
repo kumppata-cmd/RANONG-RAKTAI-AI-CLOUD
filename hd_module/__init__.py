@@ -537,6 +537,15 @@ def _start_daily_reminder_scheduler(app):
                                 logger.info("Lab sync: %s", st)
                         except Exception as ex:
                             logger.warning("Lab sync failed: %s", ex)
+                        # ว้าว #3: new Hb → ESA proposals (once per hour window, 06:00–20:00 Thai)
+                        try:
+                            if lab_tick % 12 == 0 and 6 <= now.hour <= 20:
+                                from .blueprint import run_esa_autopilot
+                                r = run_esa_autopilot()
+                                if r.get("created"):
+                                    logger.info("ESA autopilot: %s proposals", r["created"])
+                        except Exception as ex:
+                            logger.warning("ESA autopilot failed: %s", ex)
                 lab_tick += 1
                 # Send at 18:00 Thai time
                 if now.hour == 18 and now.minute < 5 and last_sent_date != now.date():
