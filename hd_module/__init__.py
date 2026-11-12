@@ -497,6 +497,13 @@ def _start_daily_reminder_scheduler(app):
             _auto_backup_hd_tables()
         except Exception as e:
             logger.error("HD boot backup error: %s", e)
+        # B11: positive confirmation that this commit is live (once per commit)
+        try:
+            with app.app_context():
+                from .blueprint import announce_deploy_once
+                announce_deploy_once()
+        except Exception as e:
+            logger.warning("deploy announce: %s", e)
         lab_tick = 0
         while True:
             try:

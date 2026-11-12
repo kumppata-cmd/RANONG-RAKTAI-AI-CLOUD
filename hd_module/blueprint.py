@@ -693,6 +693,66 @@ def drive_disconnect():
     return jsonify({"ok": True})
 
 
+# ── B11: CI / deploy status → physician LINE ──────────────
+
+@hd_bp.route("/ops/ci-status", methods=["POST"])
+def ops_ci_status():
+    """GitHub Actions posts here when CI fails (shared secret CI_NOTIFY_TOKEN).
+    Without it Render silently skips the deploy and nobody notices."""
+    import hmac
+    import os
+    from flask import current_app
+    expected = os.environ.get("CI_NOTIFY_TOKEN", "").strip()
+    got = (request.headers.get("X-CI-Token") or "").strip()
+    if not expected or not got or not hmac.compare_digest(expected, got):
+        return jsonify({"error": "unauthorized"}), 401
+    data = request.get_json(silent=True) or {}
+    sha = str(data.get("sha", ""))[:7]
+    msg = (f"❌ CI ล้ม — Render จะไม่ deploy commit นี้\n"
+           f"commit {sha} ({data.get('branch', '')}): {str(data.get('message', ''))[:120]}\n"
+           f"job ที่ล้ม: {data.get('failed_jobs') or '-'}\n"
+           f"{data.get('run_url', '')}\n"
+           f"production ยังเป็นเวอร์ชันก่อนหน้า — ต้องแก้แล้ว push ใหม่")
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+    sent = 0
+    for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+        try:
+            if push_fn and push_fn(uid, msg) is not False:
+                sent += 1
+        except Exception as e:
+            logger.warning("ci-status push: %s", e)
+    log_action(user_id=None, action="ops.ci_failed", resource_type="ops",
+               new_values={"sha": sha, "failed_jobs": data.get("failed_jobs")}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "sent": sent})
+
+
+def announce_deploy_once():
+    """After boot: tell the physician which commit is live (once per commit,
+    GCS marker so several workers / restarts do not repeat it)."""
+    import os
+    from flask import current_app
+    sha = (os.environ.get("RENDER_GIT_COMMIT") or "").strip()
+    if not sha:
+        return False
+    from . import _claim_once
+    from datetime import date as _d
+    if not _claim_once(current_app, f"deploy_{sha[:7]}", _d.today()):
+        return False
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+    msg = (f"🚀 Deploy สำเร็จ — production เป็นเวอร์ชัน {sha[:7]} แล้ว\n"
+           f"{(os.environ.get('RENDER_EXTERNAL_URL') or 'https://ranong-raktai-ai-cloud.onrender.com')}/hd/dashboard")
+    n = 0
+    for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+        try:
+            if push_fn and push_fn(uid, msg) is not False:
+                n += 1
+        except Exception as e:
+            logger.warning("deploy announce: %s", e)
+    return n > 0
+
+
 # ── B6: Lab results → bed card ─────────────────────────────
 
 def run_lab_sync():
@@ -1377,8 +1437,54 @@ def update_session(session_id):
     # Check ESA alert: patient has prescribed ESA but didn't get it and no reason given
     if data.get("status") == "completed":
         _check_esa_missing_alert(session_id)
+        # B8: when this was the last session of the shift → shift summary to the nurse group
+        try:
+            result["shift_summary"] = _maybe_send_shift_summary(session_id)
+        except Exception as e:
+            logger.warning("shift summary: %s", e)
 
     return jsonify(result)
+
+
+def _maybe_send_shift_summary(session_id):
+    """If no session of the same date+shift is still scheduled/in_progress,
+    push the shift handover summary to the nurse LINE group once
+    (GCS marker per date+shift). Returns a small status dict."""
+    import os
+    import psycopg2
+    from flask import current_app
+    from .shift_handover import generate_handover_summary
+    from . import _claim_once
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"sent": False, "reason": "no db"}
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT session_date, COALESCE(shift,'morning') FROM hd_sessions WHERE id = %s", (session_id,))
+            r = cur.fetchone()
+            if not r:
+                return {"sent": False, "reason": "session not found"}
+            day, shift = r
+            cur.execute("""SELECT COUNT(*) FILTER (WHERE status IN ('scheduled','in_progress')),
+                                  COUNT(*) FILTER (WHERE status = 'completed')
+                           FROM hd_sessions WHERE session_date = %s AND COALESCE(shift,'morning') = %s""", (day, shift))
+            open_n, done_n = cur.fetchone()
+    finally:
+        conn.close()
+    if open_n or not done_n:
+        return {"sent": False, "reason": f"{open_n} session(s) still open"}
+    if not _claim_once(current_app, f"shift_summary_{shift}", day):
+        return {"sent": False, "reason": "already sent"}
+    summary = generate_handover_summary(db_url, shift)
+    msg = summary.get("line_message") or ""
+    if not msg:
+        return {"sent": False, "reason": "empty summary"}
+    r = push_nurse_group("📋 สรุปเวรอัตโนมัติ (รอบสุดท้ายฟอกเสร็จ)\n" + msg)
+    log_action(user_id=g.get("hd_user_id"), action="shift.summary_auto", resource_type="shift",
+               new_values={"date": str(day), "shift": shift, "sent": r["sent"], "method": r["method"]}, ip_address="")
+    return {"sent": r["sent"], "method": r["method"], "shift": shift}
 
 
 @hd_bp.route("/sessions/<int:session_id>/send-summary", methods=["POST"])

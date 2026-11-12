@@ -417,3 +417,29 @@ jobs:
 
           docker rm -f ranong-ci >/dev/null 2>&1 || true
           echo "OK: image boot ได้และ /health ตอบ 200 พร้อม control ครบ"
+
+  # ---------------------------------------------------------------------------
+  # Job 6: แจ้ง LINE หมอเมื่อ CI ล้ม (B11) — Render จะ "ไม่ deploy เงียบ ๆ"
+  # เมื่อ job ใดแดง (เกิดจริง 11 พ.ย. 2026: 10 commit ไม่ขึ้น production)
+  # ต้องตั้ง GitHub secret CI_NOTIFY_TOKEN ให้ตรงกับ ENV เดียวกันบน Render
+  # ถ้ายังไม่ตั้ง job นี้จะข้าม (ไม่ทำให้ CI แดงเพิ่ม)
+  # ---------------------------------------------------------------------------
+  notify-failure:
+    name: "แจ้ง LINE เมื่อ CI ล้ม"
+    runs-on: ubuntu-24.04
+    needs: [lint, test, security, dependency-check, docker-boot]
+    if: always() && contains(join(needs.*.result, ','), 'failure')
+    steps:
+      - name: "POST /hd/api/v1/ops/ci-status"
+        env:
+          CI_NOTIFY_TOKEN: ${{ secrets.CI_NOTIFY_TOKEN }}
+          RESULTS: ${{ toJSON(needs) }}
+        run: |
+          if [ -z "$CI_NOTIFY_TOKEN" ]; then
+            echo "CI_NOTIFY_TOKEN ไม่ได้ตั้ง — ข้ามการแจ้ง LINE"; exit 0
+          fi
+          FAILED=$(echo "$RESULTS" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(",".join(k for k,v in d.items() if v.get("result") in ("failure","cancelled")))')
+          curl -sS -m 20 -X POST "https://ranong-raktai-ai-cloud.onrender.com/hd/api/v1/ops/ci-status" \
+            -H "Content-Type: application/json" -H "X-CI-Token: $CI_NOTIFY_TOKEN" \
+            -d "{\"status\":\"failure\",\"sha\":\"${GITHUB_SHA}\",\"branch\":\"${GITHUB_REF_NAME}\",\"failed_jobs\":\"${FAILED}\",\"run_url\":\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}\",\"message\":$(git log -1 --pretty=%s 2>/dev/null | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read().strip()))' || echo '""')}" \
+            || echo "แจ้งไม่สำเร็จ (ระบบอาจล่ม) — ไม่ทำให้ CI แดง"
