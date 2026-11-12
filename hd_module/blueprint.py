@@ -476,6 +476,7 @@ def run_daily_export(day, trigger="manual", user=None):
     from .daily_records import export_day, gcs_upload_fn, drive_upload_fn, combined_upload_fn, record_folder
     storage_obj = current_app.config.get("STORAGE_OBJ")
     gcs_up = gcs_upload_fn(storage_obj)
+    _wire_drive_token()
     drive_up = drive_upload_fn()
     upload = combined_upload_fn(gcs_up, drive_up) if (gcs_up or drive_up) else None
     bucket_name = getattr(storage_obj, "bucket_name", None) or os.environ.get("GCS_BUCKET_NAME", "")
@@ -561,6 +562,135 @@ def morning_brief_push_now():
         logger.error("morning brief push error: %s", e)
         return jsonify({"sent": 0, "error": str(e)}), 500
     return jsonify(res), (200 if not res.get("error") else 503)
+
+
+def _set_setting(key, value, user_id=None, description=""):
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return False
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO hd_settings (key, value, description, updated_at, updated_by)
+                VALUES (%s, %s, %s, NOW(), %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value,
+                    updated_at = NOW(), updated_by = EXCLUDED.updated_by
+            """, (key, value, description, user_id))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _wire_drive_token():
+    """Let google_drive_sync read the physician's OAuth refresh token from hd_settings."""
+    try:
+        import google_drive_sync as gds
+        if gds._refresh_token_getter is None:
+            gds.set_refresh_token_getter(lambda: get_setting_value("drive_refresh_token", ""))
+    except Exception as e:
+        logger.warning("wire drive token: %s", e)
+
+
+def _drive_oauth_redirect_uri():
+    import os
+    base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+    return f"{base}/hd/api/v1/drive/oauth/callback"
+
+
+@hd_bp.route("/drive/status", methods=["GET"])
+@require_role("physician", "admin")
+def drive_status():
+    """Is Google Drive export going to work? (mode, folder, OAuth connected?)"""
+    try:
+        import google_drive_sync as gds
+        _wire_drive_token()
+        info = {"enabled": gds.DRIVE_ENABLED, "folder_id_set": bool(gds.DRIVE_FOLDER_ID),
+                "oauth_client_configured": gds.oauth_configured(),
+                "connected_as_user": bool(gds.oauth_configured() and gds._oauth_refresh_token()),
+                "mode": gds.drive_mode(), "redirect_uri": _drive_oauth_redirect_uri()}
+        if info["connected_as_user"]:
+            st = gds.get_status()
+            info["folder_name"] = st.get("folder_name")
+            info["ok"] = bool(st.get("connected"))
+            info["error"] = st.get("error")
+        else:
+            info["ok"] = False
+            info["error"] = ("ยังไม่ได้ตั้ง GOOGLE_DRIVE_OAUTH_CLIENT_ID/SECRET บน Render" if not info["oauth_client_configured"]
+                             else "ยังไม่ได้เชื่อมบัญชี Google ของหมอ — กดปุ่มเชื่อม")
+        return jsonify(info)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@hd_bp.route("/drive/oauth/start", methods=["GET"])
+@require_role("physician", "admin")
+def drive_oauth_start():
+    """Redirect the physician to Google consent (scope drive.file only)."""
+    import urllib.parse
+    import google_drive_sync as gds
+    if not gds.oauth_configured():
+        return jsonify({"error": "GOOGLE_DRIVE_OAUTH_CLIENT_ID / SECRET ยังไม่ได้ตั้งบน Render"}), 400
+    import jwt as pyjwt
+    from .config import HdConfig
+    from datetime import datetime, timedelta, timezone
+    state = pyjwt.encode({"uid": g.get("hd_user_id"), "exp": datetime.now(timezone.utc) + timedelta(minutes=10),
+                          "purpose": "drive_oauth"}, HdConfig.JWT_SECRET, algorithm=HdConfig.JWT_ALGORITHM)
+    params = {
+        "client_id": gds.OAUTH_CLIENT_ID, "redirect_uri": _drive_oauth_redirect_uri(),
+        "response_type": "code", "scope": " ".join(gds.OAUTH_SCOPES),
+        "access_type": "offline", "prompt": "consent", "include_granted_scopes": "true", "state": state,
+    }
+    return redirect("https://accounts.google.com/o/oauth2/v2/auth?" + urllib.parse.urlencode(params))
+
+
+@hd_bp.route("/drive/oauth/callback", methods=["GET"])
+def drive_oauth_callback():
+    """Google sends the code here; exchange for a refresh token and keep it in hd_settings."""
+    import requests as req
+    import jwt as pyjwt
+    import google_drive_sync as gds
+    from .config import HdConfig
+    code = request.args.get("code", "")
+    state = request.args.get("state", "")
+    err = request.args.get("error", "")
+    if err:
+        return redirect(f"/hd/settings?drive=error&msg={err}")
+    try:
+        claims = pyjwt.decode(state, HdConfig.JWT_SECRET, algorithms=[HdConfig.JWT_ALGORITHM])
+        if claims.get("purpose") != "drive_oauth":
+            raise ValueError("bad state")
+    except Exception:
+        return redirect("/hd/settings?drive=error&msg=state")
+    try:
+        r = req.post("https://oauth2.googleapis.com/token", data={
+            "code": code, "client_id": gds.OAUTH_CLIENT_ID, "client_secret": gds.OAUTH_CLIENT_SECRET,
+            "redirect_uri": _drive_oauth_redirect_uri(), "grant_type": "authorization_code",
+        }, timeout=15)
+        tok = r.json()
+        rt = tok.get("refresh_token")
+        if not rt:
+            logger.warning("drive oauth: no refresh_token in response (%s)", list(tok.keys()))
+            return redirect("/hd/settings?drive=error&msg=no_refresh_token")
+        _set_setting("drive_refresh_token", rt, claims.get("uid"), "Google Drive OAuth refresh token (physician account)")
+        gds.set_refresh_token_getter(lambda: get_setting_value("drive_refresh_token", ""))
+        log_action(user_id=claims.get("uid"), action="drive.oauth_connected", resource_type="settings", ip_address=request.remote_addr or "")
+        return redirect("/hd/settings?drive=connected")
+    except Exception as e:
+        logger.error("drive oauth callback: %s", e)
+        return redirect("/hd/settings?drive=error&msg=exchange")
+
+
+@hd_bp.route("/drive/disconnect", methods=["POST"])
+@require_role("physician", "admin")
+def drive_disconnect():
+    import google_drive_sync as gds
+    _set_setting("drive_refresh_token", "", g.get("hd_user_id"))
+    gds.reset_service()
+    return jsonify({"ok": True})
 
 
 @hd_bp.route("/daily-log/export", methods=["POST"])
@@ -2826,6 +2956,8 @@ def get_settings():
                     "updated_at": r[3].isoformat() if r[3] else None,
                 }
         conn.close()
+        if "drive_refresh_token" in settings:   # secret — never return it to the page
+            settings["drive_refresh_token"]["value"] = "••••••••" if settings["drive_refresh_token"]["value"] else ""
         # Merge with ENV fallbacks
         env_alert = os.environ.get("HD_ALERT_RECIPIENTS", "")
         if "alert_recipients" not in settings and env_alert:

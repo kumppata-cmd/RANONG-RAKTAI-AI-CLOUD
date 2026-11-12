@@ -44,11 +44,47 @@ DRIVE_ENABLED = os.getenv("GOOGLE_DRIVE_ENABLED", "").strip().lower() == "true"
 DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID", "").strip()
 
 _drive_service = None
+_drive_mode = ""            # "oauth" (user-owned files) | "service_account"
+_refresh_token_getter = None   # callable → refresh token stored by the app (hd_settings)
+OAUTH_CLIENT_ID = os.getenv("GOOGLE_DRIVE_OAUTH_CLIENT_ID", "").strip()
+OAUTH_CLIENT_SECRET = os.getenv("GOOGLE_DRIVE_OAUTH_CLIENT_SECRET", "").strip()
+OAUTH_SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+
+def set_refresh_token_getter(fn):
+    """App supplies how to read the OAuth refresh token (e.g. from hd_settings)."""
+    global _refresh_token_getter, _drive_service
+    _refresh_token_getter = fn
+    _drive_service = None
+
+
+def _oauth_refresh_token() -> str:
+    tok = os.getenv("GOOGLE_DRIVE_REFRESH_TOKEN", "").strip()
+    if not tok and _refresh_token_getter:
+        try:
+            tok = (_refresh_token_getter() or "").strip()
+        except Exception:
+            tok = ""
+    return tok
+
+
+def oauth_configured() -> bool:
+    return bool(OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET)
+
+
+def reset_service():
+    global _drive_service
+    _drive_service = None
 
 
 def _get_drive_service():
-    """สร้าง Drive API service (lazy init, ใช้ ADC)."""
-    global _drive_service
+    """สร้าง Drive API service (lazy init).
+
+    ลำดับ: 1) OAuth ของผู้ใช้ (ไฟล์เป็นของบัญชี Google ของหมอ — service account
+    ไม่มีโควตา Drive จึงอัปโหลดลง My Drive ไม่ได้: 403 storageQuotaExceeded)
+    2) service account จาก GCS_CREDENTIALS_BASE64 / ADC (ใช้ได้กับ Shared Drive เท่านั้น)
+    """
+    global _drive_service, _drive_mode
     if _drive_service is not None:
         return _drive_service
     try:
@@ -56,7 +92,18 @@ def _get_drive_service():
         from googleapiclient.discovery import build
 
         scopes = ["https://www.googleapis.com/auth/drive"]
+        rt = _oauth_refresh_token()
+        if oauth_configured() and rt:
+            from google.oauth2.credentials import Credentials as _UserCreds
+            credentials = _UserCreds(None, refresh_token=rt, token_uri="https://oauth2.googleapis.com/token",
+                                     client_id=OAUTH_CLIENT_ID, client_secret=OAUTH_CLIENT_SECRET,
+                                     scopes=OAUTH_SCOPES)
+            _drive_mode = "oauth"
+            _drive_service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+            logger.info("Google Drive service initialized (user OAuth)")
+            return _drive_service
         creds_b64 = os.getenv("GCS_CREDENTIALS_BASE64", "").strip()
+        _drive_mode = "service_account"
         if creds_b64 and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip():
             # Render has only the base64 key (same SA as GCS) — ADC would fail
             import base64 as _b64
@@ -79,6 +126,11 @@ def _get_drive_service():
 def is_available() -> bool:
     """ตรวจว่า Drive พร้อมใช้งาน."""
     return DRIVE_ENABLED and bool(DRIVE_FOLDER_ID)
+
+
+def drive_mode() -> str:
+    """'oauth' when the doctor's account is connected, else 'service_account'."""
+    return "oauth" if (oauth_configured() and _oauth_refresh_token()) else "service_account"
 
 
 @_serialized
@@ -188,8 +240,16 @@ def upload_path(file_content: bytes, rel_path: str, mime_type: str = "applicatio
         logger.info("Drive upload_path OK: id=%s", result.get("id", "")[:8])
         return result
     except Exception as e:
-        logger.warning("Drive upload_path failed: %s", type(e).__name__)
-        return {"error": f"{type(e).__name__}"}
+        reason = ""
+        try:
+            import json as _j
+            reason = _j.loads(getattr(e, "content", b"{}") or b"{}").get("error", {}).get("errors", [{}])[0].get("reason", "")
+        except Exception:
+            pass
+        logger.warning("Drive upload_path failed: %s %s", type(e).__name__, reason)
+        if reason == "storageQuotaExceeded":
+            return {"error": "storageQuotaExceeded — service account ไม่มีโควตา Drive; ต้องเชื่อมบัญชี Google ของหมอ (OAuth) ใน ⚙️ ตั้งค่า"}
+        return {"error": f"{type(e).__name__} {reason}".strip()}
 
 
 # ─── Upload ──────────────────────────────────────────────────

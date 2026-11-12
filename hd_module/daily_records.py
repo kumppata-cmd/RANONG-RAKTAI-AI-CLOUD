@@ -435,12 +435,13 @@ def combined_upload_fn(gcs_upload, drive_upload):
                 out["gcs"] = True
             except Exception as e:
                 out["gcs"] = f"{type(e).__name__}: {str(e)[:80]}"
+                logger.warning("export GCS upload failed %s: %s", path, out["gcs"])
         if drive_upload:
             try:
                 drive_upload(path, data, ctype)
                 out["drive"] = True
             except Exception as e:
-                out["drive"] = f"{type(e).__name__}: {str(e)[:80]}"
+                out["drive"] = f"{type(e).__name__}: {str(e)[:120]}"
         return out
     return upload
 
@@ -453,6 +454,24 @@ def gcs_upload_fn(storage_obj):
         return None
 
     def upload(path, data, ctype):
+        import base64
+        import hashlib
         blob = bucket.blob(path)
-        blob.upload_from_string(data, content_type=ctype)
+        try:
+            if blob.exists():
+                blob.reload()
+                same = blob.md5_hash == base64.b64encode(hashlib.md5(data).digest()).decode()
+                if same:
+                    return          # identical copy already there (re-run) → nothing to do
+        except Exception as e:
+            logger.info("gcs exists-check %s: %s", path, type(e).__name__)
+        try:
+            blob.upload_from_string(data, content_type=ctype)
+        except Exception as e:
+            # Bucket retention / object-hold forbids overwriting → keep a versioned copy
+            stem, dot, ext = path.rpartition(".")
+            ts = (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%H%M")
+            alt = f"{stem}.v{ts}.{ext}" if dot else f"{path}.v{ts}"
+            logger.warning("gcs overwrite %s failed (%s: %s) → %s", path, type(e).__name__, str(e)[:100], alt)
+            bucket.blob(alt).upload_from_string(data, content_type=ctype)
     return upload

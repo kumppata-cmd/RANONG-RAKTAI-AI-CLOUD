@@ -17,6 +17,21 @@
 {% endblock %}
 
 {% block content %}
+<!-- Google Drive (physician account) -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>📁 Google Drive สำเนาบันทึก HD</span>
+  </div>
+  <div class="form-group" style="margin-top:12px;">
+    <div id="driveStatus" class="setting-desc">กำลังตรวจสอบ…</div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <a class="btn btn-primary" id="btnDriveConnect" href="#" onclick="driveConnect();return false;">🔗 เชื่อม Google Drive ของหมอ</a>
+      <button class="btn btn-secondary" id="btnDriveDisconnect" onclick="driveDisconnect()" style="display:none;">ยกเลิกการเชื่อม</button>
+    </div>
+    <div class="setting-desc" style="margin-top:8px;">ไฟล์ HD-Records จะถูกเขียนในนามบัญชี Google ของหมอ (Service account เขียนลง My Drive ไม่ได้ — Google ไม่ให้โควตา) · ขอสิทธิ์เฉพาะไฟล์ที่ระบบสร้างเอง (drive.file) ไม่เห็นไฟล์อื่นใน Drive</div>
+  </div>
+</div>
+
 <!-- PIN Setup -->
 <div class="card setting-card">
   <div class="card-header">
@@ -214,6 +229,29 @@ function savePin(){
       }
     }).catch(()=>showToast('ตั้ง PIN ไม่สำเร็จ','danger'));
 }
+
+/* ── Google Drive (OAuth as the physician) ── */
+function loadDriveStatus(){
+  const el = document.getElementById('driveStatus');
+  const q = new URLSearchParams(location.search);
+  if(q.get('drive')==='connected') showToast('✅ เชื่อม Google Drive แล้ว','success');
+  if(q.get('drive')==='error') showToast('❌ เชื่อม Google Drive ไม่สำเร็จ: '+(q.get('msg')||''),'danger');
+  hdFetch('/hd/api/v1/drive/status').then(r=>r.json()).then(d=>{
+    document.getElementById('btnDriveDisconnect').style.display = d.connected_as_user ? '' : 'none';
+    if(d.ok){ el.innerHTML = '✅ เชื่อมแล้ว — โฟลเดอร์ <b>'+(d.folder_name||'')+'</b> (บัญชีหมอ)'; el.style.color='var(--success)'; }
+    else if(!d.enabled || !d.folder_id_set){ el.textContent = '⚠️ GOOGLE_DRIVE_ENABLED / FOLDER_ID ยังไม่ตั้งบน Render'; el.style.color='var(--warning)'; }
+    else if(!d.oauth_client_configured){ el.innerHTML = '⚠️ ต้องตั้ง <code>GOOGLE_DRIVE_OAUTH_CLIENT_ID</code> และ <code>GOOGLE_DRIVE_OAUTH_CLIENT_SECRET</code> บน Render ก่อน (Redirect URI: <code>'+d.redirect_uri+'</code>)'; el.style.color='var(--warning)'; }
+    else { el.textContent = '⏳ ยังไม่ได้เชื่อมบัญชี Google ของหมอ — กดปุ่มด้านล่าง'; el.style.color='var(--warning)'; }
+  }).catch(()=>{ el.textContent='ตรวจสอบไม่ได้'; });
+}
+function driveConnect(){
+  /* token goes in the query so the redirect endpoint can authenticate */
+  location.href = '/hd/api/v1/drive/oauth/start?token='+encodeURIComponent(getHdToken()||'');
+}
+function driveDisconnect(){
+  hdFetch('/hd/api/v1/drive/disconnect',{method:'POST',body:'{}'}).then(()=>{showToast('ยกเลิกแล้ว','success');loadDriveStatus();});
+}
+loadDriveStatus();
 
 /* ── Test LINE push to alert recipients ── */
 function testLine(){
