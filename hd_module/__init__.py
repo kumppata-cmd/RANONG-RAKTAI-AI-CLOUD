@@ -498,6 +498,22 @@ def _start_daily_reminder_scheduler(app):
             _auto_backup_hd_tables()
         except Exception as e:
             logger.error("HD boot backup error: %s", e)
+        # B12: remove files whose water-quality record was deleted earlier
+        try:
+            import os as _os
+            import psycopg2 as _pg
+            _db = _os.environ.get("HD_DATABASE_URL", "") or _os.environ.get("DATABASE_URL", "")
+            if _db:
+                from .blueprint import cleanup_orphan_files
+                _c = _pg.connect(_db, connect_timeout=5)
+                try:
+                    _n = cleanup_orphan_files(_c)
+                    if _n:
+                        logger.info("HD orphan files removed: %d", _n)
+                finally:
+                    _c.close()
+        except Exception as e:
+            logger.warning("HD orphan cleanup: %s", e)
         # B11: positive confirmation that this commit is live (once per commit)
         try:
             with app.app_context():

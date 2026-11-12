@@ -661,29 +661,44 @@ function loadSelfAssessment(){
     });
   });
   body.innerHTML = html;
-  /* Restore from localStorage */
-  try{
-    const saved = JSON.parse(localStorage.getItem('sa_data')||'{}');
-    Object.keys(saved).forEach(k=>{
-      if(saved[k]){
-        const el = document.getElementById('sa_'+k);
-        if(el){el.classList.add('checked');passed++}
-      }
-    });
-  }catch(e){}
-  updateSaScore();
+  /* B9: restore from the database (shared by every device); localStorage is only a cache */
+  const applySaved = (saved)=>{ Object.keys(saved).forEach(k=>{ if(saved[k]){ const el=document.getElementById('sa_'+k); if(el) el.classList.add('checked'); } }); updateSaScore(); };
+  try{ applySaved(JSON.parse(localStorage.getItem('sa_data')||'{}')); }catch(e){}
+  hdFetch('/hd/api/v1/clinic-profile/self-assessment').then(r=>r.json()).then(d=>{
+    const saved = {}; (d.items||[]).forEach(it=>{ saved[it.key] = !!it.checked; });
+    document.querySelectorAll('.sa-item').forEach(el=>el.classList.remove('checked'));
+    applySaved(saved);
+    try{ localStorage.setItem('sa_data', JSON.stringify(saved)); }catch(e){}
+    const meta = (d.items||[]).filter(it=>it.assessed_at).map(it=>it.assessed_at).sort().pop();
+    const st = document.getElementById('saSyncStatus'); if(st) st.textContent = meta ? '✅ บันทึกใน DB ล่าสุด '+hdTime(meta) : 'ยังไม่เคยบันทึกใน DB';
+  }).catch(()=>{ const st=document.getElementById('saSyncStatus'); if(st) st.textContent='⚠️ โหลดจาก DB ไม่ได้ — ใช้ค่าที่เก็บในเครื่องนี้'; });
 }
 
+function saKeyToCategory(key){
+  /* key = category-with-non-alnum-replaced + '_' + index → find the matching category label */
+  for(const cat of Object.keys(SA_ITEMS)){ const pre = cat.replace(/[^a-zA-Z0-9]/g,'_')+'_'; if(key.startsWith(pre)) return cat; }
+  return '';
+}
+let _saSaveTimer = null;
 function toggleSA(key){
   const el = document.getElementById('sa_'+key);
   el.classList.toggle('checked');
-  /* Save to localStorage */
   try{
     const saved = JSON.parse(localStorage.getItem('sa_data')||'{}');
     saved[key] = el.classList.contains('checked');
     localStorage.setItem('sa_data',JSON.stringify(saved));
   }catch(e){}
   updateSaScore();
+  /* persist to DB (debounced — several taps become one save) */
+  clearTimeout(_saSaveTimer);
+  _saSaveTimer = setTimeout(saveSaToDb, 600);
+}
+function saveSaToDb(){
+  const items = [...document.querySelectorAll('.sa-item')].map(el=>{ const key = el.id.slice(3); return {category: saKeyToCategory(key), key, checked: el.classList.contains('checked')}; });
+  const st = document.getElementById('saSyncStatus'); if(st) st.textContent = '⏳ กำลังบันทึก…';
+  hdFetch('/hd/api/v1/clinic-profile/self-assessment',{method:'POST',body:JSON.stringify({items})})
+    .then(r=>r.json()).then(d=>{ if(st) st.textContent = d.ok ? '✅ บันทึกใน DB แล้ว' : '❌ '+(d.error||'บันทึกไม่สำเร็จ'); })
+    .catch(()=>{ if(st) st.textContent='❌ บันทึกไม่สำเร็จ (ค่าถูกเก็บในเครื่องนี้ไว้ก่อน)'; });
 }
 
 function updateSaScore(){
@@ -698,6 +713,7 @@ function updateSaScore(){
   const color = pct>=80?'var(--success)':pct>=50?'var(--warning)':'var(--danger)';
   bar.innerHTML = `<div style="font-size:1.8rem;font-weight:800;color:${color}">${pct}%</div>
     <div style="font-size:.8rem;color:var(--fg-muted)">${checked.length} / ${all.length} ข้อ</div>
+    <div id="saSyncStatus" style="font-size:.7rem;color:var(--fg-muted);margin-top:4px">${(document.getElementById('saSyncStatus')||{}).textContent||''}</div>
     <div style="height:6px;border-radius:3px;background:var(--border);margin-top:6px;overflow:hidden"><div style="height:100%;width:${pct}%;border-radius:3px;background:${color}"></div></div>`;
   document.getElementById('saBody').prepend(bar);
 }

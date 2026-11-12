@@ -693,6 +693,53 @@ def drive_disconnect():
     return jsonify({"ok": True})
 
 
+# ── B12: orphan files in hd_sop_files ─────────────────────
+
+def cleanup_orphan_files(conn):
+    """Delete hd_sop_files rows whose owner record no longer exists:
+    water_quality_<id> with no hd_water_quality row. Returns count."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            DELETE FROM hd_sop_files f
+            WHERE f.sop_key LIKE 'water_quality_%%'
+              AND NOT EXISTS (
+                  SELECT 1 FROM hd_water_quality w
+                  WHERE w.id::text = SUBSTRING(f.sop_key FROM 15))
+        """)
+        n = cur.rowcount
+    conn.commit()
+    return n
+
+
+@hd_bp.route("/clinic-profile/orphan-files", methods=["GET", "POST"])
+@require_role("physician", "admin")
+def orphan_files():
+    """GET = count + list; POST = delete them."""
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        if request.method == "POST":
+            n = cleanup_orphan_files(conn)
+            log_action(user_id=g.get("hd_user_id"), action="sop_files.cleanup", resource_type="sop_files",
+                       new_values={"removed": n}, ip_address=request.remote_addr or "")
+            return jsonify({"ok": True, "removed": n})
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT f.id, f.sop_key, f.filename, f.file_size, f.uploaded_at FROM hd_sop_files f
+                WHERE f.sop_key LIKE 'water_quality_%%'
+                  AND NOT EXISTS (SELECT 1 FROM hd_water_quality w WHERE w.id::text = SUBSTRING(f.sop_key FROM 15))
+                ORDER BY f.id DESC LIMIT 200""")
+            rows = [{"id": r[0], "sop_key": r[1], "filename": r[2], "size": r[3],
+                     "uploaded_at": (r[4].isoformat() + "Z") if r[4] else None} for r in cur.fetchall()]
+        return jsonify({"count": len(rows), "files": rows})
+    finally:
+        conn.close()
+
+
 # ── B11: CI / deploy status → physician LINE ──────────────
 
 @hd_bp.route("/ops/ci-status", methods=["POST"])
@@ -6066,9 +6113,21 @@ def delete_water_quality(wq_id):
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
             cur.execute("DELETE FROM hd_water_quality WHERE id = %s", (wq_id,))
+            # B12: the attached result file lives in hd_sop_files (sop_key water_quality_<id>) — remove it too
+            try:
+                cur.execute("SAVEPOINT wq_files")
+                cur.execute("DELETE FROM hd_sop_files WHERE sop_key = %s", (f"water_quality_{wq_id}",))
+                removed = cur.rowcount
+                cur.execute("RELEASE SAVEPOINT wq_files")
+            except Exception as fe:
+                cur.execute("ROLLBACK TO SAVEPOINT wq_files")
+                removed = 0
+                logger.warning("water_quality DELETE files: %s", fe)
             conn.commit()
         conn.close()
-        return jsonify({"ok": True})
+        log_action(user_id=g.get("hd_user_id"), action="water_quality.delete", resource_type="water_quality",
+                   resource_id=wq_id, new_values={"files_removed": removed}, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "files_removed": removed})
     except Exception as e:
         logger.warning("water_quality DELETE: %s", e)
         return jsonify({"error": str(e)}), 500
@@ -6562,9 +6621,10 @@ def get_self_assessment():
                 evidence TEXT, assessed_by VARCHAR(100), assessed_at TIMESTAMP,
                 UNIQUE(category, item_key))""")
             conn.commit()
-            cur.execute("SELECT category, item_key, checked, evidence, assessed_by FROM hd_self_assessment ORDER BY id")
+            cur.execute("SELECT category, item_key, checked, evidence, assessed_by, assessed_at FROM hd_self_assessment ORDER BY id")
             for r in cur.fetchall():
-                items.append({"category": r[0], "key": r[1], "checked": r[2], "evidence": r[3], "assessed_by": r[4]})
+                items.append({"category": r[0], "key": r[1], "checked": r[2], "evidence": r[3], "assessed_by": r[4],
+                              "assessed_at": (r[5].isoformat() + "Z") if r[5] else None})
         conn.close()
     except Exception as e:
         logger.warning("self_assessment GET: %s", e)
@@ -6589,14 +6649,19 @@ def save_self_assessment():
                 item_key VARCHAR(100) NOT NULL, checked BOOLEAN DEFAULT FALSE,
                 evidence TEXT, assessed_by VARCHAR(100), assessed_at TIMESTAMP,
                 UNIQUE(category, item_key))""")
+            who = g.get("hd_username") or str(g.get("hd_user_id") or "")
             for item in items:
-                cur.execute("""INSERT INTO hd_self_assessment (category, item_key, checked, assessed_at)
-                    VALUES (%s, %s, %s, NOW())
-                    ON CONFLICT (category, item_key) DO UPDATE SET checked = EXCLUDED.checked, assessed_at = NOW()""",
-                    (item.get("category"), item.get("key"), item.get("checked", False)))
+                cur.execute("""INSERT INTO hd_self_assessment (category, item_key, checked, assessed_by, assessed_at)
+                    VALUES (%s, %s, %s, %s, NOW())
+                    ON CONFLICT (category, item_key) DO UPDATE SET checked = EXCLUDED.checked,
+                        assessed_by = EXCLUDED.assessed_by, assessed_at = NOW()""",
+                    (item.get("category"), item.get("key"), bool(item.get("checked", False)), who))
             conn.commit()
         conn.close()
-        return jsonify({"ok": True})
+        log_action(user_id=g.get("hd_user_id"), action="self_assessment.save", resource_type="clinic_profile",
+                   new_values={"items": len(items), "checked": sum(1 for i in items if i.get("checked"))},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "saved": len(items)})
     except Exception as e:
         logger.warning("self_assessment POST: %s", e)
         return jsonify({"error": str(e)}), 500

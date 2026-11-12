@@ -66,12 +66,45 @@ class HdAlertPushService:
                     "name": env_key,
                 })
 
+        # B13: the physician manages recipients in ⚙️ ตั้งค่า (hd_settings.alert_recipients)
+        # — that is the single source of truth; ENV stays only as a bootstrap fallback.
+        self._load_db_recipients()
+
         if self._recipients:
             logger.info("HD Alert Push: %d recipients configured",
                         len(self._recipients))
         else:
             logger.warning("HD Alert Push: no recipients configured — "
-                           "set HD_ALERT_RECIPIENTS or ALERT_RECIPIENT_1 ENV")
+                           "set alert_recipients in ⚙️ ตั้งค่า (or HD_ALERT_RECIPIENTS ENV)")
+
+    def _load_db_recipients(self):
+        """Merge LINE ids from hd_settings.alert_recipients / physician_line_id."""
+        import time as _t
+        self._db_loaded_at = _t.time()
+        if not self._db_url:
+            return
+        try:
+            import psycopg2
+            conn = psycopg2.connect(self._db_url, connect_timeout=3)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT key, value FROM hd_settings WHERE key IN ('alert_recipients', 'physician_line_id')")
+                    rows = cur.fetchall()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug("HD Alert Push: db recipients unavailable: %s", type(e).__name__)
+            return
+        for key, value in rows:
+            for uid in [x.strip() for x in (value or "").split(",") if x.strip()]:
+                if not any(r["line_user_id"] == uid for r in self._recipients):
+                    self._recipients.append({"line_user_id": uid, "role": "physician", "name": key})
+
+    def refresh_if_stale(self, max_age_sec: int = 300):
+        """Re-read hd_settings at most every 5 min so a change in ⚙️ applies without restart."""
+        import time as _t
+        if _t.time() - getattr(self, "_db_loaded_at", 0) > max_age_sec:
+            self._load_db_recipients()
 
     def push_alert(
         self,
@@ -97,6 +130,7 @@ class HdAlertPushService:
             logger.warning("HD Alert Push: no push function — alert not sent")
             return {"sent": 0, "failed": 0, "reason": "no_push_fn"}
 
+        self.refresh_if_stale()
         if not self._recipients:
             logger.warning("HD Alert Push: no recipients — alert not sent")
             return {"sent": 0, "failed": 0, "reason": "no_recipients"}
