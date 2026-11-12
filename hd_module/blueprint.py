@@ -7,7 +7,7 @@ import logging
 from datetime import date, datetime, timezone  # noqa: F401
 from flask import (  # noqa: F401
     Blueprint, request, jsonify, g, render_template, redirect, url_for,
-    current_app, make_response,
+    current_app, make_response, Response,
 )
 
 from .auth import require_role  # noqa: F401
@@ -235,6 +235,147 @@ def morning_brief_page():
 def clinic_profile_page():
     """Clinic Profile & Accreditation — 10 tabs."""
     return render_template("hd_clinic_profile.html")
+
+
+@hd_web.route("/daily")
+def daily_log_page():
+    """ทะเบียนประจำวัน — every session of a date, grouped by shift."""
+    return render_template("hd_daily_log.html")
+
+
+# ── Daily log (ทะเบียนประจำวัน) ───────────────────────────
+
+_DAILY_LOG_SQL = """
+    SELECT s.id, s.shift, s.bed_number, s.status,
+           p.hn, p.patient_name, p.vascular_access,
+           s.started_at, s.ended_at,
+           s.pre_weight, s.post_weight, p.dry_weight, s.uf_goal, s.actual_uf,
+           s.esa_given, s.esa_drug_given, s.esa_dose_given, s.esa_route, s.esa_skip_reason,
+           s.hb_value, s.hct_value, s.notes,
+           (SELECT COUNT(*) FROM hd_vital_signs v WHERE v.session_id = s.id AND v.sbp IS NOT NULL),
+           (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id),
+           (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id AND a.severity::text = 'critical'),
+           (SELECT sbp || '/' || dbp FROM hd_vital_signs v WHERE v.session_id = s.id AND v.sbp IS NOT NULL
+              ORDER BY v.recorded_at ASC LIMIT 1),
+           (SELECT sbp || '/' || dbp FROM hd_vital_signs v WHERE v.session_id = s.id AND v.sbp IS NOT NULL
+              ORDER BY v.recorded_at DESC LIMIT 1),
+           (SELECT MIN(sbp) FROM hd_vital_signs v WHERE v.session_id = s.id)
+    FROM hd_sessions s
+    JOIN hd_patient_mapping p ON p.id = s.patient_id
+    WHERE s.session_date = %s
+    ORDER BY CASE COALESCE(s.shift,'morning') WHEN 'morning' THEN 0 WHEN 'afternoon' THEN 1 ELSE 2 END,
+             s.bed_number, s.id
+"""
+
+_DAILY_LOG_COLS = ["session_id", "shift", "bed", "status", "hn", "patient_name", "vascular_access",
+                   "started_at", "ended_at", "pre_weight", "post_weight", "dry_weight", "uf_goal",
+                   "actual_uf", "esa_given", "esa_drug", "esa_dose", "esa_route", "esa_skip_reason",
+                   "hb", "hct", "notes", "vital_count", "alert_count", "critical_count",
+                   "pre_bp", "post_bp", "min_sbp"]
+
+
+def _daily_log_rows(date_str):
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return []
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_DAILY_LOG_SQL, (date_str,))
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        d = dict(zip(_DAILY_LOG_COLS, r))
+        for k in ("started_at", "ended_at"):
+            d[k] = (d[k].isoformat() + "Z") if d[k] else None
+        for k in ("pre_weight", "post_weight", "dry_weight", "uf_goal", "actual_uf", "hb", "hct"):
+            d[k] = float(d[k]) if d[k] is not None else None
+        d["shift"] = d["shift"] or "morning"
+        if d["actual_uf"] is None and d["pre_weight"] and d["post_weight"]:
+            d["actual_uf"] = round((d["pre_weight"] - d["post_weight"]) * 1000)
+        out.append(d)
+    return out
+
+
+def _parse_date_arg(default_today=True):
+    from datetime import date as _d
+    s = (request.args.get("date") or "").strip()
+    if s:
+        try:
+            return _d.fromisoformat(s)
+        except ValueError:
+            pass
+    return _thai_today() if default_today else None
+
+
+@hd_bp.route("/daily-log", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def daily_log():
+    """All sessions of one date (default: today, Thai time), grouped by shift."""
+    day = _parse_date_arg()
+    try:
+        rows = _daily_log_rows(day.isoformat())
+    except Exception as e:
+        logger.error("daily_log error: %s", e)
+        return jsonify({"date": day.isoformat(), "error": str(e), "shifts": {}, "total": 0}), 500
+    shifts = {"morning": [], "afternoon": [], "evening": []}
+    for r in rows:
+        shifts.setdefault(r["shift"], []).append(r)
+    completed = [r for r in rows if r["status"] == "completed"]
+    summary = {
+        "total": len(rows),
+        "completed": len(completed),
+        "in_progress": sum(1 for r in rows if r["status"] == "in_progress"),
+        "cancelled": sum(1 for r in rows if r["status"] == "cancelled"),
+        "esa_given": sum(1 for r in completed if r["esa_given"] is True),
+        "with_alerts": sum(1 for r in rows if r["alert_count"]),
+        "total_uf_ml": round(sum(r["actual_uf"] or 0 for r in completed)),
+    }
+    return jsonify({"date": day.isoformat(), "shifts": shifts, "summary": summary, "total": len(rows)})
+
+
+@hd_bp.route("/daily-log.csv", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def daily_log_csv():
+    """CSV export of one day (UTF-8 BOM so Excel shows Thai correctly)."""
+    import csv
+    import io
+    day = _parse_date_arg()
+    rows = _daily_log_rows(day.isoformat())
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["วันที่", "รอบ", "เตียง", "สถานะ", "HN", "ชื่อ-สกุล", "VA", "เริ่ม", "สิ้นสุด",
+                "นน.ก่อน", "นน.หลัง", "DW", "UF เป้า", "UF จริง", "BP ก่อน", "BP หลัง", "SBP ต่ำสุด",
+                "ESA ฉีด", "ชนิด ESA", "ขนาด", "ทาง", "เหตุผลงด", "Hb", "Hct",
+                "Vital ครั้ง", "Alert", "Critical", "หมายเหตุ", "session_id"])
+    th = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}
+    for r in rows:
+        def t(ts):
+            if not ts:
+                return ""
+            from datetime import datetime, timedelta
+            return (datetime.fromisoformat(ts.replace("Z", "")) + timedelta(hours=7)).strftime("%H:%M")
+        w.writerow([day.isoformat(), th.get(r["shift"], r["shift"]), r["bed"], r["status"], r["hn"],
+                    r["patient_name"], r["vascular_access"] or "", t(r["started_at"]), t(r["ended_at"]),
+                    r["pre_weight"] or "", r["post_weight"] or "", r["dry_weight"] or "",
+                    r["uf_goal"] or "", r["actual_uf"] or "", r["pre_bp"] or "", r["post_bp"] or "",
+                    r["min_sbp"] or "",
+                    {True: "ฉีด", False: "งด"}.get(r["esa_given"], ""), r["esa_drug"] or "",
+                    r["esa_dose"] or "", r["esa_route"] or "", r["esa_skip_reason"] or "",
+                    r["hb"] or "", r["hct"] or "", r["vital_count"], r["alert_count"],
+                    r["critical_count"], (r["notes"] or "").replace("\n", " "), r["session_id"]])
+    data = ("﻿" + buf.getvalue()).encode("utf-8")
+    fname = f"HD-{day.isoformat()}.csv"
+    resp = Response(data, mimetype="text/csv; charset=utf-8")
+    resp.headers["Content-Disposition"] = _content_disposition(fname, fname)
+    log_action(user_id=g.get("hd_user_id"), action="daily_log.export", resource_type="daily_log",
+               new_values={"date": day.isoformat(), "rows": len(rows)}, ip_address=request.remote_addr or "")
+    return resp
 
 
 # ── Health / Status ───────────────────────────────────────
@@ -1980,6 +2121,7 @@ def bed_dashboard():
         target_date = _thai_today()
 
     beds = []
+    completed_sessions = []
     for i in range(1, HdConfig.TOTAL_BEDS + 1):
         beds.append({
             "bed_number": i,
@@ -2009,7 +2151,9 @@ def bed_dashboard():
                            p.dry_weight, p.esa_drug,
                            s.started_at, 4 as duration_hours,
                            s.esa_given, s.esa_drug_given,
-                           s.shift as saved_shift
+                           s.shift as saved_shift,
+                           s.ended_at, s.pre_weight, s.post_weight, s.actual_uf,
+                           (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id) AS n_alerts
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.status IN ('scheduled', 'in_progress', 'completed')
@@ -2030,6 +2174,23 @@ def bed_dashboard():
                     bed_num = row[0]
                     if 1 <= bed_num <= HdConfig.TOTAL_BEDS:
                         db_status = row[2]
+                        if db_status == "completed":
+                            # Finished sessions release the bed so the next
+                            # round can start; they are listed separately and
+                            # stay in the daily log / session page forever.
+                            completed_sessions.append({
+                                "session_id": row[1], "bed_number": bed_num,
+                                "patient_hn": row[3], "patient_name": row[4],
+                                "vascular_access": row[5],
+                                "start_time": (row[8].isoformat() + "Z") if row[8] else None,
+                                "end_time": (row[13].isoformat() + "Z") if row[13] else None,
+                                "pre_weight": float(row[14]) if row[14] else None,
+                                "post_weight": float(row[15]) if row[15] else None,
+                                "actual_uf": float(row[16]) if row[16] else None,
+                                "esa_given": row[10], "esa_drug_given": row[11],
+                                "alert_count": int(row[17] or 0),
+                            })
+                            continue
                         js_status = {"in_progress": "active", "scheduled": "pre_hd", "completed": "done"}.get(db_status, db_status)
                         # Priority: in_progress > completed > scheduled on same bed
                         current_bed = beds[bed_num - 1]
@@ -2220,6 +2381,8 @@ def bed_dashboard():
         "shift": current_shift,
         "date": target_date.isoformat(),
         "active_in_shift": active_count,
+        "completed_sessions": completed_sessions,
+        "completed_in_shift": len(completed_sessions),
         "today_scheduled": today_count,
         "today_patients": today_patients,
         "_debug_sessions_today": debug_total,

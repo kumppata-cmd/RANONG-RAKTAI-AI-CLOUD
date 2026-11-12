@@ -1,0 +1,119 @@
+{% extends "hd_base.html" %}
+{% block title %}ทะเบียนประจำวัน{% endblock %}
+{% block page_title %}📒 ทะเบียนประจำวัน{% endblock %}
+
+{% block extra_css %}
+<style>
+.dl-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px}
+.dl-bar input[type=date]{padding:8px 10px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-card);color:var(--fg);font-size:.9rem}
+.dl-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:16px}
+.dl-stat{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;text-align:center}
+.dl-stat .n{font-size:1.5rem;font-weight:800;font-variant-numeric:tabular-nums}
+.dl-stat .l{font-size:.7rem;color:var(--fg-muted)}
+.dl-shift{margin-bottom:18px}
+.dl-shift-h{font-weight:700;font-size:.95rem;margin:8px 0;display:flex;align-items:center;gap:8px}
+.dl-shift-h::after{content:'';flex:1;height:1px;background:var(--border)}
+.dl-wrap{overflow-x:auto;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-card)}
+table.dl{width:100%;border-collapse:collapse;font-size:.8rem;min-width:900px}
+table.dl th,table.dl td{padding:7px 8px;border-bottom:1px solid var(--border);text-align:left;white-space:nowrap}
+table.dl th{font-size:.7rem;color:var(--fg-muted);font-weight:600;text-transform:uppercase;letter-spacing:.03em;background:var(--bg)}
+table.dl tr:last-child td{border-bottom:none}
+.st{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.7rem;font-weight:700}
+.st-completed{background:rgba(39,174,96,.15);color:var(--success)}
+.st-in_progress{background:rgba(41,128,185,.15);color:var(--accent)}
+.st-scheduled{background:rgba(127,140,141,.15);color:var(--fg-muted)}
+.st-cancelled{background:rgba(231,76,60,.15);color:var(--danger)}
+.dl-empty{padding:14px;text-align:center;color:var(--fg-muted);font-size:.85rem}
+.dl-note{font-size:.72rem;color:var(--fg-muted);margin-top:10px}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="dl-bar">
+  <button class="btn btn-secondary" onclick="shiftDay(-1)">‹ วันก่อน</button>
+  <input type="date" id="dlDate" onchange="loadDay()">
+  <button class="btn btn-secondary" onclick="shiftDay(1)">วันถัดไป ›</button>
+  <button class="btn btn-secondary" onclick="goToday()">วันนี้</button>
+  <span style="flex:1"></span>
+  <button class="btn btn-primary" onclick="exportCsv()">⬇️ Export CSV (Excel)</button>
+  <a class="btn btn-secondary" href="/hd/dashboard" style="text-decoration:none;">← Dashboard</a>
+</div>
+
+<div class="dl-stats" id="dlStats"></div>
+<div id="dlBody"><div class="dl-empty">กำลังโหลด…</div></div>
+<div class="dl-note">ข้อมูลทุกรอบเก็บถาวรใน PostgreSQL (ไม่ลบเมื่อเตียงว่าง) · กด "ดู" เพื่อเปิดบันทึกรอบนั้น · CSV เปิดใน Excel ได้ทันที (UTF-8)</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const SHIFT_TH = {morning:'🌅 รอบเช้า', afternoon:'☀️ รอบบ่าย', evening:'🌙 รอบค่ำ'};
+const ST_TH = {completed:'เสร็จ', in_progress:'กำลังฟอก', scheduled:'รอฟอก', cancelled:'ยกเลิก'};
+
+function curDate(){ return document.getElementById('dlDate').value; }
+function setDate(iso){ document.getElementById('dlDate').value = iso; }
+function goToday(){
+  const d = new Date(Date.now() + 7*3600*1000);   /* Thai time */
+  setDate(d.toISOString().slice(0,10)); loadDay();
+}
+function shiftDay(n){
+  const d = new Date(curDate()+'T00:00:00Z'); d.setUTCDate(d.getUTCDate()+n);
+  setDate(d.toISOString().slice(0,10)); loadDay();
+}
+function fmt(v, dec){ return (v===null||v===undefined||v==='') ? '-' : (dec!==undefined ? Number(v).toFixed(dec) : v); }
+function esaCell(r){
+  if(r.esa_given===true) return '✅ '+(r.esa_drug||'ESA')+' '+(r.esa_dose||'')+' '+(r.esa_route||'');
+  if(r.esa_given===false) return '❌ งด'+(r.esa_skip_reason?' — '+r.esa_skip_reason:'');
+  return '-';
+}
+
+function loadDay(){
+  const date = curDate();
+  history.replaceState(null,'','/hd/daily?date='+date);
+  hdFetch('/hd/api/v1/daily-log?date='+date).then(r=>r.json()).then(d=>{
+    const s = d.summary || {};
+    document.getElementById('dlStats').innerHTML = [
+      ['ทั้งหมด', s.total||0, 'var(--fg)'], ['เสร็จ', s.completed||0, 'var(--success)'],
+      ['กำลังฟอก', s.in_progress||0, 'var(--accent)'], ['ยกเลิก', s.cancelled||0, 'var(--danger)'],
+      ['ฉีด ESA', s.esa_given||0, 'var(--success)'], ['มี Alert', s.with_alerts||0, 'var(--warning)'],
+      ['UF รวม (L)', ((s.total_uf_ml||0)/1000).toFixed(1), 'var(--accent)'],
+    ].map(x=>`<div class="dl-stat"><div class="n" style="color:${x[2]}">${x[1]}</div><div class="l">${x[0]}</div></div>`).join('');
+
+    const body = document.getElementById('dlBody');
+    if(!d.total){ body.innerHTML = '<div class="dl-empty">ไม่มีรอบฟอกในวันที่ '+date+'</div>'; return; }
+    body.innerHTML = ['morning','afternoon','evening'].map(sh=>{
+      const rows = (d.shifts||{})[sh] || [];
+      if(!rows.length) return '';
+      return `<div class="dl-shift"><div class="dl-shift-h">${SHIFT_TH[sh]} <span style="font-weight:400;color:var(--fg-muted);font-size:.8rem">${rows.length} คน</span></div>
+      <div class="dl-wrap"><table class="dl"><thead><tr>
+        <th>เตียง</th><th>สถานะ</th><th>HN</th><th>ชื่อ-สกุล</th><th>VA</th><th>เวลา</th>
+        <th>นน.ก่อน→หลัง</th><th>UF จริง/เป้า</th><th>BP ก่อน→หลัง</th><th>SBP ต่ำสุด</th>
+        <th>ESA</th><th>Hb</th><th>Vital</th><th>Alert</th><th></th></tr></thead><tbody>
+        ${rows.map(r=>`<tr>
+          <td><strong>${r.bed}</strong></td>
+          <td><span class="st st-${r.status}">${ST_TH[r.status]||r.status}</span></td>
+          <td>${r.hn||'-'}</td><td>${r.patient_name||''}</td><td>${r.vascular_access||'-'}</td>
+          <td>${hdTime(r.started_at)}–${r.ended_at?hdTime(r.ended_at):'…'}</td>
+          <td>${fmt(r.pre_weight,1)} → ${fmt(r.post_weight,1)}</td>
+          <td>${r.actual_uf!=null?Math.round(r.actual_uf):'-'} / ${r.uf_goal!=null?Math.round(r.uf_goal):'-'}</td>
+          <td>${r.pre_bp||'-'} → ${r.post_bp||'-'}</td>
+          <td ${r.min_sbp&&r.min_sbp<90?'style="color:var(--danger);font-weight:700"':''}>${fmt(r.min_sbp)}</td>
+          <td>${esaCell(r)}</td><td>${fmt(r.hb)}</td><td>${r.vital_count}</td>
+          <td>${r.alert_count ? (r.critical_count?'🔴 ':'🟡 ')+r.alert_count : '-'}</td>
+          <td><a href="/hd/session/${r.session_id}" style="color:var(--accent);font-weight:600;text-decoration:none;">ดู ›</a>
+              <a href="/hd/sheet/${r.session_id}" style="color:var(--fg-muted);text-decoration:none;margin-left:6px;">แผ่น</a></td>
+        </tr>`).join('')}
+      </tbody></table></div></div>`;
+    }).join('');
+  }).catch(e=>{ document.getElementById('dlBody').innerHTML = '<div class="dl-empty">โหลดไม่สำเร็จ: '+e.message+'</div>'; });
+}
+
+function exportCsv(){
+  window.open('/hd/api/v1/daily-log.csv?date='+curDate()+'&token='+encodeURIComponent(getHdToken()||''), '_blank');
+}
+
+(function(){
+  const q = new URLSearchParams(location.search).get('date');
+  if(q) { setDate(q); loadDay(); } else goToday();
+})();
+</script>
+{% endblock %}

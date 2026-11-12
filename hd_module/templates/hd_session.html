@@ -368,6 +368,8 @@
             <option value="Epiao">Epiao (Epoetin alfa)</option>
             <option value="Hemax">Hemax (Epoetin alfa)</option>
             <option value="Hema-plus">Hema-plus (Epoetin alfa)</option>
+            <option value="Hypercrit">Hypercrit (Epoetin alfa)</option>
+            <option value="Eposis">Eposis (Epoetin alfa)</option>
             <option value="Darbepoetin">Darbepoetin (Aranesp)</option>
             <option value="Other">อื่นๆ</option>
           </select>
@@ -1287,7 +1289,7 @@ function endSession(){
       method:'PUT', body:completionBody
     }).then(r=>r.json()).then(d=>{
       showToast('เสร็จสิ้นรอบฟอก — บันทึกสำเร็จ','success');
-      if(d.summary) showSessionSummary(d.summary);
+      showSessionSummary(mergeSummary(d.summary, buildLocalSummary(completionData)));
     }).catch(()=>{
       _pushOffline('/hd/api/v1/sessions/'+sessionData.session_id, 'PUT', completionBody);
       showToast('เสร็จสิ้นรอบฟอก — บันทึก offline จะ sync เมื่อ online','warning');
@@ -1347,11 +1349,33 @@ function buildLocalSummary(data){
   };
 }
 
+/* Server summary (DB truth) + local summary (what was just typed) → one
+   consistent object. Server "alerts" are objects (→ was "[object Object]"),
+   post-BP lives only in the form, vital count may lag the post-HD POST. */
+function mergeSummary(srv, local){
+  if(!srv) return local;
+  const out = Object.assign({}, local, srv);
+  const issues = (srv.issues && srv.issues.length) ? srv.issues.slice()
+    : (srv.alerts||[]).map(a => typeof a==='string' ? a
+        : ((a.severity==='critical'?'🔴 ':a.severity==='warning'?'🟡 ':'ℹ️ ') + (a.title||a.message||'')));
+  (local.alerts||[]).forEach(a=>{ if(!issues.includes(a)) issues.push(a); });
+  out.alerts = issues;
+  out.vital_records = Math.max(srv.vital_count||0, local.vital_records||0) + (local.post_sbp ? 1 : 0);
+  if(!out.post_sbp) { out.post_sbp = local.post_sbp; out.post_dbp = local.post_dbp; out.post_hr = local.post_hr; }
+  if(!out.actual_uf && local.actual_uf) out.actual_uf = local.actual_uf;
+  if(out.actual_uf) out.actual_uf = Math.round(out.actual_uf);
+  if(out.idwg==null && out.pre_weight && out.dry_weight) out.idwg = out.pre_weight - out.dry_weight;
+  out.post_symptoms = local.post_symptoms || [];
+  out.assessment = issues.length ? '⚠️ ฟอกเสร็จ — มีข้อสังเกต '+issues.length+' ข้อ' : '✅ ฟอกเลือดเสร็จสมบูรณ์ ไม่มีปัญหา';
+  return out;
+}
+
 function showSessionSummary(s){
   _sessionSummary = s;
   const el = document.getElementById('summaryContent');
-  const alertsHtml = s.alerts.length
-    ? s.alerts.map(a=>`<div style="padding:6px 10px;background:rgba(243,156,18,.1);border-radius:6px;margin:4px 0;font-size:.85rem;">${a}</div>`).join('')
+  const alertTxt = (s.alerts||[]).map(a => typeof a==='string' ? a : ((a.severity==='critical'?'🔴 ':'🟡 ')+(a.title||a.message||'')));
+  const alertsHtml = alertTxt.length
+    ? alertTxt.map(a=>`<div style="padding:6px 10px;background:rgba(243,156,18,.1);border-radius:6px;margin:4px 0;font-size:.85rem;">${a}</div>`).join('')
     : '<div style="padding:6px 10px;background:rgba(39,174,96,.1);border-radius:6px;font-size:.85rem;">✅ ไม่มีปัญหาระหว่างฟอก</div>';
 
   el.innerHTML = `

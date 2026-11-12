@@ -497,6 +497,7 @@ function fetchBeds(){
       const beds = data.beds || [];
       /* Always render — the grid must reflect the current shift state */
       renderBeds(beds);
+      renderCompleted(data.completed_sessions || [], 'completedPanel', document.getElementById('bedGrid'));
       /* Show debug info */
       const shiftNames = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
       const activeCount = data.active_in_shift || 0;
@@ -698,6 +699,35 @@ function updateDayLabel(d){
   document.getElementById('dayLabel').textContent = label;
 }
 
+/* ── Completed sessions of this round (bed released, record kept) ── */
+function renderCompleted(list, panelId, afterEl){
+  let el = document.getElementById(panelId);
+  if(!list.length){ if(el) el.remove(); return; }
+  if(!el){
+    el = document.createElement('div');
+    el.id = panelId;
+    el.style.cssText = 'margin:12px 0 16px;background:var(--bg-card);border-radius:var(--radius-sm);border:1px solid var(--border);padding:12px;';
+    afterEl.after(el);
+  }
+  const t = ts => ts ? hdTime(ts) : '-';
+  const dateQ = _selectedDate ? '?date='+_selectedDate : '';
+  el.innerHTML =
+    '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">'
+    + '<span style="font-weight:600;font-size:.9rem;">✅ ฟอกเสร็จรอบนี้ ('+list.length+' คน) — เตียงว่างสำหรับรอบถัดไป</span>'
+    + '<a href="/hd/daily'+dateQ+'" style="font-size:.8rem;color:var(--accent);font-weight:600;text-decoration:none;">📒 ทะเบียนประจำวัน ›</a>'
+    + '</div>'
+    + list.map(s=>{
+        const uf = s.actual_uf!=null ? Math.round(s.actual_uf)+' mL' : (s.pre_weight&&s.post_weight ? Math.round((s.pre_weight-s.post_weight)*1000)+' mL' : '-');
+        const esa = s.esa_given===true ? '✓ '+(s.esa_drug_given||'ESA') : (s.esa_given===false ? '✗ ESA' : '');
+        const al = s.alert_count ? ' <span style="color:var(--warning);">⚠️ '+s.alert_count+'</span>' : '';
+        return '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:.82rem;flex-wrap:wrap;">'
+          + '<span><strong>เตียง '+s.bed_number+'</strong> '+(s.patient_name||'')+' <span style="color:var(--fg-muted);">HN '+(s.patient_hn||'-')+'</span>'+al+'</span>'
+          + '<span style="color:var(--fg-muted);">'+t(s.start_time)+'–'+t(s.end_time)+' · UF '+uf+(esa?' · '+esa:'')+'</span>'
+          + '<a href="/hd/session/'+s.session_id+'" style="font-size:.78rem;color:var(--accent);text-decoration:none;font-weight:600;">ดูบันทึก ›</a>'
+          + '</div>';
+      }).join('');
+}
+
 /* ── View Mode: single vs all-rounds ── */
 function setViewMode(mode){
   _viewMode = mode;
@@ -723,7 +753,9 @@ function fetchAllRounds(){
       .then(data=>{
         const beds = data.beds || [];
         const active = beds.filter(b=>b.status && b.status!=='available');
-        document.getElementById(labels[shift]).textContent = 'HD: '+active.length+' คน';
+        const done = data.completed_sessions || [];
+        document.getElementById(labels[shift]).textContent = 'HD: '+active.length+' คน' + (done.length ? ' · ✅ เสร็จ '+done.length : '');
+        renderCompleted(done, 'completedPanel_'+shift, document.getElementById(grids[shift]));
         /* Render mini bed cards */
         const grid = document.getElementById(grids[shift]);
         grid.innerHTML = '';
