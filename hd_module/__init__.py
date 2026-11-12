@@ -477,6 +477,7 @@ def _start_daily_reminder_scheduler(app):
     def _reminder_loop():
         last_sent_date = None
         last_export_date = None
+        last_brief_date = None
         time.sleep(90)   # let server.py finish wiring storage / LINE
         try:
             global _BACKUP_STORAGE_OBJ
@@ -502,6 +503,17 @@ def _start_daily_reminder_scheduler(app):
                                 from .pre_hd_reminder import send_pre_hd_reminders
                                 result = send_pre_hd_reminders(push_fn, db_url, registry)
                                 logger.info("Daily pre-HD reminder: %s", result)
+                # 07:30 Thai time: Morning Brief → physician LINE (B7)
+                if now.hour == 7 and now.minute >= 30 and last_brief_date != now.date():
+                    last_brief_date = now.date()
+                    if _claim_once(app, "morning_brief", now.date()):
+                        with app.app_context():
+                            try:
+                                from .blueprint import run_morning_brief
+                                res = run_morning_brief(trigger="scheduled")
+                                logger.info("Morning brief: %s", res)
+                            except Exception as ex:
+                                logger.error("Morning brief failed: %s", ex)
                 # 22:30 Thai time: export today's records (CSV + PDFs) to GCS
                 if now.hour == 22 and now.minute >= 30 and last_export_date != now.date():
                     last_export_date = now.date()

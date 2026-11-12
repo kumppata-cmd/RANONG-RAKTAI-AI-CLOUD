@@ -90,6 +90,39 @@
 .bed-esa { font-size: .6rem; padding: 2px 6px; border-radius: 6px; font-weight: 700; display: inline-block; margin-top: 2px; }
 .bed-esa.given { background: rgba(34,197,94,.1); color: var(--success); }
 .bed-esa.not-given { background: rgba(243,156,18,.1); color: var(--warning); }
+/* Alert Center (B3) */
+.alert-center { margin: 0 0 12px; border-radius: var(--radius-sm); border: 1px solid var(--border); background: var(--bg-card); overflow: hidden; }
+.alert-center.has-critical { border-color: var(--danger); box-shadow: 0 0 0 2px rgba(231,76,60,.15); }
+.ac-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; font-weight: 700; font-size: .85rem; cursor: pointer; }
+.ac-head .ac-count { margin-left: auto; font-size: .72rem; font-weight: 600; color: var(--fg-muted); }
+.ac-list { border-top: 1px solid var(--border); max-height: 240px; overflow-y: auto; }
+.ac-item { display: flex; align-items: center; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--border); font-size: .8rem; }
+.ac-item:last-child { border-bottom: none; }
+.ac-item.critical { background: rgba(231,76,60,.07); }
+.ac-item.warning { background: rgba(243,156,18,.06); }
+.ac-item .ac-main { flex: 1; min-width: 0; }
+.ac-item .ac-main b { font-weight: 700; }
+.ac-item .ac-sub { font-size: .7rem; color: var(--fg-muted); }
+.ac-item .ac-time { font-size: .7rem; color: var(--fg-muted); white-space: nowrap; }
+.ac-btn { font-size: .7rem; padding: 4px 8px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); cursor: pointer; white-space: nowrap; }
+.ac-btn.primary { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+.ac-empty { padding: 8px 12px; font-size: .78rem; color: var(--success); }
+body.tv-mode .ac-item { font-size: 1.05rem; padding: 12px 16px; }
+body.tv-mode .ac-head { font-size: 1.1rem; }
+/* Bed card v3 (B4) */
+.bed-age { font-size: .62rem; font-weight: 700; display: inline-block; padding: 1px 6px; border-radius: 6px; margin-top: 2px; }
+.bed-age.ok { color: var(--fg-muted); background: rgba(127,140,141,.12); }
+.bed-age.due { color: var(--warning); background: rgba(243,156,18,.15); }
+.bed-age.overdue { color: var(--danger); background: rgba(231,76,60,.15); animation: pulse-border 1.5s infinite; }
+.bed-card.vital-overdue { border-color: var(--warning); }
+.bed-uf { margin-top: 4px; }
+.bed-uf .bar { height: 5px; border-radius: 3px; background: rgba(127,140,141,.2); overflow: hidden; }
+.bed-uf .fill { height: 100%; background: var(--accent); border-radius: 3px; }
+.bed-uf .fill.over { background: var(--danger); }
+.bed-uf .lbl { font-size: .6rem; color: var(--fg-muted); margin-top: 1px; }
+.bed-spark { display: block; margin-top: 3px; }
+.bed-chk { font-size: .6rem; color: var(--fg-muted); margin-top: 2px; letter-spacing: .02em; }
+.bed-chk .ok { color: var(--success); } .bed-chk .no { color: var(--warning); }
 /* Quick Vital Modal */
 .qv-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 999; align-items: flex-end; justify-content: center; }
 .qv-overlay.open { display: flex; }
@@ -100,6 +133,16 @@
 {% endblock %}
 
 {% block content %}
+<!-- Alert Center (B3): every open alert on every bed, worst first -->
+<div class="alert-center" id="alertCenter" hidden>
+  <div class="ac-head" onclick="toggleAlertCenter()">
+    <span id="acTitle">🚨 Alert Center</span>
+    <span class="ac-count" id="acCount"></span>
+    <span id="acChevron" style="font-size:.8rem;">▾</span>
+  </div>
+  <div class="ac-list" id="acList"></div>
+</div>
+
 <!-- Stats Bar -->
 <div class="stats-bar" id="statsBar">
   <div class="stat-item"><span class="stat-num" id="statActive" style="color:var(--success);">0</span><span class="stat-label">กำลังฟอก</span></div>
@@ -274,6 +317,87 @@ const STATUS_MAP = {
   done:      {label:'เสร็จแล้ว', cls:'bed-done'},
 };
 
+/* ── Bed card v3 helpers (B4) ── */
+const VITAL_DUE_MIN = 30, VITAL_OVERDUE_MIN = 60;
+function vitalAgeMin(b){
+  if(!b || !(b.status==='active'||b.status==='warning'||b.status==='critical')) return null;
+  let ts = b.last_vital_at || b.start_time;
+  if(!ts) return null;
+  const d = hdParseUtc(ts); if(isNaN(d)) return null;
+  return Math.max(0, Math.round((Date.now() - d.getTime())/60000));
+}
+function vitalAge(b){
+  const m = vitalAgeMin(b); if(m===null) return '';
+  const cls = m >= VITAL_OVERDUE_MIN ? 'overdue' : (m >= VITAL_DUE_MIN ? 'due' : 'ok');
+  const txt = b.last_vital_at ? `BP ล่าสุด ${m} นาที` : `ยังไม่วัด ${m} นาที`;
+  return `<span class="bed-age ${cls}">${cls==='ok'?'🕒':'⏰'} ${txt}</span>`;
+}
+function ufBar(b){
+  if(!(b.status==='active'||b.status==='warning'||b.status==='critical')) return '';
+  const goal = b.uf_goal, got = b.uf_removed;
+  if(!goal && got==null) return '';
+  const pct = goal ? Math.min(100, Math.round((got||0)/goal*100)) : 0;
+  return `<div class="bed-uf"><div class="bar"><div class="fill ${pct>=100?'over':''}" style="width:${pct}%"></div></div>
+    <div class="lbl">UF ${got!=null?Math.round(got):'-'}/${goal?Math.round(goal):'-'} mL${goal?' · '+pct+'%':''}</div></div>`;
+}
+function sparkline(b){
+  const t = b.sbp_trend || []; if(t.length < 2) return '';
+  const w = 64, h = 16, mn = Math.min(...t, 80), mx = Math.max(...t, 160);
+  const pts = t.map((v,i)=>`${(i/(t.length-1))*w},${h - ((v-mn)/(mx-mn||1))*(h-2) - 1}`).join(' ');
+  const last = t[t.length-1], col = last < 90 ? 'var(--danger)' : (t[0]-last >= 20 ? 'var(--warning)' : 'var(--fg-muted)');
+  return `<svg class="bed-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-label="SBP trend"><polyline fill="none" stroke="${col}" stroke-width="1.5" points="${pts}"/><circle cx="${w}" cy="${h - ((last-mn)/(mx-mn||1))*(h-2) - 1}" r="2" fill="${col}"/></svg>`;
+}
+function checklist(b){
+  if(!(b.status==='active'||b.status==='warning'||b.status==='critical')) return '';
+  const esa = b.esa_given===true ? '<span class="ok">✓ESA</span>' : (b.patient&&b.patient.esa_drug ? '<span class="no">⏳ESA</span>' : '');
+  const w = b.pre_weight_recorded ? '<span class="ok">✓นน.</span>' : '<span class="no">✗นน.</span>';
+  return `<div class="bed-chk">${w} ${esa}</div>`;
+}
+
+/* ── Alert Center (B3) ── */
+let _acCollapsed = false;
+const SHIFT_SHORT = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
+function collectAlerts(beds, shift){
+  const out = [];
+  (beds||[]).forEach(b => (b.alerts||[]).forEach(a => out.push(Object.assign({}, a, {
+    bed: b.bed_number, session_id: b.session_id, name: b.patient_name || (b.patient&&b.patient.name) || '',
+    hn: b.patient_hn || (b.patient&&b.patient.hn) || '', shift
+  }))));
+  out.sort((x,y)=> (x.severity==='critical'?0:1)-(y.severity==='critical'?0:1) || (y.created_at||'').localeCompare(x.created_at||''));
+  return out;
+}
+function toggleAlertCenter(){ _acCollapsed = !_acCollapsed; document.getElementById('acList').hidden = _acCollapsed; document.getElementById('acChevron').textContent = _acCollapsed?'▸':'▾'; }
+function renderAlertCenter(list){
+  const box = document.getElementById('alertCenter'); if(!box) return;
+  const nCrit = list.filter(a=>a.severity==='critical').length;
+  box.hidden = false;
+  box.classList.toggle('has-critical', nCrit>0);
+  document.getElementById('acTitle').textContent = nCrit ? '🔴 Alert Center — มีวิกฤต' : (list.length ? '🟡 Alert Center' : '✅ Alert Center');
+  document.getElementById('acCount').textContent = list.length ? `${nCrit} วิกฤต · ${list.length-nCrit} เฝ้าระวัง · ยังไม่รับทราบ` : 'ไม่มี alert ค้าง';
+  const el = document.getElementById('acList');
+  if(!list.length){ el.innerHTML = '<div class="ac-empty">ไม่มีการแจ้งเตือนค้างรับทราบ</div>'; return; }
+  el.innerHTML = list.map(a => `
+    <div class="ac-item ${a.severity}" id="ac_${a.id}">
+      <span>${a.severity==='critical'?'🔴':'🟡'}</span>
+      <div class="ac-main">
+        <div><b>เตียง ${a.bed}</b> ${a.name}${a.hn?' <span class="ac-sub">HN '+a.hn+'</span>':''}${_viewMode==='all'?' <span class="ac-sub">('+(SHIFT_SHORT[a.shift]||a.shift)+')</span>':''}</div>
+        <div class="ac-sub">${a.title||a.message||''} · ${a.physician_order ? '✍️ มีคำสั่งแพทย์: '+a.physician_order : '⏳ รอคำสั่งแพทย์'}</div>
+      </div>
+      <span class="ac-time">${a.created_at ? hdTime(a.created_at) : ''}</span>
+      <a class="ac-btn primary" href="/hd/session/${a.session_id}#alerts" onclick="event.stopPropagation()">เปิด</a>
+      <button class="ac-btn" onclick="event.stopPropagation();ackFromCenter(${a.id})">รับทราบ</button>
+    </div>`).join('');
+}
+function ackFromCenter(id){
+  hdFetch('/hd/api/v1/alerts/'+id+'/acknowledge', {method:'POST', body:'{}'})
+    .then(r=>r.json()).then(d=>{
+      if(d.success===false || d.error){ showToast(d.error||'รับทราบไม่สำเร็จ','danger'); return; }
+      const row = document.getElementById('ac_'+id); if(row) row.remove();
+      showToast('รับทราบแล้ว','success');
+      if(_viewMode==='all') fetchAllRounds(); else fetchBeds();
+    }).catch(()=>showToast('รับทราบไม่สำเร็จ','danger'));
+}
+
 function renderBeds(beds){
   const grid = document.getElementById('bedGrid');
   grid.innerHTML = '';
@@ -393,8 +517,9 @@ function renderBeds(beds){
         filterContent = va ? `<span class="bed-access ${vaClass(va)}" style="font-size:.75rem;padding:3px 10px;">${va}</span>` : '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่ระบุ VA</span>';
         break;
       default:
-        filterContent = `${dialyzerBadge}${vitals}${timeLeft}`;
+        filterContent = `${dialyzerBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${checklist(b)}`;
     }
+    if(vitalAgeMin(b) !== null && vitalAgeMin(b) >= VITAL_DUE_MIN && (b.status==='active')) card.classList.add('vital-overdue');
 
     card.innerHTML = `
       <div class="bed-num">${b.bed_number}</div>
@@ -420,6 +545,7 @@ function renderBeds(beds){
   document.getElementById('statAvailable').textContent = counts.available;
   document.getElementById('statWarning').textContent = counts.warning;
   document.getElementById('statCritical').textContent = counts.critical;
+  if(_viewMode !== 'all') renderAlertCenter(collectAlerts(beds, currentShift));
 
   /* Alert Sound + Vibration when new critical/warning appears */
   if(counts.critical > _prevCriticalCount){
@@ -741,6 +867,7 @@ function setViewMode(mode){
   else fetchBeds();
 }
 
+let _allRoundAlerts = {};
 function fetchAllRounds(){
   const shifts = ['morning','afternoon','evening'];
   const labels = {morning:'countMorning', afternoon:'countAfternoon', evening:'countEvening'};
@@ -752,6 +879,9 @@ function fetchAllRounds(){
       .then(r=>r.json())
       .then(data=>{
         const beds = data.beds || [];
+        _allRoundAlerts[shift] = collectAlerts(beds, shift);
+        renderAlertCenter([].concat(..._allRoundAlerts.morning||[], ..._allRoundAlerts.afternoon||[], ..._allRoundAlerts.evening||[])
+          .sort((x,y)=> (x.severity==='critical'?0:1)-(y.severity==='critical'?0:1)));
         const active = beds.filter(b=>b.status && b.status!=='available');
         const done = data.completed_sessions || [];
         document.getElementById(labels[shift]).textContent = 'HD: '+active.length+' คน' + (done.length ? ' · ✅ เสร็จ '+done.length : '');
@@ -803,6 +933,7 @@ function fetchAllRounds(){
             <div class="bed-hn" style="font-size:.6rem;">${b.patient_hn?'HN '+b.patient_hn:''}</div>
             ${extraLine}
             ${(b.status==='critical'||b.status==='warning') ? '<div style="font-size:.62rem;font-weight:700;color:'+(b.status==='critical'?'var(--danger)':'var(--warning)')+';margin-top:2px">'+(b.status==='critical'?'🔴 ':'🟡 ')+(b.alert_reason||'มีการแจ้งเตือน')+'</div>' : ''}
+            ${vitalAge(b)}${ufBar(b)}
           `;
           grid.appendChild(card);
         });

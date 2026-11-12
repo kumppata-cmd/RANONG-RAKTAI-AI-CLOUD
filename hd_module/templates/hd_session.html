@@ -439,9 +439,22 @@
     </div>
   </div>
 
-  <button class="btn btn-success btn-lg btn-block" onclick="endSession()">
+  <button class="btn btn-success btn-lg btn-block" onclick="endSessionGate()">
     ✅ เสร็จสิ้นรอบฟอก
   </button>
+
+  <!-- End-of-session gate (B5): checks before completing — informs, never blocks -->
+  <div id="gateOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:1000;align-items:flex-end;justify-content:center;">
+    <div style="background:var(--bg-card);border-radius:16px 16px 0 0;width:100%;max-width:480px;padding:18px;padding-bottom:calc(18px + env(safe-area-inset-bottom,0px));">
+      <h3 style="margin:0 0 6px;font-size:1rem;">📋 ตรวจก่อนปิดรอบฟอก</h3>
+      <div id="gateIntro" style="font-size:.8rem;color:var(--fg-muted);margin-bottom:10px;"></div>
+      <div id="gateList" style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px;"></div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-secondary" style="flex:1" onclick="closeGate()">← กลับไปกรอก</button>
+        <button class="btn btn-success" style="flex:1" id="gateProceed" onclick="closeGate();endSession(true)">บันทึกเลย</button>
+      </div>
+    </div>
+  </div>
 
   <!-- Session Summary (shown after completion) -->
   <div class="card" id="sessionSummaryCard" style="display:none;margin-top:16px;border:2px solid var(--success);">
@@ -950,6 +963,7 @@ function loadExistingSession(sid){
             let lastUf = 0, lastRate = 0, lastRemaining = 0;
             (ud.records||[]).forEach(u=>{
               if(u.uf_removed > lastUf) lastUf = u.uf_removed;
+              if(u.uf_removed > _lastUfRemoved) _lastUfRemoved = u.uf_removed;
               if(u.uf_rate) lastRate = u.uf_rate;
               if(u.uf_remaining) lastRemaining = u.uf_remaining;
               timeline.push({
@@ -1050,9 +1064,10 @@ function loadSessionAlerts(){
   if(!sessionData.session_id) return;
   hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/alerts').then(r=>r.json()).then(d=>{
     const list=d.alerts||[]; const panel=document.getElementById('alertsPanel');
-    if(!list.length){ panel.style.display='none'; return; }
+    if(!list.length){ panel.style.display='none'; _openAlertCount = 0; return; }
     panel.style.display='block';
     const open=list.filter(a=>!a.acknowledged).length;
+    _openAlertCount = open;
     document.getElementById('alertsCount').textContent = open ? `(${open} รายการยังไม่รับทราบ)` : '(รับทราบครบแล้ว)';
     const isDoc = _hdRole()==='physician';
     document.getElementById('alertsList').innerHTML = list.map(a=>{
@@ -1143,6 +1158,8 @@ function renderTimeline(){
 
 let _sessionSummary = null;
 let _esaGiven = null; /* null=not set, true=given, false=skipped */
+let _openAlertCount = 0;   /* for the end-of-session gate */
+let _lastUfRemoved = 0;
 
 function setEsaGiven(val){
   _esaGiven = val;
@@ -1259,7 +1276,45 @@ function loadEsaHistory(){
     .catch(()=>{});
 }
 
-function endSession(){
+/* ── End-of-session gate (B5): list what is missing, let the nurse decide ── */
+function gateChecks(){
+  const preW = parseFloat(document.getElementById('preWeight').value) || 0;
+  const postW = parseFloat(document.getElementById('postWeight').value) || 0;
+  const postSbp = parseInt(document.getElementById('postSbp').value) || 0;
+  const actualUf = parseInt(document.getElementById('actualUf').value) || 0;
+  const ufGoal = parseInt(document.getElementById('ufGoal').textContent) || 0;
+  const items = [];
+  if(!postW) items.push({k:'post_weight', ok:false, t:'ยังไม่ชั่งน้ำหนักหลังฟอก', sub:'ไม่มีค่านี้ระบบคำนวณ UF จริงไม่ได้ (ทะเบียนจะขึ้น 0)'});
+  else if(preW && postW >= preW) items.push({k:'post_weight_eq', ok:false, t:`นน.หลังฟอก (${postW}) ≥ ก่อนฟอก (${preW})`, sub:'ปกติต้องลดลง — ตรวจตัวเลขอีกครั้ง'});
+  else items.push({k:'post_weight', ok:true, t:`น้ำหนักหลังฟอก ${postW} kg (ลด ${(preW-postW).toFixed(1)} kg)`});
+  if(!postSbp) items.push({k:'post_bp', ok:false, t:'ยังไม่วัด BP หลังฟอก', sub:'จำเป็นสำหรับสรุปและทะเบียนประจำวัน'});
+  else items.push({k:'post_bp', ok:true, t:`BP หลังฟอก ${postSbp}/${document.getElementById('postDbp').value||'-'}`});
+  if(_esaGiven === null) items.push({k:'esa', ok:false, t:'ยังไม่บันทึก ESA (ฉีด / ไม่ฉีด)', sub:'กดเลือกในการ์ด ESA ด้านบน'});
+  else items.push({k:'esa', ok:true, t:_esaGiven ? 'ESA: ฉีดแล้ว' : 'ESA: งด (บันทึกเหตุผลแล้ว)'});
+  const uf = actualUf || _lastUfRemoved || 0;
+  if(ufGoal && !uf) items.push({k:'uf', ok:false, t:`ยังไม่มี UF จริง (เป้า ${ufGoal} mL)`, sub:'กรอกช่อง Actual UF หรือบันทึก UF ระหว่างฟอก'});
+  else if(ufGoal && uf < ufGoal*0.8) items.push({k:'uf', ok:false, t:`UF จริง ${uf} mL ต่ำกว่าเป้า ${ufGoal} mL (${Math.round(uf/ufGoal*100)}%)`, sub:'ถ้าตั้งใจลด UF ให้ระบุในหมายเหตุ'});
+  else if(ufGoal) items.push({k:'uf', ok:true, t:`UF จริง ${uf}/${ufGoal} mL`});
+  if(_openAlertCount > 0) items.push({k:'alerts', ok:false, t:`มี alert ยังไม่รับทราบ ${_openAlertCount} รายการ`, sub:'กด ✔ รับทราบ ในแผงการแจ้งเตือนก่อนปิดรอบ'});
+  else items.push({k:'alerts', ok:true, t:'ไม่มี alert ค้างรับทราบ'});
+  return items;
+}
+function endSessionGate(){
+  const items = gateChecks();
+  const missing = items.filter(i=>!i.ok);
+  if(!missing.length){ endSession(true); return; }
+  document.getElementById('gateIntro').textContent = `พบ ${missing.length} รายการที่ยังไม่ครบ — กลับไปกรอก หรือบันทึกเลยก็ได้ (ระบบจะจดว่าข้ามอะไร)`;
+  document.getElementById('gateList').innerHTML = items.map(i=>
+    `<div style="display:flex;gap:8px;align-items:flex-start;padding:8px 10px;border-radius:8px;background:${i.ok?'rgba(39,174,96,.08)':'rgba(243,156,18,.12)'};font-size:.85rem;">
+       <span>${i.ok?'✅':'⚠️'}</span><div><div style="font-weight:${i.ok?'500':'700'}">${i.t}</div>${i.sub?'<div style="font-size:.72rem;color:var(--fg-muted)">'+i.sub+'</div>':''}</div></div>`).join('');
+  document.getElementById('gateProceed').textContent = `บันทึกเลย (ข้าม ${missing.length})`;
+  document.getElementById('gateOverlay').style.display = 'flex';
+}
+function closeGate(){ document.getElementById('gateOverlay').style.display = 'none'; }
+
+function endSession(fromGate){
+  if(!fromGate){ endSessionGate(); return; }
+  const skipped = gateChecks().filter(i=>!i.ok).map(i=>i.t);
   const postWeight = parseFloat(document.getElementById('postWeight').value) || 0;
   const postSbp = parseInt(document.getElementById('postSbp').value) || 0;
   const postDbp = parseInt(document.getElementById('postDbp').value) || 0;
@@ -1267,7 +1322,8 @@ function endSession(){
   const actualUf = parseInt(document.getElementById('actualUf').value) || 0;
   const postSymptoms = [];
   document.querySelectorAll('input[name="post_symptom"]:checked').forEach(el=>postSymptoms.push(el.value));
-  const notes = document.getElementById('postNotes').value;
+  let notes = document.getElementById('postNotes').value;
+  if(skipped.length) notes = (notes ? notes + '\n' : '') + '[ปิดรอบโดยข้าม: ' + skipped.join('; ') + ']';
 
   /* Merge ESA + lab data */
   const esaData = getEsaData();

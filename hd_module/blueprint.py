@@ -476,6 +476,43 @@ def run_daily_export(day, trigger="manual", user=None):
     return res
 
 
+def run_morning_brief(trigger="manual", user=None):
+    """Build the physician Morning Brief and push it to alert_recipients."""
+    import os
+    import psycopg2
+    from flask import current_app
+    from .morning_brief import send_morning_brief
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+    recipients = [r.strip() for r in ids.split(",") if r.strip()]
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"sent": 0, "error": "no database"}
+    base_url = (os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("BASE_URL")
+                or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        sent, msg = send_morning_brief(conn, push_fn, recipients if push_fn else [], base_url)
+    finally:
+        conn.close()
+    log_action(user_id=user, action="morning_brief.push", resource_type="morning_brief",
+               new_values={"sent": sent, "recipients": len(recipients), "trigger": trigger}, ip_address="")
+    return {"sent": sent, "recipients": len(recipients), "trigger": trigger, "message": msg,
+            "error": None if (push_fn and recipients) else "LINE ไม่พร้อม หรือยังไม่ตั้ง alert_recipients"}
+
+
+@hd_bp.route("/morning-brief/push", methods=["POST"])
+@require_role("physician", "admin")
+def morning_brief_push_now():
+    """Send the Morning Brief to the physician now (same text as the 07:30 job)."""
+    try:
+        res = run_morning_brief(trigger="manual", user=g.get("hd_user_id"))
+    except Exception as e:
+        logger.error("morning brief push error: %s", e)
+        return jsonify({"sent": 0, "error": str(e)}), 500
+    return jsonify(res), (200 if not res.get("error") else 503)
+
+
 @hd_bp.route("/daily-log/export", methods=["POST"])
 @require_role("physician", "admin")
 def daily_log_export_now():
@@ -2350,8 +2387,40 @@ def bed_dashboard():
                                 "sbp": vrow[0], "dbp": vrow[1],
                                 "hr": vrow[2], "temp": vrow[3], "spo2": vrow[4],
                             }
+                            beds[bnum - 1]["last_vital_at"] = (vrow[5].isoformat() + "Z") if vrow[5] else None
+                        # SBP trend (oldest → newest, last 6) for the mini sparkline
+                        cur.execute("""
+                            SELECT sbp FROM (
+                                SELECT sbp, recorded_at FROM hd_vital_signs
+                                WHERE session_id = %s AND sbp IS NOT NULL
+                                ORDER BY recorded_at DESC LIMIT 6
+                            ) t ORDER BY recorded_at ASC
+                        """, (sid,))
+                        if 1 <= bnum <= len(beds):
+                            beds[bnum - 1]["sbp_trend"] = [r[0] for r in cur.fetchall()]
                     except Exception:
                         pass
+
+                # UF progress + pre-HD checklist flags (what the nurse decides on)
+                for sid, bnum in session_ids:
+                    if not (1 <= bnum <= len(beds)):
+                        continue
+                    b = beds[bnum - 1]
+                    try:
+                        cur.execute("SELECT uf_goal, pre_weight, post_weight FROM hd_sessions WHERE id = %s", (sid,))
+                        srow = cur.fetchone()
+                        if srow:
+                            b["uf_goal"] = float(srow[0]) if srow[0] is not None else None
+                            b["pre_weight_recorded"] = srow[1] is not None
+                            b["post_weight_recorded"] = srow[2] is not None
+                        cur.execute("""SELECT MAX(uf_removed) FROM hd_uf_records WHERE session_id = %s""", (sid,))
+                        urow = cur.fetchone()
+                        b["uf_removed"] = float(urow[0]) if urow and urow[0] is not None else None
+                    except Exception:
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
 
                 # Attach open (unacknowledged) alerts → bed status warning/critical
                 for sid, bnum in session_ids:

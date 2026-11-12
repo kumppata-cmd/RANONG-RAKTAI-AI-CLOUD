@@ -32,6 +32,20 @@
 {% block content %}
 <div class="mb-auto-refresh">🔄 รีเฟรชอัตโนมัติทุก 60 วินาที | <a href="/hd/" style="color:var(--accent);text-decoration:none;">← Dashboard</a> | <a href="/hd/checklist/page" style="color:var(--accent);text-decoration:none;">✅ Checklist</a></div>
 <div class="mb-date" id="mbDate">กำลังโหลด...</div>
+<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin:-4px 0 12px;">
+  <button class="btn btn-primary" id="btnBriefPush" onclick="pushBrief()" style="font-size:.82rem;">📨 ส่ง Morning Brief เข้า LINE หมอตอนนี้</button>
+  <span id="briefPushStatus" style="font-size:.78rem;color:var(--fg-muted);">ระบบส่งอัตโนมัติทุกวัน 07:30 น.</span>
+</div>
+<script>
+function pushBrief(){
+  const b=document.getElementById('btnBriefPush'), st=document.getElementById('briefPushStatus');
+  b.disabled=true; st.textContent='⏳ กำลังรวบรวมและส่ง…';
+  hdFetch('/hd/api/v1/morning-brief/push',{method:'POST',body:'{}'}).then(r=>r.json()).then(d=>{
+    if(d.error){ st.textContent='❌ '+d.error; st.style.color='var(--danger)'; }
+    else { st.textContent='✅ ส่งแล้ว '+d.sent+' คน — เช็ค LINE'; st.style.color='var(--success)'; }
+  }).catch(()=>{ st.textContent='❌ เรียก API ไม่ได้'; st.style.color='var(--danger)'; }).finally(()=>{ b.disabled=false; });
+}
+</script>
 
 <!-- Shift Summary -->
 <div class="mb-grid" id="mbShifts">
