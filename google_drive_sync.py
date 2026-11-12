@@ -55,9 +55,17 @@ def _get_drive_service():
         import google.auth
         from googleapiclient.discovery import build
 
-        credentials, _project = google.auth.default(
-            scopes=["https://www.googleapis.com/auth/drive"]
-        )
+        scopes = ["https://www.googleapis.com/auth/drive"]
+        creds_b64 = os.getenv("GCS_CREDENTIALS_BASE64", "").strip()
+        if creds_b64 and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS", "").strip():
+            # Render has only the base64 key (same SA as GCS) — ADC would fail
+            import base64 as _b64
+            import json as _json
+            from google.oauth2 import service_account
+            info = _json.loads(_b64.b64decode(creds_b64))
+            credentials = service_account.Credentials.from_service_account_info(info, scopes=scopes)
+        else:
+            credentials, _project = google.auth.default(scopes=scopes)
         _drive_service = build(
             "drive", "v3", credentials=credentials, cache_discovery=False
         )
@@ -140,6 +148,48 @@ def _find_or_create_folder(
     except Exception as e:
         logger.warning("Drive folder create failed: %s", type(e).__name__)
         return parent_id
+
+
+def _ensure_path(service, rel_path: str, root_id: str) -> str:
+    """Walk/create nested folders 'a/b/c' under root; returns the leaf folder id."""
+    parent = root_id
+    for part in [x for x in rel_path.split("/") if x]:
+        parent = _find_or_create_folder(service, part, parent)
+    return parent
+
+
+@_serialized
+def upload_path(file_content: bytes, rel_path: str, mime_type: str = "application/pdf",
+                replace: bool = True) -> dict:
+    """Upload to a nested path under the root folder, e.g.
+    'HD-Records/2026/2026-11/2026-11-12/HD-2026-11-12.csv'. Creates folders
+    as needed; with replace=True an existing file of the same name in that
+    folder is updated in place (so a re-run does not create duplicates)."""
+    if not is_available():
+        return {"error": "Google Drive ไม่ได้เปิดใช้งาน"}
+    service = _get_drive_service()
+    if not service:
+        return {"error": "ไม่สามารถเชื่อมต่อ Google Drive"}
+    try:
+        from googleapiclient.http import MediaInMemoryUpload
+        folder, _, name = rel_path.rpartition("/")
+        parent_id = _ensure_path(service, folder, DRIVE_FOLDER_ID) if folder else DRIVE_FOLDER_ID
+        media = MediaInMemoryUpload(file_content, mimetype=mime_type)
+        existing = []
+        if replace:
+            q = (f"name='{name.replace(chr(39), chr(92) + chr(39))}' and '{parent_id}' in parents and trashed=false")
+            existing = service.files().list(q=q, fields="files(id)", pageSize=1).execute().get("files", [])
+        if existing:
+            result = service.files().update(fileId=existing[0]["id"], media_body=media,
+                                            fields="id, name, webViewLink").execute()
+        else:
+            result = service.files().create(body={"name": name, "parents": [parent_id]},
+                                            media_body=media, fields="id, name, webViewLink").execute()
+        logger.info("Drive upload_path OK: id=%s", result.get("id", "")[:8])
+        return result
+    except Exception as e:
+        logger.warning("Drive upload_path failed: %s", type(e).__name__)
+        return {"error": f"{type(e).__name__}"}
 
 
 # ─── Upload ──────────────────────────────────────────────────

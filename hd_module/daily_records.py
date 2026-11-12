@@ -361,8 +361,15 @@ def export_day(conn, day, rows, csv_bytes, upload, clinic_name="คลินิ�
     def put(path, data, ctype):
         entry = {"path": path, "bytes": len(data), "ok": False, "error": None}
         try:
-            upload(path, data, ctype)
-            entry["ok"] = True
+            res = upload(path, data, ctype)
+            # upload may report per-destination results, e.g. {"gcs": True, "drive": "error: 403"}
+            if isinstance(res, dict):
+                entry.update(res)
+                entry["ok"] = res.get("gcs", True) is True
+                bad = [f"{k}: {v}" for k, v in res.items() if v is not True]
+                entry["error"] = "; ".join(bad) if bad else None
+            else:
+                entry["ok"] = True
         except Exception as e:
             entry["error"] = f"{type(e).__name__}: {str(e)[:120]}"
             logger.warning("export_day: upload %s failed: %s", path, entry["error"])
@@ -397,6 +404,45 @@ def export_day(conn, day, rows, csv_bytes, upload, clinic_name="คลินิ�
                 pass
     ok = sum(1 for f in files if f["ok"])
     return {"folder": folder, "date": day.isoformat(), "files": files, "ok": ok, "failed": len(files) - ok}
+
+
+def drive_upload_fn():
+    """upload(path, data, ctype) into the physician's Google Drive root folder
+    (GOOGLE_DRIVE_FOLDER_ID) at the same HD-Records/... path, or None if the
+    Drive integration is off."""
+    try:
+        import google_drive_sync as gds
+    except Exception:
+        return None
+    if not gds.is_available():
+        return None
+
+    def upload(path, data, ctype):
+        r = gds.upload_path(data, path, ctype)
+        if r.get("error"):
+            raise RuntimeError(r["error"])
+    return upload
+
+
+def combined_upload_fn(gcs_upload, drive_upload):
+    """GCS is the system of record (must succeed); Drive is best-effort and
+    reported separately in the manifest."""
+    def upload(path, data, ctype):
+        out = {}
+        if gcs_upload:
+            try:
+                gcs_upload(path, data, ctype)
+                out["gcs"] = True
+            except Exception as e:
+                out["gcs"] = f"{type(e).__name__}: {str(e)[:80]}"
+        if drive_upload:
+            try:
+                drive_upload(path, data, ctype)
+                out["drive"] = True
+            except Exception as e:
+                out["drive"] = f"{type(e).__name__}: {str(e)[:80]}"
+        return out
+    return upload
 
 
 def gcs_upload_fn(storage_obj):

@@ -55,6 +55,27 @@
       <span class="setting-status" id="status_test_line"></span>
     </div>
   </div>
+  <div class="form-group" style="margin-top:16px;padding-top:12px;border-top:1px dashed var(--border);">
+    <label class="form-label">👥 LINE กลุ่มพยาบาล (Group ID)</label>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
+      <input type="text" class="form-control" id="setting_nurse_group_id" placeholder="Cxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" style="flex:1;min-width:220px;">
+      <button class="btn btn-primary save-btn" onclick="saveSetting('nurse_group_id')">💾 บันทึก</button>
+    </div>
+    <div class="setting-desc">คำสั่งแพทย์, สรุปเวร, Pre-HD reminder, อุบัติการณ์ จะถูกส่งเข้ากลุ่มนี้ผ่าน LINE OA (Messaging API) — <b>LINE Notify ปิดบริการแล้ว</b> ไม่ต้องใช้ token อีก</div>
+    <div class="setting-status" id="status_nurse_group_id"></div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+      <button class="btn btn-secondary" onclick="testGroup()" id="btn_test_group">📨 ทดสอบส่งเข้ากลุ่ม</button>
+      <span class="setting-status" id="status_test_group"></span>
+    </div>
+    <div class="how-to" style="margin-top:8px;">
+      <strong>วิธีตั้งค่ากลุ่มพยาบาล (ทำครั้งเดียว):</strong>
+      <ol>
+        <li>ในกลุ่ม LINE ของทีมพยาบาล → เชิญบัญชี OA ของคลินิกเข้ากลุ่ม</li>
+        <li>พิมพ์ <code>groupid</code> ในกลุ่ม → บอทตอบ Group ID (ขึ้นต้นด้วย C)</li>
+        <li>คัดลอกมาวางช่องด้านบน → 💾 บันทึก → กด "ทดสอบส่งเข้ากลุ่ม"</li>
+      </ol>
+    </div>
+  </div>
   <div class="how-to">
     <strong>วิธีหา LINE User ID ของตัวเอง:</strong>
     <ol>
@@ -211,6 +232,18 @@ function testLine(){
         st.style.color='var(--danger)';
         showToast(d.error||d.hint||'ส่ง LINE ไม่สำเร็จ','danger');
       }
+    }).catch(()=>{st.textContent='❌ เรียก API ไม่ได้'; st.style.color='var(--danger)';})
+    .finally(()=>{btn.disabled=false;});
+}
+
+function testGroup(){
+  const st = document.getElementById('status_test_group'), btn = document.getElementById('btn_test_group');
+  btn.disabled = true; st.textContent = '⏳ กำลังส่ง…'; st.style.color='';
+  hdFetch('/hd/api/v1/alerts/notify-group',{method:'POST',body:JSON.stringify({message:'🧪 ทดสอบการเชื่อมต่อกลุ่มพยาบาล — ถ้าเห็นข้อความนี้ คำสั่งแพทย์/สรุปเวรจะเข้ากลุ่มนี้'})})
+    .then(r=>r.json()).then(d=>{
+      if(d.sent && d.method==='group'){ st.textContent='✅ ส่งเข้ากลุ่มแล้ว'; st.style.color='var(--success)'; }
+      else if(d.sent){ st.textContent='⚠️ ยังไม่มี Group ID — ส่งหาแพทย์รายบุคคลแทน ('+d.count+' คน)'; st.style.color='var(--warning)'; }
+      else { st.textContent='❌ '+(d.message||'ส่งไม่สำเร็จ'); st.style.color='var(--danger)'; }
     }).catch(()=>{st.textContent='❌ เรียก API ไม่ได้'; st.style.color='var(--danger)';})
     .finally(()=>{btn.disabled=false;});
 }

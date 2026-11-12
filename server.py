@@ -18113,6 +18113,23 @@ def webhook():
                 text = msg.get("text", "")
                 logger.info(f"รับข้อความ: {len(text)} chars")
 
+                # ── groupid: บอก groupId ของกลุ่มนี้ (ใช้ตั้ง nurse_group_id ให้
+                #    HD Smart Monitoring ส่งคำสั่งแพทย์/สรุปเวรเข้ากลุ่มผ่าน
+                #    Messaging API — LINE Notify ปิดบริการแล้ว) ──
+                if text.strip().lower() in ("groupid", "group id", "ไอดีกลุ่ม"):
+                    _src = event.get("source", {}) or {}
+                    _gid = _src.get("groupId") or _src.get("roomId") or ""
+                    if _gid:
+                        reply_message(
+                            reply_token,
+                            "👥 Group ID ของกลุ่มนี้\n" + _gid +
+                            "\n\nนำไปใส่ใน HD Smart Monitoring → ⚙️ ตั้งค่า → "
+                            "nurse_group_id แล้วระบบจะส่งคำสั่งแพทย์/สรุปเวรเข้ากลุ่มนี้",
+                        )
+                    else:
+                        reply_message(reply_token, "คำสั่งนี้ใช้ในกลุ่ม LINE เท่านั้น — เชิญ OA เข้ากลุ่มพยาบาลแล้วพิมพ์ groupid ในกลุ่ม")
+                    continue
+
                 # ── ตรวจ Registration Mode สำหรับข้อความพิมพ์ (file-based) ──
                 _in_registration = _check_registration_mode(user_hash)
 

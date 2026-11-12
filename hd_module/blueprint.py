@@ -21,6 +21,46 @@ logger = logging.getLogger(__name__)
 _THAI_TZ = timezone(offset=__import__('datetime').timedelta(hours=7))
 
 
+def push_nurse_group(message, fallback_recipients=True):
+    """Send `message` to the nurse LINE group via Messaging API push
+    (hd_settings.nurse_group_id = groupId from the 'groupid' command).
+
+    LINE Notify was discontinued on 31 Mar 2025, so this is the only group
+    channel. If no group id is set and fallback_recipients is True, the
+    message goes to alert_recipients individually instead.
+    Returns {"sent": bool, "method": "group"|"push"|None, "count": n, "error": str|None}.
+    """
+    from flask import current_app
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    if not push_fn:
+        return {"sent": False, "method": None, "count": 0, "error": "LINE_PUSH_FN not configured"}
+    gid = (get_setting_value("nurse_group_id", "") or "").strip()
+    if gid:
+        try:
+            ok = push_fn(gid, message)
+            if ok is not False:
+                return {"sent": True, "method": "group", "count": 1, "error": None}
+            err = "LINE API ปฏิเสธ (OA ยังไม่อยู่ในกลุ่ม หรือ groupId ผิด)"
+        except Exception as e:
+            err = str(e)
+        logger.warning("nurse group push failed: %s", err)
+        if not fallback_recipients:
+            return {"sent": False, "method": "group", "count": 0, "error": err}
+    else:
+        err = "ยังไม่ตั้ง nurse_group_id"
+    if not fallback_recipients:
+        return {"sent": False, "method": None, "count": 0, "error": err}
+    ids = get_setting_value("alert_recipients", "") or ""
+    n = 0
+    for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+        try:
+            if push_fn(uid, message) is not False:
+                n += 1
+        except Exception as e:
+            logger.warning("nurse fallback push %s: %s", uid[:6], e)
+    return {"sent": n > 0, "method": "push", "count": n, "error": None if n else err}
+
+
 def _safe_int(val):
     """Return int or None — prevents 'invalid input syntax for type integer'."""
     if val is None:
@@ -433,9 +473,11 @@ def run_daily_export(day, trigger="manual", user=None):
     import os
     import psycopg2
     from flask import current_app
-    from .daily_records import export_day, gcs_upload_fn, record_folder
+    from .daily_records import export_day, gcs_upload_fn, drive_upload_fn, combined_upload_fn, record_folder
     storage_obj = current_app.config.get("STORAGE_OBJ")
-    upload = gcs_upload_fn(storage_obj)
+    gcs_up = gcs_upload_fn(storage_obj)
+    drive_up = drive_upload_fn()
+    upload = combined_upload_fn(gcs_up, drive_up) if (gcs_up or drive_up) else None
     bucket_name = getattr(storage_obj, "bucket_name", None) or os.environ.get("GCS_BUCKET_NAME", "")
     if upload is None:
         res = {"ok": 0, "failed": 0, "files": [], "folder": record_folder(day), "date": day.isoformat(),
@@ -452,6 +494,9 @@ def run_daily_export(day, trigger="manual", user=None):
         finally:
             conn.close()
         res["bucket"] = bucket_name
+        res["drive_enabled"] = drive_up is not None
+        res["drive_ok"] = sum(1 for f in res["files"] if f.get("drive") is True)
+        res["drive_failed"] = sum(1 for f in res["files"] if "drive" in f and f.get("drive") is not True)
     res["trigger"] = trigger
     log_action(user_id=user, action="daily_log.gcs_export", resource_type="daily_log",
                new_values={"date": day.isoformat(), "ok": res["ok"], "failed": res["failed"],
@@ -467,8 +512,13 @@ def run_daily_export(day, trigger="manual", user=None):
                 msg = (f"⚠️ สำเนาบันทึก HD {day.isoformat()}: สำเร็จ {res['ok']} ไฟล์ ล้มเหลว {res['failed']} ไฟล์\n"
                        f"gs://{bucket_name}/{res['folder']}")
             else:
+                drive_line = ""
+                if res.get("drive_enabled"):
+                    drive_line = (f"\n📁 Google Drive: {res.get('drive_ok', 0)} ไฟล์"
+                                  + (f" (ล้มเหลว {res['drive_failed']})" if res.get("drive_failed") else " ✓"))
                 msg = (f"📦 สำเนาบันทึก HD {day.isoformat()} เรียบร้อย {res['ok']} ไฟล์\n"
-                       f"gs://{bucket_name}/{res['folder']}\n({'อัตโนมัติ 22:30' if trigger == 'scheduled' else 'กดส่งเอง'})")
+                       f"gs://{bucket_name}/{res['folder']}{drive_line}\n"
+                       f"({'อัตโนมัติ 22:30' if trigger == 'scheduled' else 'กดส่งเอง'})")
             for uid in [r.strip() for r in ids.split(",") if r.strip()]:
                 push_fn(uid, msg)
     except Exception as e:
@@ -1907,21 +1957,18 @@ def physician_order(alert_id):
                    resource_type="alert", resource_id=alert_id,
                    new_values={"order": order[:200]}, ip_address=request.remote_addr or "")
 
-        # Relay to nursing team (LINE Notify group) if configured; never fatal
+        # Relay to the nursing team LINE group (Messaging API); never fatal
         relayed = False
+        relay_method = None
         try:
-            token = get_setting_value("nurse_group_token", "") or get_setting_value("line_notify_token", "")
-            if token:
-                import requests as req
-                msg = (f"\n✍️ คำสั่งแพทย์ ({who})\n👤 {pr[0]} (HN {pr[1]}) เตียง {pr[2] or '-'}\n"
-                       f"⚠️ {title}\n📝 {order}")
-                req.post("https://notify-api.line.me/api/notify",
-                         headers={"Authorization": f"Bearer {token}"},
-                         data={"message": msg}, timeout=10)
-                relayed = True
+            msg = (f"✍️ คำสั่งแพทย์ ({who})\n👤 {pr[0]} (HN {pr[1]}) เตียง {pr[2] or '-'}\n"
+                   f"⚠️ {title}\n📝 {order}\n"
+                   f"👉 รับทราบใน HD Smart Monitoring → เตียง {pr[2] or '-'}")
+            r = push_nurse_group(msg, fallback_recipients=False)
+            relayed, relay_method = r["sent"], r["method"]
         except Exception as e:
             logger.warning("order relay: %s", e)
-        return jsonify({"ok": True, "alert_id": alert_id, "relayed_to_nurses": relayed})
+        return jsonify({"ok": True, "alert_id": alert_id, "relayed_to_nurses": relayed, "relay_method": relay_method})
     except Exception as e:
         logger.error("physician_order: %s", e)
         return jsonify({"error": str(e)}), 500
@@ -2840,8 +2887,9 @@ def update_settings():
     allowed_keys = [
         "alert_recipients",        # LINE userId for alerts
         "physician_line_id",       # physician LINE userId (raw, for push)
-        "line_notify_token",       # LINE Notify token (for group alerts)
-        "nurse_group_token",       # LINE Notify token (nurse group)
+        "nurse_group_id",          # LINE groupId of the nurse group (Messaging API push; 'groupid' command)
+        "line_notify_token",       # legacy — LINE Notify discontinued 31 Mar 2025 (ignored)
+        "nurse_group_token",       # legacy — ignored
         "clinic_name",             # clinic display name
         "default_duration_hours",  # default dialysis duration
         "alert_sbp_drop",          # IDH SBP drop threshold
@@ -3156,55 +3204,16 @@ def auto_assign_beds():
 @hd_bp.route("/alerts/notify-group", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def notify_nurse_group():
-    """Send alert summary to nurse LINE group.
-
-    ส่งสรุป alerts ไปยัง LINE group ของพยาบาล
-    ต้องตั้ง 'nurse_group_token' ใน hd_settings (LINE Notify token ของกลุ่ม)
-    """
-    import os, urllib.request, urllib.parse
+    """Send a message to the nurse LINE group (Messaging API push to
+    hd_settings.nurse_group_id); falls back to alert_recipients one by one."""
     data = request.get_json(silent=True) or {}
     message = data.get("message", "")
-
     if not message:
         return jsonify({"error": "message required"}), 400
-
-    # ดึง LINE Notify token จาก settings
-    group_token = get_setting_value("nurse_group_token", "")
-    if not group_token:
-        # Fallback: ส่ง LINE push ไปหา alert_recipients ทุกคน
-        recipients = get_setting_value("alert_recipients", "")
-        if not recipients:
-            return jsonify({"sent": False, "message": "ไม่พบ token/recipients — ตั้งค่าที่ ⚙️"}), 400
-
-        push_fn = current_app.config.get("LINE_PUSH_FN")
-        if not push_fn:
-            return jsonify({"sent": False, "message": "LINE push not configured"}), 500
-
-        sent_count = 0
-        for uid in recipients.split(","):
-            uid = uid.strip()
-            if uid:
-                try:
-                    push_fn(uid, f"🚨 แจ้งเตือน HD\n{message}")
-                    sent_count += 1
-                except Exception as e:
-                    logger.warning("notify_nurse_group push failed for %s: %s", uid[:8], e)
-
-        return jsonify({"sent": True, "method": "push", "count": sent_count})
-
-    # ใช้ LINE Notify API
-    try:
-        req = urllib.request.Request(
-            "https://notify-api.line.me/api/notify",
-            data=urllib.parse.urlencode({"message": f"\n🚨 HD Alert\n{message}"}).encode(),
-            headers={"Authorization": f"Bearer {group_token}"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            return jsonify({"sent": True, "method": "notify", "status": resp.status})
-    except Exception as e:
-        logger.error("LINE Notify failed: %s", e)
-        return jsonify({"sent": False, "error": str(e)}), 500
+    r = push_nurse_group(f"🚨 แจ้งเตือน HD\n{message}")
+    status = 200 if r["sent"] else 400
+    return jsonify({"sent": r["sent"], "method": r["method"], "count": r["count"],
+                    "message": r["error"] or "ส่งแล้ว"}), status
 
 
 # ── F2: Shift Handover ────────────────────────────────────
@@ -4446,28 +4455,11 @@ def trigger_pre_hd_reminder():
             from .blueprint import notify_nurse_group as _nng
         except ImportError:
             pass
-        # Use LINE Notify if available
-        notify_token = None
-        if db_url:
-            try:
-                import psycopg2
-                conn = psycopg2.connect(db_url, connect_timeout=5)
-                with conn.cursor() as cur:
-                    cur.execute("SELECT value FROM hd_settings WHERE key='line_notify_token'")
-                    r = cur.fetchone()
-                    if r:
-                        notify_token = r[0]
-                conn.close()
-            except Exception:
-                pass
-        if notify_token:
-            try:
-                import requests as req
-                req.post("https://notify-api.line.me/api/notify",
-                         headers={"Authorization": f"Bearer {notify_token}"},
-                         data={"message": "\n" + nurse_msg}, timeout=10)
-            except Exception as e:
-                logger.warning("Nurse summary notify failed: %s", e)
+        # Nurse group via Messaging API (group id from the 'groupid' command)
+        try:
+            result["nurse_group"] = push_nurse_group(nurse_msg, fallback_recipients=False)
+        except Exception as e:
+            logger.warning("Nurse summary group push failed: %s", e)
 
     log_action(user_id=g.get("hd_user_id"), action="reminder.pre_hd",
                resource_type="reminder", ip_address=request.remote_addr or "")
@@ -6085,20 +6077,13 @@ def save_incident():
             else:
                 line_err = "LINE_PUSH_FN not configured"
                 logger.warning("incident LINE: push_fn not available")
-            # Method 2: LINE Notify (fallback — uses group token from hd_settings)
-            if not sent:
-                notify_token = get_setting_value("line_notify_token", "")
-                if not notify_token:
-                    notify_token = get_setting_value("nurse_group_token", "")
-                if notify_token:
-                    try:
-                        import requests as req
-                        req.post("https://notify-api.line.me/api/notify",
-                                 headers={"Authorization": f"Bearer {notify_token}"},
-                                 data={"message": msg}, timeout=10)
-                        sent = True
-                    except Exception as ne:
-                        logger.warning("incident LINE Notify: %s", ne)
+            # Also post to the nurse group (Messaging API) when configured
+            try:
+                gr = push_nurse_group(msg, fallback_recipients=False)
+                if gr["sent"]:
+                    sent = True
+            except Exception as ne:
+                logger.warning("incident nurse group: %s", ne)
             logger.info("incident LINE alert sent=%s", sent)
         except Exception as e2:
             logger.warning("incident LINE notify: %s", e2)

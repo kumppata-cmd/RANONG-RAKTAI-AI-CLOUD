@@ -128,6 +128,7 @@ function exportNow(){
       st.style.color = bad.length ? 'var(--warning)' : 'var(--success)';
       st.innerHTML = (bad.length?'⚠️':'✅')+' อัปโหลดสำเร็จ '+d.ok+' ไฟล์'+(bad.length?' ล้มเหลว '+bad.length+' ไฟล์':'')
         + ' → <code>gs://'+(d.bucket||'')+'/'+d.folder+'/</code>'
+        + (d.drive_enabled ? ' · 📁 Google Drive '+(d.drive_ok||0)+' ไฟล์'+(d.drive_failed?' (ล้มเหลว '+d.drive_failed+')':' ✓') : ' · Google Drive: ปิดอยู่')
         + (bad.length ? '<div style="font-size:.72rem;margin-top:4px;">'+bad.map(f=>f.path.split('/').pop()+': '+f.error).join('<br>')+'</div>' : '');
       showToast(bad.length?'ส่งสำเนาบางไฟล์ไม่สำเร็จ':'ส่งสำเนาเรียบร้อย', bad.length?'warning':'success');
     }).catch(()=>{ st.textContent='❌ เรียก API ไม่ได้'; st.style.color='var(--danger)'; })
