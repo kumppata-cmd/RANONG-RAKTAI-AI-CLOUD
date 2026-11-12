@@ -143,7 +143,7 @@ def _run_hd_migrations():
                     file_size INTEGER, file_data BYTEA NOT NULL,
                     uploaded_by VARCHAR(100), uploaded_at TIMESTAMP DEFAULT NOW())""",
                 # B6: lab results copied from the document system (hd_module/lab_sync.py)
-                """CREATE TABLE IF NOT EXISTS hd_lab_results (
+                """CREATE TABLE IF NOT EXISTS hd_lab_docs (
                     id SERIAL PRIMARY KEY, patient_id INTEGER REFERENCES hd_patient_mapping(id),
                     hn VARCHAR(20) NOT NULL, doc_id VARCHAR(80) UNIQUE NOT NULL,
                     specimen_date DATE, doc_date DATE, status VARCHAR(30),
@@ -153,7 +153,7 @@ def _run_hd_migrations():
                     bun NUMERIC(6,1), glucose NUMERIC(6,1),
                     hbsag VARCHAR(20), antihcv VARCHAR(20), antihbs VARCHAR(20),
                     synced_at TIMESTAMP DEFAULT NOW())""",
-                "CREATE INDEX IF NOT EXISTS ix_hd_lab_hn_date ON hd_lab_results(hn, specimen_date DESC)",
+                "CREATE INDEX IF NOT EXISTS ix_hd_lab_docs_hn_date ON hd_lab_docs(hn, specimen_date DESC)",
                 # Set alert_recipients
                 """INSERT INTO hd_settings (key, value, description, updated_at)
                     VALUES ('alert_recipients', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId แพทย์', NOW())
@@ -432,7 +432,8 @@ def _auto_backup_hd_tables():
                 from google.cloud import storage as gcs_storage
                 client = gcs_storage.Client()
                 bucket = client.bucket(bucket_name)
-            blob_path = f"backups/hd_backup_{today}.json"
+            # Object Creator role cannot overwrite → unique name per boot
+            blob_path = f"backups/hd_backup_{today}_{datetime.now().strftime('%H%M%S')}.json"
             blob = bucket.blob(blob_path)
             blob.upload_from_string(
                 json.dumps(backup_data, default=str, ensure_ascii=False),
@@ -510,7 +511,7 @@ def _start_daily_reminder_scheduler(app):
                 from datetime import timezone as _tz, timedelta as _td
                 _thai_tz = _tz(_td(hours=7))
                 now = datetime.now(_thai_tz)
-                # Every 30 min (first pass right away): lab documents → hd_lab_results
+                # Every 30 min (first pass right away): lab documents → hd_lab_docs
                 if lab_tick % 6 == 0:
                     with app.app_context():
                         try:

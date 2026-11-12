@@ -756,7 +756,7 @@ def announce_deploy_once():
 # ── B6: Lab results → bed card ─────────────────────────────
 
 def run_lab_sync():
-    """Copy recent lab documents' extracted results into hd_lab_results."""
+    """Copy recent lab documents' extracted results into hd_lab_docs."""
     import os
     import psycopg2
     from flask import current_app
@@ -799,7 +799,7 @@ def patient_labs(patient_id):
     try:
         with conn.cursor() as cur:
             cur.execute(f"""SELECT COALESCE(specimen_date, doc_date), status, doc_id, {', '.join(NUMERIC_COLS + TEXT_COLS)}
-                            FROM hd_lab_results WHERE patient_id = %s
+                            FROM hd_lab_docs WHERE patient_id = %s
                             ORDER BY COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC LIMIT 12""", (patient_id,))
             rows = []
             for r in cur.fetchall():

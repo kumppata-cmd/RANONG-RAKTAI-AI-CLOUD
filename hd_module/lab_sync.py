@@ -1,4 +1,4 @@
-"""Lab results from the document system → hd_lab_results → bed cards (B6).
+"""Lab results from the document system → hd_lab_docs → bed cards (B6).
 
 Source of truth stays the document pipeline (OCR → lab_extractor →
 _lab_results/<doc_id>.json in GCS, status pending_review/approved). This
@@ -32,7 +32,7 @@ NUMERIC_COLS = ["hb", "hct", "k", "na", "ca", "phos", "albumin", "pth", "ferriti
 TEXT_COLS = ["hbsag", "antihcv", "antihbs"]
 
 CREATE_SQL = """
-CREATE TABLE IF NOT EXISTS hd_lab_results (
+CREATE TABLE IF NOT EXISTS hd_lab_docs (
     id SERIAL PRIMARY KEY,
     patient_id INTEGER REFERENCES hd_patient_mapping(id),
     hn VARCHAR(20) NOT NULL,
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS hd_lab_results (
     hbsag VARCHAR(20), antihcv VARCHAR(20), antihbs VARCHAR(20),
     synced_at TIMESTAMP DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS ix_hd_lab_hn_date ON hd_lab_results(hn, specimen_date DESC);
+CREATE INDEX IF NOT EXISTS ix_hd_lab_docs_hn_date ON hd_lab_docs(hn, specimen_date DESC);
 """
 
 
@@ -129,7 +129,7 @@ def flags_for(row):
 
 
 def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
-    """Copy lab JSONs of recent lab documents into hd_lab_results.
+    """Copy lab JSONs of recent lab documents into hd_lab_docs.
 
     Returns {"scanned", "inserted", "skipped", "no_hn", "no_json"}.
     """
@@ -147,7 +147,7 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
     docs.sort(key=lambda d: (d.get("submitted_at") or d.get("received_at") or d.get("upload_date") or ""), reverse=True)
     with conn.cursor() as cur:
         cur.execute(CREATE_SQL)
-        cur.execute("SELECT doc_id FROM hd_lab_results")
+        cur.execute("SELECT doc_id FROM hd_lab_docs")
         have = {r[0] for r in cur.fetchall()}
         cur.execute("SELECT id, hn FROM hd_patient_mapping")
         pid_by_hn = {str(r[1]).strip().upper(): r[0] for r in cur.fetchall()}
@@ -181,7 +181,7 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
                 vals = [pid_by_hn[hn], hn, doc_id, _parse_date(rep.get("specimen_date")) or _parse_date(ddate),
                         _parse_date(ddate), rep.get("status", "")] + [row[c] for c in NUMERIC_COLS + TEXT_COLS]
                 cur.execute("SAVEPOINT lab_ins")
-                cur.execute(f"INSERT INTO hd_lab_results ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "
+                cur.execute(f"INSERT INTO hd_lab_docs ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "
                             f"ON CONFLICT (doc_id) DO NOTHING", vals)
                 cur.execute("RELEASE SAVEPOINT lab_ins")
                 stats["inserted"] += 1
@@ -207,7 +207,7 @@ def latest_for_patients(cur, patient_ids):
     cur.execute(f"""
         SELECT DISTINCT ON (patient_id) patient_id, COALESCE(specimen_date, doc_date) AS d, status, doc_id,
                {', '.join(NUMERIC_COLS + TEXT_COLS)}
-        FROM hd_lab_results WHERE patient_id = ANY(%s)
+        FROM hd_lab_docs WHERE patient_id = ANY(%s)
         ORDER BY patient_id, COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC
     """, (list(patient_ids),))
     out = {}

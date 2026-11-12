@@ -74,12 +74,12 @@ def collect(conn, today=None):
             ORDER BY p.id, s.session_date DESC""", ((today - timedelta(days=45)).isoformat(),))
         out["low_hb"] = sorted([r for r in out["low_hb"] if r[2] is not None and float(r[2]) < 9.0],
                                key=lambda r: float(r[2]))[:8]
-        # Lab documents (hd_lab_results): newest row per patient within 60 days
+        # Lab documents (hd_lab_docs): newest row per patient within 60 days
         out["lab_flags"] = []
         for r in _q(cur, """
             SELECT DISTINCT ON (l.patient_id) p.patient_name, p.hn, l.hb, l.k, l.phos, l.ca, l.hbsag,
                    COALESCE(l.specimen_date, l.doc_date)
-            FROM hd_lab_results l JOIN hd_patient_mapping p ON p.id = l.patient_id
+            FROM hd_lab_docs l JOIN hd_patient_mapping p ON p.id = l.patient_id
             WHERE COALESCE(l.specimen_date, l.doc_date) >= %s
             ORDER BY l.patient_id, COALESCE(l.specimen_date, l.doc_date) DESC, l.id DESC""",
                      ((today - timedelta(days=60)).isoformat(),)):
