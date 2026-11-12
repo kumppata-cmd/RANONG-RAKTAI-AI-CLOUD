@@ -18114,6 +18114,38 @@ def webhook():
                 text = msg.get("text", "")
                 logger.info(f"รับข้อความ: {len(text)} chars")
 
+                # ── ว้าว #8: "@รักษ์ไต …" ในกลุ่มพยาบาล → ตอบจาก HD DB (read-only,
+                #    ไม่ใช้ External AI, ตอบกลับในกลุ่มเดิมเท่านั้น) ──
+                try:
+                    from hd_module.group_assistant import match as _ga_match
+                    _ga_body = _ga_match(text)
+                except Exception:
+                    _ga_body = None
+                if _ga_body is not None:
+                    _src = event.get("source", {}) or {}
+                    _gid = _src.get("groupId") or _src.get("roomId") or ""
+                    try:
+                        from hd_module.blueprint import get_setting_value as _gsv
+                        _nurse_gid = (_gsv("nurse_group_id", "") or "").strip()
+                    except Exception:
+                        _nurse_gid = ""
+                    if _gid and _nurse_gid and _gid == _nurse_gid:
+                        try:
+                            import psycopg2 as _pg
+                            from hd_module.group_assistant import answer as _ga_answer
+                            _dbu = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+                            _c = _pg.connect(_dbu, connect_timeout=5)
+                            try:
+                                _ans = _ga_answer(_c, _ga_body)
+                            finally:
+                                _c.close()
+                        except Exception as _ge:
+                            logger.warning(f"group assistant: {_ge}")
+                            _ans = "ขออภัย ตอบไม่ได้ตอนนี้ ลองใหม่อีกครั้ง"
+                        reply_message(reply_token, _ans[:4900])
+                        continue
+                    # outside the nurse group: ignore silently (fall through to normal handling)
+
                 # ── groupid: บอก groupId ของกลุ่มนี้ (ใช้ตั้ง nurse_group_id ให้
                 #    HD Smart Monitoring ส่งคำสั่งแพทย์/สรุปเวรเข้ากลุ่มผ่าน
                 #    Messaging API — LINE Notify ปิดบริการแล้ว) ──
