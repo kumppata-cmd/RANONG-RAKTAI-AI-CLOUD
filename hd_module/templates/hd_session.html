@@ -268,6 +268,14 @@
   </div>
 
   <!-- Alerts + physician orders -->
+  <!-- ว้าว #1: IDH risk (advisory) -->
+  <div class="card" id="idhPanel" style="display:none;margin-bottom:12px;">
+    <div class="card-header"><span>⚡ ความเสี่ยงความดันตก (IDH)</span><span id="idhScore" style="font-weight:800;font-size:1.1rem"></span></div>
+    <div id="idhAdvice" style="font-size:.82rem;font-weight:600;margin:4px 0"></div>
+    <div id="idhFactors" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px"></div>
+    <div style="font-size:.68rem;color:var(--fg-muted);margin-top:6px">คะแนนจาก UF rate, IDWG, แนวโน้ม SBP, ประวัติ IDH, Hb/Alb, อายุ — เป็นคำแนะนำให้เฝ้าระวัง ไม่ใช่คำสั่งการรักษา</div>
+  </div>
+
   <!-- B6: latest labs from the document system -->
   <div class="card" id="labsPanel" style="display:none;margin-bottom:12px;">
     <div class="card-header"><span>🧪 ผลแล็บล่าสุด <span id="labsDate" style="font-weight:400;font-size:.75rem;color:var(--fg-muted)"></span></span>
@@ -916,6 +924,7 @@ function loadExistingSession(sid){
       sessionData.patient_id = d.patient_id || null;
       loadSessionAlerts();
       loadLabs();
+      loadIdhRisk();
       sessionData.pre_weight = d.pre_weight || 0;
       sessionData.dry_weight = d.dry_weight || 0;
       /* Fill header */
@@ -1043,6 +1052,7 @@ function saveIntraVital(){
     .then(d=>{
       if(d.vital_id) showToast('Vital #'+d.vital_id+' บันทึกลง DB สำเร็จ','info');
       loadSessionAlerts();
+      loadIdhRisk();
       if(d.alerts && d.alerts.length){
         d.alerts.forEach(a=>{
           if(a.severity==='critical'){
@@ -1072,6 +1082,20 @@ function saveIntraVital(){
 function _hdRole(){
   try{ const t=getHdToken(); return JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))).role||''; }catch(e){ return ''; }
 }
+/* ── ว้าว #1: IDH risk ── */
+function loadIdhRisk(){
+  if(!sessionData.session_id) return;
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/idh-risk').then(r=>r.json()).then(r=>{
+    const p = document.getElementById('idhPanel'); if(!r || r.error){ p.style.display='none'; return; }
+    p.style.display='block';
+    const col = r.level==='high' ? 'var(--danger)' : r.level==='moderate' ? 'var(--warning)' : 'var(--success)';
+    document.getElementById('idhScore').innerHTML = `<span style="color:${col}">${r.score}%</span> <span style="font-size:.75rem;color:var(--fg-muted)">${r.level==='high'?'สูง':r.level==='moderate'?'ปานกลาง':'ต่ำ'}</span>`;
+    document.getElementById('idhAdvice').textContent = r.advice || 'ความเสี่ยงต่ำ — วัด BP ตามปกติทุก 30 นาที';
+    document.getElementById('idhAdvice').style.color = col;
+    document.getElementById('idhFactors').innerHTML = (r.factors||[]).map(f=>`<span style="font-size:.74rem;padding:3px 8px;border-radius:10px;background:var(--bg);border:1px solid var(--border)">${f.text} <b>+${f.points}</b></span>`).join('') || '<span style="font-size:.74rem;color:var(--fg-muted)">ไม่พบปัจจัยเสี่ยง</span>';
+  }).catch(()=>{});
+}
+
 /* ── B6: labs ── */
 const LAB_SHOW = [['hb','Hb','g/dL'],['hct','Hct','%'],['k','K','mmol/L'],['na','Na',''],['ca','Ca','mg/dL'],['phos','P','mg/dL'],['albumin','Alb','g/dL'],['pth','PTH','pg/mL'],['ferritin','Ferritin',''],['tsat','TSAT','%'],['ktv','Kt/V',''],['urr','URR','%'],['creatinine','Cr',''],['bun','BUN',''],['glucose','Glu','']];
 let _labRows = [];

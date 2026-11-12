@@ -740,6 +740,31 @@ def orphan_files():
         conn.close()
 
 
+@hd_bp.route("/sessions/<int:session_id>/idh-risk", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def session_idh_risk(session_id):
+    import os
+    import psycopg2
+    from .idh_predictor import features_for, score as idh_score
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            f = features_for(cur, session_id)
+    finally:
+        conn.close()
+    if not f:
+        return jsonify({"error": "not found"}), 404
+    out = idh_score(f)
+    out["features"] = {k: (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
+                       for k, v in f.items() if k != "sbp_series"}
+    out["features"]["sbp_series"] = f.get("sbp_series")
+    return jsonify(out)
+
+
 # ── B11: CI / deploy status → physician LINE ──────────────
 
 @hd_bp.route("/ops/ci-status", methods=["POST"])
@@ -2817,6 +2842,21 @@ def bed_dashboard():
                             conn.rollback()
                         except Exception:
                             pass
+
+                # ว้าว #1: IDH risk score for active sessions (advisory only)
+                try:
+                    from .idh_predictor import features_for, score as idh_score
+                    for sid, bnum in session_ids:
+                        if 1 <= bnum <= len(beds) and beds[bnum - 1].get("status") in ("active", "warning", "critical"):
+                            feats = features_for(cur, sid)
+                            if feats:
+                                beds[bnum - 1]["idh_risk"] = idh_score(feats)
+                except Exception as ie:
+                    logger.warning("idh predictor: %s", ie)
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
 
                 # B6: latest lab per patient on a bed (from hd_lab_results)
                 try:
