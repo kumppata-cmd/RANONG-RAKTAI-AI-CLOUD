@@ -1752,6 +1752,12 @@ def update_session(session_id):
             result["shift_summary"] = _maybe_send_shift_summary(session_id)
         except Exception as e:
             logger.warning("shift summary: %s", e)
+        # ว้าว #7: post-HD summary to the patient's LINE (toggle: patient_summary_auto)
+        try:
+            if (get_setting_value("patient_summary_auto", "on") or "on").lower() != "off":
+                result["patient_summary"] = send_patient_summary(session_id, trigger="auto")
+        except Exception as e:
+            logger.warning("patient summary: %s", e)
 
     return jsonify(result)
 
@@ -1814,23 +1820,8 @@ def send_session_summary(session_id):
         return jsonify({"sent": False, "message": "LINE Push ไม่พร้อมใช้งาน"})
 
     if target == "patient":
-        # Find patient LINE ID from master registry
-        patient_line_id = None
-        reg = current_app.config.get("MASTER_REGISTRY")
-        if reg:
-            for p in reg.list_all():
-                if getattr(p, "hn", "") == summary.get("patient_hn") or \
-                   getattr(p, "clinic_hn", "") == summary.get("patient_hn"):
-                    patient_line_id = getattr(p, "line_user_id", None)
-                    break
-        if not patient_line_id:
-            return jsonify({"sent": False, "message": "ผู้ป่วยยังไม่ได้ผูก LINE"})
-        msg = _format_patient_summary_line(summary)
-        try:
-            push_fn(patient_line_id, msg)
-            return jsonify({"sent": True})
-        except Exception as e:
-            return jsonify({"sent": False, "message": str(e)})
+        r = send_patient_summary(session_id, summary=summary, trigger="manual")
+        return jsonify(r), (200 if r.get("sent") or r.get("reason") else 500)
 
     else:
         # Send to physician — check DB settings first, then ENV fallback
@@ -1898,6 +1889,91 @@ def _check_esa_missing_alert(session_id):
         conn.close()
     except Exception as e:
         logger.warning("_check_esa_missing_alert error: %s", e)
+
+
+def _resolve_patient_line_id(hn):
+    from flask import current_app
+    fn = current_app.config.get("PATIENT_LINE_ID_FN")
+    if not fn:
+        reg = current_app.config.get("MASTER_REGISTRY")
+        if reg:
+            for p in reg.list_all():
+                if getattr(p, "hn", "") == hn or getattr(p, "clinic_hn", "") == hn:
+                    return getattr(p, "line_user_id", None) or ""
+        return ""
+    try:
+        return fn(hn) or ""
+    except Exception:
+        return ""
+
+
+def send_patient_summary(session_id, summary=None, trigger="auto"):
+    """ว้าว #7 — Flex summary to the patient's own LINE. Returns {sent, reason?}.
+    Never raises; nothing is written except the audit log."""
+    import os
+    from flask import current_app
+    from .patient_summary import build_flex, build_text, enrich_from_db
+    summary = summary or _build_session_summary(session_id, {})
+    if not summary:
+        return {"sent": False, "reason": "no_session"}
+    if not summary.get("post_weight") and not summary.get("actual_uf"):
+        return {"sent": False, "reason": "incomplete", "message": "ยังไม่มีน้ำหนักหลังฟอก/UF"}
+    hn = summary.get("patient_hn") or ""
+    uid = _resolve_patient_line_id(hn)
+    if not uid:
+        return {"sent": False, "reason": "not_linked", "message": "ผู้ป่วยยังไม่ได้ผูก LINE"}
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    history = []
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                history = enrich_from_db(cur, session_id, summary)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("patient summary enrich: %s", e)
+    flex = build_flex(summary, history)
+    push_multi = current_app.config.get("LINE_PUSH_MESSAGES_FN")
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    ok = False
+    try:
+        if push_multi:
+            ok = push_multi(uid, [flex]) is not False
+        if not ok and push_fn:
+            ok = push_fn(uid, build_text(summary, history)) is not False
+    except Exception as e:
+        logger.warning("patient summary push: %s", e)
+    log_action(user_id=g.get("hd_user_id") if trigger == "manual" else None, action="session.patient_summary_sent",
+               resource_type="session", resource_id=session_id,
+               new_values={"hn": hn, "trigger": trigger, "ok": ok}, ip_address=(request.remote_addr or "") if trigger == "manual" else "")
+    return {"sent": ok, "reason": None if ok else "push_failed"}
+
+
+@hd_bp.route("/sessions/<int:session_id>/patient-summary/preview", methods=["GET"])
+@require_role("physician", "nurse")
+def patient_summary_preview(session_id):
+    import os
+    from .patient_summary import build_text, enrich_from_db
+    summary = _build_session_summary(session_id, {})
+    if not summary:
+        return jsonify({"error": "not found"}), 404
+    history = []
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                history = enrich_from_db(cur, session_id, summary)
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.warning("patient summary preview: %s", e)
+    linked = bool(_resolve_patient_line_id(summary.get("patient_hn") or ""))
+    return jsonify({"text": build_text(summary, history), "linked": linked,
+                    "auto": (get_setting_value("patient_summary_auto", "on") or "on").lower() != "off"})
 
 
 def _build_session_summary(session_id, post_data):
@@ -3540,6 +3616,7 @@ def update_settings():
         "default_duration_hours",  # default dialysis duration
         "alert_sbp_drop",          # IDH SBP drop threshold
         "alert_severe_sbp",        # severe IDH threshold
+        "patient_summary_auto",    # ว้าว #7: on/off auto LINE summary to patient
         "esa_target_low", "esa_target_high", "esa_hold_above",   # ESA Autopilot protocol
         "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
     ]

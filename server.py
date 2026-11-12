@@ -12917,6 +12917,24 @@ def push_messages(user_id: str, messages: list[dict]) -> bool:
 
 # ─── HD Alert Push + Vital Recorder (init after push_message def) ──
 app.config["LINE_PUSH_FN"] = push_message  # For HD session summary LINE push
+app.config["LINE_PUSH_MESSAGES_FN"] = push_messages  # Flex / multi-message push (patient post-HD summary)
+
+
+def _hd_patient_line_id(hn: str) -> str:
+    """HN คลินิก → LINE userId ของผู้ป่วยที่ผูกบัญชีไว้ (อ่านอย่างเดียว; "" ถ้าไม่ได้ผูก).
+    ใช้เส้นทางเดิม: HNRegistry (clinic_hn → owner_hash) → _enrolled_ids (owner_hash → userId)."""
+    try:
+        rec = hn_registry.get_by_clinic_hn(hn or "")
+        if not rec:
+            return ""
+        from alert_delivery import _lookup_enrolled_line_id
+        return _lookup_enrolled_line_id(storage, rec.owner_hash) or ""
+    except Exception as e:
+        logger.warning("patient line id lookup: %s", type(e).__name__)
+        return ""
+
+
+app.config["PATIENT_LINE_ID_FN"] = _hd_patient_line_id
 app.config["STORAGE_OBJ"] = storage        # HD daily-record export / backup reuse the same GCS auth
 app.config["DOC_INDEX"] = doc_index        # HD lab sync reads lab documents → bed cards
 

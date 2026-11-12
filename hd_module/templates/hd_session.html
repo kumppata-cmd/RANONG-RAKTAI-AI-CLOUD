@@ -480,6 +480,7 @@
     <div id="summaryContent"></div>
     <div style="margin-top:16px;display:flex;gap:8px;flex-wrap:wrap;">
       <button class="btn btn-success" onclick="sendSummaryToPatient()">📱 ส่ง LINE ผู้ป่วย</button>
+      <button class="btn btn-outline" onclick="previewPatientSummary()">👁 ดูข้อความที่ผู้ป่วยจะได้รับ</button>
       <button class="btn btn-primary" onclick="sendSummaryToDoctor()">👨‍⚕️ ส่ง LINE หมอ</button>
       <button class="btn btn-outline" onclick="exportPDF()" style="color:var(--accent);border-color:var(--accent);">📄 พิมพ์ / PDF</button>
       <a class="btn btn-outline" id="lnk360" href="#" style="display:none;text-decoration:none;">🧭 Patient 360</a>
@@ -1535,6 +1536,18 @@ function sendSummaryToPatient(){
     if(d.sent) el.innerHTML = '✅ ส่ง LINE ให้ผู้ป่วยสำเร็จ';
     else el.innerHTML = '⚠️ '+(d.message||'ผู้ป่วยยังไม่ได้ผูก LINE — ส่งไม่ได้');
   }).catch(()=>{ el.innerHTML = '❌ ส่งไม่สำเร็จ'; });
+}
+
+function previewPatientSummary(){
+  if(!sessionData.session_id) return;
+  const el = document.getElementById('lineSendStatus');
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/patient-summary/preview').then(r=>r.json()).then(d=>{
+    if(d.error){ el.textContent = '⚠️ ' + d.error; return; }
+    el.innerHTML = '<pre style="white-space:pre-wrap;font:inherit;background:var(--bg);border:1px dashed var(--border);border-radius:6px;padding:10px;margin:6px 0 0;">' +
+      (d.text||'').replace(/[&<>]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])) + '</pre>' +
+      '<div style="font-size:.78rem;color:var(--fg-muted);margin-top:4px;">' + (d.linked ? '✅ ผู้ป่วยผูก LINE แล้ว' : '⚠️ ผู้ป่วยยังไม่ได้ผูก LINE') +
+      ' · ส่งอัตโนมัติเมื่อจบรอบ: ' + (d.auto ? 'เปิด' : 'ปิด') + ' (ผู้ป่วยจะได้รับเป็นการ์ดพร้อมกราฟน้ำหนัก)</div>';
+  }).catch(()=>{ el.textContent = '❌ โหลดตัวอย่างไม่ได้'; });
 }
 
 function sendSummaryToDoctor(){

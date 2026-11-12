@@ -162,6 +162,23 @@
   </div>
 </div>
 
+<!-- Patient post-HD summary (ว้าว #7) -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>📱 สรุปหลังฟอกถึงผู้ป่วย (LINE)</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('patient_summary_auto')">💾 บันทึก</button>
+  </div>
+  <div class="form-group" style="margin-top:12px;">
+    <label class="form-label">ส่งอัตโนมัติเมื่อจบรอบ</label>
+    <select class="form-control" id="setting_patient_summary_auto">
+      <option value="on">เปิด — ส่งการ์ดสรุป (น้ำหนัก/UF/ความดัน/กราฟ/นัดถัดไป) ให้ผู้ป่วยที่ผูก LINE ทันทีที่ปิดรอบ</option>
+      <option value="off">ปิด — ส่งเองจากปุ่ม "📱 ส่ง LINE ผู้ป่วย" ในหน้ารอบฟอกเท่านั้น</option>
+    </select>
+    <div class="setting-desc">ผู้ป่วยได้รับเฉพาะตัวเลขของตนเองเป็นภาษาง่าย ๆ — ไม่ส่ง alert, คำสั่งแพทย์, ผลแล็บ หรือการวินิจฉัย · ส่งได้เฉพาะผู้ป่วยที่ผูกบัญชี LINE กับ HN แล้ว</div>
+    <div class="setting-status" id="status_patient_summary_auto"></div>
+  </div>
+</div>
+
 <!-- ESA Autopilot protocol -->
 <div class="card setting-card">
   <div class="card-header">
