@@ -277,6 +277,12 @@ def clinic_profile_page():
     return render_template("hd_clinic_profile.html")
 
 
+@hd_web.route("/va-watch")
+def va_watch_page():
+    """VA Watch — vascular access trend per patient."""
+    return render_template("hd_va_watch.html")
+
+
 @hd_web.route("/esa")
 def esa_autopilot_page():
     """ESA Autopilot — proposals waiting for the physician."""
@@ -769,6 +775,27 @@ def session_idh_risk(session_id):
                        for k, v in f.items() if k != "sbp_series"}
     out["features"]["sbp_series"] = f.get("sbp_series")
     return jsonify(out)
+
+
+# ── ว้าว #2: VA Watch (vascular access surveillance from flowsheet) ──
+
+@hd_bp.route("/va-watch", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def va_watch_list():
+    import os
+    import psycopg2
+    from .va_watch import collect
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"items": []})
+    days = min(int(request.args.get("days", 120) or 120), 365)
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        items = collect(conn, days=days)
+    finally:
+        conn.close()
+    return jsonify({"items": items, "days": days,
+                    "counts": {lv: sum(1 for i in items if i["level"] == lv) for lv in ("alert", "watch", "ok")}})
 
 
 # ── ว้าว #3: ESA Autopilot (propose → physician approves) ──

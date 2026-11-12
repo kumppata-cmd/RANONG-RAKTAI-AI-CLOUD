@@ -1,0 +1,108 @@
+{% extends "hd_base.html" %}
+{% block title %}VA Watch{% endblock %}
+{% block page_title %}🩸 VA Watch — เฝ้าระวังเส้นฟอก{% endblock %}
+{% block nav_va %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.va-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.va-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;margin-bottom:14px}
+.va-stat{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;text-align:center;cursor:pointer}
+.va-stat.on{outline:2px solid var(--accent)}
+.va-stat .n{font-size:1.5rem;font-weight:800;font-variant-numeric:tabular-nums}
+.va-stat .l{font-size:.7rem;color:var(--fg-muted)}
+.va-list{display:grid;gap:10px}
+.va-item{background:var(--bg-card);border:1px solid var(--border);border-left:4px solid var(--border);border-radius:var(--radius-sm);padding:12px 14px;display:grid;grid-template-columns:1fr auto;gap:8px 16px;align-items:start}
+.va-item.alert{border-left-color:var(--danger)}
+.va-item.watch{border-left-color:var(--warning,#e67e22)}
+.va-item.ok{border-left-color:var(--success)}
+.va-who{font-weight:700;font-size:.95rem}
+.va-who small{font-weight:500;color:var(--fg-muted);margin-left:6px}
+.va-score{font-size:1.4rem;font-weight:800;font-variant-numeric:tabular-nums;line-height:1;text-align:right}
+.va-score small{display:block;font-size:.65rem;font-weight:600;color:var(--fg-muted);margin-top:2px}
+.va-now{display:flex;gap:14px;flex-wrap:wrap;margin-top:6px;font-size:.8rem}
+.va-now b{font-variant-numeric:tabular-nums}
+.va-sig{font-size:.8rem;margin-top:6px;padding-left:16px}
+.va-sig li{margin:2px 0}
+.va-adv{font-size:.78rem;color:var(--fg-muted);margin-top:6px}
+.va-chart{grid-column:1/-1;display:flex;gap:4px;align-items:flex-end;height:48px;margin-top:4px}
+.va-chart .bar{flex:1;background:var(--accent);opacity:.55;border-radius:2px 2px 0 0;min-width:6px;position:relative}
+.va-chart .bar.hi{background:var(--danger);opacity:.8}
+.va-chart .bar span{position:absolute;top:-14px;left:0;right:0;text-align:center;font-size:.6rem;color:var(--fg-muted);font-variant-numeric:tabular-nums}
+.va-empty{padding:28px;text-align:center;color:var(--fg-muted);font-size:.9rem;background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--radius-sm)}
+.va-note{font-size:.72rem;color:var(--fg-muted);margin-top:12px}
+@media (max-width:640px){.va-item{grid-template-columns:1fr}.va-score{text-align:left}}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="va-bar">
+  <select id="days" class="form-control" style="width:auto" onchange="load()">
+    <option value="60">60 วันล่าสุด</option><option value="120" selected>120 วันล่าสุด</option><option value="365">1 ปี</option>
+  </select>
+  <button class="btn btn-secondary" onclick="load()">🔄 โหลดใหม่</button>
+  <span style="flex:1"></span>
+  <a class="btn btn-secondary" href="/hd/dashboard" style="text-decoration:none;">← Dashboard</a>
+</div>
+<div class="va-stats" id="stats"></div>
+<div class="va-list" id="list"><div class="va-empty">กำลังโหลด…</div></div>
+<div class="va-note">คำนวณจากค่ามัธยฐาน BFR / VP / AP ของแต่ละรอบใน flowsheet (10 รอบล่าสุด) เทียบกับ baseline ของผู้ป่วยเอง + Kt/V / URR ล่าสุด ·
+เกณฑ์: VP &gt; 200 ที่ BFR ≤ 300, VP เพิ่ม ≥ 25% จาก baseline, AP &lt; −250, BFR ได้จริง &lt; 85% ของที่สั่ง, Kt/V &lt; 1.2 ·
+ระบบ <b>ชี้เป้า</b> ให้ตรวจ access เท่านั้น — การส่งตรวจ/รักษาเป็นดุลยพินิจแพทย์ · อัปเดตใน Morning Brief ทุกเช้า</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const LV = {alert:['🔴 ควรตรวจ access','var(--danger)'], watch:['🟠 เฝ้าระวัง','var(--warning,#e67e22)'], ok:['🟢 ปกติ','var(--success)']};
+let items = [], filter = '';
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function f0(v){ return v==null ? '—' : Math.round(v); }
+function setFilter(lv){ filter = (filter===lv) ? '' : lv; render(); }
+
+async function load(){
+  const list = document.getElementById('list');
+  try{
+    const r = await hdFetch('/hd/api/v1/va-watch?days=' + document.getElementById('days').value);
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error||r.status);
+    items = d.items || [];
+    const c = d.counts || {};
+    document.getElementById('stats').innerHTML = ['alert','watch','ok'].map(lv =>
+      `<div class="va-stat ${filter===lv?'on':''}" onclick="setFilter('${lv}')"><div class="n" style="color:${LV[lv][1]}">${c[lv]||0}</div><div class="l">${LV[lv][0]}</div></div>`).join('') +
+      `<div class="va-stat"><div class="n">${items.length}</div><div class="l">ผู้ป่วยที่มีข้อมูล</div></div>`;
+    render();
+  }catch(e){ list.innerHTML = `<div class="va-empty">โหลดไม่สำเร็จ: ${esc(e.message||e)}</div>`; }
+}
+
+function chart(sess, base){
+  const vals = sess.map(s=>s.vp).filter(v=>v!=null);
+  if(vals.length < 2) return '';
+  const max = Math.max(...vals, 1);
+  return `<div class="va-chart">` + sess.map(s => s.vp==null ? '' :
+    `<div class="bar ${(base && s.vp > base*1.25) || s.vp > 200 ? 'hi' : ''}" style="height:${Math.max(6, s.vp/max*100)}%" title="${s.date} VP ${f0(s.vp)} · BFR ${f0(s.bfr)} · AP ${f0(s.ap)}"><span>${f0(s.vp)}</span></div>`).join('') + `</div>`;
+}
+
+function render(){
+  const list = document.getElementById('list');
+  document.querySelectorAll('.va-stat').forEach((el,i)=>el.classList.toggle('on', ['alert','watch','ok'][i]===filter));
+  const rows = filter ? items.filter(i=>i.level===filter) : items;
+  if(!rows.length){ list.innerHTML = `<div class="va-empty">${items.length?'ไม่มีรายการในกลุ่มนี้':'ยังไม่มีข้อมูล flowsheet ในช่วงที่เลือก'}</div>`; return; }
+  list.innerHTML = rows.map(i => {
+    const l = i.latest || {};
+    return `<div class="va-item ${i.level}">
+      <div>
+        <div class="va-who">${esc(i.name||'')}<small>HN ${esc(i.hn||'')} · ${esc(i.access||'ไม่ระบุ access')}</small></div>
+        <div class="va-now"><span>VP <b>${f0(l.vp)}</b></span><span>AP <b>${f0(l.ap)}</b></span><span>BFR <b>${f0(l.bfr)}</b>${i.prescribed_bfr?` / สั่ง ${i.prescribed_bfr}`:''}</span>
+          ${i.baseline_vp?`<span>baseline VP <b>${f0(i.baseline_vp)}</b></span>`:''}${i.ktv!=null?`<span>Kt/V <b>${i.ktv.toFixed(2)}</b></span>`:''}${i.urr!=null?`<span>URR <b>${f0(i.urr)}%</b></span>`:''}
+          <span style="color:var(--fg-muted)">${(i.sessions||[]).length} รอบ · ล่าสุด ${esc(l.date||'')}</span></div>
+        ${i.signals.length ? `<ul class="va-sig">${i.signals.map(s=>`<li>${esc(s.text)} <span style="color:var(--fg-muted)">+${s.points}</span></li>`).join('')}</ul>` : ''}
+        ${i.advice ? `<div class="va-adv">💡 ${esc(i.advice)}</div>` : ''}
+      </div>
+      <div class="va-score" style="color:${LV[i.level][1]}">${i.score}<small>${LV[i.level][0]}</small></div>
+      ${chart(i.sessions||[], i.baseline_vp)}
+    </div>`;
+  }).join('');
+}
+load();
+</script>
+{% endblock %}

@@ -89,6 +89,19 @@ def collect(conn, today=None):
             if fl:
                 out["lab_flags"].append((r[0], r[1], r[7], fl))
         out["lab_flags"].sort(key=lambda x: 0 if any(f["sev"] == "critical" for f in x[3]) else 1)
+        # VA Watch (ว้าว #2): access trend from flowsheet medians
+        out["va_watch"] = []
+        try:
+            cur.execute("SAVEPOINT mb_va")
+            from .va_watch import collect as va_collect
+            out["va_watch"] = va_collect(conn)
+            cur.execute("RELEASE SAVEPOINT mb_va")
+        except Exception as e:
+            logger.warning("morning_brief va_watch skipped: %s", str(e)[:120])
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT mb_va")
+            except Exception:
+                pass
         r = _q(cur, "SELECT MAX(COALESCE(send_date, test_date)) FROM hd_water_quality")
         last_water = r[0][0] if r and r[0] else None
         if last_water is None:
@@ -133,6 +146,10 @@ def build_message(data, base_url=""):
         L.append(f"\n🧪 ผลแล็บผิดปกติ ({len(data['lab_flags'])} คน) — จากเอกสารแล็บ")
         for name, hn, d0, fl in data["lab_flags"][:6]:
             L.append(f"  • {name} (HN {hn}) " + "; ".join(f["text"].split(" — ")[0] for f in fl))
+
+    if data.get("va_watch"):
+        from .va_watch import brief_lines
+        L.extend(brief_lines(data["va_watch"]))
 
     if data["dialyzer"]:
         L.append(f"\n🔧 Dialyzer ใกล้ครบ reuse ({len(data['dialyzer'])})")
