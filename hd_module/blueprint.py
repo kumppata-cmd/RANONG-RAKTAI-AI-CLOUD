@@ -277,6 +277,14 @@ def clinic_profile_page():
     return render_template("hd_clinic_profile.html")
 
 
+@hd_web.route("/tv")
+def hd_tv_page():
+    """Nurse Station TV mode — standalone, dark, auto-refresh, no nav (ว้าว #6)."""
+    resp = make_response(render_template("hd_tv.html"))
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return resp
+
+
 @hd_web.route("/patient/<hn>/360")
 def patient_360_page(hn):
     """Patient 360 — one timeline of sessions, alerts, labs, ESA, drugs, incidents."""
