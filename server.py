@@ -12200,6 +12200,40 @@ def _build_daily_digest() -> str:
     return "\n".join(lines)
 
 
+_DAILY_ONCE_LOCAL: dict = {}   # fallback เมื่อ GCS ไม่พร้อม (กันซ้ำได้แค่ใน process)
+
+
+def _claim_daily_once(job: str, day=None) -> bool:
+    """True = ยังไม่มีใครส่งงานนี้วันนี้ และจองสิทธิ์ได้ (atomic ข้าม worker/restart)
+
+    ใช้ GCS create-only object (if_generation_match=0) ที่ _markers/<job>_<date>.json
+    ถ้า GCS ไม่พร้อม → กันซ้ำได้เฉพาะใน process (ดีกว่าไม่ส่งเลย)
+    """
+    from datetime import timezone as _tz, timedelta as _td
+    day = day or datetime.now(_tz(_td(hours=7))).date()
+    key = f"{job}_{day.isoformat()}"
+    bucket = getattr(storage, "_bucket", None) if 'storage' in globals() else None
+    if bucket is None:
+        if _DAILY_ONCE_LOCAL.get(key):
+            return False
+        _DAILY_ONCE_LOCAL[key] = True
+        return True
+    try:
+        bucket.blob(f"_markers/{key}.json").upload_from_string(
+            json.dumps({"at": datetime.now(_tz(_td(hours=7))).isoformat()}),
+            content_type="application/json", if_generation_match=0,
+        )
+        return True
+    except Exception as e:
+        if getattr(e, "code", None) == 412:
+            return False          # มีคนจองไปแล้ววันนี้
+        logger.warning("daily-once marker %s: %s", job, type(e).__name__)
+        if _DAILY_ONCE_LOCAL.get(key):
+            return False
+        _DAILY_ONCE_LOCAL[key] = True
+        return True
+
+
 def job_daily_reminders() -> dict:
     """งานประจำวัน 08:00: เตือนนัดพรุ่งนี้/วันนี้ + นัดประจำ + ฟอกเลือด + สรุปเจ้าหน้าที่"""
     out: dict = {}
@@ -12219,16 +12253,22 @@ def job_daily_reminders() -> dict:
     # ส่งแค่ข้อความเดียว — _build_daily_digest() รวมทุกอย่างแล้ว
     # (ฟอกวันนี้ + เอกสาร + ค่าวิกฤต + ติดตามผลยา + Hb ต่ำ)
     # ไม่ส่ง treatment_followup แยกอีก — เพราะรวมอยู่ใน digest แล้ว
+    # ส่งได้วันละ 1 ครั้งจริง ๆ: จอง marker create-only ใน GCS ก่อนส่ง
+    # (_last_run_day ใน thread เป็น memory ของ process — ทุก worker และทุก
+    # restart/deploy ในชั่วโมง 08:xx จะส่งซ้ำ → หมอได้ 4 ข้อความ 12 พ.ย.)
     try:
-        _digest = _build_daily_digest()
-        _sent = 0
-        for _rid in _staff_line_ids():
-            try:
-                push_message(_rid, _digest)
-                _sent += 1
-            except Exception:
-                pass
-        out["daily_digest"] = {"sent": _sent, "length": len(_digest)}
+        if not _claim_daily_once("daily_digest"):
+            out["daily_digest"] = {"skipped": "already sent today (other worker/restart)"}
+        else:
+            _digest = _build_daily_digest()
+            _sent = 0
+            for _rid in _staff_line_ids():
+                try:
+                    push_message(_rid, _digest)
+                    _sent += 1
+                except Exception:
+                    pass
+            out["daily_digest"] = {"sent": _sent, "length": len(_digest)}
     except Exception as _e:
         out["daily_digest"] = {"error": type(_e).__name__}
     # treatment_followup: ข้อมูลรวมอยู่ใน daily_digest section 4 แล้ว ไม่ส่งแยก

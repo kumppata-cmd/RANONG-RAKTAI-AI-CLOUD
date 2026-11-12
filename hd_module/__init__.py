@@ -448,6 +448,26 @@ def _auto_backup_hd_tables():
         logger.error("HD backup failed: %s", e)
 
 
+def _claim_once(app, job, day):
+    """Cross-worker / cross-restart 'run once per day' guard using a GCS
+    create-only marker (_markers/hd_<job>_<date>.json). Falls back to
+    allowing the run when GCS is unavailable."""
+    import json as _json
+    bucket = getattr(app.config.get("STORAGE_OBJ"), "_bucket", None)
+    if bucket is None:
+        return True
+    try:
+        bucket.blob(f"_markers/hd_{job}_{day.isoformat()}.json").upload_from_string(
+            _json.dumps({"job": job, "date": day.isoformat()}),
+            content_type="application/json", if_generation_match=0)
+        return True
+    except Exception as e:
+        if getattr(e, "code", None) == 412:
+            return False
+        logger.warning("HD once-marker %s: %s", job, type(e).__name__)
+        return True
+
+
 def _start_daily_reminder_scheduler(app):
     """Start background thread that sends pre-HD reminders daily at 18:00."""
     import threading
@@ -471,27 +491,29 @@ def _start_daily_reminder_scheduler(app):
                 now = datetime.now(_thai_tz)
                 # Send at 18:00 Thai time
                 if now.hour == 18 and now.minute < 5 and last_sent_date != now.date():
-                    with app.app_context():
-                        import os
-                        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-                        push_fn = app.config.get("LINE_PUSH_FN")
-                        registry = app.config.get("MASTER_REGISTRY")
-                        if db_url and push_fn:
-                            from .pre_hd_reminder import send_pre_hd_reminders
-                            result = send_pre_hd_reminders(push_fn, db_url, registry)
-                            logger.info("Daily pre-HD reminder: %s", result)
                     last_sent_date = now.date()
+                    if _claim_once(app, "pre_hd_reminder", now.date()):
+                        with app.app_context():
+                            import os
+                            db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+                            push_fn = app.config.get("LINE_PUSH_FN")
+                            registry = app.config.get("MASTER_REGISTRY")
+                            if db_url and push_fn:
+                                from .pre_hd_reminder import send_pre_hd_reminders
+                                result = send_pre_hd_reminders(push_fn, db_url, registry)
+                                logger.info("Daily pre-HD reminder: %s", result)
                 # 22:30 Thai time: export today's records (CSV + PDFs) to GCS
                 if now.hour == 22 and now.minute >= 30 and last_export_date != now.date():
                     last_export_date = now.date()
-                    with app.app_context():
-                        try:
-                            from .blueprint import run_daily_export
-                            res = run_daily_export(now.date(), trigger="scheduled")
-                            logger.info("Daily record export: ok=%s failed=%s folder=%s",
-                                        res.get("ok"), res.get("failed"), res.get("folder"))
-                        except Exception as ex:
-                            logger.error("Daily record export failed: %s", ex)
+                    if _claim_once(app, "daily_export", now.date()):
+                        with app.app_context():
+                            try:
+                                from .blueprint import run_daily_export
+                                res = run_daily_export(now.date(), trigger="scheduled")
+                                logger.info("Daily record export: ok=%s failed=%s folder=%s",
+                                            res.get("ok"), res.get("failed"), res.get("folder"))
+                            except Exception as ex:
+                                logger.error("Daily record export failed: %s", ex)
             except Exception as e:
                 logger.error("Reminder scheduler error: %s", e)
             time.sleep(300)  # Check every 5 minutes
