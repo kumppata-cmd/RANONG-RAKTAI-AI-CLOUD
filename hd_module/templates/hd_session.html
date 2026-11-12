@@ -1427,7 +1427,8 @@ function sendSummaryToDoctor(){
 
 function exportPDF(){
   if(!sessionData.session_id){ showToast('ยังไม่มี session','warning'); return; }
-  window.open('/hd/api/v1/sessions/'+sessionData.session_id+'/export-summary','_blank');
+  /* Real PDF (summary page + Monitoring Sheet page), Thai font embedded */
+  window.open('/hd/api/v1/sessions/'+sessionData.session_id+'/record.pdf?token='+encodeURIComponent(getHdToken()||''),'_blank');
 }
 </script>
 {% endblock %}

@@ -36,12 +36,15 @@ table.dl tr:last-child td{border-bottom:none}
   <button class="btn btn-secondary" onclick="goToday()">วันนี้</button>
   <span style="flex:1"></span>
   <button class="btn btn-primary" onclick="exportCsv()">⬇️ Export CSV (Excel)</button>
+  <button class="btn btn-primary" onclick="exportNow()" id="btnExportNow">📦 ส่งสำเนาวันนี้ไป GCS</button>
   <a class="btn btn-secondary" href="/hd/dashboard" style="text-decoration:none;">← Dashboard</a>
 </div>
+<div id="exportStatus" style="font-size:.8rem;margin:-6px 0 12px;color:var(--fg-muted);"></div>
 
 <div class="dl-stats" id="dlStats"></div>
 <div id="dlBody"><div class="dl-empty">กำลังโหลด…</div></div>
-<div class="dl-note">ข้อมูลทุกรอบเก็บถาวรใน PostgreSQL (ไม่ลบเมื่อเตียงว่าง) · กด "ดู" เพื่อเปิดบันทึกรอบนั้น · CSV เปิดใน Excel ได้ทันที (UTF-8)</div>
+<div class="dl-note">ข้อมูลทุกรอบเก็บถาวรใน PostgreSQL (ไม่ลบเมื่อเตียงว่าง) · กด "ดู" เพื่อเปิดบันทึกรอบนั้น · CSV เปิดใน Excel ได้ทันที (UTF-8) ·
+ระบบส่งสำเนา (CSV + PDF รายรอบ + PDF รายคน) ไป GCS อัตโนมัติทุกวัน 22:30 น. ที่ <code>HD-Records/ปี/ปี-เดือน/วันที่/</code> และแจ้งผลทาง LINE</div>
 {% endblock %}
 
 {% block extra_js %}
@@ -83,7 +86,8 @@ function loadDay(){
     body.innerHTML = ['morning','afternoon','evening'].map(sh=>{
       const rows = (d.shifts||{})[sh] || [];
       if(!rows.length) return '';
-      return `<div class="dl-shift"><div class="dl-shift-h">${SHIFT_TH[sh]} <span style="font-weight:400;color:var(--fg-muted);font-size:.8rem">${rows.length} คน</span></div>
+      return `<div class="dl-shift"><div class="dl-shift-h">${SHIFT_TH[sh]} <span style="font-weight:400;color:var(--fg-muted);font-size:.8rem">${rows.length} คน</span>
+        <a href="#" onclick="openPdf('/hd/api/v1/daily-log/${sh}.pdf?date=${date}');return false;" style="font-size:.78rem;color:var(--accent);font-weight:600;text-decoration:none;margin-left:auto;">📄 PDF รอบนี้</a></div>
       <div class="dl-wrap"><table class="dl"><thead><tr>
         <th>เตียง</th><th>สถานะ</th><th>HN</th><th>ชื่อ-สกุล</th><th>VA</th><th>เวลา</th>
         <th>นน.ก่อน→หลัง</th><th>UF จริง/เป้า</th><th>BP ก่อน→หลัง</th><th>SBP ต่ำสุด</th>
@@ -100,7 +104,8 @@ function loadDay(){
           <td>${esaCell(r)}</td><td>${fmt(r.hb)}</td><td>${r.vital_count}</td>
           <td>${r.alert_count ? (r.critical_count?'🔴 ':'🟡 ')+r.alert_count : '-'}</td>
           <td><a href="/hd/session/${r.session_id}" style="color:var(--accent);font-weight:600;text-decoration:none;">ดู ›</a>
-              <a href="/hd/sheet/${r.session_id}" style="color:var(--fg-muted);text-decoration:none;margin-left:6px;">แผ่น</a></td>
+              <a href="/hd/sheet/${r.session_id}" style="color:var(--fg-muted);text-decoration:none;margin-left:6px;">แผ่น</a>
+              <a href="#" onclick="openPdf('/hd/api/v1/sessions/${r.session_id}/record.pdf');return false;" style="color:var(--fg-muted);text-decoration:none;margin-left:6px;">PDF</a></td>
         </tr>`).join('')}
       </tbody></table></div></div>`;
     }).join('');
@@ -109,6 +114,24 @@ function loadDay(){
 
 function exportCsv(){
   window.open('/hd/api/v1/daily-log.csv?date='+curDate()+'&token='+encodeURIComponent(getHdToken()||''), '_blank');
+}
+function openPdf(path){
+  window.open(path + (path.includes('?')?'&':'?') + 'token='+encodeURIComponent(getHdToken()||''), '_blank');
+}
+function exportNow(){
+  const btn = document.getElementById('btnExportNow'), st = document.getElementById('exportStatus');
+  btn.disabled = true; st.textContent = '⏳ กำลังสร้าง PDF/CSV และอัปโหลด… (ประมาณ 10–30 วินาที)';
+  hdFetch('/hd/api/v1/daily-log/export?date='+curDate(), {method:'POST', body:'{}'})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){ st.innerHTML = '❌ '+d.error; st.style.color='var(--danger)'; return; }
+      const bad = (d.files||[]).filter(f=>!f.ok);
+      st.style.color = bad.length ? 'var(--warning)' : 'var(--success)';
+      st.innerHTML = (bad.length?'⚠️':'✅')+' อัปโหลดสำเร็จ '+d.ok+' ไฟล์'+(bad.length?' ล้มเหลว '+bad.length+' ไฟล์':'')
+        + ' → <code>gs://'+(d.bucket||'')+'/'+d.folder+'/</code>'
+        + (bad.length ? '<div style="font-size:.72rem;margin-top:4px;">'+bad.map(f=>f.path.split('/').pop()+': '+f.error).join('<br>')+'</div>' : '');
+      showToast(bad.length?'ส่งสำเนาบางไฟล์ไม่สำเร็จ':'ส่งสำเนาเรียบร้อย', bad.length?'warning':'success');
+    }).catch(()=>{ st.textContent='❌ เรียก API ไม่ได้'; st.style.color='var(--danger)'; })
+    .finally(()=>{ btn.disabled=false; });
 }
 
 (function(){

@@ -39,8 +39,9 @@ def register_hd_module(app):
         # Auto-complete stale sessions from previous day (safety reset)
         _auto_complete_stale_sessions()
 
-        # Auto-backup HD tables to GCS (daily on boot)
-        _auto_backup_hd_tables()
+        # Auto-backup HD tables to GCS now runs from the scheduler thread
+        # ~90 s after boot, once server.py has put its authenticated storage
+        # object in app.config["STORAGE_OBJ"] (a bare Client() got 403).
 
         # Start self-ping to prevent Render sleep
         _render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
@@ -56,6 +57,9 @@ def register_hd_module(app):
     except Exception as e:
         logger.error(f"Failed to register HD module: {e}")
         return False
+
+
+_BACKUP_STORAGE_OBJ = None
 
 
 def _run_hd_migrations():
@@ -404,11 +408,18 @@ def _auto_backup_hd_tables():
                 backup_data["tables"][table] = {"count": 0, "error": "table not found"}
         conn.close()
 
-        # Upload to GCS
+        # Upload to GCS — reuse the server's authenticated StorageGCS bucket
+        # (GCS_CREDENTIALS_BASE64) when available; a bare Client() has no
+        # credentials on Render and was the cause of the 403.
         try:
-            from google.cloud import storage as gcs_storage
-            client = gcs_storage.Client()
-            bucket = client.bucket(bucket_name)
+            bucket = None
+            storage_obj = _BACKUP_STORAGE_OBJ
+            if storage_obj is not None:
+                bucket = getattr(storage_obj, "_bucket", None)
+            if bucket is None:
+                from google.cloud import storage as gcs_storage
+                client = gcs_storage.Client()
+                bucket = client.bucket(bucket_name)
             blob_path = f"backups/hd_backup_{today}.json"
             blob = bucket.blob(blob_path)
             blob.upload_from_string(
@@ -445,6 +456,14 @@ def _start_daily_reminder_scheduler(app):
 
     def _reminder_loop():
         last_sent_date = None
+        last_export_date = None
+        time.sleep(90)   # let server.py finish wiring storage / LINE
+        try:
+            global _BACKUP_STORAGE_OBJ
+            _BACKUP_STORAGE_OBJ = app.config.get("STORAGE_OBJ")
+            _auto_backup_hd_tables()
+        except Exception as e:
+            logger.error("HD boot backup error: %s", e)
         while True:
             try:
                 from datetime import timezone as _tz, timedelta as _td
@@ -462,6 +481,17 @@ def _start_daily_reminder_scheduler(app):
                             result = send_pre_hd_reminders(push_fn, db_url, registry)
                             logger.info("Daily pre-HD reminder: %s", result)
                     last_sent_date = now.date()
+                # 22:30 Thai time: export today's records (CSV + PDFs) to GCS
+                if now.hour == 22 and now.minute >= 30 and last_export_date != now.date():
+                    last_export_date = now.date()
+                    with app.app_context():
+                        try:
+                            from .blueprint import run_daily_export
+                            res = run_daily_export(now.date(), trigger="scheduled")
+                            logger.info("Daily record export: ok=%s failed=%s folder=%s",
+                                        res.get("ok"), res.get("failed"), res.get("folder"))
+                        except Exception as ex:
+                            logger.error("Daily record export failed: %s", ex)
             except Exception as e:
                 logger.error("Reminder scheduler error: %s", e)
             time.sleep(300)  # Check every 5 minutes

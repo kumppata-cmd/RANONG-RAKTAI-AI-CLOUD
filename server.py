@@ -12877,6 +12877,7 @@ def push_messages(user_id: str, messages: list[dict]) -> bool:
 
 # ─── HD Alert Push + Vital Recorder (init after push_message def) ──
 app.config["LINE_PUSH_FN"] = push_message  # For HD session summary LINE push
+app.config["STORAGE_OBJ"] = storage        # HD daily-record export / backup reuse the same GCS auth
 
 try:
     from hd_module.alert_push import HdAlertPushService

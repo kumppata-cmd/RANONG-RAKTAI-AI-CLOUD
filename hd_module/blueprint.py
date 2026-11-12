@@ -339,14 +339,9 @@ def daily_log():
     return jsonify({"date": day.isoformat(), "shifts": shifts, "summary": summary, "total": len(rows)})
 
 
-@hd_bp.route("/daily-log.csv", methods=["GET"])
-@require_role("physician", "nurse", "admin", "auditor")
-def daily_log_csv():
-    """CSV export of one day (UTF-8 BOM so Excel shows Thai correctly)."""
+def _daily_log_csv_bytes(day, rows):
     import csv
     import io
-    day = _parse_date_arg()
-    rows = _daily_log_rows(day.isoformat())
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["วันที่", "รอบ", "เตียง", "สถานะ", "HN", "ชื่อ-สกุล", "VA", "เริ่ม", "สิ้นสุด",
@@ -369,13 +364,130 @@ def daily_log_csv():
                     r["esa_dose"] or "", r["esa_route"] or "", r["esa_skip_reason"] or "",
                     r["hb"] or "", r["hct"] or "", r["vital_count"], r["alert_count"],
                     r["critical_count"], (r["notes"] or "").replace("\n", " "), r["session_id"]])
-    data = ("﻿" + buf.getvalue()).encode("utf-8")
+    return ("﻿" + buf.getvalue()).encode("utf-8")
+
+
+def _pdf_response(data, fname):
+    resp = Response(data, mimetype="application/pdf")
+    resp.headers["Content-Disposition"] = _content_disposition(fname, "record.pdf")
+    return resp
+
+
+@hd_bp.route("/daily-log.csv", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def daily_log_csv():
+    """CSV export of one day (UTF-8 BOM so Excel shows Thai correctly)."""
+    day = _parse_date_arg()
+    rows = _daily_log_rows(day.isoformat())
+    data = _daily_log_csv_bytes(day, rows)
     fname = f"HD-{day.isoformat()}.csv"
     resp = Response(data, mimetype="text/csv; charset=utf-8")
     resp.headers["Content-Disposition"] = _content_disposition(fname, fname)
     log_action(user_id=g.get("hd_user_id"), action="daily_log.export", resource_type="daily_log",
                new_values={"date": day.isoformat(), "rows": len(rows)}, ip_address=request.remote_addr or "")
     return resp
+
+
+@hd_bp.route("/daily-log/<shift>.pdf", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def daily_log_shift_pdf(shift):
+    """PDF table of one shift (เช้า/บ่าย/ค่ำ) of one day."""
+    from .daily_records import shift_pdf, SHIFT_TH
+    if shift not in SHIFT_TH:
+        return jsonify({"error": "shift must be morning/afternoon/evening"}), 400
+    day = _parse_date_arg()
+    rows = [r for r in _daily_log_rows(day.isoformat()) if r["shift"] == shift]
+    data = shift_pdf(day, shift, rows, get_setting_value("clinic_name", "") or "คลินิกระนอง รักษ์ไต")
+    return _pdf_response(data, f"HD-{day.isoformat()}-{SHIFT_TH[shift]}.pdf")
+
+
+@hd_bp.route("/sessions/<int:session_id>/record.pdf", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def session_record_pdf(session_id):
+    """Per-session PDF: summary page + Monitoring Sheet page."""
+    import os
+    import psycopg2
+    from .daily_records import load_session_record, session_pdf, session_filename
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 500
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        rec = load_session_record(conn, session_id)
+    finally:
+        conn.close()
+    if not rec:
+        return jsonify({"error": "session not found"}), 404
+    data = session_pdf(rec, get_setting_value("clinic_name", "") or "คลินิกระนอง รักษ์ไต")
+    log_action(user_id=g.get("hd_user_id"), action="session.pdf", resource_type="session",
+               resource_id=session_id, ip_address=request.remote_addr or "")
+    return _pdf_response(data, session_filename(rec["hn"], rec["name"], rec["bed"], rec["shift"]))
+
+
+def run_daily_export(day, trigger="manual", user=None):
+    """Render CSV + shift PDFs + session PDFs for `day` and upload to GCS
+    (HD-Records/YYYY/YYYY-MM/YYYY-MM-DD/). Pushes a LINE summary to the
+    physician. Returns the manifest. Used by the 22:30 scheduler and the
+    '📦 ส่งสำเนา' button."""
+    import os
+    import psycopg2
+    from flask import current_app
+    from .daily_records import export_day, gcs_upload_fn, record_folder
+    storage_obj = current_app.config.get("STORAGE_OBJ")
+    upload = gcs_upload_fn(storage_obj)
+    bucket_name = getattr(storage_obj, "bucket_name", None) or os.environ.get("GCS_BUCKET_NAME", "")
+    if upload is None:
+        res = {"ok": 0, "failed": 0, "files": [], "folder": record_folder(day), "date": day.isoformat(),
+               "error": "GCS ไม่พร้อม (storage ไม่ได้เชื่อมต่อ) — ไฟล์ยังดาวน์โหลดจากหน้าทะเบียนได้"}
+    else:
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        try:
+            rows = _daily_log_rows(day.isoformat())
+            csv_bytes = _daily_log_csv_bytes(day, rows)
+            res = export_day(conn, day, rows, csv_bytes, upload,
+                             get_setting_value("clinic_name", "") or "คลินิกระนอง รักษ์ไต")
+        finally:
+            conn.close()
+        res["bucket"] = bucket_name
+    res["trigger"] = trigger
+    log_action(user_id=user, action="daily_log.gcs_export", resource_type="daily_log",
+               new_values={"date": day.isoformat(), "ok": res["ok"], "failed": res["failed"],
+                           "trigger": trigger, "error": res.get("error")}, ip_address="")
+    # LINE the physician (success or failure) so a silent failure never goes unnoticed
+    try:
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+        ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+        if push_fn and ids:
+            if res.get("error"):
+                msg = f"⚠️ สำเนาบันทึก HD {day.isoformat()} ส่งไม่ได้\n{res['error']}"
+            elif res["failed"]:
+                msg = (f"⚠️ สำเนาบันทึก HD {day.isoformat()}: สำเร็จ {res['ok']} ไฟล์ ล้มเหลว {res['failed']} ไฟล์\n"
+                       f"gs://{bucket_name}/{res['folder']}")
+            else:
+                msg = (f"📦 สำเนาบันทึก HD {day.isoformat()} เรียบร้อย {res['ok']} ไฟล์\n"
+                       f"gs://{bucket_name}/{res['folder']}\n({'อัตโนมัติ 22:30' if trigger == 'scheduled' else 'กดส่งเอง'})")
+            for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+                push_fn(uid, msg)
+    except Exception as e:
+        logger.warning("daily export LINE notify failed: %s", e)
+    return res
+
+
+@hd_bp.route("/daily-log/export", methods=["POST"])
+@require_role("physician", "admin")
+def daily_log_export_now():
+    """Manual trigger of the day export (same as the 22:30 job)."""
+    day = _parse_date_arg()
+    try:
+        res = run_daily_export(day, trigger="manual", user=g.get("hd_user_id"))
+    except Exception as e:
+        logger.error("daily export error: %s", e)
+        return jsonify({"ok": 0, "failed": 0, "error": str(e)}), 500
+    status = 200 if not res.get("error") else 503
+    return jsonify(res), status
 
 
 # ── Health / Status ───────────────────────────────────────
@@ -3226,17 +3338,13 @@ def patient_esa_history(hn):
 # HD FLOWSHEET — Full HD Monitoring Sheet
 # ══════════════════════════════════════════════════════════
 
-@hd_bp.route("/sessions/<int:session_id>/flowsheet", methods=["GET"])
-@require_role("physician", "nurse", "admin")
-def get_flowsheet(session_id):
-    """Get all flowsheet entries for a session."""
-    import os
-    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        return jsonify({"rows": []})
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url, connect_timeout=5)
+def flowsheet_entries(conn, session_id):
+    """Sheet rows + vitals/UF recorded elsewhere, merged into 30-min slots.
+
+    Shared by GET /flowsheet and the daily-record PDF. Returns (entries, srow)
+    where srow = (uf_goal, pre_hd_note, started_at, patient_name, hn, va).
+    """
+    if True:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT id, slot_time, recorded_at,
@@ -3271,7 +3379,6 @@ def get_flowsheet(session_id):
             except Exception:
                 conn.rollback()
                 urows = []
-        conn.close()
 
         entries = []
         for r in rows:
@@ -3341,6 +3448,24 @@ def get_flowsheet(session_id):
                     e["ufr"] = int(uf_rate)
                 e["synced"] = True
             entries.sort(key=lambda e: e["slot_time"])
+        return entries, srow
+
+
+@hd_bp.route("/sessions/<int:session_id>/flowsheet", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def get_flowsheet(session_id):
+    """Get all flowsheet entries for a session."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"rows": []})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            entries, srow = flowsheet_entries(conn, session_id)
+        finally:
+            conn.close()
 
         return jsonify({
             "rows": entries,

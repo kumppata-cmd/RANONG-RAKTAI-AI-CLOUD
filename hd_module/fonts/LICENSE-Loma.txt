@@ -1,0 +1,8 @@
+Loma (Loma.ttf, Loma-Bold.ttf) — Thai font from fonts-tlwg
+Copyright 2003 National Electronics and Computer Technology Center (NECTEC)
+Copyright 2003-2021 Theppitak Karoonboonyanan
+License: GNU GPL v2 or later, with Font exception
+Source: https://linux.thai.net/pub/thailinux/software/fonts-tlwg
+Converted from the OTF (CFF) release to TrueType outlines with fontTools
+(cu2qu) so reportlab can embed it. Used only to render Thai text in
+generated PDF reports (HD Smart Monitoring daily records).
