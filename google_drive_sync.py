@@ -73,8 +73,9 @@ def oauth_configured() -> bool:
 
 
 def reset_service():
-    global _drive_service
+    global _drive_service, _oauth_root_cache
     _drive_service = None
+    _oauth_root_cache = ""
 
 
 def _get_drive_service():
@@ -123,9 +124,40 @@ def _get_drive_service():
         return None
 
 
+OAUTH_ROOT_FOLDER_NAME = "RANONG-RAKTAI-HD-Records"
+_oauth_root_cache = ""
+
+
+def _oauth_root_id(service) -> str:
+    """With scope drive.file the app can only see files it created, so the
+    doctor's own folder (DRIVE_FOLDER_ID) is invisible. Use/create an
+    app-owned folder at the top of My Drive instead."""
+    global _oauth_root_cache
+    if _oauth_root_cache:
+        return _oauth_root_cache
+    q = (f"name='{OAUTH_ROOT_FOLDER_NAME}' and mimeType='application/vnd.google-apps.folder' "
+         f"and trashed=false and 'root' in parents")
+    res = service.files().list(q=q, fields="files(id)", pageSize=1).execute().get("files", [])
+    if res:
+        _oauth_root_cache = res[0]["id"]
+    else:
+        f = service.files().create(body={"name": OAUTH_ROOT_FOLDER_NAME,
+                                         "mimeType": "application/vnd.google-apps.folder"},
+                                   fields="id").execute()
+        _oauth_root_cache = f["id"]
+        logger.info("Drive: created app root folder")
+    return _oauth_root_cache
+
+
+def _root_folder_id(service) -> str:
+    return _oauth_root_id(service) if drive_mode() == "oauth" else DRIVE_FOLDER_ID
+
+
 def is_available() -> bool:
     """ตรวจว่า Drive พร้อมใช้งาน."""
-    return DRIVE_ENABLED and bool(DRIVE_FOLDER_ID)
+    if not DRIVE_ENABLED:
+        return False
+    return drive_mode() == "oauth" or bool(DRIVE_FOLDER_ID)
 
 
 def drive_mode() -> str:
@@ -147,11 +179,11 @@ def get_status() -> dict:
     if not service:
         return status
     try:
-        info = service.files().get(
-            fileId=DRIVE_FOLDER_ID, fields="id,name"
-        ).execute()
+        root = _root_folder_id(service)
+        info = service.files().get(fileId=root, fields="id,name").execute()
         status["connected"] = True
         status["folder_name"] = info.get("name", "")
+        status["mode"] = drive_mode()
     except Exception as e:
         status["error"] = type(e).__name__
     return status
@@ -225,7 +257,8 @@ def upload_path(file_content: bytes, rel_path: str, mime_type: str = "applicatio
     try:
         from googleapiclient.http import MediaInMemoryUpload
         folder, _, name = rel_path.rpartition("/")
-        parent_id = _ensure_path(service, folder, DRIVE_FOLDER_ID) if folder else DRIVE_FOLDER_ID
+        root = _root_folder_id(service)
+        parent_id = _ensure_path(service, folder, root) if folder else root
         media = MediaInMemoryUpload(file_content, mimetype=mime_type)
         existing = []
         if replace:
