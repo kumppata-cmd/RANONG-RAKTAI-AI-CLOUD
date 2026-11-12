@@ -1,7 +1,7 @@
 /* HD Smart Monitoring — Service Worker (PWA)
  * Cache-first for static assets, network-first for API calls
  */
-const CACHE_NAME = 'hd-monitor-v2.2';
+const CACHE_NAME = 'hd-monitor-v2.3';
 const STATIC_ASSETS = [
   '/hd/dashboard',
   '/hd/login',
