@@ -277,6 +277,12 @@ def clinic_profile_page():
     return render_template("hd_clinic_profile.html")
 
 
+@hd_web.route("/patient/<hn>/360")
+def patient_360_page(hn):
+    """Patient 360 — one timeline of sessions, alerts, labs, ESA, drugs, incidents."""
+    return render_template("hd_patient_360.html", patient_hn=hn)
+
+
 @hd_web.route("/va-watch")
 def va_watch_page():
     """VA Watch — vascular access trend per patient."""
@@ -775,6 +781,48 @@ def session_idh_risk(session_id):
                        for k, v in f.items() if k != "sbp_series"}
     out["features"]["sbp_series"] = f.get("sbp_series")
     return jsonify(out)
+
+
+# ── ว้าว #5: Patient 360 timeline ──
+
+@hd_bp.route("/patients/<int:patient_id>/timeline", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def patient_timeline(patient_id):
+    import os
+    import psycopg2
+    from .patient360 import build
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    days = min(int(request.args.get("days", 365) or 365), 1095)
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        data = build(conn, patient_id, days=days)
+    finally:
+        conn.close()
+    if data is None:
+        return jsonify({"error": "not found"}), 404
+    log_action(user_id=g.get("hd_user_id"), action="patient.timeline_view", resource_type="patient",
+               resource_id=patient_id, ip_address=request.remote_addr or "")
+    return jsonify(data)
+
+
+@hd_bp.route("/patients/by-hn/<hn>/id", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def patient_id_by_hn(hn):
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE UPPER(hn) = %s", (hn.strip().upper(),))
+            r = cur.fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"id": r[0]})
 
 
 # ── ว้าว #2: VA Watch (vascular access surveillance from flowsheet) ──

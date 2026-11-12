@@ -1,0 +1,143 @@
+{% extends "hd_base.html" %}
+{% block title %}Patient 360{% endblock %}
+{% block page_title %}🧭 Patient 360{% endblock %}
+{% block nav_patients %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.p3-head{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:14px 16px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:8px 18px;align-items:baseline}
+.p3-head .nm{font-size:1.15rem;font-weight:800}
+.p3-head .meta{font-size:.82rem;color:var(--fg-muted)}
+.p3-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.p3-kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:14px}
+.p3-kpi{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;text-align:center}
+.p3-kpi .n{font-size:1.35rem;font-weight:800;font-variant-numeric:tabular-nums}
+.p3-kpi .l{font-size:.68rem;color:var(--fg-muted)}
+.p3-charts{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:10px;margin-bottom:16px}
+.p3-chart{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;min-width:0}
+.p3-chart h4{margin:0 0 4px;font-size:.8rem;color:var(--fg-muted);font-weight:600}
+.p3-chart svg{width:100%;height:110px;display:block}
+.p3-filters{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.p3-filters button{border:1px solid var(--border);background:var(--bg-card);color:var(--fg-muted);border-radius:14px;padding:4px 10px;font-size:.75rem;cursor:pointer}
+.p3-filters button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.p3-tl{position:relative;padding-left:22px}
+.p3-tl::before{content:'';position:absolute;left:7px;top:0;bottom:0;width:2px;background:var(--border)}
+.p3-day{font-size:.75rem;font-weight:700;color:var(--fg-muted);margin:14px 0 6px;position:relative}
+.p3-day::before{content:'';position:absolute;left:-19px;top:4px;width:8px;height:8px;border-radius:50%;background:var(--fg-muted)}
+.p3-ev{background:var(--bg-card);border:1px solid var(--border);border-left:4px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;margin-bottom:6px;font-size:.84rem}
+.p3-ev.session{border-left-color:var(--accent)}.p3-ev.alert.critical{border-left-color:var(--danger)}.p3-ev.alert{border-left-color:var(--warning,#e67e22)}
+.p3-ev.lab{border-left-color:#8e44ad}.p3-ev.esa{border-left-color:#16a085}.p3-ev.drug{border-left-color:#2c3e50}.p3-ev.dialyzer{border-left-color:#7f8c8d}.p3-ev.incident{border-left-color:var(--danger)}
+.p3-ev .t{font-weight:700}.p3-ev .m{color:var(--fg-muted);font-size:.78rem;margin-top:2px}
+.p3-ev a{color:var(--accent);text-decoration:none}
+.p3-tag{display:inline-block;padding:1px 7px;border-radius:9px;font-size:.66rem;font-weight:700;margin-left:4px;background:rgba(127,140,141,.15);color:var(--fg-muted)}
+.p3-tag.bad{background:rgba(231,76,60,.15);color:var(--danger)}.p3-tag.ok{background:rgba(39,174,96,.15);color:var(--success)}.p3-tag.warn{background:rgba(230,126,34,.15);color:#e67e22}
+.p3-empty{padding:24px;text-align:center;color:var(--fg-muted);background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--radius-sm)}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="p3-bar">
+  <select id="days" class="form-control" style="width:auto" onchange="load()">
+    <option value="90">90 วัน</option><option value="180">6 เดือน</option><option value="365" selected>1 ปี</option><option value="1095">3 ปี</option>
+  </select>
+  <span style="flex:1"></span>
+  <a class="btn btn-secondary" id="lnkDetail" href="/hd/patient/{{ patient_hn }}" style="text-decoration:none;">👤 ข้อมูลผู้ป่วย</a>
+  <a class="btn btn-secondary" href="/hd/patients" style="text-decoration:none;">← รายชื่อ</a>
+</div>
+<div class="p3-head" id="head">กำลังโหลด…</div>
+<div class="p3-kpis" id="kpis"></div>
+<div class="p3-charts" id="charts"></div>
+<div class="p3-filters" id="filters"></div>
+<div class="p3-tl" id="tl"></div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const HN = {{ patient_hn|tojson }};
+const TYPES = {session:'🩺 รอบฟอก', alert:'🚨 Alert', lab:'🧪 แล็บ', esa:'💊 ESA', drug:'💉 ยา', dialyzer:'🔧 Dialyzer', incident:'⚠️ อุบัติการณ์'};
+let DATA = null, on = new Set(Object.keys(TYPES));
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function dTH(iso){ if(!iso) return ''; const d=new Date(iso.length>10?iso:iso+'T00:00:00'); return d.toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'}); }
+function tTH(iso){ if(!iso||iso.length<=10) return ''; return new Date(iso).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}); }
+function f1(v){ return v==null?'—':Number(v).toFixed(1); }
+
+/* tiny SVG line chart: pts [{d,v}], band [lo,hi] optional, ref value optional */
+function line(pts, opts){
+  opts = opts||{}; if(!pts.length) return '<div class="p3-empty" style="padding:10px">ไม่มีข้อมูล</div>';
+  const W=320,H=110,P=22, vals=pts.map(p=>p.v).concat(opts.ref!=null?[opts.ref]:[]).concat(opts.band||[]);
+  let lo=Math.min(...vals), hi=Math.max(...vals); if(hi===lo){hi+=1;lo-=1;} const pad=(hi-lo)*.12; lo-=pad; hi+=pad;
+  const x=i=>P+(pts.length===1?0:(W-2*P)*i/(pts.length-1)), y=v=>H-P+ (P-H+P)*0 - (v-lo)/(hi-lo)*(H-2*P)+0;
+  const Y=v=>H-P-(v-lo)/(hi-lo)*(H-2*P);
+  let s=`<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`;
+  if(opts.band) s+=`<rect x="${P}" y="${Y(opts.band[1])}" width="${W-2*P}" height="${Y(opts.band[0])-Y(opts.band[1])}" fill="var(--success)" opacity=".12"/>`;
+  if(opts.ref!=null) s+=`<line x1="${P}" x2="${W-P}" y1="${Y(opts.ref)}" y2="${Y(opts.ref)}" stroke="var(--fg-muted)" stroke-dasharray="3 3"/>`;
+  s+=`<polyline fill="none" stroke="${opts.color||'var(--accent)'}" stroke-width="2" points="${pts.map((p,i)=>x(i)+','+Y(p.v)).join(' ')}"/>`;
+  pts.forEach((p,i)=>{ const bad = opts.bad && opts.bad(p.v); s+=`<circle cx="${x(i)}" cy="${Y(p.v)}" r="${bad?4:2.5}" fill="${bad?'var(--danger)':(opts.color||'var(--accent)')}"><title>${dTH(p.d)}: ${p.v}${p.src?' ('+p.src+')':''}</title></circle>`; });
+  s+=`<text x="${P}" y="${H-4}" font-size="9" fill="var(--fg-muted)">${dTH(pts[0].d)}</text><text x="${W-P}" y="${H-4}" font-size="9" text-anchor="end" fill="var(--fg-muted)">${dTH(pts[pts.length-1].d)}</text>`;
+  s+=`<text x="${W-P}" y="${Y(pts[pts.length-1].v)-6}" font-size="10" font-weight="700" text-anchor="end" fill="var(--fg)">${pts[pts.length-1].v}</text></svg>`;
+  return s;
+}
+
+async function load(){
+  try{
+    let pid = DATA && DATA.patient ? DATA.patient.id : null;
+    if(!pid){ const r0 = await hdFetch('/hd/api/v1/patients/by-hn/'+encodeURIComponent(HN)+'/id'); const j0 = await r0.json(); if(!r0.ok) throw new Error(j0.error||r0.status); pid = j0.id; }
+    const r = await hdFetch('/hd/api/v1/patients/'+pid+'/timeline?days='+document.getElementById('days').value);
+    DATA = await r.json(); if(!r.ok) throw new Error(DATA.error||r.status);
+    render();
+  }catch(e){ document.getElementById('head').innerHTML = '<span style="color:var(--danger)">โหลดไม่สำเร็จ: '+esc(e.message||e)+'</span>'; }
+}
+
+function render(){
+  const p = DATA.patient, s = DATA.summary, se = DATA.series;
+  document.getElementById('head').innerHTML = `<span class="nm">${esc(p.name)}</span><span class="meta">HN ${esc(p.hn)}${p.age?' · อายุ '+p.age+' ปี':''}</span>
+    <span class="meta">เส้นฟอก ${esc(p.access||'-')}</span><span class="meta">DW ${f1(p.dry_weight)} kg</span><span class="meta">ESA ${esc(p.esa_drug||'-')} ${esc(p.esa_dose||'')}</span><span class="meta">ตาราง ${esc(p.schedule_days||'-')}</span>${p.is_active?'':'<span class="p3-tag">ไม่ active</span>'}`;
+  const k = [['รอบฟอก', s.sessions], ['มี IDH/alert', s.idh_sessions, s.idh_sessions?'var(--danger)':''], ['Alert รวม', s.alerts], ['รอคำสั่งแพทย์', s.orders_pending, s.orders_pending?'var(--danger)':''],
+             ['Hb ล่าสุด', f1(s.last_hb), s.last_hb!=null&&s.last_hb<10?'var(--danger)':''], ['IDWG เฉลี่ย', s.avg_idwg_pct!=null?s.avg_idwg_pct+'%':'—', s.avg_idwg_pct>4?'var(--danger)':''], ['UF ได้ตามเป้า', s.uf_achieved_pct!=null?s.uf_achieved_pct+'%':'—'], ['แล็บ', s.labs]];
+  document.getElementById('kpis').innerHTML = k.map(x=>`<div class="p3-kpi"><div class="n" style="color:${x[2]||'inherit'}">${x[1]??'—'}</div><div class="l">${x[0]}</div></div>`).join('');
+  const w = se.weight.filter(x=>x.pre!=null).map(x=>({d:x.d,v:x.pre}));
+  document.getElementById('charts').innerHTML =
+    `<div class="p3-chart"><h4>น้ำหนักก่อนฟอก (kg) · เส้นประ = DW</h4>${line(w,{ref:p.dry_weight, bad:v=>p.dry_weight&&v>p.dry_weight*1.04})}</div>` +
+    `<div class="p3-chart"><h4>Hb (g/dL) · แถบเขียว = เป้า 10–12</h4>${line(se.hb,{band:[10,12], color:'#8e44ad', bad:v=>v<9||v>13})}</div>` +
+    `<div class="p3-chart"><h4>VP มัธยฐานต่อรอบ (mmHg)</h4>${line(se.vp,{ref:200, bad:v=>v>200})}</div>` +
+    `<div class="p3-chart"><h4>Kt/V · เส้นประ = 1.2</h4>${line(se.ktv,{ref:1.2, color:'#16a085', bad:v=>v<1.2})}</div>`;
+  const cnt = {}; DATA.events.forEach(e=>cnt[e.type]=(cnt[e.type]||0)+1);
+  document.getElementById('filters').innerHTML = Object.keys(TYPES).map(t=>`<button class="${on.has(t)?'on':''}" onclick="tog('${t}')">${TYPES[t]} ${cnt[t]||0}</button>`).join('');
+  const tl = document.getElementById('tl'); let last = '', html = '';
+  const evs = DATA.events.filter(e=>on.has(e.type));
+  if(!evs.length){ tl.innerHTML = '<div class="p3-empty">ไม่มีเหตุการณ์ในช่วงที่เลือก</div>'; return; }
+  evs.forEach(e=>{
+    if(e.date!==last){ last=e.date; html += `<div class="p3-day">${dTH(e.date)}</div>`; }
+    html += `<div class="p3-ev ${e.type} ${e.severity||''}">${ev(e)}</div>`;
+  });
+  tl.innerHTML = html;
+}
+function tog(t){ on.has(t)?on.delete(t):on.add(t); render(); }
+
+function ev(e){
+  const tm = tTH(e.ts); const T = tm?`<span class="p3-tag">${tm}</span>`:'';
+  switch(e.type){
+    case 'session': {
+      const st = {completed:'เสร็จ',in_progress:'กำลังฟอก',scheduled:'รอ',cancelled:'ยกเลิก'}[e.status]||e.status;
+      const uf = e.actual_uf!=null?`UF ${e.actual_uf}${e.uf_goal?'/'+e.uf_goal:''} mL`:'';
+      const wt = e.pre_weight!=null?`น้ำหนัก ${e.pre_weight}→${e.post_weight??'?'} kg`:'';
+      return `<div class="t">🩺 รอบฟอก เตียง ${e.bed} ${esc(st)} ${e.alerts?`<span class="p3-tag bad">alert ${e.alerts}</span>`:''}${e.min_sbp&&e.min_sbp<90?`<span class="p3-tag bad">SBP ต่ำสุด ${e.min_sbp}</span>`:''} ${T}
+        <a href="/hd/session/${e.session_id}">เปิด ›</a></div>
+        <div class="m">${[wt, uf, e.hb!=null?'Hb '+e.hb:'', e.ktv!=null?'Kt/V '+e.ktv:'', e.vp_median!=null?'VP~'+Math.round(e.vp_median):'', e.esa_given?'ESA '+esc(e.esa_given):''].filter(Boolean).join(' · ')}${e.notes?'<br>📝 '+esc(e.notes):''}</div>`;
+    }
+    case 'alert': return `<div class="t">${e.severity==='critical'?'🔴':(e.severity==='warning'?'🟠':'🔵')} ${esc(e.title)} ${e.order?'<span class="p3-tag ok">มีคำสั่งแพทย์</span>':(e.severity!=='info'?'<span class="p3-tag bad">รอคำสั่ง</span>':'')} ${T}</div>
+        <div class="m">${esc(e.message||'')}${e.order?`<br>✍️ ${esc(e.order)} — ${esc(e.order_by||'')}`:''}</div>`;
+    case 'lab': { const v=e.values; const keys=['hb','k','phos','ca','albumin','ktv','urr','pth','ferritin','tsat'];
+      return `<div class="t">🧪 ผลแล็บ ${e.status==='approved'?'<span class="p3-tag ok">ยืนยันแล้ว</span>':'<span class="p3-tag warn">รอตรวจสอบ</span>'}</div>
+        <div class="m">${keys.filter(k=>v[k]!=null).map(k=>`${k.toUpperCase()} ${v[k]}`).join(' · ')}${e.flags.length?'<br>'+e.flags.map(f=>`<span class="p3-tag ${f.sev==='critical'?'bad':'warn'}">${esc(f.text.split(' — ')[0])}</span>`).join(' '):''}</div>`; }
+    case 'esa': { const a={increase:'เพิ่ม',decrease:'ลด',hold:'งด',resume:'กลับมาให้',review:'ทบทวน'}[e.action]||e.action; const st={pending:'<span class="p3-tag warn">รออนุมัติ</span>',approved:'<span class="p3-tag ok">อนุมัติ</span>',rejected:'<span class="p3-tag">ไม่ปรับ</span>'}[e.status]||'';
+      return `<div class="t">💊 ESA ${a} ${esc(e.current_dose||'')} → ${esc(e.proposed_dose||'')} ${st} ${T}</div><div class="m">Hb ${e.hb} · ${esc(e.rationale||'')}${e.decided_by?' · โดย '+esc(e.decided_by):''}${e.note?' · '+esc(e.note):''}</div>`; }
+    case 'drug': return `<div class="t">💉 ${esc(e.drug)} ${esc(e.dose||'')} ${esc(e.route||'')} ${T}</div>`;
+    case 'dialyzer': return `<div class="t">🔧 Dialyzer ใหม่ ${esc(e.dialyzer)} ${e.serial?'#'+esc(e.serial):''}</div><div class="m">reuse ${e.reuse}/${e.max_reuse} · ${esc(e.status)}</div>`;
+    case 'incident': return `<div class="t">⚠️ อุบัติการณ์ ${esc(e.incident_type)} <span class="p3-tag ${e.severity==='serious'?'bad':'warn'}">${esc(e.severity)}</span> <span class="p3-tag">${esc(e.status)}</span></div><div class="m">${esc(e.description||'')}</div>`;
+  }
+  return esc(JSON.stringify(e));
+}
+load();
+</script>
+{% endblock %}

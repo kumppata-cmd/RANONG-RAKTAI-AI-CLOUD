@@ -482,6 +482,7 @@
       <button class="btn btn-success" onclick="sendSummaryToPatient()">📱 ส่ง LINE ผู้ป่วย</button>
       <button class="btn btn-primary" onclick="sendSummaryToDoctor()">👨‍⚕️ ส่ง LINE หมอ</button>
       <button class="btn btn-outline" onclick="exportPDF()" style="color:var(--accent);border-color:var(--accent);">📄 พิมพ์ / PDF</button>
+      <a class="btn btn-outline" id="lnk360" href="#" style="display:none;text-decoration:none;">🧭 Patient 360</a>
     </div>
     <div id="lineSendStatus" style="margin-top:8px;font-size:.8rem;"></div>
   </div>
@@ -934,6 +935,7 @@ function loadExistingSession(sid){
       if(d.patient_hn){
         document.getElementById('patientSelect').value = d.patient_hn;
         sessionData.hn = d.patient_hn;
+        try { const l = document.getElementById('lnk360'); if (l && d.patient_hn) { l.href = '/hd/patient/' + encodeURIComponent(d.patient_hn) + '/360'; l.style.display = ''; } } catch (e) {}
         loadEsaHistory();
       }
       if(d.esa_drug) sessionData.esa_drug = d.esa_drug;
