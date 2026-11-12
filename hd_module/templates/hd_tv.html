@@ -15,13 +15,19 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:
 .kp{display:flex;gap:14px;font-size:.9rem;color:var(--muted)}
 .kp b{color:var(--fg);font-size:1.15rem;margin-right:3px}
 .kp .c{color:var(--crit)}.kp .w{color:var(--warn)}
-.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;padding:12px 22px;height:calc(100vh - 62px - 44px);overflow:hidden;align-content:start}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px;padding:12px 22px;height:calc(100vh - 62px - 44px);overflow-y:auto;align-content:start;grid-auto-rows:max-content;padding-bottom:60px}
+.shifts{display:flex;gap:4px}
+.shifts button{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:5px 9px;cursor:pointer;font-size:.8rem}
+.shifts button.on{background:var(--acc);border-color:var(--acc);color:#fff}
+.wait{grid-column:1/-1;background:var(--panel);border:1px dashed var(--line);border-radius:12px;padding:8px 12px;font-size:.82rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center}
+.wait b{color:var(--fg)}
 .bed{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 12px;min-height:118px;display:flex;flex-direction:column;gap:4px;position:relative;transition:background .3s}
 .bed.free{background:var(--free);opacity:.55}
 .bed.warning{border-color:var(--warn);box-shadow:0 0 0 2px rgba(243,156,18,.35)}
 .bed.critical{border-color:var(--crit);box-shadow:0 0 0 3px rgba(231,76,60,.45);animation:pulse 1.4s infinite}
 .bed.completed{opacity:.75;border-color:var(--ok)}
 @keyframes pulse{0%,100%{box-shadow:0 0 0 3px rgba(231,76,60,.45)}50%{box-shadow:0 0 0 7px rgba(231,76,60,.15)}}
+.bed > *{flex-shrink:0}
 .bed .n{position:absolute;top:8px;right:10px;font-size:.8rem;color:var(--muted);font-weight:700}
 .bed .nm{font-weight:800;font-size:1.05rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-right:34px}
 .bed .sub{font-size:.75rem;color:var(--muted)}
@@ -44,13 +50,18 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:
 @keyframes scroll{to{transform:translateX(-100%)}}
 .btn{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:.8rem}
 .off{position:fixed;inset:0;background:rgba(11,18,32,.92);display:none;align-items:center;justify-content:center;font-size:1.3rem;color:var(--warn);z-index:9}
-@media (max-width:700px){.grid{grid-template-columns:repeat(auto-fill,minmax(160px,1fr));padding:8px}.top{padding:8px 10px;gap:10px}.kp{display:none}}
+@media (max-width:700px){.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));padding:8px;gap:6px;height:calc(100vh - 100px - 44px)}.bed{min-height:84px;padding:8px 10px;gap:2px}.bed .bp{font-size:1.2rem}.bed .nm{font-size:.95rem}.bed .row{font-size:.72rem}.top{padding:8px 10px;gap:8px;flex-wrap:wrap}.top .ttl{font-size:1rem}.kp{display:none}.top .clock{font-size:1.2rem}}
 </style>
 </head>
 <body>
 <div class="top">
   <div class="ttl">🏥 HD รักษ์ไต · Nurse Station</div>
-  <div class="sh" id="shift">—</div>
+  <div class="shifts" id="shifts">
+    <button data-s="all" class="on" onclick="setShift('all')">ทั้งวัน</button>
+    <button data-s="morning" onclick="setShift('morning')">🌅 เช้า</button>
+    <button data-s="afternoon" onclick="setShift('afternoon')">☀️ บ่าย</button>
+    <button data-s="evening" onclick="setShift('evening')">🌙 ค่ำ</button>
+  </div>
   <div class="kp" id="kp"></div>
   <button class="btn" onclick="toggleFs()">⛶ เต็มจอ</button>
   <div class="clock" id="clock">--:--</div>
@@ -65,6 +76,27 @@ const REFRESH = 20000;
 function thaiNow(){ const n = new Date(); return new Date(n.getTime() + (n.getTimezoneOffset() + 420) * 60000); }
 function detectShift(){ const h = thaiNow().getHours(); if(h >= 7 && h < 13) return 'morning'; if(h >= 13 && h < 17) return 'afternoon'; return 'evening'; }
 const SH_TH = {morning:'🌅 รอบเช้า', afternoon:'☀️ รอบบ่าย', evening:'🌙 รอบค่ำ'};
+const SHIFTS = ['morning','afternoon','evening'];
+let shiftSel = 'all';
+function setShift(sv){ shiftSel = sv; document.querySelectorAll('.shifts button').forEach(b=>b.classList.toggle('on', b.dataset.s===sv)); load(); }
+const RANK = {critical:6, warning:5, active:4, pre_hd:3, done:2, available:1, free:1, empty:1};
+/* merge the three shift payloads: per bed keep the most "live" session; sum completed */
+function mergeShifts(payloads){
+  const beds = {}, done = [], seenDone = new Set();
+  let today = [];
+  payloads.forEach(d => {
+    if(!d) return;
+    (d.beds||[]).forEach(b => {
+      const cur = beds[b.bed_number];
+      if(!cur || (RANK[b.status]||0) > (RANK[cur.status]||0)) beds[b.bed_number] = Object.assign({}, b, {shift: d.shift});
+      else if(cur && b.next_scheduled && !cur.next_scheduled) cur.next_scheduled = b.next_scheduled;
+    });
+    (d.completed_sessions||[]).forEach(c => { const k = c.session_id || (c.bed_number+':'+c.patient_hn); if(!seenDone.has(k)){ seenDone.add(k); done.push(c); } });
+    if((d.today_patients||[]).length > today.length) today = d.today_patients;
+  });
+  const list = Object.values(beds).sort((a,b)=>a.bed_number-b.bed_number);
+  return {beds: list, completed_sessions: done, completed_in_shift: done.length, today_patients: today};
+}
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function tick(){ const t = thaiNow(); document.getElementById('clock').textContent = t.toTimeString().slice(0,5); }
 setInterval(tick, 1000); tick();
@@ -115,7 +147,13 @@ function render(d){
       ${al?`<div class="al">🚨 ${esc(al.title)}${al.message?' — '+esc(al.message):''}</div>`:''}
     </div>`;
   }).join('');
-  document.getElementById('kp').innerHTML = `<span><b>${act}</b>กำลังฟอก</span><span><b>${d.completed_in_shift||0}</b>เสร็จ</span><span class="c"><b>${crit}</b>วิกฤต</span><span class="w"><b>${warn}</b>เตือน</span><span><b>${d.today_patients||0}</b>วันนี้</span>`;
+  const onBed = new Set(beds.map(b=>b.patient_hn).filter(Boolean).concat((d.completed_sessions||[]).map(c=>c.patient_hn).filter(Boolean)));
+  const waiting = (d.today_patients||[]).filter(p => !onBed.has(p.hn));
+  if(waiting.length){
+    document.getElementById('grid').insertAdjacentHTML('beforeend', `<div class="wait"><b>⏳ นัดวันนี้ ยังไม่ขึ้นเตียง ${waiting.length} คน</b>` +
+      waiting.slice(0,30).map(p=>`<span>${esc(p.name||'')}${p.va?' · '+esc(p.va):''}</span>`).join('') + (waiting.length>30?`<span>… อีก ${waiting.length-30}</span>`:'') + `</div>`);
+  }
+  document.getElementById('kp').innerHTML = `<span><b>${act}</b>กำลังฟอก</span><span><b>${d.completed_in_shift||0}</b>เสร็จ</span><span class="c"><b>${crit}</b>วิกฤต</span><span class="w"><b>${warn}</b>เตือน</span><span><b>${(d.today_patients||[]).length}</b>นัดวันนี้</span>`;
   const alerts = [];
   beds.forEach(b=>(b.alerts||[]).forEach(a=>{ if(!a.physician_order && a.severity!=='info') alerts.push(`${a.severity==='critical'?'🔴':'🟠'} เตียง ${b.bed_number} ${b.patient_name||''}: ${a.title}${a.message?' — '+a.message:''}`); }));
   const t = document.getElementById('tick');
@@ -123,15 +161,18 @@ function render(d){
   else { t.textContent = '✅ ไม่มี alert ที่รอคำสั่งแพทย์'; t.className = 'inner still'; }
 }
 
+async function fetchShift(sh){
+  const r = await fetch('/hd/api/v1/dashboard/beds?shift=' + sh, {headers:{'Authorization':'Bearer ' + TOKEN}});
+  if(r.status === 401){ location.href = '/hd/login'; throw new Error('401'); }
+  if(!r.ok) throw new Error(r.status);
+  return r.json();
+}
 async function load(){
-  const sh = detectShift(); document.getElementById('shift').textContent = SH_TH[sh];
   try{
-    const r = await fetch('/hd/api/v1/dashboard/beds?shift=' + sh, {headers:{'Authorization':'Bearer ' + TOKEN}});
-    if(r.status === 401){ location.href = '/hd/login'; return; }
-    if(!r.ok) throw new Error(r.status);
-    render(await r.json());
+    const data = shiftSel === 'all' ? mergeShifts(await Promise.all(SHIFTS.map(fetchShift))) : await fetchShift(shiftSel);
+    render(data);
     document.getElementById('off').style.display = 'none';
-  }catch(e){ document.getElementById('off').style.display = 'flex'; }
+  }catch(e){ if(e.message !== '401') document.getElementById('off').style.display = 'flex'; }
 }
 load(); setInterval(load, REFRESH);
 /* keep the screen awake on tablets/TV sticks when supported */
