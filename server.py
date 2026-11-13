@@ -18256,6 +18256,25 @@ def webhook():
 
                 # ── ว้าว #8: "@รักษ์ไต …" ในกลุ่มพยาบาล → ตอบจาก HD DB (read-only,
                 #    ไม่ใช้ External AI, ตอบกลับในกลุ่มเดิมเท่านั้น) ──
+                # ── PDPA: ผู้ป่วยที่ผูก LINE พิมพ์ "ถอนความยินยอม" / "หยุดส่งข้อความ" (แชท 1:1 เท่านั้น) ──
+                _src_c = event.get("source", {}) or {}
+                if not (_src_c.get("groupId") or _src_c.get("roomId")) and \
+                        text.strip().replace(" ", "") in ("ถอนความยินยอม", "หยุดส่งข้อความ", "ยกเลิกรับข้อความ", "unsubscribe"):
+                    try:
+                        _pt = hn_registry.get_by_owner(user_hash)
+                        if _pt and _pt.clinic_hn:
+                            from hd_module.blueprint import patient_withdraw_consent
+                            with app.app_context():
+                                patient_withdraw_consent(_pt.clinic_hn, via="line")
+                            reply_message(reply_token, "✅ บันทึกการถอนความยินยอมแล้ว ระบบจะหยุดส่งสรุป/แจ้งเตือนทาง LINE ให้ท่าน "
+                                                       "การรักษาและนัดหมายที่คลินิกไม่เปลี่ยนแปลง หากต้องการรับข้อความอีกครั้ง แจ้งเจ้าหน้าที่ได้ครับ/ค่ะ")
+                        else:
+                            reply_message(reply_token, "บัญชีนี้ยังไม่ได้ผูกกับ HN จึงไม่มีการส่งข้อมูลส่วนบุคคลให้อยู่แล้วครับ/ค่ะ")
+                    except Exception as _ce:
+                        logger.warning(f"consent withdraw: {type(_ce).__name__}")
+                        reply_message(reply_token, "ขออภัย บันทึกไม่สำเร็จ กรุณาแจ้งเจ้าหน้าที่ที่คลินิก")
+                    continue
+
                 # ── ตรวจน้ำ RO ประจำวัน: "น้ำRO H 0 F 0.1 T 0" ในกลุ่มพยาบาล ──
                 try:
                     from hd_module.water_check import parse_command as _wc_parse

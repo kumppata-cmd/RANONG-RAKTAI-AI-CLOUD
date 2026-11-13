@@ -146,6 +146,7 @@ def build_flex(summary, history=None, today=None):
     if nxt:
         footer.append({"type": "text", "text": f"📅 นัดครั้งถัดไป วัน{DAY_TH[nxt.weekday()]}ที่ {_d(nxt)}", "size": "sm", "weight": "bold", "wrap": True})
     footer.append({"type": "text", "text": "📞 มีอาการผิดปกติ ติดต่อคลินิกได้ทันที", "size": "xs", "color": "#8A9BC0", "wrap": True})
+    footer.append({"type": "text", "text": "ไม่ต้องการรับข้อความ พิมพ์ \"ถอนความยินยอม\"", "size": "xxs", "color": "#B0BCCB", "wrap": True})
     bubble = {"type": "bubble", "size": "mega",
               "header": {"type": "box", "layout": "vertical", "backgroundColor": "#0F766E", "paddingAll": "14px", "contents": [
                   {"type": "text", "text": "📋 สรุปการฟอกเลือดวันนี้", "color": "#FFFFFF", "weight": "bold", "size": "md"},

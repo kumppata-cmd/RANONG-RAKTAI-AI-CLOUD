@@ -219,6 +219,31 @@
   </div>
 </div>
 
+<!-- PDPA + backup -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🔐 PDPA · 💾 สำรองฐานข้อมูล</span>
+    <button class="btn btn-primary save-btn" onclick="['patient_push_requires_consent','clinic_phone'].forEach(saveSetting)">💾 บันทึก</button>
+  </div>
+  <div class="grid-2" style="margin-top:12px;">
+    <div class="form-group"><label class="form-label">บังคับต้องมีความยินยอม (ทะเบียน PDPA) ก่อนส่ง LINE ถึงผู้ป่วย</label>
+      <select class="form-control" id="setting_patient_push_requires_consent"><option value="off">ปิด — ส่งได้ถ้าผู้ป่วยผูก LINE (ยกเว้นคนที่ถอนแล้ว)</option><option value="on">เปิด — ส่งเฉพาะคนที่บันทึกความยินยอมแล้ว</option></select>
+      <div class="setting-status" id="status_patient_push_requires_consent"></div></div>
+    <div class="form-group"><label class="form-label">เบอร์ติดต่อคลินิก (แสดงในประกาศความเป็นส่วนตัว)</label>
+      <input type="text" class="form-control" id="setting_clinic_phone" placeholder="077-xxx-xxx"><div class="setting-status" id="status_clinic_phone"></div></div>
+  </div>
+  <div class="setting-desc" style="margin-top:6px;">ทะเบียนความยินยอม: <a href="/hd/consents">🔐 ความยินยอม PDPA</a> · ประกาศ: <a href="/hd/privacy" target="_blank" rel="noopener">/hd/privacy</a></div>
+  <hr style="border:0;border-top:1px solid var(--border);margin:12px 0">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <strong>💾 สำรองฐานข้อมูลทั้งหมด</strong>
+    <span style="font-size:.78rem;color:var(--fg-muted)">อัตโนมัติทุกคืน 23:00 → Cloud + Google Drive "สำรองฐานข้อมูล" · ทดสอบกู้คืนทุกวันจันทร์ · แจ้ง LINE เมื่อมีปัญหา</span>
+    <span style="flex:1"></span>
+    <button class="btn btn-secondary" onclick="runBackup(false)">▶ สำรองตอนนี้</button>
+    <button class="btn btn-secondary" onclick="runBackup(true)">🧪 สำรอง + ทดสอบกู้คืน</button>
+  </div>
+  <div id="backupStatus" style="font-size:.8rem;margin-top:8px;color:var(--fg-muted)">กำลังโหลดสถานะ…</div>
+</div>
+
 <!-- Smart Bed Scheduler -->
 <div class="card setting-card">
   <div class="card-header">
@@ -293,6 +318,20 @@
 
 {% block extra_js %}
 <script>
+async function loadBackupStatus(){
+  const el = document.getElementById('backupStatus'); if(!el) return;
+  try{ const r = await hdFetch('/hd/api/v1/ops/backup/status'); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    const l = d.last; let s = l ? `ล่าสุด ${String(l.at||'').replace('T',' ').slice(0,16)} · ${l.tables} ตาราง · ${(l.rows||0).toLocaleString()} แถว · ${((l.bytes||0)/1048576).toFixed(1)} MB · GCS ${l.gcs?'✅':'❌'} · Drive ${l.drive?'✅':'❌'} · ตรวจไฟล์ ${l.verify?'✅':'❌'}` + (l.restore?` · กู้คืน ${l.restore.ok?'✅':'❌'}`:'') : 'ยังไม่เคยสำรอง';
+    if(d.recent && d.recent.length) s += `<br>ไฟล์ล่าสุดใน Cloud: ` + d.recent.slice(0,5).map(x=>x.name).join(', ');
+    el.innerHTML = s; }catch(e){ el.textContent = 'โหลดสถานะไม่ได้: ' + (e.message||e); }
+}
+async function runBackup(restore){
+  const el = document.getElementById('backupStatus'); el.textContent = restore ? 'กำลังสำรอง + ทดสอบกู้คืน (อาจใช้เวลา 1–2 นาที)…' : 'กำลังสำรอง…';
+  try{ const r = await hdFetch('/hd/api/v1/ops/backup/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({restore_test: restore})});
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status); loadBackupStatus(); }catch(e){ el.textContent = '❌ ' + (e.message||e); }
+}
+document.addEventListener('DOMContentLoaded', loadBackupStatus);
+
 /* Load current settings */
 (function loadSettings(){
   const token = getHdToken();

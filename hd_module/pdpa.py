@@ -1,232 +1,152 @@
-"""PDPA Compliance Module — คลินิกระนอง รักษ์ไต
+"""PDPA (พ.ร.บ.คุ้มครองข้อมูลส่วนบุคคล 2562) support — Go-Live R4.
 
-พ.ร.บ. คุ้มครองข้อมูลส่วนบุคคล พ.ศ. 2562 (PDPA)
-สำหรับข้อมูลสุขภาพ (Sensitive Data) ต้องได้รับความยินยอมชัดแจ้ง
+What this adds (and what it deliberately does not):
+    hd_consents            one row per consent event: given / withdrawn, by type + version,
+                           how it was obtained (paper / line / web) and who recorded it
+    privacy notice         Thai text served at /hd/privacy (no patient data on it)
+    consent form PDF       printable form for paper signature (reportlab, Loma)
+    enforcement helper     has_consent(cur, patient_id, type) used by patient-facing pushes
+                           when ⚙️ patient_push_requires_consent = on
+    withdraw by LINE       the patient types ถอนความยินยอม / หยุดส่งข้อความ → status withdrawn
 
-Module นี้จัดการ:
-1. Data Retention Policy — กำหนดอายุข้อมูล
-2. Consent Tracking — บันทึกความยินยอม
-3. Right to Access — ผู้ป่วยขอดูข้อมูล
-4. Right to Delete — ผู้ป่วยขอลบข้อมูล (ภายใต้ข้อยกเว้นทางการแพทย์)
-5. Data Minimization — ไม่เก็บข้อมูลเกินจำเป็น
-6. Audit — บันทึกทุกการเข้าถึงข้อมูล
-
-⚠️ ข้อมูลสุขภาพ (Health Data) เป็น Sensitive Data ตาม PDPA
-   → ต้องได้รับความยินยอมชัดแจ้ง (Explicit Consent)
-   → ข้อยกเว้น: เพื่อการรักษาทางการแพทย์ (มาตรา 26(5)(ก))
+It never deletes clinical records (medical-record retention law applies);
+"right to erasure" requests are logged for the physician to handle.
 """
-
+import io
 import logging
-import os
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
-
-# ── Data Retention Policy ──────────────────────────────────
-
-DATA_RETENTION_POLICY = {
-    # ประเภทข้อมูล: อายุเก็บ (ปี)
-    "medical_records": 10,        # เวชระเบียน — กฎหมาย 10 ปี
-    "lab_results": 10,            # ผลตรวจแล็บ
-    "dialysis_records": 10,       # บันทึกฟอกเลือด
-    "prescriptions": 10,          # ใบสั่งยา
-    "vital_signs": 5,             # สัญญาณชีพ (HD sessions)
-    "hd_sessions": 5,             # รอบฟอกเลือด
-    "clinical_alerts": 2,         # แจ้งเตือนทางคลินิก
-    "audit_logs": 5,              # บันทึกการเข้าถึง
-    "consent_records": 10,        # บันทึกความยินยอม
-    "bills_receipts": 5,          # ใบเสร็จ/บิล
+NOTICE_VERSION = "2026-11-13"
+CONSENT_TYPES = {
+    "data_processing": "เก็บรวบรวม/ใช้ข้อมูลสุขภาพเพื่อการรักษาและคุณภาพบริการ",
+    "line_messaging": "รับข้อความผ่าน LINE (สรุปหลังฟอก, นัดหมาย, แจ้งเตือน)",
+    "cloud_storage": "จัดเก็บเอกสารบนระบบคลาวด์ (Google Cloud / Google Drive ของคลินิก)",
 }
 
-# ── Legal Basis ────────────────────────────────────────────
-
-LEGAL_BASES = {
-    "medical_treatment": "PDPA มาตรา 26(5)(ก) — เพื่อการรักษาทางการแพทย์",
-    "vital_interest": "PDPA มาตรา 24(4) — เพื่อประโยชน์สำคัญต่อชีวิต",
-    "legal_obligation": "PDPA มาตรา 24(6) — ปฏิบัติตามกฎหมาย",
-    "explicit_consent": "PDPA มาตรา 26 — ความยินยอมชัดแจ้ง",
-}
-
-
-def get_retention_years(doc_type: str) -> int:
-    """ดึงจำนวนปีที่ต้องเก็บข้อมูลตามประเภท"""
-    return DATA_RETENTION_POLICY.get(doc_type, 10)
-
-
-def check_data_expired(doc_type: str, created_date: datetime) -> bool:
-    """ตรวจว่าข้อมูลหมดอายุการเก็บรักษาหรือยัง"""
-    years = get_retention_years(doc_type)
-    expiry = created_date + timedelta(days=years * 365)
-    return datetime.now(timezone.utc) > expiry
+CREATE_SQL = """
+CREATE TABLE IF NOT EXISTS hd_consents (
+    id SERIAL PRIMARY KEY,
+    patient_id INTEGER REFERENCES hd_patient_mapping(id),
+    hn VARCHAR(20) NOT NULL,
+    consent_type VARCHAR(40) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    notice_version VARCHAR(20),
+    via VARCHAR(20),
+    recorded_by VARCHAR(100),
+    note TEXT,
+    created_at TIMESTAMP DEFAULT NOW()
+)
+"""
+CREATE_INDEX_SQL = "CREATE INDEX IF NOT EXISTS ix_hd_consents_hn ON hd_consents(hn, consent_type, id DESC)"
 
 
-def get_legal_basis(purpose: str) -> str:
-    """ดึงฐานทางกฎหมายสำหรับวัตถุประสงค์"""
-    return LEGAL_BASES.get(purpose, LEGAL_BASES["medical_treatment"])
+def _thai_now():
+    return datetime.now(timezone.utc) + timedelta(hours=7)
 
 
-# ── Consent Management ─────────────────────────────────────
-
-def record_consent(db_url: str, patient_hn: str, consent_type: str,
-                   granted: bool, recorded_by: str = "system") -> bool:
-    """บันทึกความยินยอมของผู้ป่วย
-
-    consent_type: "data_collection", "data_sharing", "line_notification"
-    """
-    if not db_url:
-        return False
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url, connect_timeout=5)
-        with conn.cursor() as cur:
-            cur.execute("""
-                CREATE TABLE IF NOT EXISTS pdpa_consent (
-                    id SERIAL PRIMARY KEY,
-                    patient_hn VARCHAR(20) NOT NULL,
-                    consent_type VARCHAR(50) NOT NULL,
-                    granted BOOLEAN NOT NULL,
-                    recorded_by VARCHAR(100),
-                    recorded_at TIMESTAMP NOT NULL DEFAULT NOW(),
-                    legal_basis TEXT,
-                    notes TEXT,
-                    UNIQUE(patient_hn, consent_type)
-                )
-            """)
-            cur.execute("""
-                INSERT INTO pdpa_consent (patient_hn, consent_type, granted,
-                                          recorded_by, legal_basis)
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (patient_hn, consent_type) DO UPDATE SET
-                    granted = EXCLUDED.granted,
-                    recorded_by = EXCLUDED.recorded_by,
-                    recorded_at = NOW()
-            """, (patient_hn, consent_type, granted, recorded_by,
-                  get_legal_basis("medical_treatment")))
-        conn.commit()
-        conn.close()
-        logger.info("PDPA consent recorded: HN=%s type=%s granted=%s",
-                     patient_hn, consent_type, granted)
-        return True
-    except Exception as e:
-        logger.error("PDPA consent recording failed: %s", e)
-        return False
+def record(cur, hn, consent_type, status, via, recorded_by, note="", patient_id=None, version=NOTICE_VERSION):
+    if consent_type not in CONSENT_TYPES or status not in ("given", "withdrawn"):
+        raise ValueError("bad consent type/status")
+    if patient_id is None:
+        cur.execute("SELECT id FROM hd_patient_mapping WHERE UPPER(hn) = %s", (str(hn).upper(),))
+        r = cur.fetchone()
+        patient_id = r[0] if r else None
+    cur.execute("""INSERT INTO hd_consents (patient_id, hn, consent_type, status, notice_version, via, recorded_by, note)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                (patient_id, str(hn).upper(), consent_type, status, version, via, recorded_by, note[:300] if note else None))
+    return cur.fetchone()[0]
 
 
-def check_consent(db_url: str, patient_hn: str, consent_type: str) -> bool:
-    """ตรวจสอบว่าผู้ป่วยให้ความยินยอมหรือไม่"""
-    if not db_url:
-        return True  # Default: allow (medical treatment exception)
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url, connect_timeout=3)
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT granted FROM pdpa_consent
-                WHERE patient_hn = %s AND consent_type = %s
-            """, (patient_hn, consent_type))
-            row = cur.fetchone()
-        conn.close()
-        if row is None:
-            return True  # No explicit opt-out → allow under medical treatment
-        return row[0]
-    except Exception:
-        return True  # Fail-open for medical treatment
+def status_for(cur, hn):
+    """{consent_type: {"status", "at", "via", "version"}} — latest event per type."""
+    cur.execute("""SELECT DISTINCT ON (consent_type) consent_type, status, created_at, via, notice_version
+                   FROM hd_consents WHERE hn = %s ORDER BY consent_type, id DESC""", (str(hn).upper(),))
+    return {r[0]: {"status": r[1], "at": r[2].isoformat() if r[2] else None, "via": r[3], "version": r[4]} for r in cur.fetchall()}
 
 
-# ── Right to Access ────────────────────────────────────────
-
-def generate_data_access_report(db_url: str, patient_hn: str) -> dict:
-    """สร้างรายงานข้อมูลของผู้ป่วย (Right to Access)
-
-    ผู้ป่วยมีสิทธิขอดูข้อมูลส่วนบุคคลของตนเองได้
-    """
-    report = {
-        "patient_hn": patient_hn,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "legal_basis": get_legal_basis("medical_treatment"),
-        "retention_policy": DATA_RETENTION_POLICY,
-        "data_categories": {},
-    }
-    if not db_url:
-        return report
-    try:
-        import psycopg2
-        conn = psycopg2.connect(db_url, connect_timeout=5)
-
-        # HD sessions count
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT COUNT(*), MIN(started_at), MAX(started_at)
-                FROM hd_sessions s
-                JOIN hd_patient_mapping p ON p.id = s.patient_id
-                WHERE p.hn = %s
-            """, (patient_hn,))
-            row = cur.fetchone()
-            report["data_categories"]["hd_sessions"] = {
-                "count": row[0],
-                "earliest": row[1].isoformat() if row[1] else None,
-                "latest": row[2].isoformat() if row[2] else None,
-                "retention_years": 5,
-            }
-
-        # Vital signs count
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT COUNT(*)
-                FROM hd_vital_signs v
-                JOIN hd_sessions s ON s.id = v.session_id
-                JOIN hd_patient_mapping p ON p.id = s.patient_id
-                WHERE p.hn = %s
-            """, (patient_hn,))
-            report["data_categories"]["vital_signs"] = {
-                "count": cur.fetchone()[0],
-                "retention_years": 5,
-            }
-
-        # Alerts count
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT COUNT(*)
-                FROM hd_clinical_alerts a
-                JOIN hd_sessions s ON s.id = a.session_id
-                JOIN hd_patient_mapping p ON p.id = s.patient_id
-                WHERE p.hn = %s
-            """, (patient_hn,))
-            report["data_categories"]["clinical_alerts"] = {
-                "count": cur.fetchone()[0],
-                "retention_years": 2,
-            }
-
-        conn.close()
-    except Exception as e:
-        logger.error("PDPA data access report failed: %s", e)
-        report["error"] = str(e)
-
-    return report
+def has_consent(cur, hn, consent_type):
+    st = status_for(cur, hn).get(consent_type)
+    return bool(st and st["status"] == "given")
 
 
-# ── Data Minimization Checklist ────────────────────────────
+def overview(cur):
+    """Per active patient: status of each consent type (for the registry page)."""
+    cur.execute("SELECT id, hn, patient_name FROM hd_patient_mapping WHERE is_active = TRUE ORDER BY patient_name")
+    pats = cur.fetchall()
+    cur.execute("""SELECT DISTINCT ON (hn, consent_type) hn, consent_type, status, created_at, via
+                   FROM hd_consents ORDER BY hn, consent_type, id DESC""")
+    st = {}
+    for hn, t, s, at, via in cur.fetchall():
+        st.setdefault(hn, {})[t] = {"status": s, "at": at.isoformat() if at else None, "via": via}
+    out = []
+    for pid, hn, name in pats:
+        out.append({"patient_id": pid, "hn": hn, "name": name, "consents": st.get(str(hn).upper(), {})})
+    return out
 
-MINIMIZATION_CHECKLIST = [
-    "✅ ไม่เก็บข้อมูลบัตรประชาชนในระบบ",
-    "✅ HN ใช้ hash สำหรับ LINE user mapping (ไม่ reverse ได้)",
-    "✅ ไม่ส่งข้อมูลผู้ป่วยไป External AI (EXTERNAL_AI_CLASSIFICATION_ALLOWED=False)",
-    "✅ Log ใช้ document_id[:8] เท่านั้น (ไม่มีชื่อ/HN ใน log)",
-    "✅ Audit trail บันทึกทุกการเข้าถึงเอกสาร",
-    "✅ Alert ล้มเหลวไม่กระทบ document flow",
-    "✅ ผลวิเคราะห์ต้องผ่าน Human Review ก่อนใช้",
-    "✅ Owner-based document isolation",
-]
+
+def withdraw_all(cur, hn, via="line", note=""):
+    """Patient withdrew via LINE: mark messaging (and cloud/processing stay — treatment needs them; physician reviews)."""
+    return record(cur, hn, "line_messaging", "withdrawn", via, "patient", note)
 
 
-def get_pdpa_status() -> dict:
-    """สรุปสถานะ PDPA compliance"""
-    return {
-        "retention_policy": DATA_RETENTION_POLICY,
-        "legal_bases": LEGAL_BASES,
-        "minimization_checklist": MINIMIZATION_CHECKLIST,
-        "external_ai_disabled": True,
-        "audit_logging": True,
-        "consent_management": True,
-    }
+def notice_text(clinic_name="คลินิกระนอง รักษ์ไต", contact=""):
+    return f"""ประกาศความเป็นส่วนตัว (Privacy Notice) — {clinic_name}
+ฉบับวันที่ {NOTICE_VERSION}
+
+1. ข้อมูลที่เก็บรวบรวม
+ชื่อ-นามสกุล, เลขประจำตัวผู้ป่วย (HN), วันเกิด, ข้อมูลการรักษาฟอกไต (น้ำหนัก, ความดัน, ค่าการฟอก, ยา, ผลตรวจทางห้องปฏิบัติการ), เอกสารทางการแพทย์ที่ท่านส่งให้คลินิก และบัญชี LINE ของท่านเมื่อท่านเลือกผูกบัญชี
+
+2. วัตถุประสงค์
+เพื่อการรักษาพยาบาล การติดตามอาการ การนัดหมาย การแจ้งเตือนความปลอดภัย การประกันคุณภาพของหน่วยไตเทียม และการเบิกจ่ายตามสิทธิการรักษา
+
+3. ฐานทางกฎหมาย
+การรักษาพยาบาลและประโยชน์สำคัญต่อชีวิต (มาตรา 26) · การส่งข้อความผ่าน LINE และการจัดเก็บบนคลาวด์ใช้ความยินยอมของท่าน ซึ่งถอนได้ทุกเมื่อโดยไม่กระทบการรักษา
+
+4. การจัดเก็บและความปลอดภัย
+ข้อมูลเก็บในระบบของคลินิกบนผู้ให้บริการคลาวด์ (Google Cloud ภูมิภาคเอเชีย) และสำเนาใน Google Drive ของคลินิก เข้าถึงได้เฉพาะบุคลากรที่ได้รับสิทธิ์ มีการบันทึกการเข้าถึงทุกครั้ง ไม่ส่งข้อมูลให้ระบบปัญญาประดิษฐ์ภายนอก เวชระเบียนเก็บตามที่กฎหมายกำหนด (ไม่น้อยกว่า 5 ปี)
+
+5. การเปิดเผย
+เฉพาะแก่โรงพยาบาลที่ส่งต่อการรักษา หน่วยงานเบิกจ่ายตามสิทธิ และหน่วยงานตามกฎหมายเท่านั้น
+
+6. สิทธิของท่าน
+ขอเข้าถึง/สำเนา แก้ไข คัดค้าน ระงับ ถอนความยินยอม และร้องเรียน — แจ้งเจ้าหน้าที่ที่หน่วยไตเทียม หรือพิมพ์ "ถอนความยินยอม" ใน LINE เพื่อหยุดรับข้อความ
+
+7. ติดต่อ
+{clinic_name}{(' · ' + contact) if contact else ''}
+"""
+
+
+def consent_form_pdf(clinic_name="คลินิกระนอง รักษ์ไต", patient_name="", hn=""):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+    from reportlab.lib import colors
+    from .daily_records import _styles, register_fonts
+    register_fonts()
+    st = _styles()
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=18 * mm, rightMargin=18 * mm, topMargin=14 * mm, bottomMargin=14 * mm,
+                            title="หนังสือให้ความยินยอม")
+    el = [Paragraph(f"หนังสือให้ความยินยอมในการเก็บรวบรวม ใช้ และเปิดเผยข้อมูลส่วนบุคคล — {clinic_name}", st["h1"]),
+          Paragraph(f"ฉบับ {NOTICE_VERSION}", st["base"]), Spacer(1, 6),
+          Paragraph(f"ข้าพเจ้า {patient_name or '…………………………………………'} HN {hn or '……………'} ได้อ่านประกาศความเป็นส่วนตัวของคลินิกแล้ว และให้ความยินยอมดังนี้", st["base"]),
+          Spacer(1, 6)]
+    rows = [["", "รายการ", "ยินยอม", "ไม่ยินยอม"]]
+    for i, (k, v) in enumerate(CONSENT_TYPES.items(), 1):
+        rows.append([str(i), v, "☐", "☐"])
+    t = Table(rows, colWidths=[8 * mm, 118 * mm, 22 * mm, 24 * mm])
+    t.setStyle(TableStyle([("FONTNAME", (0, 0), (-1, -1), "Loma"), ("FONTSIZE", (0, 0), (-1, -1), 10),
+                           ("GRID", (0, 0), (-1, -1), 0.4, colors.grey), ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#E8EEF7")),
+                           ("ALIGN", (2, 1), (-1, -1), "CENTER"), ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
+    el += [t, Spacer(1, 8),
+           Paragraph("ข้าพเจ้าทราบว่าการถอนความยินยอมข้อ 2–3 ทำได้ทุกเมื่อโดยไม่กระทบการรักษา และข้อมูลการรักษายังคงถูกเก็บตามกฎหมายเวชระเบียน", st["base"]),
+           Spacer(1, 18),
+           Table([["ลงชื่อ ………………………………… ผู้ป่วย/ผู้แทน", "ลงชื่อ ………………………………… เจ้าหน้าที่"],
+                  ["(…………………………………)", "(…………………………………)"],
+                  ["วันที่ ……/……/………", "วันที่ ……/……/………"]], colWidths=[86 * mm, 86 * mm],
+                 style=TableStyle([("FONTNAME", (0, 0), (-1, -1), "Loma"), ("FONTSIZE", (0, 0), (-1, -1), 10)])),
+           Spacer(1, 14), Paragraph(notice_text(clinic_name).replace("\n", "<br/>"), st["small"] if "small" in st else st["base"])]
+    doc.build(el)
+    return buf.getvalue()

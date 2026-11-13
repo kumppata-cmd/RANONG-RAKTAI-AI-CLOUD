@@ -3,6 +3,7 @@
 All routes under /hd/api/v1/.  Completely isolated from server.py.
 """
 
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone  # noqa: F401
 from flask import (  # noqa: F401
@@ -295,6 +296,19 @@ def hd_tv_page():
 def patient_360_page(hn):
     """Patient 360 — one timeline of sessions, alerts, labs, ESA, drugs, incidents."""
     return render_template("hd_patient_360.html", patient_hn=hn)
+
+
+@hd_web.route("/privacy")
+def privacy_page():
+    """Public privacy notice (no patient data). Linked from patient-facing messages."""
+    from .pdpa import NOTICE_VERSION, notice_text
+    txt = notice_text(get_setting_value("clinic_name", "") or "คลินิกระนอง รักษ์ไต", get_setting_value("clinic_phone", "") or "")
+    return render_template("hd_privacy.html", notice=txt, version=NOTICE_VERSION)
+
+
+@hd_web.route("/consents")
+def consents_page():
+    return render_template("hd_consents.html")
 
 
 @hd_web.route("/scheduler")
@@ -1748,6 +1762,214 @@ def dw_run_now():
         return jsonify({"error": str(e)}), 500
 
 
+# ── Go-Live R4: PDPA — consent registry, privacy notice, consent form ──
+
+@hd_bp.route("/consents", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def consents_list():
+    import os
+    import psycopg2
+    from .pdpa import CONSENT_TYPES, CREATE_INDEX_SQL, CREATE_SQL, NOTICE_VERSION, overview, status_for
+    hn = request.args.get("hn")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CREATE_SQL)
+            cur.execute(CREATE_INDEX_SQL)
+            conn.commit()
+            if hn:
+                return jsonify({"hn": hn, "consents": status_for(cur, hn), "types": CONSENT_TYPES, "version": NOTICE_VERSION})
+            items = overview(cur)
+    finally:
+        conn.close()
+    n = len(items)
+    given = sum(1 for i in items if i["consents"].get("data_processing", {}).get("status") == "given")
+    line_ok = sum(1 for i in items if i["consents"].get("line_messaging", {}).get("status") == "given")
+    return jsonify({"items": items, "types": CONSENT_TYPES, "version": NOTICE_VERSION,
+                    "counts": {"patients": n, "data_processing": given, "line_messaging": line_ok},
+                    "require_consent_for_push": (get_setting_value("patient_push_requires_consent", "off") or "off").lower() == "on"})
+
+
+@hd_bp.route("/consents", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def consents_record():
+    """{hn, types: [..] or type, status: given|withdrawn, via: paper|web|line, note}"""
+    import os
+    import psycopg2
+    from .pdpa import CONSENT_TYPES, CREATE_SQL, record
+    data = request.get_json(silent=True) or {}
+    hn = (data.get("hn") or "").strip()
+    types = data.get("types") or ([data.get("type")] if data.get("type") else [])
+    status = data.get("status", "given")
+    via = data.get("via", "paper")
+    if not hn or not types or any(t not in CONSENT_TYPES for t in types) or status not in ("given", "withdrawn"):
+        return jsonify({"error": "hn/types/status ไม่ถูกต้อง"}), 400
+    who = g.get("hd_username") or str(g.get("hd_user_id") or "")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CREATE_SQL)
+            ids = [record(cur, hn, t, status, via, who, data.get("note") or "") for t in types]
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action=f"consent.{status}", resource_type="consent", resource_id=ids[0],
+               new_values={"hn": hn, "types": types, "via": via}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "ids": ids})
+
+
+@hd_bp.route("/consents/form.pdf", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def consents_form_pdf():
+    import os
+    import psycopg2
+    from flask import Response
+    from .pdpa import consent_form_pdf
+    hn = request.args.get("hn", "")
+    name = ""
+    if hn:
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT patient_name FROM hd_patient_mapping WHERE UPPER(hn) = %s", (hn.upper(),))
+                r = cur.fetchone()
+                name = r[0] if r else ""
+        finally:
+            conn.close()
+    pdf = consent_form_pdf(get_setting_value("clinic_name", "") or "คลินิกระนอง รักษ์ไต", name, hn)
+    return Response(pdf, mimetype="application/pdf", headers={"Content-Disposition": _content_disposition(f"consent_{hn or 'blank'}.pdf")})
+
+
+def patient_withdraw_consent(hn, via="line"):
+    """Called from the LINE webhook when a linked patient types ถอนความยินยอม."""
+    import os
+    import psycopg2
+    from .pdpa import CREATE_SQL, withdraw_all
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CREATE_SQL)
+            withdraw_all(cur, hn, via)
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=None, action="consent.withdrawn", resource_type="consent", resource_id=None,
+               new_values={"hn": hn, "types": ["line_messaging"], "via": via}, ip_address="")
+    try:
+        push_nurse_group(f"ℹ️ ผู้ป่วย HN {hn} ถอนความยินยอมรับข้อความ LINE (PDPA) — ระบบหยุดส่งสรุป/แจ้งเตือนให้แล้ว", fallback_recipients=True)
+    except Exception:
+        pass
+
+
+# ── Go-Live R1: nightly full DB backup (GCS + Drive) + verify + weekly restore test ──
+
+def run_db_backup(trigger="scheduled", restore_test=False, send_line=True):
+    import os
+    import psycopg2
+    from flask import current_app
+    from . import db_backup as dbb
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"error": "no database"}
+    conn = psycopg2.connect(db_url, connect_timeout=10)
+    try:
+        blob, man = dbb.dump(conn, app_version=(os.environ.get("RENDER_GIT_COMMIT") or "")[:7])
+        restore = None
+        if restore_test:
+            try:
+                restore = dbb.restore_to_schema(conn, blob)
+                dbb.drop_restore_schema(conn, restore["schema"])
+            except Exception as e:
+                conn.rollback()
+                restore = {"ok": False, "error": str(e)[:120], "restored": {}}
+    finally:
+        conn.close()
+    verify_ok, problems = dbb.verify(blob)
+    name = dbb.archive_name()
+    now = datetime.now(timezone.utc) + timedelta(hours=7)
+    gcs_path = ""
+    try:
+        bucket = getattr(current_app.config.get("STORAGE_OBJ"), "_bucket", None)
+        if bucket is not None:
+            gcs_path = f"{dbb.GCS_PREFIX}/{now.year}/{now.month:02d}/{name}"
+            bucket.blob(gcs_path).upload_from_string(blob, content_type="application/gzip")
+    except Exception as e:
+        logger.error("db backup gcs: %s", e)
+        gcs_path = ""
+    drive_ok = False
+    try:
+        from .daily_records import drive_upload_fn
+        up = drive_upload_fn()
+        if up:
+            up(f"{dbb.DRIVE_DIR}/{now.year}/{now.month:02d}/{name}", blob, "application/gzip")
+            drive_ok = True
+    except Exception as e:
+        logger.warning("db backup drive: %s", str(e)[:80])
+    status = {"name": name, "gcs": gcs_path, "drive": drive_ok, "verify": verify_ok, "problems": problems,
+              "tables": man.get("table_count"), "rows": man.get("row_total"), "bytes": man.get("archive_bytes"),
+              "restore": {k: v for k, v in (restore or {}).items() if k != "restored"} if restore else None,
+              "at": man["created_at"], "trigger": trigger}
+    try:
+        _set_setting("last_db_backup", json.dumps(status, ensure_ascii=False, default=str))
+    except Exception:
+        pass
+    log_action(user_id=None, action="db.backup", resource_type="backup", resource_id=None,
+               new_values={k: v for k, v in status.items() if k != "problems"}, ip_address="")
+    if send_line:
+        ok_all = bool(gcs_path) and verify_ok and (restore is None or restore.get("ok"))
+        msg = dbb.line_text(man, gcs_path, drive_ok, verify_ok, problems, restore)
+        if not ok_all:
+            msg = "🚨 สำรองฐานข้อมูลมีปัญหา\n" + msg
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+        ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+        # quiet success: only on Monday (weekly restore test) or on any problem
+        if not ok_all or restore_test or trigger == "manual":
+            for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+                try:
+                    push_fn and push_fn(uid, msg)
+                except Exception as e:
+                    logger.warning("db backup push: %s", e)
+    return status
+
+
+@hd_bp.route("/ops/backup/run", methods=["POST"])
+@require_role("physician", "admin")
+def ops_backup_run():
+    data = request.get_json(silent=True) or {}
+    try:
+        st = run_db_backup(trigger="manual", restore_test=bool(data.get("restore_test")), send_line=True)
+        return jsonify(st), (200 if st.get("gcs") else 500)
+    except Exception as e:
+        logger.error("backup run: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/ops/backup/status", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def ops_backup_status():
+    import os
+    from flask import current_app
+    raw = get_setting_value("last_db_backup", "")
+    try:
+        last = json.loads(raw) if raw else None
+    except Exception:
+        last = None
+    recent = []
+    try:
+        bucket = getattr(current_app.config.get("STORAGE_OBJ"), "_bucket", None)
+        if bucket is not None:
+            from . import db_backup as dbb
+            blobs = sorted(bucket.list_blobs(prefix=dbb.GCS_PREFIX + "/"), key=lambda b: b.name)[-14:]
+            recent = [{"name": b.name.split("/")[-1], "bytes": b.size, "updated": b.updated.isoformat() if b.updated else None} for b in blobs]
+    except Exception as e:
+        logger.info("backup list: %s", e)
+    return jsonify({"last": last, "recent": recent[::-1]})
+
+
 # ── B11: CI / deploy status → physician LINE ──────────────
 
 @hd_bp.route("/ops/ci-status", methods=["POST"])
@@ -2667,6 +2889,22 @@ def send_patient_summary(session_id, summary=None, trigger="auto"):
     uid = _resolve_patient_line_id(hn)
     if not uid:
         return {"sent": False, "reason": "not_linked", "message": "ผู้ป่วยยังไม่ได้ผูก LINE"}
+    # PDPA: respect a withdrawn consent always; require a recorded consent only when ⚙️ says so
+    try:
+        import psycopg2
+        from .pdpa import status_for
+        _c = psycopg2.connect(os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", ""), connect_timeout=5)
+        try:
+            with _c.cursor() as cur:
+                st = status_for(cur, hn).get("line_messaging")
+        finally:
+            _c.close()
+        if st and st["status"] == "withdrawn":
+            return {"sent": False, "reason": "consent_withdrawn", "message": "ผู้ป่วยถอนความยินยอมรับข้อความ LINE"}
+        if (get_setting_value("patient_push_requires_consent", "off") or "off").lower() == "on" and not (st and st["status"] == "given"):
+            return {"sent": False, "reason": "no_consent", "message": "ยังไม่มีบันทึกความยินยอมรับข้อความ LINE (PDPA)"}
+    except Exception as e:
+        logger.warning("consent check: %s", e)
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     history = []
     try:
@@ -4367,6 +4605,7 @@ def update_settings():
         "uf_rate_max", "uf_rate_caution", "dw_review_every", "dw_step_kg", "dw_min_interval_days",   # DW Autopilot
         "anemia_ferritin_low", "anemia_tsat_low", "anemia_ferritin_high", "anemia_eri_high", "anemia_eri_mod",
         "hbv_beds", "hcv_beds", "scheduler_push_1800",   # Smart Bed Scheduler
+        "patient_push_requires_consent", "clinic_phone",   # PDPA
         "esa_target_low", "esa_target_high", "esa_hold_above",   # ESA Autopilot protocol
         "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
     ]

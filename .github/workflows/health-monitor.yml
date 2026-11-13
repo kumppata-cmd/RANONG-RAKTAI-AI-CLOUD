@@ -1,4 +1,9 @@
-# ตรวจสุขภาพ production ทุก 30 นาที — ไม่ต้องใช้บริการ/บัญชีภายนอก
+# ตรวจสุขภาพ production ทุก 5 นาที (Go-Live R2 — uptime monitor) — ไม่ต้องใช้บริการภายนอก
+#
+# แจ้ง LINE ตรง ๆ จาก GitHub (ไม่ผ่านแอป เพราะแอปอาจล่มอยู่) ถ้าตั้ง repo secrets:
+#   LINE_CHANNEL_ACCESS_TOKEN  = token ของ LINE OA (เดียวกับบน Render)
+#   LINE_ALERT_USER_IDS        = userId ของหมอ (คั่นด้วย , ได้)
+# ส่งเฉพาะตอน "ล่มครั้งแรก" และ "กลับมาปกติ" (ไม่สแปม) — ใช้ GitHub Issue เป็นตัวจำสถานะ
 #
 # ตรวจ /health ว่า:
 #   - ตอบ HTTP 200
@@ -15,7 +20,7 @@ name: Production Health Monitor
 
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/5 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -71,6 +76,7 @@ jobs:
           exit 0
 
       - name: "เปิด/อัปเดต/ปิด issue ตามผล"
+        id: issue
         uses: actions/github-script@v7
         env:
           HEALTHY: ${{ steps.probe.outputs.healthy }}
@@ -87,16 +93,43 @@ jobs:
               owner, repo, state: 'open', labels: 'production-alert', per_page: 5,
             });
             const existing = open.data.find(i => i.title === title);
+            // transition: 'down' (first failure), 'up' (recovered), '' (no change)
+            core.setOutput('transition', !healthy && !existing ? 'down' : (healthy && existing ? 'up' : ''));
+            core.setOutput('problems_line', problems.split('\n').slice(0, 3).join(' | '));
             if (!healthy) {
               const body = `**เวลา:** ${now} (ไทย)\n**URL:** ${process.env.HEALTH_URL}\n\n**ปัญหาที่พบ:**\n\`\`\`\n${problems}\n\`\`\`\n\nตรวจที่ Render Dashboard → Logs / Events\nissue นี้จะปิดเองเมื่อ health กลับมาปกติ`;
               if (existing) {
                 await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `ยังผิดปกติ — ${now}\n\`\`\`\n${problems}\n\`\`\`` });
-                core.setFailed('production unhealthy (issue updated)');
+                core.warning('production still unhealthy (issue updated)');
               } else {
                 await github.rest.issues.create({ owner, repo, title, body, labels: ['production-alert'] });
-                core.setFailed('production unhealthy (issue opened)');
+                core.warning('production unhealthy (issue opened)');
               }
             } else if (existing) {
               await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body: `✅ กลับมาปกติแล้ว — ${now} (indexed_documents=${process.env.DOCS})` });
               await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
             }
+
+      - name: "แจ้ง LINE หมอ (เฉพาะตอนล่ม/กลับมา) — ข้ามถ้าไม่ได้ตั้ง secret"
+        if: steps.issue.outputs.transition != '' && env.LINE_TOKEN != ''
+        env:
+          LINE_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_TO: ${{ secrets.LINE_ALERT_USER_IDS }}
+          TRANSITION: ${{ steps.issue.outputs.transition }}
+          PROBLEMS: ${{ steps.issue.outputs.problems_line }}
+        shell: bash
+        run: |
+          now=$(TZ=Asia/Bangkok date '+%d/%m %H:%M')
+          if [ "$TRANSITION" = "down" ]; then
+            text="🚨 ระบบ RANONG-RAKTAI ล่ม/ผิดปกติ ($now)\n$PROBLEMS\nตรวจ Render → Logs · ใช้แบบฟอร์มกระดาษสำรองไปก่อน"
+          else
+            text="✅ ระบบกลับมาปกติแล้ว ($now)"
+          fi
+          IFS=',' read -ra ids <<< "$LINE_TO"
+          for id in "${ids[@]}"; do
+            id=$(echo "$id" | xargs)
+            [ -z "$id" ] && continue
+            curl -sS -X POST https://api.line.me/v2/bot/message/push \
+              -H "Authorization: Bearer $LINE_TOKEN" -H "Content-Type: application/json" \
+              -d "{\"to\":\"$id\",\"messages\":[{\"type\":\"text\",\"text\":\"$text\"}]}" -o /dev/null -w "LINE push → %{http_code}\n" || true
+          done

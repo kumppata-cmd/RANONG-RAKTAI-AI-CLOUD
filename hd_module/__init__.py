@@ -157,6 +157,9 @@ def _run_hd_migrations():
                 # manual lab form: adequacy values
                 "ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS kt_v NUMERIC(4,2)",
                 "ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS urr NUMERIC(5,1)",
+                # PDPA consents
+                __import__("hd_module.pdpa", fromlist=["CREATE_SQL"]).CREATE_SQL,
+                __import__("hd_module.pdpa", fromlist=["CREATE_INDEX_SQL"]).CREATE_INDEX_SQL,
                 # Dry Weight Autopilot proposals
                 __import__("hd_module.dw_autopilot", fromlist=["CREATE_SQL"]).CREATE_SQL,
                 # ตรวจระบบน้ำ RO ประจำวัน (Hardness / Free Cl / Total Cl)
@@ -593,6 +596,16 @@ def _start_daily_reminder_scheduler(app):
                                 logger.info("Morning brief: %s", res)
                             except Exception as ex:
                                 logger.error("Morning brief failed: %s", ex)
+                # Go-Live R1: 23:00 Thai time — full DB backup (+ restore test on Mondays)
+                if now.hour == 23 and now.minute < 30 and _claim_once(app, "db_backup", now.date()):
+                    with app.app_context():
+                        try:
+                            from .blueprint import run_db_backup
+                            st = run_db_backup(trigger="scheduled", restore_test=(now.weekday() == 0))
+                            logger.info("DB backup: %s tables %s rows gcs=%s drive=%s verify=%s",
+                                        st.get("tables"), st.get("rows"), bool(st.get("gcs")), st.get("drive"), st.get("verify"))
+                        except Exception as ex:
+                            logger.error("DB backup failed: %s", ex)
                 # 22:30 Thai time: export today's records (CSV + PDFs) to GCS
                 if now.hour == 22 and now.minute >= 30 and last_export_date != now.date():
                     last_export_date = now.date()

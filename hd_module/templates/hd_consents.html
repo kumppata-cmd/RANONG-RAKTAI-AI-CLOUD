@@ -1,0 +1,75 @@
+{% extends "hd_base.html" %}
+{% block title %}ความยินยอม PDPA{% endblock %}
+{% block page_title %}🔐 ทะเบียนความยินยอม (PDPA){% endblock %}
+{% block nav_consents %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.cs-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.cs-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px}
+.cs-stat{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;text-align:center}
+.cs-stat .n{font-size:1.4rem;font-weight:800}.cs-stat .l{font-size:.7rem;color:var(--fg-muted)}
+.cs-tbl{width:100%;border-collapse:collapse;font-size:.82rem;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden}
+.cs-tbl th,.cs-tbl td{padding:7px 8px;border-bottom:1px solid var(--border);text-align:left;vertical-align:middle}
+.cs-tbl th{font-size:.72rem;color:var(--fg-muted);background:var(--bg)}
+.ok{color:var(--success);font-weight:700}.no{color:var(--fg-muted)}.wd{color:var(--danger);font-weight:700}
+.cs-btn{font-size:.72rem;padding:3px 8px}
+.cs-note{font-size:.72rem;color:var(--fg-muted);margin-top:12px}
+.cs-wrap{overflow-x:auto}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="cs-bar">
+  <input id="q" class="form-control" style="width:220px" placeholder="ค้นหาชื่อ/HN" oninput="render()">
+  <select id="flt" class="form-control" style="width:auto" onchange="render()">
+    <option value="">ทั้งหมด</option><option value="missing">ยังไม่มีความยินยอม</option><option value="withdrawn">ถอนแล้ว</option><option value="given">ให้แล้ว</option>
+  </select>
+  <span style="flex:1"></span>
+  <a class="btn btn-secondary" id="blankForm" href="#" style="text-decoration:none">📄 แบบฟอร์มเปล่า (PDF)</a>
+  <a class="btn btn-secondary" href="/hd/privacy" target="_blank" rel="noopener" style="text-decoration:none">🔐 ประกาศความเป็นส่วนตัว</a>
+</div>
+<div class="cs-stats" id="stats"></div>
+<div id="msg" style="font-size:.8rem;min-height:1.2em;margin-bottom:6px"></div>
+<div class="cs-wrap"><table class="cs-tbl"><thead><tr><th>ผู้ป่วย</th><th>HN</th><th>เก็บ/ใช้ข้อมูล</th><th>รับข้อความ LINE</th><th>เก็บบนคลาวด์</th><th>บันทึก</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="cs-note">บันทึกเมื่อผู้ป่วยลงชื่อในแบบฟอร์มกระดาษ (พิมพ์ต่อคนได้จากปุ่ม 📄 ในแถว) · "ให้ทั้งหมด" = 3 รายการพร้อมกัน · ผู้ป่วยถอนเองได้โดยพิมพ์ "ถอนความยินยอม" ใน LINE · ⚙️ "บังคับต้องมีความยินยอมก่อนส่ง LINE ถึงผู้ป่วย" เปิดเมื่อเก็บครบแล้ว · เวชระเบียนไม่ถูกลบตามคำขอ (กฎหมายเวชระเบียน) — คำขอลบให้แพทย์พิจารณาและบันทึกใน audit</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let ITEMS = [];
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function tok(){ try { return '?token=' + encodeURIComponent(getHdToken()||''); } catch(e){ return ''; } }
+function cell(c){ if(!c) return '<span class="no">—</span>'; const d = c.at ? new Date(c.at).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'}) : '';
+  return c.status==='given' ? `<span class="ok">✓ ${d}</span>` : `<span class="wd">✗ ถอน ${d}</span>`; }
+async function load(){
+  try{ const r = await hdFetch('/hd/api/v1/consents'); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    ITEMS = d.items||[]; const c = d.counts||{};
+    document.getElementById('stats').innerHTML = `<div class="cs-stat"><div class="n">${c.patients||0}</div><div class="l">ผู้ป่วย active</div></div>
+      <div class="cs-stat"><div class="n" style="color:var(--success)">${c.data_processing||0}</div><div class="l">ยินยอมเก็บ/ใช้ข้อมูล</div></div>
+      <div class="cs-stat"><div class="n" style="color:var(--accent)">${c.line_messaging||0}</div><div class="l">ยินยอมรับ LINE</div></div>
+      <div class="cs-stat"><div class="n">${d.require_consent_for_push?'เปิด':'ปิด'}</div><div class="l">บังคับยินยอมก่อนส่ง LINE</div></div>`;
+    document.getElementById('blankForm').href = '/hd/api/v1/consents/form.pdf' + tok();
+    render();
+  }catch(e){ document.getElementById('msg').textContent = '❌ ' + (e.message||e); }
+}
+function render(){
+  const q = (document.getElementById('q').value||'').toLowerCase(), f = document.getElementById('flt').value;
+  const rows = ITEMS.filter(i => (!q || (i.name||'').toLowerCase().includes(q) || String(i.hn).includes(q)))
+    .filter(i => { const dp = i.consents.data_processing; if(f==='missing') return !dp; if(f==='given') return dp && dp.status==='given'; if(f==='withdrawn') return Object.values(i.consents).some(c=>c.status==='withdrawn'); return true; });
+  document.getElementById('rows').innerHTML = rows.map(i => `<tr>
+    <td>${esc(i.name)}</td><td>${esc(i.hn)}</td><td>${cell(i.consents.data_processing)}</td><td>${cell(i.consents.line_messaging)}</td><td>${cell(i.consents.cloud_storage)}</td>
+    <td style="white-space:nowrap"><button class="btn btn-primary cs-btn" onclick="rec('${esc(i.hn)}','given')">✓ ให้ทั้งหมด</button>
+      <button class="btn btn-secondary cs-btn" onclick="rec('${esc(i.hn)}','withdrawn')">✗ ถอน LINE</button>
+      <a class="btn btn-secondary cs-btn" href="/hd/api/v1/consents/form.pdf?hn=${encodeURIComponent(i.hn)}&${tok().slice(1)}" style="text-decoration:none">📄</a></td></tr>`).join('') || '<tr><td colspan="6" style="text-align:center;color:var(--fg-muted)">ไม่มีรายการ</td></tr>';
+}
+async function rec(hn, status){
+  const msg = document.getElementById('msg');
+  const types = status==='given' ? ['data_processing','line_messaging','cloud_storage'] : ['line_messaging'];
+  try{ const r = await hdFetch('/hd/api/v1/consents', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({hn, types, status, via:'paper'})});
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status); msg.textContent = `✅ บันทึก HN ${hn} (${status==='given'?'ให้ความยินยอม':'ถอน LINE'})`; load(); }
+  catch(e){ msg.textContent = '❌ ' + (e.message||e); }
+}
+load();
+</script>
+{% endblock %}
