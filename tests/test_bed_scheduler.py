@@ -35,10 +35,25 @@ class SchedulerTests(unittest.TestCase):
         beds = [a["bed"] for a in d["shifts"]["morning"]]
         self.assertNotIn(2, beds); self.assertEqual(len(beds), 2); self.assertEqual(len(d["unassigned"]), 2)
 
+    def test_hbv_bed_open_when_no_hbv_patient(self):
+        # 3 beds, bed 3 = HBV zone, 3 normal patients, nobody HBsAg+ → bed 3 may be used (last)
+        ctx = CTX(total_beds=3, hbv_beds=[3], patients=[P(1, "a", ["จ"], bed=1), P(2, "b", ["จ"], bed=2), P(3, "c", ["จ"])])
+        d = plan_day(ctx, date(2026, 11, 16))
+        beds = sorted(a["bed"] for a in d["shifts"]["morning"])
+        self.assertEqual(beds, [1, 2, 3]); self.assertEqual(d["unassigned"], [])
+        self.assertFalse(d["hbv_in_shift"]["morning"])
+        self.assertTrue(all(not w.startswith("⛔") for a in d["shifts"]["morning"] for w in a["warnings"]))
+        # once an HBsAg+ patient joins the shift, bed 3 is reserved again
+        ctx["patients"].append(P(4, "d", ["จ"], hbv=True))
+        d2 = plan_day(ctx, date(2026, 11, 16))
+        m = {a["name"]: a["bed"] for a in d2["shifts"]["morning"]}
+        self.assertEqual(m["d"], 3); self.assertEqual(len(d2["unassigned"]), 1)
+
     def test_check_bed_warnings(self):
         ctx = CTX()
         self.assertTrue(any(w.startswith("⛔") for w in check_bed(ctx, P(1, "x", [], hbv=True), 1)))
         self.assertTrue(any(w.startswith("⛔") for w in check_bed(ctx, P(1, "x", []), 5)))
+        self.assertFalse(any(w.startswith("⛔") for w in check_bed(ctx, P(1, "x", []), 5, hbv_in_shift=False)))
         self.assertEqual(check_bed(ctx, P(1, "x", []), 1), [])
 
     def test_week_and_text(self):

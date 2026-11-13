@@ -1314,7 +1314,18 @@ def scheduler_check():
         bed = int(data.get("bed"))
     except (TypeError, ValueError):
         return jsonify({"error": "bed"}), 400
-    return jsonify({"warnings": check_bed(ctx, p, bed), "patient": {"name": p["name"], "hbv": p["hbv"], "hcv": p["hcv"]}})
+    # does an HBsAg+ patient dialyse in that date+shift? (planned ones + the one being moved)
+    hbv_in_shift = True
+    try:
+        from datetime import date as _d
+        from .bed_scheduler import plan_day
+        if data.get("date") and data.get("shift"):
+            dp = plan_day(ctx, _d.fromisoformat(data["date"]))
+            hbv_in_shift = any(a["hbv"] for a in dp["shifts"].get(data["shift"], [])) or p["hbv"]
+    except Exception:
+        pass
+    return jsonify({"warnings": check_bed(ctx, p, bed, hbv_in_shift=hbv_in_shift),
+                    "patient": {"name": p["name"], "hbv": p["hbv"], "hcv": p["hcv"]}})
 
 
 @hd_bp.route("/scheduler/apply", methods=["POST"])
@@ -1342,11 +1353,12 @@ def scheduler_apply():
         if overrides:
             by_id = {p["id"]: p for p in ctx["patients"]}
             rows = [a for a in plan["shifts"][shift] if a["patient_id"] not in overrides.values() and a["bed"] not in overrides]
+            hbv_in_shift = any(a["hbv"] for a in rows) or any(by_id[pid]["hbv"] for pid in overrides.values() if pid in by_id)
             for bed, pid in overrides.items():
                 p = by_id.get(pid)
                 if p:
                     rows.append({"bed": bed, "patient_id": pid, "hn": p["hn"], "name": p["name"], "hbv": p["hbv"], "hcv": p["hcv"],
-                                 "warnings": check_bed(ctx, p, bed)})
+                                 "warnings": check_bed(ctx, p, bed, hbv_in_shift=hbv_in_shift)})
             plan["shifts"][shift] = sorted(rows, key=lambda a: a["bed"])
         res = apply_day(conn, plan, shift, nurse_id=g.get("hd_user_id"))
     finally:

@@ -131,8 +131,10 @@ def zone_of(ctx, bed):
     return "normal"
 
 
-def check_bed(ctx, patient, bed, occupied=None):
-    """→ list of warnings (empty = fine). Hard rules are prefixed '⛔'."""
+def check_bed(ctx, patient, bed, occupied=None, hbv_in_shift=True):
+    """→ list of warnings (empty = fine). Hard rules are prefixed '⛔'.
+    hbv_in_shift: an HBsAg+ patient dialyses in this shift → the HBV bed is reserved for them;
+    when the shift has no HBsAg+ patient the bed may be used by others (clinic policy 13 Nov 2026)."""
     w = []
     if bed in ctx["bad_beds"]:
         w.append(f"⛔ เตียง {bed}: {ctx['bad_beds'][bed]}")
@@ -140,7 +142,10 @@ def check_bed(ctx, patient, bed, occupied=None):
     if patient["hbv"] and ctx["hbv_beds"] and z != "hbv":
         w.append(f"⛔ ผู้ป่วย HBsAg+ ต้องใช้เตียงโซน HBV ({', '.join(map(str, ctx['hbv_beds']))})")
     if not patient["hbv"] and z == "hbv":
-        w.append("⛔ เตียงโซน HBV — ห้ามใช้กับผู้ป่วย HBsAg ลบ")
+        if hbv_in_shift:
+            w.append("⛔ เตียงโซน HBV — รอบนี้มีผู้ป่วย HBsAg+ ห้ามใช้กับผู้ป่วยอื่น")
+        else:
+            w.append("ℹ️ เตียงโซน HBV — รอบนี้ไม่มีผู้ป่วย HBsAg+ ใช้ได้ (ล้างเครื่องตามมาตรฐาน)")
     if patient["hcv"] and ctx["hcv_beds"] and z != "hcv":
         w.append(f"⚠️ ผู้ป่วย anti-HCV+ ควรใช้เตียงโซน HCV ({', '.join(map(str, ctx['hcv_beds']))})")
     if not patient["hcv"] and z == "hcv" and ctx["hcv_beds"]:
@@ -158,14 +163,18 @@ def plan_day(ctx, day):
     for sh in SHIFTS:
         group = sorted([p for p in due if p["usual_shift"] == sh], key=lambda p: (p["usual_bed"] or 999, p["name"]))
         occupied = {}
+        hbv_in_shift = any(p["hbv"] for p in group)
         free_normal = [b for b in range(1, ctx["total_beds"] + 1) if b not in ctx["bad_beds"] and zone_of(ctx, b) == "normal"]
         free_hbv = [b for b in ctx["hbv_beds"] if b not in ctx["bad_beds"]]
         free_hcv = [b for b in ctx["hcv_beds"] if b not in ctx["bad_beds"]]
+        if not hbv_in_shift:
+            # no HBsAg+ patient this shift → the HBV bed is open to everyone (used last, so it stays free as long as possible)
+            free_normal = free_normal + free_hbv
         # HBV first (scarce beds), then HCV, then the rest
         for p in sorted(group, key=lambda p: (0 if p["hbv"] else (1 if p["hcv"] else 2))):
             pool = free_hbv if (p["hbv"] and ctx["hbv_beds"]) else (free_hcv if (p["hcv"] and ctx["hcv_beds"]) else free_normal)
             bed = None
-            if p["usual_bed"] in pool and p["usual_bed"] not in occupied:
+            if p["usual_bed"] in pool and p["usual_bed"] not in occupied and (hbv_in_shift or p["hbv"] or zone_of(ctx, p["usual_bed"]) != "hbv" or len(group) >= len(free_normal)):
                 bed = p["usual_bed"]
             else:
                 for b in pool:
@@ -180,9 +189,10 @@ def plan_day(ctx, day):
             out["shifts"][sh].append({"bed": bed, "patient_id": p["id"], "hn": p["hn"], "name": p["name"], "access": p["access"],
                                       "hbv": p["hbv"], "hcv": p["hcv"], "zone": zone_of(ctx, bed),
                                       "moved": bool(p["usual_bed"] and p["usual_bed"] != bed),
-                                      "warnings": check_bed(ctx, p, bed)})
+                                      "warnings": check_bed(ctx, p, bed, hbv_in_shift=hbv_in_shift)})
         out["shifts"][sh].sort(key=lambda a: a["bed"])
         out["load"][sh] = len(out["shifts"][sh])
+        out.setdefault("hbv_in_shift", {})[sh] = hbv_in_shift
     return out
 
 
