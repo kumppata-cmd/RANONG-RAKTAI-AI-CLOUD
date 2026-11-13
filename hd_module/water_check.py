@@ -64,7 +64,12 @@ CREATE TABLE IF NOT EXISTS hd_water_inbox (
     record_id INTEGER REFERENCES hd_water_daily(id)
 )
 """
-CREATE_SQL = CREATE_SQL + ";\n" + CREATE_INDEX_SQL + ";\n" + CREATE_INBOX_SQL + ";"
+ALTER_SQL = [
+    "ALTER TABLE hd_water_daily ADD COLUMN IF NOT EXISTS removed_photos JSONB DEFAULT '[]'::jsonb",
+    "ALTER TABLE hd_water_daily ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMP",
+    "ALTER TABLE hd_water_daily ADD COLUMN IF NOT EXISTS deleted_by VARCHAR(100)",
+]
+CREATE_SQL = CREATE_SQL + ";\n" + CREATE_INDEX_SQL + ";\n" + CREATE_INBOX_SQL + ";\n" + ";\n".join(ALTER_SQL) + ";"
 
 
 def _thai_now():
@@ -283,6 +288,57 @@ def archive(conn, storage, rec, vals, ev, drive_upload=None, tester_name="", ext
     return stored, drive_out
 
 
+def add_photos(conn, storage, rid, photo_blobs, drive_upload=None):
+    """Append uploaded photos to an existing record (GCS dated folder + Drive). Originals are never deleted."""
+    bucket = getattr(storage, "_bucket", None)
+    with conn.cursor() as cur:
+        cur.execute("SELECT check_date, shift, photos, drive FROM hd_water_daily WHERE id = %s AND deleted_at IS NULL", (rid,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        day, shift, photos, drive = r[0], r[1], list(r[2] or []), list(r[3] or [])
+        n0 = sum(1 for p in photos if p.endswith(".jpg"))
+        stamp = _thai_now().strftime("%H%M%S")
+        for j, data in enumerate(photo_blobs, 1):
+            name = f"{day.isoformat()}_{SHIFT_TH.get(shift, shift)}_add{stamp}_{n0 + j}.jpg"
+            gpath = f"{record_dir(day)}/{name}"
+            if bucket is not None:
+                try:
+                    bucket.blob(gpath).upload_from_string(data, content_type="image/jpeg")
+                    photos.append(gpath)
+                except Exception as e:
+                    logger.warning("water add photo gcs: %s", e)
+            if drive_upload:
+                try:
+                    drive_upload(f"{drive_dir(day)}/{name}", data, "image/jpeg")
+                    drive.append(f"{drive_dir(day)}/{name}")
+                except Exception as e:
+                    logger.warning("water add photo drive: %s", str(e)[:80])
+        cur.execute("UPDATE hd_water_daily SET photos = %s, drive = %s WHERE id = %s", (json.dumps(photos), json.dumps(drive), rid))
+    conn.commit()
+    return photos
+
+
+def remove_photo(conn, rid, idx):
+    """Unlink photo #idx from the record (kept in removed_photos; the file itself stays in GCS/Drive)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT photos, removed_photos FROM hd_water_daily WHERE id = %s AND deleted_at IS NULL", (rid,))
+        r = cur.fetchone()
+        if not r:
+            return None
+        photos, removed = list(r[0] or []), list(r[1] or [])
+        jpgs = [p for p in photos if p.endswith(".jpg")]
+        if idx < 0 or idx >= len(jpgs):
+            return False
+        gone = jpgs[idx]
+        photos.remove(gone)
+        removed.append(gone)
+        cur.execute("UPDATE hd_water_daily SET photos = %s, removed_photos = %s WHERE id = %s",
+                    (json.dumps(photos), json.dumps(removed), rid))
+    conn.commit()
+    return True
+
+
 def reply_text(rec, ev, tester_name="", n_photos=0, drive_ok=False):
     d = rec["date"]
     head = "✅ ผ่านทุกค่า" if ev["status"] == "pass" else ("❌ ไม่ผ่าน" if ev["status"] == "fail" else "⚠️ บันทึกบางค่า")
@@ -314,7 +370,7 @@ HELP = ("💧 บันทึกตรวจน้ำ RO: ส่งรูปข�
 def latest(cur, n=1):
     cur.execute("""SELECT check_date, shift, sample_point, hardness_text, free_cl, total_cl, status, fails, tester_name,
                           jsonb_array_length(COALESCE(photos,'[]'::jsonb)) FROM hd_water_daily
-                   ORDER BY check_date DESC, id DESC LIMIT %s""", (n,))
+                   WHERE deleted_at IS NULL ORDER BY check_date DESC, id DESC LIMIT %s""", (n,))
     return cur.fetchall()
 
 

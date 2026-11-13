@@ -24,6 +24,10 @@
 .w-item .m{font-size:.76rem;color:var(--fg-muted);margin-top:4px}
 .w-item .ph{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
 .w-item .ph img{height:64px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in}
+.w-x{position:absolute;top:-6px;right:-6px;border:none;background:var(--danger);color:#fff;border-radius:50%;width:20px;height:20px;font-size:.7rem;cursor:pointer;line-height:1}
+.w-add{height:64px;width:64px;border:1px dashed var(--border);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:1.3rem;cursor:pointer;color:var(--fg-muted)}
+.w-act{display:flex;gap:8px;align-items:center;margin-top:8px}
+.w-actmsg{font-size:.74rem;color:var(--fg-muted)}
 .w-form{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px}
 .w-form h4{margin:0 0 8px;font-size:.9rem}
 .w-form .row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
@@ -105,9 +109,38 @@ async function load(){
       <div class="v"><span>Hardness <b>${esc(it.hardness_text||fmt(it.hardness))}</b></span><span>Free Cl <b>${fmt(it.free_cl)}</b></span><span>Total Cl <b>${fmt(it.total_cl)}</b></span></div>
       ${it.fails?`<div class="m" style="color:var(--danger)">${esc(it.fails)}</div>`:''}
       <div class="m">ผู้ตรวจ ${esc(it.tester||'-')} · ${it.source==='web'?'หน้าเว็บ':'LINE กลุ่ม'}${it.note?' · '+esc(it.note):''}${(it.drive||[]).length?' · ☁️ Drive':''}</div>
-      ${(it.photos||[]).filter(p=>p.endsWith('.jpg')).length ? `<div class="ph">${(it.photos||[]).filter(p=>p.endsWith('.jpg')).map((p,i)=>`<img loading="lazy" src="/hd/api/v1/water-ro/${it.id}/photo/${i}${TOKEN_Q}" onclick="zoom(this.src)" alt="รูป ${i+1}">`).join('')}</div>` : ''}
+      <div class="ph">${(it.photos||[]).filter(p=>p.endsWith('.jpg')).map((p,i)=>`<div style="position:relative"><img loading="lazy" src="/hd/api/v1/water-ro/${it.id}/photo/${i}${TOKEN_Q}" onclick="zoom(this.src)" alt="รูป ${i+1}"><button type="button" class="w-x" title="เอารูปนี้ออก" onclick="removePhoto(${it.id},${i},this)">✕</button></div>`).join('')}
+        <label class="w-add" title="เพิ่มรูป">📷<input type="file" accept="image/*" capture="environment" multiple style="display:none" onchange="addPhotos(${it.id}, this.files, this)"></label>
+      </div>
+      <div class="w-act"><button type="button" class="btn btn-secondary" style="font-size:.72rem;padding:3px 8px" onclick="delRecord(${it.id}, this)">🗑 ลบรายการ</button><span class="w-actmsg"></span></div>
     </div>`).join('');
   }catch(e){ list.innerHTML = `<div class="w-empty">โหลดไม่สำเร็จ: ${esc(e.message||e)}</div>`; }
+}
+/* edit photos on a saved record: resize → POST; ✕ unlinks (file kept); two-tap delete of the record */
+function shrink(file){ return new Promise(res => { const img = new Image(); const url = URL.createObjectURL(file);
+  img.onload = () => { const s = Math.min(1, 1600 / Math.max(img.width, img.height)); const c = document.createElement('canvas');
+    c.width = Math.round(img.width*s); c.height = Math.round(img.height*s); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+    c.toBlob(b => { URL.revokeObjectURL(url); res(b); }, 'image/jpeg', .85); };
+  img.onerror = () => res(null); img.src = url; }); }
+async function addPhotos(id, files, inp){
+  const msg = inp.closest('.w-item').querySelector('.w-actmsg'); msg.textContent = 'กำลังอัปโหลดรูป…';
+  const fd = new FormData();
+  for (const f of Array.from(files||[]).slice(0,4)) { const b = await shrink(f); if(b) fd.append('photos', b, 'photo.jpg'); }
+  try{ const r = await hdFetch(`/hd/api/v1/water-ro/${id}/photos`, {method:'POST', body: fd}); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    msg.textContent = `✅ เพิ่มรูปแล้ว (รวม ${d.photos})`; load(); }catch(e){ msg.textContent = '❌ ' + (e.message||e); }
+  inp.value = '';
+}
+async function removePhoto(id, idx, btn){
+  if(btn.dataset.armed !== '1'){ btn.dataset.armed = '1'; btn.textContent = '?'; btn.title = 'กดอีกครั้งเพื่อยืนยัน'; setTimeout(()=>{ btn.dataset.armed=''; btn.textContent='✕'; }, 3000); return; }
+  const msg = btn.closest('.w-item').querySelector('.w-actmsg');
+  try{ const r = await hdFetch(`/hd/api/v1/water-ro/${id}/photo/${idx}`, {method:'DELETE'}); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    msg.textContent = 'เอารูปออกจากรายการแล้ว (ไฟล์ต้นฉบับยังเก็บไว้)'; load(); }catch(e){ msg.textContent = '❌ ' + (e.message||e); }
+}
+async function delRecord(id, btn){
+  const msg = btn.closest('.w-item').querySelector('.w-actmsg');
+  if(btn.dataset.armed !== '1'){ btn.dataset.armed = '1'; btn.textContent = '⚠️ ยืนยันลบ?'; msg.textContent = 'กดอีกครั้งภายใน 4 วิ เพื่อลบ'; setTimeout(()=>{ btn.dataset.armed=''; btn.textContent='🗑 ลบรายการ'; msg.textContent=''; }, 4000); return; }
+  try{ const r = await hdFetch(`/hd/api/v1/water-ro/${id}`, {method:'DELETE'}); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status); load(); }
+  catch(e){ msg.textContent = '❌ ' + (e.message||e); }
 }
 function zoom(src){ document.getElementById('zoomImg').src = src; document.getElementById('zoom').style.display = 'flex'; }
 

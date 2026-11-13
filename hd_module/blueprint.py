@@ -814,7 +814,8 @@ def water_ro_list():
             conn.commit()
             cur.execute("""SELECT id, check_date, shift, sample_point, hardness_ppm, hardness_text, free_cl, total_cl, status,
                                   fails, tester_name, source, note, photos, drive, created_at, raw_text
-                           FROM hd_water_daily WHERE check_date >= CURRENT_DATE - %s ORDER BY check_date DESC, id DESC""", (days,))
+                           FROM hd_water_daily WHERE check_date >= CURRENT_DATE - %s AND deleted_at IS NULL
+                           ORDER BY check_date DESC, id DESC""", (days,))
             items = [{"id": r[0], "date": r[1].isoformat(), "shift": r[2], "sample_point": r[3],
                       "hardness": float(r[4]) if r[4] is not None else None, "hardness_text": r[5],
                       "free_cl": float(r[6]) if r[6] is not None else None, "total_cl": float(r[7]) if r[7] is not None else None,
@@ -899,6 +900,85 @@ def water_ro_add():
         logger.warning("water web push: %s", e)
     return jsonify({"ok": True, "id": rec["id"], "status": ev["status"], "fails": ev["fails"], "lines": ev["lines"],
                     "photos": len(photos), "drive": len(drive_out)})
+
+
+@hd_bp.route("/water-ro/<int:rid>/photos", methods=["POST"])
+@require_role("physician", "nurse")
+def water_ro_add_photos(rid):
+    """Add up to 4 more photos to an existing record (multipart 'photos')."""
+    from flask import current_app
+    from .water_check import add_photos
+    import os
+    import psycopg2
+    blobs = []
+    for f in request.files.getlist("photos")[:4]:
+        b = f.read()
+        if b and len(b) <= 8 * 1024 * 1024 and (f.mimetype or "").startswith("image/"):
+            blobs.append(b)
+    if not blobs:
+        return jsonify({"error": "ไม่มีรูป"}), 400
+    drive_up = None
+    try:
+        from .daily_records import drive_upload_fn
+        drive_up = drive_upload_fn()
+    except Exception:
+        pass
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        photos = add_photos(conn, current_app.config.get("STORAGE_OBJ"), rid, blobs, drive_upload=drive_up)
+    finally:
+        conn.close()
+    if photos is None:
+        return jsonify({"error": "not found"}), 404
+    log_action(user_id=g.get("hd_user_id"), action="water.photos_added", resource_type="water", resource_id=rid,
+               new_values={"added": len(blobs)}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "photos": sum(1 for p in photos if p.endswith(".jpg"))})
+
+
+@hd_bp.route("/water-ro/<int:rid>/photo/<int:idx>", methods=["DELETE"])
+@require_role("physician", "nurse")
+def water_ro_remove_photo(rid, idx):
+    """Unlink one photo from the record. The file is kept (ห้ามลบไฟล์ต้นฉบับ) — only hidden from the record."""
+    from .water_check import remove_photo
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        r = remove_photo(conn, rid, idx)
+    finally:
+        conn.close()
+    if r is None:
+        return jsonify({"error": "not found"}), 404
+    if r is False:
+        return jsonify({"error": "ไม่มีรูปนี้"}), 404
+    log_action(user_id=g.get("hd_user_id"), action="water.photo_removed", resource_type="water", resource_id=rid,
+               new_values={"idx": idx}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True})
+
+
+@hd_bp.route("/water-ro/<int:rid>", methods=["DELETE"])
+@require_role("physician", "nurse")
+def water_ro_delete(rid):
+    """Soft-delete a record (hidden from lists/brief; row and files are kept for audit)."""
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hd_water_daily SET deleted_at = NOW(), deleted_by = %s WHERE id = %s AND deleted_at IS NULL RETURNING id",
+                        (g.get("hd_username") or str(g.get("hd_user_id") or ""), rid))
+            ok = cur.fetchone() is not None
+        conn.commit()
+    finally:
+        conn.close()
+    if not ok:
+        return jsonify({"error": "not found"}), 404
+    log_action(user_id=g.get("hd_user_id"), action="water.record_deleted", resource_type="water", resource_id=rid,
+               ip_address=request.remote_addr or "")
+    return jsonify({"ok": True})
 
 
 @hd_bp.route("/water-ro/<int:rid>/photo/<int:idx>", methods=["GET"])
