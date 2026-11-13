@@ -1,0 +1,137 @@
+{% extends "hd_base.html" %}
+{% block title %}จัดเตียงอัตโนมัติ{% endblock %}
+{% block page_title %}🗓 Smart Bed Scheduler{% endblock %}
+{% block nav_scheduler %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.sc-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
+.sc-warn{font-size:.78rem;color:#e67e22;margin-bottom:8px}
+.sc-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:.74rem;color:var(--fg-muted);margin-bottom:10px}
+.sc-legend i{display:inline-block;width:12px;height:12px;border-radius:3px;vertical-align:middle;margin-right:4px}
+.sc-days{display:flex;gap:4px;overflow-x:auto;margin-bottom:10px;padding-bottom:4px}
+.sc-day{flex:none;border:1px solid var(--border);background:var(--bg-card);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:.8rem;min-width:84px;text-align:center}
+.sc-day.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.sc-day small{display:block;font-size:.68rem;opacity:.8}
+.sc-shifts{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:10px}
+.sc-shift{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px}
+.sc-shift h4{margin:0 0 6px;display:flex;align-items:center;gap:8px;font-size:.9rem}
+.sc-shift h4 span{flex:1}
+.sc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(118px,1fr));gap:5px}
+.sc-bed{border:1px solid var(--border);border-radius:6px;padding:5px 6px;font-size:.74rem;min-height:46px;background:var(--bg);cursor:pointer;position:relative}
+.sc-bed .n{font-weight:800;font-size:.7rem;color:var(--fg-muted)}
+.sc-bed .p{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sc-bed.hbv{background:rgba(231,76,60,.12);border-color:var(--danger)}
+.sc-bed.hcv{background:rgba(230,126,34,.12);border-color:#e67e22}
+.sc-bed.bad{background:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(127,140,141,.15) 4px,rgba(127,140,141,.15) 8px);color:var(--fg-muted)}
+.sc-bed.empty .p{color:var(--fg-muted);font-weight:400}
+.sc-bed.sel{outline:2px solid var(--accent)}
+.sc-bed.booked::after{content:'✓';position:absolute;top:3px;right:5px;color:var(--success);font-weight:800}
+.sc-bed .w{color:var(--danger);font-size:.66rem}
+.sc-un{font-size:.78rem;color:var(--danger);margin-top:6px}
+.sc-msg{font-size:.8rem;margin:8px 0;min-height:1.2em}
+.sc-stats{font-size:.78rem;color:var(--fg-muted);margin-bottom:8px}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="sc-bar">
+  <input type="date" id="start" class="form-control" style="width:auto" onchange="load()">
+  <button class="btn btn-secondary" onclick="shiftWeek(-7)">‹ สัปดาห์ก่อน</button>
+  <button class="btn btn-secondary" onclick="shiftWeek(7)">สัปดาห์หน้า ›</button>
+  <span style="flex:1"></span>
+  <button class="btn btn-secondary" onclick="pushDay()">📨 ส่งตารางวันนี้เข้ากลุ่ม</button>
+  <a class="btn btn-secondary" href="/hd/settings" style="text-decoration:none">⚙️ โซน HBV/HCV</a>
+</div>
+<div class="sc-stats" id="stats"></div>
+<div class="sc-warn" id="warn"></div>
+<div class="sc-legend"><span><i style="background:rgba(231,76,60,.4)"></i>โซน HBV</span><span><i style="background:rgba(230,126,34,.4)"></i>โซน HCV</span><span><i style="background:repeating-linear-gradient(45deg,#ccc,#ccc 3px,#fff 3px,#fff 6px)"></i>เครื่องไม่พร้อม</span><span>✓ = มีรอบในระบบแล้ว</span><span>🅱 HBsAg+ · 🅲 anti-HCV+ · ↔ ย้ายจากเตียงประจำ</span><span>คลิกผู้ป่วย แล้วคลิกเตียงเป้าหมายเพื่อย้าย (ระบบตรวจกฎให้)</span></div>
+<div class="sc-days" id="days"></div>
+<div class="sc-msg" id="msg"></div>
+<div class="sc-shifts" id="shifts"></div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const SH = {morning:'🌅 เช้า', afternoon:'☀️ บ่าย', evening:'🌙 ค่ำ'};
+let PLAN = null, DAYI = 0, SEL = null, OVR = {};   // OVR[date][shift] = {bed: patient_id}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function dTH(iso){ const d=new Date(iso+'T00:00:00'); return d.toLocaleDateString('th-TH',{day:'numeric',month:'short'}); }
+function shiftWeek(n){ const el=document.getElementById('start'); const d=new Date(el.value+'T00:00:00'); d.setDate(d.getDate()+n); el.value=d.toISOString().slice(0,10); load(); }
+async function load(){
+  const msg = document.getElementById('msg'); msg.textContent = 'กำลังวางแผน…';
+  try{ const r = await hdFetch('/hd/api/v1/scheduler/week?start=' + document.getElementById('start').value); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    PLAN = d; DAYI = Math.min(DAYI, 6); msg.textContent = '';
+    document.getElementById('stats').textContent = `ผู้ป่วย active ${d.patients} คน · HBsAg+ ${d.hbv_patients} · anti-HCV+ ${d.hcv_patients} · เตียง ${d.total_beds} · โซน HBV: ${(d.zones.hbv||[]).join(', ')||'ยังไม่ตั้ง'}`;
+    document.getElementById('warn').innerHTML = (d.warnings||[]).map(w=>'⚠️ '+esc(w)).join('<br>');
+    document.getElementById('days').innerHTML = d.days.map((x,i)=>`<div class="sc-day ${i===DAYI?'on':''}" onclick="DAYI=${i};render()">${x.day_th}<small>${dTH(x.date)} · ${Object.values(x.load).reduce((a,b)=>a+b,0)} คน</small></div>`).join('');
+    render();
+  }catch(e){ msg.textContent = '❌ ' + (e.message||e); }
+}
+function cur(){ return PLAN.days[DAYI]; }
+function rowsFor(shift){
+  const day = cur(); const o = (OVR[day.date]||{})[shift] || {};
+  const byBed = {}; day.shifts[shift].forEach(a => byBed[a.bed] = a);
+  Object.entries(o).forEach(([bed, pid]) => { Object.keys(byBed).forEach(b => { if(byBed[b].patient_id===pid) delete byBed[b]; });
+    const p = PLAN.patients_detail.find(x=>x.id===pid); if(p) byBed[bed] = {bed:Number(bed), patient_id:pid, hn:p.hn, name:p.name, hbv:p.hbv, hcv:p.hcv, moved:true, warnings:[], manual:true}; });
+  return byBed;
+}
+function render(){
+  const day = cur(); const booked = (PLAN.booked||{})[day.date] || {};
+  document.querySelectorAll('.sc-day').forEach((el,i)=>el.classList.toggle('on', i===DAYI));
+  document.getElementById('shifts').innerHTML = ['morning','afternoon','evening'].map(sh => {
+    const byBed = rowsFor(sh); const bk = booked[sh] || {};
+    let cells = '';
+    for(let b=1;b<=PLAN.total_beds;b++){
+      const a = byBed[b]; const zone = (PLAN.zones.hbv||[]).includes(b)?'hbv':((PLAN.zones.hcv||[]).includes(b)?'hcv':'');
+      const bad = PLAN.bad_beds && PLAN.bad_beds[b];
+      const isSel = SEL && SEL.shift===sh && SEL.bed===b;
+      cells += `<div class="sc-bed ${zone} ${bad?'bad':''} ${a?'':'empty'} ${isSel?'sel':''} ${bk[b]?'booked':''}" onclick="clickBed('${sh}',${b})" title="${bad?esc(bad):(bk[b]?('มีรอบแล้ว: '+esc(bk[b].name)):'')}">
+        <div class="n">เตียง ${b}${a&&a.moved?' ↔':''}</div>
+        <div class="p">${a?esc(a.name)+(a.hbv?' 🅱':'')+(a.hcv?' 🅲':''):(bad?'ไม่พร้อม':'ว่าง')}</div>
+        ${a&&a.warnings&&a.warnings.length?`<div class="w">${esc(a.warnings[0])}</div>`:''}</div>`;
+    }
+    const n = Object.keys(byBed).length;
+    const un = day.unassigned.filter(u=>u.shift===sh);
+    return `<div class="sc-shift"><h4>${SH[sh]} <span style="font-weight:500;color:var(--fg-muted)">${n} คน</span>
+        <button class="btn btn-primary" style="font-size:.74rem;padding:4px 8px" onclick="applyShift('${sh}')">➕ สร้างรอบ (${n})</button></h4>
+      <div class="sc-grid">${cells}</div>
+      ${un.length?`<div class="sc-un">⚠️ ยังไม่มีเตียง: ${un.map(u=>esc(u.name)+' ('+esc(u.reason)+')').join(', ')}</div>`:''}</div>`;
+  }).join('');
+}
+async function clickBed(shift, bed){
+  const byBed = rowsFor(shift); const a = byBed[bed]; const msg = document.getElementById('msg');
+  if(!SEL){ if(!a){ return; } SEL = {shift, bed, patient_id:a.patient_id, name:a.name}; msg.textContent = `เลือก ${a.name} — คลิกเตียงเป้าหมายในเวร${SH[shift]}`; render(); return; }
+  if(SEL.shift!==shift){ msg.textContent = 'ย้ายได้เฉพาะภายในเวรเดียวกัน'; SEL=null; render(); return; }
+  if(SEL.bed===bed){ SEL=null; msg.textContent=''; render(); return; }
+  try{ const r = await hdFetch('/hd/api/v1/scheduler/check', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({patient_id: SEL.patient_id, bed})});
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    const hard = (d.warnings||[]).filter(w=>w.startsWith('⛔'));
+    if(hard.length){ msg.innerHTML = `<span style="color:var(--danger)">${esc(hard[0])}</span> — ไม่ย้าย`; SEL=null; render(); return; }
+    const day = cur(); OVR[day.date] = OVR[day.date]||{}; OVR[day.date][shift] = OVR[day.date][shift]||{};
+    const target = byBed[bed];
+    OVR[day.date][shift][bed] = SEL.patient_id;
+    if(target){ OVR[day.date][shift][SEL.bed] = target.patient_id; }   // swap
+    msg.innerHTML = `✅ ย้าย ${esc(SEL.name)} → เตียง ${bed}${target?' (สลับกับ '+esc(target.name)+')':''}` + ((d.warnings||[]).length?` <span style="color:#e67e22">${esc(d.warnings[0])}</span>`:'');
+    SEL=null; render();
+  }catch(e){ msg.textContent = '❌ ' + (e.message||e); SEL=null; render(); }
+}
+async function applyShift(shift){
+  const day = cur(); const msg = document.getElementById('msg');
+  if(msg.dataset.arm !== shift){ msg.dataset.arm = shift; msg.textContent = `กด "สร้างรอบ" อีกครั้งเพื่อสร้างรอบ ${day.day_th} ${dTH(day.date)} เวร${SH[shift]} (ข้ามคนที่มีรอบอยู่แล้ว)`; setTimeout(()=>{ if(msg.dataset.arm===shift) msg.dataset.arm=''; }, 5000); return; }
+  msg.dataset.arm = ''; msg.textContent = 'กำลังสร้างรอบ…';
+  try{ const r = await hdFetch('/hd/api/v1/scheduler/apply', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({date: day.date, shift, overrides: (OVR[day.date]||{})[shift]||{}})});
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    msg.textContent = `✅ สร้างรอบ ${d.created} · ข้าม ${d.skipped} (มีรอบแล้ว/ติดกฎ)`; load();
+  }catch(e){ msg.textContent = '❌ ' + (e.message||e); }
+}
+async function pushDay(){
+  const day = cur(); const msg = document.getElementById('msg'); msg.textContent = 'กำลังส่ง…';
+  try{ const r = await hdFetch('/hd/api/v1/scheduler/push', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({date: day.date})});
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status); msg.textContent = d.ok ? '✅ ส่งเข้ากลุ่มพยาบาลแล้ว' : '⚠️ ส่งไม่สำเร็จ (ตั้ง nurse_group_id หรือยัง?)'; }
+  catch(e){ msg.textContent = '❌ ' + (e.message||e); }
+}
+(function(){ const n = new Date(); n.setMinutes(n.getMinutes()-n.getTimezoneOffset()); document.getElementById('start').value = n.toISOString().slice(0,10); })();
+load();
+</script>
+{% endblock %}

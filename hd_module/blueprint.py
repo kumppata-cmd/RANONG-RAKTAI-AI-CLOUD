@@ -297,6 +297,12 @@ def patient_360_page(hn):
     return render_template("hd_patient_360.html", patient_hn=hn)
 
 
+@hd_web.route("/scheduler")
+def scheduler_page():
+    """Smart Bed Scheduler — week plan with HBV/HCV zones and machine status."""
+    return render_template("hd_scheduler.html")
+
+
 @hd_web.route("/adequacy")
 def adequacy_page():
     """Adequacy Guardian — Kt/V per patient with levers to reach target."""
@@ -1242,6 +1248,155 @@ def esa_run_now():
     except Exception as e:
         logger.error("esa run: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+# ── ว้าว รอบ 2 #3: Smart Bed Scheduler ──
+
+def _sched_ctx(conn):
+    from .bed_scheduler import load_context
+    return load_context(conn, HdConfig.TOTAL_BEDS, get_setting_value("hbv_beds", ""), get_setting_value("hcv_beds", ""))
+
+
+@hd_bp.route("/scheduler/week", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def scheduler_week():
+    import os
+    import psycopg2
+    from datetime import date as _d
+    from .bed_scheduler import plan_week
+    start = request.args.get("start")
+    try:
+        start = _d.fromisoformat(start) if start else _thai_today()
+    except ValueError:
+        return jsonify({"error": "start ไม่ถูกต้อง"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        ctx = _sched_ctx(conn)
+        plan = plan_week(ctx, start)
+        # mark beds that already have a scheduled/in-progress session (so the UI shows "already booked")
+        with conn.cursor() as cur:
+            cur.execute("""SELECT session_date, COALESCE(shift,'morning'), bed_number, p.patient_name, s.status FROM hd_sessions s
+                           JOIN hd_patient_mapping p ON p.id = s.patient_id
+                           WHERE session_date BETWEEN %s AND %s AND status IN ('scheduled','in_progress','completed')""",
+                        (start.isoformat(), (start + timedelta(days=6)).isoformat()))
+            booked = {}
+            for d, sh, bed, name, st in cur.fetchall():
+                booked.setdefault(d.isoformat(), {}).setdefault(sh, {})[bed] = {"name": name, "status": st}
+        plan["booked"] = booked
+        plan["patients_detail"] = [{"id": p["id"], "hn": p["hn"], "name": p["name"], "hbv": p["hbv"], "hcv": p["hcv"],
+                                    "usual_shift": p["usual_shift"], "usual_bed": p["usual_bed"], "days": p["days"]} for p in ctx["patients"]]
+        plan["bad_beds"] = ctx["bad_beds"]
+    finally:
+        conn.close()
+    return jsonify(plan)
+
+
+@hd_bp.route("/scheduler/check", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def scheduler_check():
+    """{patient_id, bed} → warnings (drag/drop validation)."""
+    import os
+    import psycopg2
+    from .bed_scheduler import check_bed
+    data = request.get_json(silent=True) or {}
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        ctx = _sched_ctx(conn)
+    finally:
+        conn.close()
+    p = next((x for x in ctx["patients"] if x["id"] == data.get("patient_id")), None)
+    if not p:
+        return jsonify({"error": "patient not found"}), 404
+    try:
+        bed = int(data.get("bed"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "bed"}), 400
+    return jsonify({"warnings": check_bed(ctx, p, bed), "patient": {"name": p["name"], "hbv": p["hbv"], "hcv": p["hcv"]}})
+
+
+@hd_bp.route("/scheduler/apply", methods=["POST"])
+@require_role("physician", "nurse")
+def scheduler_apply():
+    """Create scheduled sessions for one date + shift from the plan (with optional manual overrides {bed: patient_id})."""
+    import os
+    import psycopg2
+    from datetime import date as _d
+    from .bed_scheduler import apply_day, check_bed, plan_day
+    data = request.get_json(silent=True) or {}
+    try:
+        day = _d.fromisoformat(data.get("date"))
+    except (TypeError, ValueError):
+        return jsonify({"error": "date"}), 400
+    shift = data.get("shift", "morning")
+    if shift not in ("morning", "afternoon", "evening"):
+        return jsonify({"error": "shift"}), 400
+    overrides = {int(k): int(v) for k, v in (data.get("overrides") or {}).items()}
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        ctx = _sched_ctx(conn)
+        plan = plan_day(ctx, day)
+        if overrides:
+            by_id = {p["id"]: p for p in ctx["patients"]}
+            rows = [a for a in plan["shifts"][shift] if a["patient_id"] not in overrides.values() and a["bed"] not in overrides]
+            for bed, pid in overrides.items():
+                p = by_id.get(pid)
+                if p:
+                    rows.append({"bed": bed, "patient_id": pid, "hn": p["hn"], "name": p["name"], "hbv": p["hbv"], "hcv": p["hcv"],
+                                 "warnings": check_bed(ctx, p, bed)})
+            plan["shifts"][shift] = sorted(rows, key=lambda a: a["bed"])
+        res = apply_day(conn, plan, shift, nurse_id=g.get("hd_user_id"))
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="scheduler.apply", resource_type="schedule", resource_id=None,
+               new_values={"date": day.isoformat(), "shift": shift, **res, "overrides": len(overrides)}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, **res})
+
+
+@hd_bp.route("/scheduler/push", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def scheduler_push():
+    """Send one day's plan to the nurse group."""
+    import os
+    import psycopg2
+    from datetime import date as _d
+    from .bed_scheduler import line_text, plan_day
+    data = request.get_json(silent=True) or {}
+    try:
+        day = _d.fromisoformat(data.get("date")) if data.get("date") else _thai_today() + timedelta(days=1)
+    except ValueError:
+        return jsonify({"error": "date"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        plan = plan_day(_sched_ctx(conn), day)
+    finally:
+        conn.close()
+    base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+    ok = push_nurse_group(line_text(plan, base), fallback_recipients=True)
+    return jsonify({"ok": bool(ok), "date": day.isoformat()})
+
+
+def push_tomorrow_schedule():
+    """18:00 tick: tomorrow's bed plan → nurse group (skipped when nobody is scheduled)."""
+    import os
+    import psycopg2
+    from .bed_scheduler import line_text, plan_day
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url or (get_setting_value("scheduler_push_1800", "on") or "on").lower() == "off":
+        return False
+    day = _thai_today() + timedelta(days=1)
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        plan = plan_day(_sched_ctx(conn), day)
+    finally:
+        conn.close()
+    if not any(plan["shifts"].values()):
+        return False
+    base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+    return push_nurse_group(line_text(plan, base), fallback_recipients=False)
 
 
 # ── ว้าว รอบ 2 #2: Adequacy Guardian + monthly quality report ──
@@ -4198,6 +4353,7 @@ def update_settings():
         "water_interval_days", "water_sample_point",
         "uf_rate_max", "uf_rate_caution", "dw_review_every", "dw_step_kg", "dw_min_interval_days",   # DW Autopilot
         "anemia_ferritin_low", "anemia_tsat_low", "anemia_ferritin_high", "anemia_eri_high", "anemia_eri_mod",
+        "hbv_beds", "hcv_beds", "scheduler_push_1800",   # Smart Bed Scheduler
         "esa_target_low", "esa_target_high", "esa_hold_above",   # ESA Autopilot protocol
         "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
     ]

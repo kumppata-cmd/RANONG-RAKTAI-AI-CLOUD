@@ -573,6 +573,12 @@ def _start_daily_reminder_scheduler(app):
                                 from .pre_hd_reminder import send_pre_hd_reminders
                                 result = send_pre_hd_reminders(push_fn, db_url, registry)
                                 logger.info("Daily pre-HD reminder: %s", result)
+                            # ว้าว รอบ 2 #3: tomorrow's bed plan → nurse group
+                            try:
+                                from .blueprint import push_tomorrow_schedule
+                                logger.info("Tomorrow bed plan pushed: %s", push_tomorrow_schedule())
+                            except Exception as ex:
+                                logger.warning("Bed plan push failed: %s", ex)
                 # 07:30 Thai time: Morning Brief → physician LINE (B7)
                 if now.hour == 7 and now.minute >= 30 and last_brief_date != now.date():
                     last_brief_date = now.date()
