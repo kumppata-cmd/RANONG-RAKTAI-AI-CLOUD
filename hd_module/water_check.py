@@ -237,8 +237,9 @@ def save_record(conn, vals, ev, *, tester_name, tester_hash, raw_text, source="l
             "sample_point": sample_point or vals.get("point") or DEFAULTS["water_sample_point"]}
 
 
-def archive(conn, storage, rec, vals, ev, drive_upload=None, tester_name=""):
-    """Copy inbox photos + a JSON sheet into the dated folder (GCS) and Drive. Best-effort."""
+def archive(conn, storage, rec, vals, ev, drive_upload=None, tester_name="", extra_photos=None):
+    """Copy inbox photos (+ photos uploaded directly from the web form) and a JSON
+    sheet into the dated folder (GCS) and Drive. Best-effort."""
     bucket = getattr(storage, "_bucket", None)
     day, stored, drive_out = rec["date"], [], []
     stamp = _thai_now().strftime("%H%M")
@@ -255,6 +256,9 @@ def archive(conn, storage, rec, vals, ev, drive_upload=None, tester_name=""):
                 files.append((f"{base}_{i}.jpg", data, "image/jpeg"))
             except Exception as e:
                 logger.warning("water photo read %s: %s", p, e)
+    for j, data in enumerate(extra_photos or [], len(rec["photos"]) + 1):
+        if data:
+            files.append((f"{base}_{j}.jpg", data, "image/jpeg"))
     for name, data, ctype in files:
         gpath = f"{record_dir(day)}/{name}"
         if bucket is not None:

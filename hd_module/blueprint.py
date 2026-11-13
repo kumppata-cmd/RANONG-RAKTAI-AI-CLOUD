@@ -829,12 +829,23 @@ def water_ro_list():
 @hd_bp.route("/water-ro", methods=["POST"])
 @require_role("physician", "nurse")
 def water_ro_add():
-    """Manual entry from the web page (same evaluation; no photos)."""
+    """Entry from the web page: JSON, or multipart with up to 4 photos (phone camera/gallery).
+    Photos go to GCS + Drive like the LINE flow; the result is pushed to the nurse group."""
     import os
     import psycopg2
     from datetime import date as _d
-    from .water_check import evaluate, limits_from, save_record
-    data = request.get_json(silent=True) or {}
+    from flask import current_app
+    from .water_check import evaluate, limits_from, save_record, archive, reply_text
+    photos = []
+    if request.content_type and request.content_type.startswith("multipart/"):
+        data = {k: request.form.get(k) for k in request.form}
+        data["hardness_gt"] = (request.form.get("hardness_gt") or "").lower() in ("1", "true", "on")
+        for f in request.files.getlist("photos")[:4]:
+            blob = f.read()
+            if blob and len(blob) <= 8 * 1024 * 1024 and (f.mimetype or "").startswith("image/"):
+                photos.append(blob)
+    else:
+        data = request.get_json(silent=True) or {}
     vals = {"hardness": data.get("hardness"), "hardness_gt": bool(data.get("hardness_gt")), "free": data.get("free_cl"),
             "total": data.get("total_cl"), "note": (data.get("note") or "")[:200], "point": data.get("sample_point")}
     for k in ("hardness", "free", "total"):
@@ -859,17 +870,35 @@ def water_ro_add():
         rec = save_record(conn, vals, ev, tester_name=g.get("hd_username") or "", tester_hash=None, raw_text="web",
                           source="web", sample_point=vals["point"] or lim["water_sample_point"], check_date=cd,
                           shift=data.get("shift"))
+        drive_up = None
+        try:
+            from .daily_records import drive_upload_fn
+            drive_up = drive_upload_fn()
+        except Exception:
+            pass
+        stored, drive_out = archive(conn, current_app.config.get("STORAGE_OBJ"), rec, vals, ev, drive_upload=drive_up,
+                                    tester_name=g.get("hd_username") or "", extra_photos=photos)
     finally:
         conn.close()
     log_action(user_id=g.get("hd_user_id"), action="water.check_recorded", resource_type="water", resource_id=rec["id"],
-               new_values={"status": ev["status"], "fails": ev["fails"], "source": "web"}, ip_address=request.remote_addr or "")
-    if ev["status"] == "fail":
-        try:
-            from .water_check import reply_text
-            push_nurse_group("🚨 ตรวจน้ำ RO ไม่ผ่านเกณฑ์ (บันทึกจากหน้าเว็บ)\n" + reply_text(rec, ev, g.get("hd_username") or ""), fallback_recipients=True)
-        except Exception as e:
-            logger.warning("water web fail push: %s", e)
-    return jsonify({"ok": True, "id": rec["id"], "status": ev["status"], "fails": ev["fails"], "lines": ev["lines"]})
+               new_values={"status": ev["status"], "fails": ev["fails"], "source": "web", "photos": len(photos),
+                           "drive": len(drive_out)}, ip_address=request.remote_addr or "")
+    # LINE: nurse group always (so the record is visible in the OA/group); physician too when failing
+    msg = reply_text(rec, ev, g.get("hd_username") or "", len(photos), bool(drive_out)) + "\n(บันทึกจากหน้าเว็บ — ดูรูปที่ /hd/water-ro)"
+    try:
+        if ev["status"] == "fail":
+            push_nurse_group("🚨 ตรวจน้ำ RO ไม่ผ่านเกณฑ์\n" + msg, fallback_recipients=True)
+            ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+            push_fn = current_app.config.get("LINE_PUSH_FN")
+            for uid in [x.strip() for x in ids.split(",") if x.strip()]:
+                if push_fn:
+                    push_fn(uid, "🚨 ตรวจน้ำ RO ไม่ผ่านเกณฑ์\n" + msg)
+        else:
+            push_nurse_group(msg, fallback_recipients=False)
+    except Exception as e:
+        logger.warning("water web push: %s", e)
+    return jsonify({"ok": True, "id": rec["id"], "status": ev["status"], "fails": ev["fails"], "lines": ev["lines"],
+                    "photos": len(photos), "drive": len(drive_out)})
 
 
 @hd_bp.route("/water-ro/<int:rid>/photo/<int:idx>", methods=["GET"])

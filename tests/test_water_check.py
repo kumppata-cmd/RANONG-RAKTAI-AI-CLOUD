@@ -54,3 +54,34 @@ class EvaluateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ArchiveTests(unittest.TestCase):
+    """archive() with photos uploaded from the web form (no inbox) — GCS + Drive + DB update."""
+    def test_extra_photos_go_to_gcs_and_drive(self):
+        from hd_module.water_check import archive
+        uploads, drive = [], []
+
+        class Blob:
+            def __init__(self, p): self.p = p
+            def upload_from_string(self, data, content_type=""): uploads.append((self.p, content_type, len(data)))
+        class Bucket:
+            def blob(self, p): return Blob(p)
+        class Storage: _bucket = Bucket()
+        class Cur:
+            def execute(self, *a): pass
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        class Conn:
+            def cursor(self): return Cur()
+            def commit(self): pass
+
+        rec = {"id": 1, "date": date(2026, 11, 13), "shift": "morning", "photos": [], "sample_point": "หลังถังคาร์บอน"}
+        ev = evaluate({"hardness": 0, "free": 0.1, "total": 0})
+        stored, dout = archive(Conn(), Storage(), rec, {"hardness": 0, "free": 0.1, "total": 0}, ev,
+                               drive_upload=lambda p, d, c: drive.append(p), tester_name="x", extra_photos=[b"a" * 10, b"b" * 20])
+        self.assertEqual(len(stored), 3)                                  # json + 2 photos
+        self.assertTrue(all(p.startswith("water-check/2026/2026-11/2026-11-13/") for p in stored))
+        self.assertEqual(sum(1 for u in uploads if u[1] == "image/jpeg"), 2)
+        self.assertEqual(len(dout), 3)
+        self.assertTrue(all(p.startswith("ตรวจระบบน้ำประจำวัน/2026/2026-11/") for p in dout))

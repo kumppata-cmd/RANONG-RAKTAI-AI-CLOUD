@@ -321,7 +321,8 @@ function hdFetch(url, opts={}){
     window.location.href='/hd/login';
     return Promise.reject(new Error('no_token'));
   }
-  opts.headers = Object.assign({'Authorization':'Bearer '+token, 'Content-Type':'application/json'}, opts.headers||{});
+  const _isForm = (typeof FormData !== 'undefined') && (opts.body instanceof FormData);
+  opts.headers = Object.assign(_isForm ? {'Authorization':'Bearer '+token} : {'Authorization':'Bearer '+token, 'Content-Type':'application/json'}, opts.headers||{});
   return fetch(url, opts).then(r=>{
     if(r.status===401){
       /* Token expired — redirect to login */
