@@ -20785,10 +20785,10 @@ def admin_retroactive_route():
 @app.route("/admin/api/stats", methods=["GET"])
 def admin_api_stats():
     """API สำหรับดึงข้อมูลสถิติระบบ — ใช้โดย Dashboard."""
-    auth_header = request.headers.get("X-Admin-Secret", "")
-    auth_param = request.headers.get("X-Admin-Secret", "")
-    if not ADMIN_SECRET or (auth_header != ADMIN_SECRET and auth_param != ADMIN_SECRET):
-        return jsonify({"error": "Unauthorized"}), 401
+    # header X-Admin-Secret หรือ cookie จากหน้า login (same-origin GET) — เหมือน API อื่น
+    _err = _admin_api_auth()
+    if _err is not None:
+        return _err
 
     # Document counts by category
     cat_counts: dict[str, int] = {}
@@ -20963,7 +20963,8 @@ inbox:'badge-inbox',dialysis:'badge-dialysis',review:'badge-review'};
 
 async function load(){
   try{
-    const r=await fetch('/admin/api/stats?secret='+encodeURIComponent(SECRET));
+    // ใช้ cookie จากหน้า login (same-origin) หรือ header ถ้าเปิดด้วย ?secret= — ไม่ส่ง secret ใน URL
+    const r=await fetch('/admin/api/stats',{credentials:'same-origin',headers:SECRET?{'X-Admin-Secret':SECRET}:{}});
     if(!r.ok)throw new Error('HTTP '+r.status);
     const d=await r.json();
     document.getElementById('error').style.display='none';
