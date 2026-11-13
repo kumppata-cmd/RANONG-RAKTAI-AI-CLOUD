@@ -12920,6 +12920,95 @@ app.config["LINE_PUSH_FN"] = push_message  # For HD session summary LINE push
 app.config["LINE_PUSH_MESSAGES_FN"] = push_messages  # Flex / multi-message push (patient post-HD summary)
 
 
+def _line_group_member_name(group_id: str, user_id: str) -> str:
+    """ชื่อที่แสดงของสมาชิกในกลุ่ม (สำหรับช่อง 'ผู้ตรวจ'); "" ถ้าดึงไม่ได้."""
+    if not group_id or not user_id:
+        return ""
+    try:
+        r = http_requests.get(f"https://api.line.me/v2/bot/group/{group_id}/member/{user_id}",
+                              headers={"Authorization": f"Bearer {LINE_CHANNEL_ACCESS_TOKEN}"}, timeout=8)
+        if r.ok:
+            return (r.json().get("displayName") or "")[:100]
+    except Exception:
+        pass
+    return ""
+
+
+def _nurse_group_id() -> str:
+    try:
+        from hd_module.blueprint import get_setting_value as _gsv
+        return (_gsv("nurse_group_id", "") or "").strip()
+    except Exception:
+        return ""
+
+
+def _water_store_group_image(msg_id: str, user_hash: str):
+    """รูปที่ส่งในกลุ่มพยาบาล → เก็บดิบใน GCS water-check/_inbox (ไม่เข้า OCR/เอกสารผู้ป่วย)."""
+    try:
+        from hd_module import water_check as wc
+        import psycopg2 as _pg
+        data = download_line_content(msg_id)
+        if not data:
+            return
+        day = (datetime.now(timezone.utc) + timedelta(hours=7)).date()
+        path = wc.inbox_path(day, user_hash, msg_id)
+        bucket = getattr(storage, "_bucket", None)
+        if bucket is None:
+            return
+        bucket.blob(path).upload_from_string(data, content_type="image/jpeg")
+        dbu = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        c = _pg.connect(dbu, connect_timeout=5)
+        try:
+            wc.add_inbox(c, user_hash, msg_id, path)
+        finally:
+            c.close()
+    except Exception as e:
+        logger.warning(f"water inbox: {type(e).__name__}: {str(e)[:80]}")
+
+
+def _water_handle_command(parsed: dict, text: str, user_hash: str, line_user_id: str, group_id: str) -> str:
+    """บันทึกผลตรวจน้ำ RO จากข้อความในกลุ่ม → ข้อความตอบกลับ."""
+    from hd_module import water_check as wc
+    from hd_module.blueprint import get_setting_value as _gsv
+    import psycopg2 as _pg
+    if parsed.get("help"):
+        return wc.HELP
+    lim = wc.limits_from(_gsv)
+    ev = wc.evaluate(parsed, lim)
+    tester = _line_group_member_name(group_id, line_user_id)
+    dbu = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    c = _pg.connect(dbu, connect_timeout=5)
+    try:
+        rec = wc.save_record(c, parsed, ev, tester_name=tester, tester_hash=user_hash, raw_text=text,
+                             sample_point=parsed.get("point") or lim.get("water_sample_point"))
+        drive_up = None
+        try:
+            from hd_module.daily_records import drive_upload_fn
+            drive_up = drive_upload_fn()
+        except Exception:
+            pass
+        stored, drive_out = wc.archive(c, storage, rec, parsed, ev, drive_upload=drive_up, tester_name=tester)
+    finally:
+        c.close()
+    try:
+        from hd_module.blueprint import log_action as _la
+        with app.app_context():
+            _la(user_id=None, action="water.check_recorded", resource_type="water", resource_id=rec["id"],
+                new_values={"status": ev["status"], "fails": ev["fails"], "photos": len(rec["photos"]), "tester": tester}, ip_address="")
+    except Exception:
+        pass
+    msg = wc.reply_text(rec, ev, tester, len(rec["photos"]), bool(drive_out))
+    if ev["status"] == "fail":
+        try:
+            ids = _gsv("alert_recipients", "") or _gsv("physician_line_id", "")
+            base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+            for uid in [x.strip() for x in ids.split(",") if x.strip()]:
+                push_message(uid, "🚨 ตรวจน้ำ RO ไม่ผ่านเกณฑ์\n" + msg + f"\n{base}/hd/water-ro")
+        except Exception as e:
+            logger.warning(f"water fail push: {e}")
+    return msg
+
+
 def _hd_patient_line_id(hn: str) -> str:
     """HN คลินิก → LINE userId ของผู้ป่วยที่ผูกบัญชีไว้ (อ่านอย่างเดียว; "" ถ้าไม่ได้ผูก).
     ใช้เส้นทางเดิม: HNRegistry (clinic_hn → owner_hash) → _enrolled_ids (owner_hash → userId)."""
@@ -18068,6 +18157,12 @@ def webhook():
                 continue
 
             if msg_type == "image":
+                _src_img = event.get("source", {}) or {}
+                _gid_img = _src_img.get("groupId") or _src_img.get("roomId") or ""
+                if _gid_img and _gid_img == _nurse_group_id():
+                    # กลุ่มพยาบาล: รูป = หลักฐานตรวจน้ำ RO (เก็บดิบ รอข้อความค่า) — ไม่เข้า pipeline เอกสารผู้ป่วย
+                    threading.Thread(target=_water_store_group_image, args=(msg_id, user_hash), daemon=True).start()
+                    continue
                 logger.info(f"รับภาพ (id={msg_id})")
                 event_logger.log("document_received", job_id=_job_id, data={
                     "type": "image", "msg_id": msg_id,
@@ -18134,6 +18229,23 @@ def webhook():
 
                 # ── ว้าว #8: "@รักษ์ไต …" ในกลุ่มพยาบาล → ตอบจาก HD DB (read-only,
                 #    ไม่ใช้ External AI, ตอบกลับในกลุ่มเดิมเท่านั้น) ──
+                # ── ตรวจน้ำ RO ประจำวัน: "น้ำRO H 0 F 0.1 T 0" ในกลุ่มพยาบาล ──
+                try:
+                    from hd_module.water_check import parse_command as _wc_parse
+                    _wc = _wc_parse(text)
+                except Exception:
+                    _wc = None
+                if _wc is not None:
+                    _src_w = event.get("source", {}) or {}
+                    _gid_w = _src_w.get("groupId") or _src_w.get("roomId") or ""
+                    if _gid_w and _gid_w == _nurse_group_id():
+                        try:
+                            _ans_w = _water_handle_command(_wc, text, user_hash, _line_user_id, _gid_w)
+                        except Exception as _we:
+                            logger.warning(f"water command: {type(_we).__name__}: {str(_we)[:120]}")
+                            _ans_w = "ขออภัย บันทึกผลตรวจน้ำไม่สำเร็จ ลองใหม่อีกครั้ง"
+                        reply_message(reply_token, _ans_w[:4900])
+                        continue
                 try:
                     from hd_module.group_assistant import match as _ga_match
                     _ga_body = _ga_match(text)

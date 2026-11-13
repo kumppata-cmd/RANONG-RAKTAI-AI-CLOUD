@@ -131,15 +131,35 @@ def _esa(cur):
 
 
 def _water(cur, today):
+    parts = []
+    try:
+        from .water_check import status_line
+        cur.execute("SAVEPOINT ga_w")
+        sl = status_line(cur, 7, today)
+        cur.execute("RELEASE SAVEPOINT ga_w")
+        if sl:
+            parts.append(sl)
+    except Exception:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT ga_w")
+        except Exception:
+            pass
+    lab = _water_lab(cur, today)
+    parts.append(lab)
+    parts.append("บันทึกใหม่: ส่งรูปแล้วพิมพ์ น้ำRO H 0 F 0.1 T 0")
+    return "\n".join(parts)
+
+
+def _water_lab(cur, today):
     rows = _q(cur, """SELECT test_date, test_type, result_value, unit, pass_fail FROM hd_water_quality
                       ORDER BY test_date DESC, id DESC LIMIT 4""")
     if not rows:
-        return "💧 ยังไม่มีผลตรวจน้ำในระบบ"
+        return "🧫 ผลแล็บน้ำ (รายเดือน): ยังไม่มีในระบบ"
     d = rows[0][0]
     days = (today - d).days
     res = "; ".join(f"{t} {v or ''}{(' ' + u) if u else ''}{' ✓' if pf == 'pass' else (' ✗' if pf == 'fail' else '')}".strip()
                     for _, t, v, u, pf in rows if _ == d)
-    return f"💧 ตรวจน้ำล่าสุด {d.day}/{d.month}/{d.year + 543} ({days} วันก่อน){' — ' + res if res else ''}" + \
+    return f"🧫 ผลแล็บน้ำล่าสุด {d.day}/{d.month}/{d.year + 543} ({days} วันก่อน){' — ' + res if res else ''}" + \
         ("\n⚠️ เกิน 30 วันแล้ว" if days > 30 else "")
 
 

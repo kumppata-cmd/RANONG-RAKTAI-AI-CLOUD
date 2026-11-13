@@ -102,6 +102,25 @@ def collect(conn, today=None):
                 cur.execute("ROLLBACK TO SAVEPOINT mb_va")
             except Exception:
                 pass
+        # Daily RO water check (hardness / chlorine) — last entry + due?
+        out["water_daily"] = None
+        try:
+            cur.execute("SAVEPOINT mb_wd")
+            from .water_check import status_line
+            interval = 7
+            try:
+                from .blueprint import get_setting_value
+                interval = int(float(get_setting_value("water_interval_days", "7") or 7))
+            except Exception:
+                pass
+            out["water_daily"] = status_line(cur, interval, today)
+            cur.execute("RELEASE SAVEPOINT mb_wd")
+        except Exception as e:
+            logger.warning("morning_brief water_daily skipped: %s", str(e)[:120])
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT mb_wd")
+            except Exception:
+                pass
         r = _q(cur, "SELECT MAX(COALESCE(send_date, test_date)) FROM hd_water_quality")
         last_water = r[0][0] if r and r[0] else None
         if last_water is None:
@@ -155,6 +174,9 @@ def build_message(data, base_url=""):
         L.append(f"\n🔧 Dialyzer ใกล้ครบ reuse ({len(data['dialyzer'])})")
         for r in data["dialyzer"][:5]:
             L.append(f"  • {r[0]} (HN {r[1]}) {r[2] or ''} {r[3]}/{r[4]}")
+
+    if data.get("water_daily"):
+        L.append("\n" + data["water_daily"])
 
     wo = data["water_overdue"]
     if wo:

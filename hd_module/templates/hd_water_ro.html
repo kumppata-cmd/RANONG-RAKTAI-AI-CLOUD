@@ -1,0 +1,125 @@
+{% extends "hd_base.html" %}
+{% block title %}ตรวจระบบน้ำ RO{% endblock %}
+{% block page_title %}💧 ตรวจระบบน้ำ RO ประจำวัน{% endblock %}
+{% block nav_water %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.w-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.w-lim{font-size:.78rem;color:var(--fg-muted);background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 12px;margin-bottom:12px;display:flex;flex-wrap:wrap;gap:6px 16px}
+.w-lim b{color:var(--fg)}
+.w-cal{display:grid;grid-template-columns:repeat(auto-fill,minmax(34px,1fr));gap:4px;margin-bottom:14px}
+.w-day{aspect-ratio:1;border-radius:6px;background:var(--bg-card);border:1px solid var(--border);font-size:.62rem;display:flex;align-items:center;justify-content:center;color:var(--fg-muted);cursor:default}
+.w-day.pass{background:rgba(39,174,96,.25);border-color:var(--success);color:var(--fg)}
+.w-day.fail{background:rgba(231,76,60,.3);border-color:var(--danger);color:var(--fg)}
+.w-day.partial{background:rgba(230,126,34,.25);border-color:#e67e22;color:var(--fg)}
+.w-day.today{outline:2px solid var(--accent)}
+.w-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;align-items:start}
+.w-list{display:grid;gap:8px}
+.w-item{background:var(--bg-card);border:1px solid var(--border);border-left:4px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;font-size:.85rem}
+.w-item.pass{border-left-color:var(--success)}.w-item.fail{border-left-color:var(--danger)}.w-item.partial{border-left-color:#e67e22}
+.w-item .h{display:flex;gap:10px;align-items:baseline;flex-wrap:wrap;font-weight:700}
+.w-item .v{display:flex;gap:14px;flex-wrap:wrap;margin-top:4px;font-variant-numeric:tabular-nums}
+.w-item .v b{font-size:1.05rem}
+.w-item .m{font-size:.76rem;color:var(--fg-muted);margin-top:4px}
+.w-item .ph{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+.w-item .ph img{height:64px;border-radius:6px;border:1px solid var(--border);cursor:zoom-in}
+.w-form{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px}
+.w-form h4{margin:0 0 8px;font-size:.9rem}
+.w-form .row{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px}
+.w-form label{font-size:.72rem;color:var(--fg-muted);display:block;margin-bottom:2px}
+.w-form input,.w-form select{width:100%;padding:7px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--fg)}
+.w-empty{padding:22px;text-align:center;color:var(--fg-muted);background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--radius-sm)}
+.w-note{font-size:.72rem;color:var(--fg-muted);margin-top:12px}
+.w-zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:99;cursor:zoom-out}
+.w-zoom img{max-width:96vw;max-height:94vh;border-radius:8px}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="w-bar">
+  <select id="days" class="form-control" style="width:auto" onchange="load()">
+    <option value="60">60 วัน</option><option value="120" selected>120 วัน</option><option value="365">1 ปี</option>
+  </select>
+  <button class="btn btn-secondary" onclick="load()">🔄</button>
+  <span style="flex:1"></span>
+  <a class="btn btn-secondary" href="/hd/settings" style="text-decoration:none;">⚙️ เกณฑ์</a>
+  <a class="btn btn-secondary" href="/hd/clinic-profile" style="text-decoration:none;">🧫 ผลแล็บน้ำรายเดือน</a>
+</div>
+<div class="w-lim" id="lim"></div>
+<div class="w-cal" id="cal"></div>
+<div class="w-grid">
+  <div class="w-list" id="list"><div class="w-empty">กำลังโหลด…</div></div>
+  <div class="w-form">
+    <h4>✍️ บันทึกเอง (ไม่มีรูป) — ช่องทางหลักคือส่งรูป + พิมพ์ค่าในกลุ่มพยาบาล</h4>
+    <div class="row"><div><label>วันที่ตรวจ</label><input type="date" id="fDate"></div>
+      <div><label>เวร</label><select id="fShift"><option value="morning">เช้า</option><option value="afternoon">บ่าย</option><option value="evening">ค่ำ</option></select></div></div>
+    <div class="row"><div><label>Hardness (ppm จากแถบสี)</label><select id="fH"><option value="">— ไม่ได้ตรวจ —</option><option value="0">0</option><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="gt50">&gt;50</option></select></div>
+      <div><label>จุดเก็บ</label><input id="fPoint" placeholder="หลังถังคาร์บอน"></div></div>
+    <div class="row"><div><label>Free Cl (ppm)</label><input type="number" step="0.05" min="0" id="fF" placeholder="0.1"></div>
+      <div><label>Total Cl (ppm)</label><input type="number" step="0.05" min="0" id="fT" placeholder="0"></div></div>
+    <div><label>หมายเหตุ</label><input id="fNote" placeholder="เช่น เปลี่ยนเกลือแล้ว"></div>
+    <div style="margin-top:10px;display:flex;gap:8px;align-items:center"><button class="btn btn-primary" onclick="submitForm()">💾 บันทึก</button><span id="fStatus" style="font-size:.8rem;color:var(--fg-muted)"></span></div>
+  </div>
+</div>
+<div class="w-note">วิธีบันทึกจากกลุ่ม LINE พยาบาล: ส่งรูปขวดทดสอบ 1–3 รูป แล้วพิมพ์ <b>น้ำRO H 0 F 0.1 T 0</b> (เพิ่ม เวร/จุดเก็บ/วันที่ได้) → บอทประเมินตามเกณฑ์ ตอบทันที เก็บรูปไว้ที่ Cloud และ Google Drive โฟลเดอร์ "ตรวจระบบน้ำประจำวัน" แยกจากเอกสารอื่น · ❌ ส่ง LINE แพทย์อัตโนมัติ · รูปเปิดดูได้เฉพาะเจ้าหน้าที่ที่ล็อกอิน (ไม่มีลิงก์สาธารณะ)</div>
+<div class="w-zoom" id="zoom" onclick="this.style.display='none'"><img id="zoomImg" alt=""></div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const SH = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function dTH(iso){ const d=new Date(iso+'T00:00:00'); return d.toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'}); }
+function fmt(v){ return v==null?'—':Number(v).toString(); }
+let TOKEN_Q = '';
+try { TOKEN_Q = '?token=' + encodeURIComponent(getHdToken()||''); } catch(e){}
+
+async function load(){
+  const list = document.getElementById('list');
+  try{
+    const days = document.getElementById('days').value;
+    const r = await hdFetch('/hd/api/v1/water-ro?days=' + days); const d = await r.json();
+    if(!r.ok) throw new Error(d.error||r.status);
+    const L = d.limits || {};
+    document.getElementById('lim').innerHTML = `<span>เกณฑ์: Total Cl &lt; <b>${L.water_total_cl_max}</b></span><span>Free Cl &lt; <b>${L.water_free_cl_max}</b></span><span>Hardness ≤ <b>${L.water_hardness_max}</b> ppm</span><span>ตรวจทุก <b>${L.water_interval_days}</b> วัน</span><span>จุดเก็บมาตรฐาน: <b>${esc(L.water_sample_point)}</b></span>`;
+    document.getElementById('fPoint').placeholder = L.water_sample_point || '';
+    // calendar: last N days, worst status per day
+    const by = {}; (d.items||[]).forEach(it=>{ const cur=by[it.date]; const rank={fail:3,partial:2,pass:1}; if(!cur || rank[it.status]>rank[cur]) by[it.date]=it.status; });
+    const today = new Date(); today.setHours(0,0,0,0);
+    const n = Math.min(Number(days), 120); let cal='';
+    for(let i=n-1;i>=0;i--){ const dt=new Date(today); dt.setDate(today.getDate()-i); const iso=dt.toISOString().slice(0,10); const st=by[iso]||''; cal += `<div class="w-day ${st} ${i===0?'today':''}" title="${dTH(iso)} ${st||'ไม่ได้ตรวจ'}">${dt.getDate()}</div>`; }
+    document.getElementById('cal').innerHTML = cal;
+    const items = d.items||[];
+    if(!items.length){ list.innerHTML = '<div class="w-empty">ยังไม่มีบันทึกในช่วงที่เลือก</div>'; return; }
+    list.innerHTML = items.map(it => `<div class="w-item ${it.status}">
+      <div class="h"><span>${it.status==='pass'?'✅':(it.status==='fail'?'❌':'⚠️')} ${dTH(it.date)}</span><span style="font-weight:500;color:var(--fg-muted)">เวร${SH[it.shift]||it.shift||''} · ${esc(it.sample_point||'')}</span></div>
+      <div class="v"><span>Hardness <b>${esc(it.hardness_text||fmt(it.hardness))}</b></span><span>Free Cl <b>${fmt(it.free_cl)}</b></span><span>Total Cl <b>${fmt(it.total_cl)}</b></span></div>
+      ${it.fails?`<div class="m" style="color:var(--danger)">${esc(it.fails)}</div>`:''}
+      <div class="m">ผู้ตรวจ ${esc(it.tester||'-')} · ${it.source==='web'?'หน้าเว็บ':'LINE กลุ่ม'}${it.note?' · '+esc(it.note):''}${(it.drive||[]).length?' · ☁️ Drive':''}</div>
+      ${(it.photos||[]).filter(p=>p.endsWith('.jpg')).length ? `<div class="ph">${(it.photos||[]).filter(p=>p.endsWith('.jpg')).map((p,i)=>`<img loading="lazy" src="/hd/api/v1/water-ro/${it.id}/photo/${i}${TOKEN_Q}" onclick="zoom(this.src)" alt="รูป ${i+1}">`).join('')}</div>` : ''}
+    </div>`).join('');
+  }catch(e){ list.innerHTML = `<div class="w-empty">โหลดไม่สำเร็จ: ${esc(e.message||e)}</div>`; }
+}
+function zoom(src){ document.getElementById('zoomImg').src = src; document.getElementById('zoom').style.display = 'flex'; }
+
+async function submitForm(){
+  const st = document.getElementById('fStatus'); st.textContent = 'กำลังบันทึก…';
+  const h = document.getElementById('fH').value;
+  const body = {date: document.getElementById('fDate').value || null, shift: document.getElementById('fShift').value,
+    hardness: h==='gt50' ? 50 : (h===''?null:Number(h)), hardness_gt: h==='gt50',
+    free_cl: document.getElementById('fF').value===''?null:Number(document.getElementById('fF').value),
+    total_cl: document.getElementById('fT').value===''?null:Number(document.getElementById('fT').value),
+    sample_point: document.getElementById('fPoint').value || null, note: document.getElementById('fNote').value};
+  try{
+    const r = await hdFetch('/hd/api/v1/water-ro', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    st.textContent = (d.status==='pass'?'✅ ผ่าน':(d.status==='fail'?'❌ ไม่ผ่าน — '+d.fails.join('; '):'⚠️ บันทึกบางค่า'));
+    ['fF','fT','fNote'].forEach(id=>document.getElementById(id).value=''); document.getElementById('fH').value='';
+    load();
+  }catch(e){ st.textContent = '❌ ' + (e.message||e); }
+}
+(function(){ const n = new Date(); n.setMinutes(n.getMinutes()-n.getTimezoneOffset()); document.getElementById('fDate').value = n.toISOString().slice(0,10); const h=new Date().getHours(); document.getElementById('fShift').value = h<13?'morning':(h<17?'afternoon':'evening'); })();
+load();
+</script>
+{% endblock %}

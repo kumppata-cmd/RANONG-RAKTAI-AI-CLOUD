@@ -179,6 +179,27 @@
   </div>
 </div>
 
+<!-- RO water daily check limits -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>💧 ตรวจระบบน้ำ RO ประจำวัน — เกณฑ์</span>
+    <button class="btn btn-primary save-btn" onclick="['water_total_cl_max','water_free_cl_max','water_hardness_max','water_interval_days','water_sample_point'].forEach(saveSetting)">💾 บันทึกทั้งหมด</button>
+  </div>
+  <div class="setting-desc" style="margin-top:8px;">ค่าเริ่มต้นตาม ISO 23500 / AAMI (น้ำหลังถังคาร์บอน) · พยาบาลบันทึกจากกลุ่ม LINE: ส่งรูป แล้วพิมพ์ <b>น้ำRO H 0 F 0.1 T 0</b> · ดูรายการที่ <a href="/hd/water-ro">ตรวจน้ำ RO</a></div>
+  <div class="grid-2" style="margin-top:12px;">
+    <div class="form-group"><label class="form-label">Total chlorine (คลอรามีน) ต้องน้อยกว่า (ppm) — default 0.1</label>
+      <input type="number" step="0.01" class="form-control" id="setting_water_total_cl_max" placeholder="0.1"><div class="setting-status" id="status_water_total_cl_max"></div></div>
+    <div class="form-group"><label class="form-label">Free chlorine ต้องน้อยกว่า (ppm) — default 0.5</label>
+      <input type="number" step="0.01" class="form-control" id="setting_water_free_cl_max" placeholder="0.5"><div class="setting-status" id="status_water_free_cl_max"></div></div>
+    <div class="form-group"><label class="form-label">Hardness ไม่เกิน (ppm บนแถบสี) — default 0</label>
+      <input type="number" step="1" class="form-control" id="setting_water_hardness_max" placeholder="0"><div class="setting-status" id="status_water_hardness_max"></div></div>
+    <div class="form-group"><label class="form-label">ความถี่ที่ต้องตรวจ (วัน) — เตือนใน Morning Brief เมื่อเกิน · default 7</label>
+      <input type="number" step="1" class="form-control" id="setting_water_interval_days" placeholder="7"><div class="setting-status" id="status_water_interval_days"></div></div>
+    <div class="form-group"><label class="form-label">จุดเก็บน้ำมาตรฐาน — default หลังถังคาร์บอน</label>
+      <input type="text" class="form-control" id="setting_water_sample_point" placeholder="หลังถังคาร์บอน"><div class="setting-status" id="status_water_sample_point"></div></div>
+  </div>
+</div>
+
 <!-- ESA Autopilot protocol -->
 <div class="card setting-card">
   <div class="card-header">

@@ -154,6 +154,8 @@ def _run_hd_migrations():
                     hbsag VARCHAR(20), antihcv VARCHAR(20), antihbs VARCHAR(20),
                     synced_at TIMESTAMP DEFAULT NOW())""",
                 "CREATE INDEX IF NOT EXISTS ix_hd_lab_docs_hn_date ON hd_lab_docs(hn, specimen_date DESC)",
+                # ตรวจระบบน้ำ RO ประจำวัน (Hardness / Free Cl / Total Cl)
+                *[stmt.strip() for stmt in __import__("hd_module.water_check", fromlist=["CREATE_SQL"]).CREATE_SQL.split(";") if stmt.strip()],
                 # Set alert_recipients
                 """INSERT INTO hd_settings (key, value, description, updated_at)
                     VALUES ('alert_recipients', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId แพทย์', NOW())

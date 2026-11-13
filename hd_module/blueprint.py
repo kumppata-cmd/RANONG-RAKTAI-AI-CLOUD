@@ -277,6 +277,12 @@ def clinic_profile_page():
     return render_template("hd_clinic_profile.html")
 
 
+@hd_web.route("/water-ro")
+def water_ro_page():
+    """ตรวจระบบน้ำ RO ประจำวัน — ปฏิทิน/รายการ/กรอกเอง."""
+    return render_template("hd_water_ro.html")
+
+
 @hd_web.route("/tv")
 def hd_tv_page():
     """Nurse Station TV mode — standalone, dark, auto-refresh, no nav (ว้าว #6)."""
@@ -789,6 +795,106 @@ def session_idh_risk(session_id):
                        for k, v in f.items() if k != "sbp_series"}
     out["features"]["sbp_series"] = f.get("sbp_series")
     return jsonify(out)
+
+
+# ── ตรวจระบบน้ำ RO ประจำวัน (Hardness / Free Cl / Total Cl) ──
+
+@hd_bp.route("/water-ro", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def water_ro_list():
+    import os
+    import psycopg2
+    from .water_check import CREATE_SQL, limits_from
+    days = min(int(request.args.get("days", 120) or 120), 730)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CREATE_SQL)
+            conn.commit()
+            cur.execute("""SELECT id, check_date, shift, sample_point, hardness_ppm, hardness_text, free_cl, total_cl, status,
+                                  fails, tester_name, source, note, photos, drive, created_at, raw_text
+                           FROM hd_water_daily WHERE check_date >= CURRENT_DATE - %s ORDER BY check_date DESC, id DESC""", (days,))
+            items = [{"id": r[0], "date": r[1].isoformat(), "shift": r[2], "sample_point": r[3],
+                      "hardness": float(r[4]) if r[4] is not None else None, "hardness_text": r[5],
+                      "free_cl": float(r[6]) if r[6] is not None else None, "total_cl": float(r[7]) if r[7] is not None else None,
+                      "status": r[8], "fails": r[9], "tester": r[10], "source": r[11], "note": r[12],
+                      "photos": r[13] or [], "drive": r[14] or [], "created_at": (r[15].isoformat() + "Z") if r[15] else None,
+                      "raw_text": r[16]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return jsonify({"items": items, "limits": limits_from(get_setting_value), "days": days})
+
+
+@hd_bp.route("/water-ro", methods=["POST"])
+@require_role("physician", "nurse")
+def water_ro_add():
+    """Manual entry from the web page (same evaluation; no photos)."""
+    import os
+    import psycopg2
+    from datetime import date as _d
+    from .water_check import evaluate, limits_from, save_record
+    data = request.get_json(silent=True) or {}
+    vals = {"hardness": data.get("hardness"), "hardness_gt": bool(data.get("hardness_gt")), "free": data.get("free_cl"),
+            "total": data.get("total_cl"), "note": (data.get("note") or "")[:200], "point": data.get("sample_point")}
+    for k in ("hardness", "free", "total"):
+        if vals[k] in ("", None):
+            vals[k] = None
+        else:
+            try:
+                vals[k] = float(vals[k])
+            except (TypeError, ValueError):
+                return jsonify({"error": f"{k} ต้องเป็นตัวเลข"}), 400
+    if vals["hardness"] is None and vals["free"] is None and vals["total"] is None:
+        return jsonify({"error": "ต้องระบุอย่างน้อย 1 ค่า"}), 400
+    try:
+        cd = _d.fromisoformat(data["date"]) if data.get("date") else None
+    except ValueError:
+        return jsonify({"error": "วันที่ไม่ถูกต้อง"}), 400
+    lim = limits_from(get_setting_value)
+    ev = evaluate(vals, lim)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        rec = save_record(conn, vals, ev, tester_name=g.get("hd_username") or "", tester_hash=None, raw_text="web",
+                          source="web", sample_point=vals["point"] or lim["water_sample_point"], check_date=cd,
+                          shift=data.get("shift"))
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="water.check_recorded", resource_type="water", resource_id=rec["id"],
+               new_values={"status": ev["status"], "fails": ev["fails"], "source": "web"}, ip_address=request.remote_addr or "")
+    if ev["status"] == "fail":
+        try:
+            from .water_check import reply_text
+            push_nurse_group("🚨 ตรวจน้ำ RO ไม่ผ่านเกณฑ์ (บันทึกจากหน้าเว็บ)\n" + reply_text(rec, ev, g.get("hd_username") or ""), fallback_recipients=True)
+        except Exception as e:
+            logger.warning("water web fail push: %s", e)
+    return jsonify({"ok": True, "id": rec["id"], "status": ev["status"], "fails": ev["fails"], "lines": ev["lines"]})
+
+
+@hd_bp.route("/water-ro/<int:rid>/photo/<int:idx>", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def water_ro_photo(rid, idx):
+    """Serve one archived photo through the app (signed-in staff only; no public URL)."""
+    import os
+    import psycopg2
+    from flask import Response, current_app
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT photos FROM hd_water_daily WHERE id = %s", (rid,))
+            r = cur.fetchone()
+    finally:
+        conn.close()
+    photos = [p for p in (r[0] if r else []) if p.endswith(".jpg")]
+    if idx < 0 or idx >= len(photos):
+        return jsonify({"error": "not found"}), 404
+    bucket = getattr(current_app.config.get("STORAGE_OBJ"), "_bucket", None)
+    if bucket is None:
+        return jsonify({"error": "no storage"}), 503
+    data = bucket.blob(photos[idx]).download_as_bytes()
+    return Response(data, mimetype="image/jpeg", headers={"Cache-Control": "private, max-age=600"})
 
 
 # ── ว้าว #5: Patient 360 timeline ──
@@ -3617,6 +3723,8 @@ def update_settings():
         "alert_sbp_drop",          # IDH SBP drop threshold
         "alert_severe_sbp",        # severe IDH threshold
         "patient_summary_auto",    # ว้าว #7: on/off auto LINE summary to patient
+        "water_total_cl_max", "water_free_cl_max", "water_hardness_max",   # RO water daily check limits
+        "water_interval_days", "water_sample_point",
         "esa_target_low", "esa_target_high", "esa_hold_above",   # ESA Autopilot protocol
         "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
     ]
