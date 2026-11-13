@@ -13794,6 +13794,32 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
     # Log เฉพาะจำนวนตัวอักษร — ห้ามบันทึกเนื้อหาเอกสารลง log
     logger.info(f"OCR extracted: {len(content.strip())} chars")
 
+    def _kw_in_text(kw_lower: str, text_lower: str) -> bool:
+        """ตรวจว่า keyword อยู่ใน text — คำสั้น (≤3 chars, ASCII)
+        ใช้ word-boundary match เพื่อลด false positive เช่น
+        "HD" ไม่ควร match "ทุกHD" (Thai prefix)"""
+        if len(kw_lower) <= 3 and kw_lower.isascii():
+            # ใช้ Unicode word boundary (\b ไม่พอ เพราะ \b ไม่นับ Thai)
+            # ตรวจว่าตัวอักษรก่อน/หลัง keyword ไม่ใช่ letter (ทุกภาษา)
+            idx = 0
+            while True:
+                idx = text_lower.find(kw_lower, idx)
+                if idx == -1:
+                    return False
+                # ตรวจ char ก่อนหน้า
+                if idx > 0 and text_lower[idx - 1].isalpha():
+                    idx += 1
+                    continue
+                # ตรวจ char หลัง
+                end = idx + len(kw_lower)
+                if end < len(text_lower) and text_lower[end].isalpha():
+                    idx += 1
+                    continue
+                return True
+            return False
+        return kw_lower in text_lower
+
+
     rules = {
         "bills": (
             ["ใบเสร็จ", "ใบเสร็จรับเงิน", "ชำระเงิน", "จำนวนเงิน",
@@ -13938,15 +13964,41 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
     }
 
     # ── Pre-check: สลิปโอนเงิน / ธนาคาร ──
+    # ── Pre-check: Hemodialysis WORK SHEET (ใบฟอกเลือด/flowsheet ของพยาบาล) ──
+    # ใบนี้มีหัวข้อ "Hemodialysis Prescription" และ "Medication / Route" อยู่ในตัว
+    # ทำให้ pre-check ใบสั่งยา HD ด้านล่างจับเป็น rx ผิด (13 พ.ย. 2026, HN 67360)
+    # จุดต่างที่ใบสั่งยาไม่มี: ส่วนประเมินพยาบาล/flowsheet/ภาวะแทรกซ้อน/จำหน่าย
+    _worksheet_marks = [
+        "work sheet", "worksheet", "hemodialysis work sheet",
+        "pre-dialysis assesment", "pre-dialysis assessment", "pre-dialysis",
+        "nursing diagnosis", "nursing care plan", "expective outcome", "expected outcome",
+        "pre hd note", "post hd note", "nurse start", "nurse off",
+        "net uf balance", "total repletement", "technical complication",
+        "nursing managment", "nursing management", "health edecation", "health education",
+        "discharge by", "hd no", "sleep disturbance", "jvp engorged", "prolong bleeding",
+        "conduct", "tmp", "vp", "ufr",
+    ]
+    _ws_hits = [kw for kw in _worksheet_marks if _kw_in_text(kw, content_lower)]
+    if len(_ws_hits) >= 3:
+        logger.info("  pre-check: HD work sheet detected (%d marks) → dialysis", len(_ws_hits))
+        return {
+            "category": "dialysis",
+            "reason": f"HD work sheet pre-check ({len(_ws_hits)} marks)",
+            "confidence": min(len(_ws_hits) / 6.0, 1.0),
+            "_ocr_text": content,
+        }
+
     # ── Pre-check: ใบสั่งยาฟอกเลือด (HD Prescription) ──
     # ใบยา HD มีทั้ง dialysis + medication keywords → บังคับ rx
+    # ต้องมี rx keyword ≥2 (เดิม ≥1 — คำเดียวอย่าง "medication"/"route"
+    # โผล่บนใบฟอกเลือดทุกใบ ทำให้จัดผิด)
     _hd_rx_strong = ["hemodialysis", "dialyzer", "dry weight", "anticoagulant",
                      "heparin", "dialysate", "bfr", "dfr"]
     _rx_strong = ["medication", "dose", "frequency", "route", "regimen",
                   "oral", "prescription", "mg", "tab", "cap", "ใบสั่งยา"]
     _hd_hits = sum(1 for kw in _hd_rx_strong if kw.lower() in content_lower)
-    _rx_hits = sum(1 for kw in _rx_strong if kw.lower() in content_lower)
-    if _hd_hits >= 1 and _rx_hits >= 1:
+    _rx_hits = sum(1 for kw in _rx_strong if _kw_in_text(kw.lower(), content_lower))
+    if _hd_hits >= 1 and _rx_hits >= 2:
         logger.info("  pre-check: HD prescription detected (%d HD + %d rx hits) → rx",
                      _hd_hits, _rx_hits)
         return {
@@ -14150,31 +14202,6 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             return "THAI" in _ucd.name(ch, "")
         except Exception:
             return False
-
-    def _kw_in_text(kw_lower: str, text_lower: str) -> bool:
-        """ตรวจว่า keyword อยู่ใน text — คำสั้น (≤3 chars, ASCII)
-        ใช้ word-boundary match เพื่อลด false positive เช่น
-        "HD" ไม่ควร match "ทุกHD" (Thai prefix)"""
-        if len(kw_lower) <= 3 and kw_lower.isascii():
-            # ใช้ Unicode word boundary (\b ไม่พอ เพราะ \b ไม่นับ Thai)
-            # ตรวจว่าตัวอักษรก่อน/หลัง keyword ไม่ใช่ letter (ทุกภาษา)
-            idx = 0
-            while True:
-                idx = text_lower.find(kw_lower, idx)
-                if idx == -1:
-                    return False
-                # ตรวจ char ก่อนหน้า
-                if idx > 0 and text_lower[idx - 1].isalpha():
-                    idx += 1
-                    continue
-                # ตรวจ char หลัง
-                end = idx + len(kw_lower)
-                if end < len(text_lower) and text_lower[end].isalpha():
-                    idx += 1
-                    continue
-                return True
-            return False
-        return kw_lower in text_lower
 
     best, best_score = "review", 0
     all_matches = {}
