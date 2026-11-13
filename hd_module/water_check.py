@@ -51,8 +51,10 @@ CREATE TABLE IF NOT EXISTS hd_water_daily (
     photos JSONB DEFAULT '[]'::jsonb,
     drive JSONB DEFAULT '[]'::jsonb,
     created_at TIMESTAMP DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS ix_hd_water_daily_date ON hd_water_daily(check_date DESC);
+)
+"""
+CREATE_INDEX_SQL = "CREATE INDEX IF NOT EXISTS ix_hd_water_daily_date ON hd_water_daily(check_date DESC)"
+CREATE_INBOX_SQL = """
 CREATE TABLE IF NOT EXISTS hd_water_inbox (
     id SERIAL PRIMARY KEY,
     user_hash VARCHAR(64),
@@ -60,8 +62,9 @@ CREATE TABLE IF NOT EXISTS hd_water_inbox (
     gcs_path TEXT NOT NULL,
     received_at TIMESTAMP DEFAULT NOW(),
     record_id INTEGER REFERENCES hd_water_daily(id)
-);
+)
 """
+CREATE_SQL = CREATE_SQL + ";\n" + CREATE_INDEX_SQL + ";\n" + CREATE_INBOX_SQL + ";"
 
 
 def _thai_now():
