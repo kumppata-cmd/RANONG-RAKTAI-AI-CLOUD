@@ -1,0 +1,104 @@
+{% extends "hd_base.html" %}
+{% block title %}Adequacy Guardian{% endblock %}
+{% block page_title %}🧪 Adequacy Guardian — Kt/V{% endblock %}
+{% block nav_adequacy %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.aq-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.aq-stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px}
+.aq-stat{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;text-align:center;cursor:pointer}
+.aq-stat.on{outline:2px solid var(--accent)}
+.aq-stat .n{font-size:1.4rem;font-weight:800}.aq-stat .l{font-size:.7rem;color:var(--fg-muted)}
+.aq-list{display:grid;gap:8px}
+.aq-item{background:var(--bg-card);border:1px solid var(--border);border-left:4px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px}
+.aq-item.low{border-left-color:var(--danger)}.aq-item.ok{border-left-color:var(--success)}.aq-item.unknown{border-left-color:var(--fg-muted)}
+.aq-who{font-weight:700}.aq-who small{font-weight:500;color:var(--fg-muted);margin-left:6px}
+.aq-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:4px;font-size:.8rem;font-variant-numeric:tabular-nums}
+.aq-row b{font-size:1rem}
+.aq-opt{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.aq-opt span{border:1px dashed var(--border);border-radius:8px;padding:3px 8px;font-size:.76rem}
+.aq-note{font-size:.74rem;color:#e67e22;margin-top:4px}
+.aq-foot{font-size:.72rem;color:var(--fg-muted);margin-top:12px}
+.aq-rep{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:12px;margin-bottom:14px}
+.aq-rep pre{white-space:pre-wrap;font:inherit;font-size:.82rem;margin:8px 0 0}
+.aq-empty{padding:22px;text-align:center;color:var(--fg-muted);background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--radius-sm)}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="aq-rep">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <strong>📊 รายงานคุณภาพรายเดือน</strong>
+    <input type="month" id="rmonth" class="form-control" style="width:auto">
+    <button class="btn btn-secondary" onclick="loadReport()">ดูสรุป</button>
+    <a class="btn btn-secondary" id="pdfLink" href="#" style="text-decoration:none">📄 PDF</a>
+    <button class="btn btn-primary" onclick="sendReport()">📤 ส่ง LINE + Drive</button>
+    <span id="repStatus" style="font-size:.78rem;color:var(--fg-muted)"></span>
+  </div>
+  <pre id="repText"></pre>
+</div>
+
+<div class="aq-bar">
+  <select id="days" class="form-control" style="width:auto" onchange="load()">
+    <option value="90" selected>90 วันล่าสุด</option><option value="180">180 วัน</option><option value="365">1 ปี</option>
+  </select>
+  <button class="btn btn-secondary" onclick="load()">🔄</button>
+</div>
+<div class="aq-stats" id="stats"></div>
+<div class="aq-list" id="list"><div class="aq-empty">กำลังโหลด…</div></div>
+<div class="aq-foot">วัดจริง = Kt/V หรือ URR จากเอกสารแล็บ/บันทึกรอบ · ประมาณ = spKt/V ≈ (0.68×BFR ที่ได้จริง × เวลา) ÷ (0.55×น้ำหนัก) ใช้ชี้เป้าเมื่อยังไม่มีค่าวัด · เป้า Kt/V ≥ 1.2 (URR ≥ 65%) · ข้อเสนอ "เพิ่มเวลา / BFR" เป็นประมาณการเพื่อพิจารณา การปรับใบสั่งฟอกเป็นดุลยพินิจแพทย์ · รายงานรายเดือนสร้างอัตโนมัติทุกวันที่ 1 เวลา 22:30 → LINE แพทย์ + Google Drive "รายงานคุณภาพ"</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let ITEMS = [], F = '';
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function monthStr(){ const v = document.getElementById('rmonth').value; return v || ''; }
+function tokenQ(){ try { return '&token=' + encodeURIComponent(getHdToken()||''); } catch(e){ return ''; } }
+async function load(){
+  const list = document.getElementById('list');
+  try{
+    const r = await hdFetch('/hd/api/v1/adequacy?days=' + document.getElementById('days').value); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    ITEMS = d.items||[]; const c = d.counts||{};
+    document.getElementById('stats').innerHTML = [['low','ต่ำกว่าเป้า',c.low,'var(--danger)'],['ok','ถึงเป้า',c.ok,'var(--success)'],['unknown','ไม่มีข้อมูล',c.unknown,'var(--fg-muted)'],['','วัดจริง',c.measured,'var(--accent)']]
+      .map(x=>`<div class="aq-stat ${F===x[0]&&x[0]?'on':''}" onclick="setF('${x[0]}')"><div class="n" style="color:${x[3]}">${x[2]||0}</div><div class="l">${x[1]}</div></div>`).join('');
+    render();
+  }catch(e){ list.innerHTML = `<div class="aq-empty">โหลดไม่สำเร็จ: ${esc(e.message||e)}</div>`; }
+}
+function setF(f){ F = (F===f)?'':f; render(); document.querySelectorAll('.aq-stat').forEach((el,i)=>el.classList.toggle('on', ['low','ok','unknown',''][i]===F && F!=='')); }
+function render(){
+  const rows = F ? ITEMS.filter(i => F==='low'?i.adequate===false:(F==='ok'?i.adequate===true:i.adequate===null)) : ITEMS;
+  const list = document.getElementById('list');
+  if(!rows.length){ list.innerHTML = '<div class="aq-empty">ไม่มีรายการ</div>'; return; }
+  list.innerHTML = rows.map(i => {
+    const cls = i.adequate===false?'low':(i.adequate===true?'ok':'unknown');
+    const val = i.ktv!=null ? `Kt/V <b>${i.ktv}</b>` : (i.urr!=null ? `URR <b>${Math.round(i.urr)}%</b>` : (i.est!=null?`≈Kt/V <b>${i.est}</b> <small style="color:var(--fg-muted)">(ประมาณ)</small>`:'<b>—</b>'));
+    return `<div class="aq-item ${cls}">
+      <div class="aq-who"><a href="/hd/patient/${encodeURIComponent(i.hn)}/360" style="color:inherit;text-decoration:none">${esc(i.name||'')}</a><small>HN ${esc(i.hn||'')} · ${esc(i.access||'')}</small></div>
+      <div class="aq-row"><span>${val}${i.measured_date?` <small style="color:var(--fg-muted)">${i.measured_date}</small>`:''}</span>
+        <span>BFR สั่ง <b>${i.bfr_rx?Math.round(i.bfr_rx):'—'}</b>${i.bfr_actual?` / ได้จริง <b>${Math.round(i.bfr_actual)}</b>`:''}</span>
+        <span>เวลา <b>${i.hours}</b> ชม. × ${i.per_week}/สป.</span><span>น้ำหนัก <b>${i.weight!=null?i.weight:'—'}</b> kg</span></div>
+      ${i.note?`<div class="aq-note">⚠️ ${esc(i.note)}</div>`:''}
+      ${i.options&&i.options.length?`<div class="aq-opt">${i.options.map(o=>`<span>${esc(o.text)}</span>`).join('')}</div>`:''}
+    </div>`; }).join('');
+}
+async function loadReport(){
+  const st = document.getElementById('repStatus'); st.textContent = 'กำลังคำนวณ…';
+  try{ const r = await hdFetch('/hd/api/v1/quality-report?month=' + monthStr()); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    document.getElementById('repText').textContent = d.text; st.textContent = ''; }
+  catch(e){ st.textContent = '❌ ' + (e.message||e); }
+}
+async function sendReport(){
+  const st = document.getElementById('repStatus'); st.textContent = 'กำลังสร้าง PDF + ส่ง…';
+  try{ const r = await hdFetch('/hd/api/v1/quality-report/send', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({month: monthStr()||null})});
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    st.textContent = `✅ ${d.month} · LINE ${d.line_sent} · Drive ${d.drive?'✓':'✗'}`; }
+  catch(e){ st.textContent = '❌ ' + (e.message||e); }
+}
+(function(){ const n = new Date(); n.setMonth(n.getMonth()-1); const m = n.toISOString().slice(0,7); document.getElementById('rmonth').value = m;
+  const upd = () => { document.getElementById('pdfLink').href = '/hd/api/v1/quality-report.pdf?month=' + monthStr() + tokenQ(); };
+  document.getElementById('rmonth').addEventListener('change', upd); upd(); })();
+load(); loadReport();
+</script>
+{% endblock %}

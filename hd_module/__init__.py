@@ -596,6 +596,15 @@ def _start_daily_reminder_scheduler(app):
                                             res.get("ok"), res.get("failed"), res.get("folder"))
                             except Exception as ex:
                                 logger.error("Daily record export failed: %s", ex)
+                    # ว้าว รอบ 2 #2: 1st of the month → quality report for the previous month
+                    if now.day == 1 and _claim_once(app, "quality_report", now.date()):
+                        with app.app_context():
+                            try:
+                                from .blueprint import run_quality_report
+                                res = run_quality_report(trigger="scheduled")
+                                logger.info("Quality report %s: drive=%s line=%s", res.get("month"), res.get("drive"), res.get("line_sent"))
+                            except Exception as ex:
+                                logger.error("Quality report failed: %s", ex)
             except Exception as e:
                 logger.error("Reminder scheduler error: %s", e)
             time.sleep(300)  # Check every 5 minutes

@@ -4,7 +4,7 @@ All routes under /hd/api/v1/.  Completely isolated from server.py.
 """
 
 import logging
-from datetime import date, datetime, timezone  # noqa: F401
+from datetime import date, datetime, timedelta, timezone  # noqa: F401
 from flask import (  # noqa: F401
     Blueprint, request, jsonify, g, render_template, redirect, url_for,
     current_app, make_response, Response,
@@ -295,6 +295,12 @@ def hd_tv_page():
 def patient_360_page(hn):
     """Patient 360 — one timeline of sessions, alerts, labs, ESA, drugs, incidents."""
     return render_template("hd_patient_360.html", patient_hn=hn)
+
+
+@hd_web.route("/adequacy")
+def adequacy_page():
+    """Adequacy Guardian — Kt/V per patient with levers to reach target."""
+    return render_template("hd_adequacy.html")
 
 
 @hd_web.route("/anemia")
@@ -1235,6 +1241,140 @@ def esa_run_now():
         return jsonify(run_esa_autopilot(trigger="manual"))
     except Exception as e:
         logger.error("esa run: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── ว้าว รอบ 2 #2: Adequacy Guardian + monthly quality report ──
+
+def _ym(arg):
+    from datetime import date as _d
+    today = (datetime.now(timezone.utc) + timedelta(hours=7)).date()
+    if arg:
+        y, m = arg.split("-")[:2]
+        return int(y), int(m)
+    prev = (today.replace(day=1) - timedelta(days=1))
+    return prev.year, prev.month
+
+
+def run_quality_report(year=None, month=None, trigger="scheduled", send_line=True):
+    """Build the month's quality report → GCS reports/quality + Drive 'รายงานคุณภาพ' + LINE summary."""
+    import os
+    import psycopg2
+    from flask import current_app
+    from .quality_report import collect_month, line_text, pdf_bytes
+    if year is None or month is None:
+        year, month = _ym(None)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        D = collect_month(conn, year, month)
+    finally:
+        conn.close()
+    pdf = pdf_bytes(D)
+    name = f"HD-Quality-{year}-{month:02d}.pdf"
+    stored, drive_ok = [], False
+    try:
+        bucket = getattr(current_app.config.get("STORAGE_OBJ"), "_bucket", None)
+        if bucket is not None:
+            gp = f"reports/quality/{year}/{name}"
+            try:
+                bucket.blob(gp).upload_from_string(pdf, content_type="application/pdf")
+            except Exception:
+                gp = f"reports/quality/{year}/{name[:-4]}.v{datetime.now(timezone.utc).strftime('%H%M')}.pdf"
+                bucket.blob(gp).upload_from_string(pdf, content_type="application/pdf")
+            stored.append(gp)
+    except Exception as e:
+        logger.warning("quality report gcs: %s", e)
+    try:
+        from .daily_records import drive_upload_fn
+        up = drive_upload_fn()
+        if up:
+            up(f"รายงานคุณภาพ/{year}/{name}", pdf, "application/pdf")
+            drive_ok = True
+    except Exception as e:
+        logger.warning("quality report drive: %s", str(e)[:80])
+    sent = 0
+    if send_line:
+        base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+        msg = line_text(D, base)
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+        ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+        for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+            try:
+                if push_fn and push_fn(uid, msg) is not False:
+                    sent += 1
+            except Exception as e:
+                logger.warning("quality report push: %s", e)
+    log_action(user_id=None, action="quality.report_generated", resource_type="report", resource_id=None,
+               new_values={"month": f"{year}-{month:02d}", "trigger": trigger, "gcs": stored, "drive": drive_ok, "line_sent": sent}, ip_address="")
+    return {"month": f"{year}-{month:02d}", "gcs": stored, "drive": drive_ok, "line_sent": sent, "data": D}
+
+
+@hd_bp.route("/adequacy", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def adequacy_list():
+    import os
+    import psycopg2
+    from .quality_report import adequacy
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        items = adequacy(conn, min(int(request.args.get("days", 90) or 90), 365))
+    finally:
+        conn.close()
+    return jsonify({"items": items, "counts": {"low": sum(1 for i in items if i["adequate"] is False),
+                                              "ok": sum(1 for i in items if i["adequate"] is True),
+                                              "unknown": sum(1 for i in items if i["adequate"] is None),
+                                              "measured": sum(1 for i in items if i["source"] == "measured")}})
+
+
+@hd_bp.route("/quality-report", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def quality_report_json():
+    import os
+    import psycopg2
+    from .quality_report import collect_month, line_text
+    y, m = _ym(request.args.get("month"))
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        D = collect_month(conn, y, m)
+    finally:
+        conn.close()
+    D["text"] = line_text(D, "")
+    return jsonify(D)
+
+
+@hd_bp.route("/quality-report.pdf", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def quality_report_pdf():
+    import os
+    import psycopg2
+    from flask import Response
+    from .quality_report import collect_month, pdf_bytes
+    y, m = _ym(request.args.get("month"))
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        D = collect_month(conn, y, m)
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="quality.report_pdf", resource_type="report", resource_id=None,
+               new_values={"month": f"{y}-{m:02d}"}, ip_address=request.remote_addr or "")
+    return Response(pdf_bytes(D), mimetype="application/pdf",
+                    headers={"Content-Disposition": _content_disposition(f"HD-Quality-{y}-{m:02d}.pdf")})
+
+
+@hd_bp.route("/quality-report/send", methods=["POST"])
+@require_role("physician", "admin")
+def quality_report_send():
+    y, m = _ym((request.get_json(silent=True) or {}).get("month"))
+    try:
+        r = run_quality_report(y, m, trigger="manual")
+        r.pop("data", None)
+        return jsonify(r)
+    except Exception as e:
+        logger.error("quality report: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
