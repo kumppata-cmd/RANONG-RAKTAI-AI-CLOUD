@@ -1254,7 +1254,8 @@ def esa_run_now():
 
 def _sched_ctx(conn):
     from .bed_scheduler import load_context
-    return load_context(conn, HdConfig.TOTAL_BEDS, get_setting_value("hbv_beds", ""), get_setting_value("hcv_beds", ""))
+    # คลินิก: เตียงโซน HBV = เตียง 25 เตียงเดียว (หมอยืนยัน 13 พ.ย. 2569) — เปลี่ยนได้ใน ⚙️ hbv_beds
+    return load_context(conn, HdConfig.TOTAL_BEDS, get_setting_value("hbv_beds", "") or "25", get_setting_value("hcv_beds", ""))
 
 
 @hd_bp.route("/scheduler/week", methods=["GET"])
