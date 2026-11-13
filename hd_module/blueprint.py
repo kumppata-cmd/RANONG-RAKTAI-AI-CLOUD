@@ -790,7 +790,18 @@ def session_idh_risk(session_id):
         conn.close()
     if not f:
         return jsonify({"error": "not found"}), 404
+    # ว้าว รอบ 2 #5: "ถ้า…จะ…" simulator — override planned inputs (nothing is saved)
+    simulated = False
+    for k in ("uf_goal", "duration_hours", "pre_weight"):
+        v = request.args.get(k)
+        if v not in (None, ""):
+            try:
+                f[k] = float(v)
+                simulated = True
+            except ValueError:
+                pass
     out = idh_score(f)
+    out["simulated"] = simulated
     out["features"] = {k: (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
                        for k, v in f.items() if k != "sbp_series"}
     out["features"]["sbp_series"] = f.get("sbp_series")
@@ -1215,6 +1226,176 @@ def esa_run_now():
         return jsonify(run_esa_autopilot(trigger="manual"))
     except Exception as e:
         logger.error("esa run: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── ว้าว รอบ 2 #1: Dry Weight Autopilot + UF Planner ──
+
+def _dw_limits():
+    from .dw_autopilot import DEFAULTS
+    out = {}
+    for k, dv in DEFAULTS.items():
+        v = get_setting_value(k, "")
+        try:
+            out[k] = float(v) if v not in ("", None) else dv
+        except ValueError:
+            out[k] = dv
+    return out
+
+
+def run_dw_autopilot(trigger="scheduled"):
+    import os
+    import psycopg2
+    from flask import current_app
+    from .dw_autopilot import generate, line_summary
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"created": 0}
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        created = generate(conn, _dw_limits())
+    finally:
+        conn.close()
+    sent = 0
+    if created:
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+        ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+        base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+        msg = line_summary(created, base)
+        for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+            try:
+                if push_fn and push_fn(uid, msg) is not False:
+                    sent += 1
+            except Exception as e:
+                logger.warning("dw autopilot push: %s", e)
+        log_action(user_id=None, action="dw.proposals_created", resource_type="dw",
+                   new_values={"count": len(created), "trigger": trigger, "line_sent": sent}, ip_address="")
+    return {"created": len(created), "line_sent": sent, "items": created}
+
+
+@hd_bp.route("/uf-plan", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def uf_plan():
+    """UF Planner: ?pre_weight=&dry_weight=&hours=  or ?session_id= (reads the session + prescription)."""
+    import os
+    import psycopg2
+    from .dw_autopilot import plan_uf
+    lim = _dw_limits()
+    pre, dw, hours = request.args.get("pre_weight"), request.args.get("dry_weight"), request.args.get("hours")
+    sid = request.args.get("session_id")
+    if sid:
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT s.pre_weight, p.dry_weight,
+                                      COALESCE((SELECT r.duration_hours FROM hd_prescriptions r WHERE r.patient_id = s.patient_id
+                                                AND r.is_active = TRUE ORDER BY r.id DESC LIMIT 1), 4.0), s.uf_goal
+                               FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id WHERE s.id = %s""", (sid,))
+                r = cur.fetchone()
+        finally:
+            conn.close()
+        if not r:
+            return jsonify({"error": "not found"}), 404
+        pre = pre or r[0]; dw = dw or r[1]; hours = hours or r[2]
+        plan = plan_uf(pre, dw, hours, lim)
+        plan["uf_goal_set"] = float(r[3]) if r[3] is not None else None
+        return jsonify(plan)
+    return jsonify(plan_uf(pre, dw, hours or 4, lim))
+
+
+@hd_bp.route("/dw/proposals", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def dw_proposals():
+    import os
+    import psycopg2
+    from .dw_autopilot import CREATE_SQL
+    status = request.args.get("status", "pending")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CREATE_SQL)
+            conn.commit()
+            q = """SELECT d.id, d.patient_id, d.hn, p.patient_name, d.current_dw, d.proposed_dw, d.direction, d.rationale,
+                          d.evidence, d.sessions_used, d.status, d.created_at, d.decided_by, d.decided_at, d.note, p.dry_weight
+                   FROM hd_dw_proposals d JOIN hd_patient_mapping p ON p.id = d.patient_id"""
+            if status == "all":
+                cur.execute(q + " ORDER BY d.id DESC LIMIT 200")
+            else:
+                cur.execute(q + " WHERE d.status = %s ORDER BY d.id DESC LIMIT 200", (status,))
+            items = [{"id": r[0], "patient_id": r[1], "hn": r[2], "name": r[3], "current_dw": float(r[4]) if r[4] is not None else None,
+                      "proposed_dw": float(r[5]) if r[5] is not None else None, "direction": r[6], "rationale": r[7],
+                      "evidence": r[8] or {}, "sessions_used": r[9], "status": r[10],
+                      "created_at": (r[11].isoformat() + "Z") if r[11] else None, "decided_by": r[12],
+                      "decided_at": (r[13].isoformat() + "Z") if r[13] else None, "note": r[14],
+                      "now_dw": float(r[15]) if r[15] is not None else None} for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return jsonify({"items": items, "limits": _dw_limits()})
+
+
+@hd_bp.route("/dw/proposals/<int:pid>/decide", methods=["POST"])
+@require_role("physician")
+def dw_decide(pid):
+    """Approve (optionally with a different value) → updates hd_patient_mapping.dry_weight; or reject."""
+    import os
+    import psycopg2
+    data = request.get_json(silent=True) or {}
+    decision = data.get("decision")
+    note = (data.get("note") or "").strip()[:300]
+    override = data.get("dry_weight")
+    if decision not in ("approve", "reject"):
+        return jsonify({"error": "decision must be approve|reject"}), 400
+    who = g.get("hd_username") or str(g.get("hd_user_id") or "")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    applied = None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT patient_id, proposed_dw, current_dw, status, hn FROM hd_dw_proposals WHERE id = %s", (pid,))
+            r = cur.fetchone()
+            if not r:
+                return jsonify({"error": "not found"}), 404
+            if r[3] != "pending":
+                return jsonify({"error": f"already {r[3]}"}), 409
+            patient_id, proposed, current, _, hn = r
+            if decision == "approve":
+                try:
+                    new_dw = float(override) if override not in (None, "") else float(proposed)
+                except (TypeError, ValueError):
+                    return jsonify({"error": "dry_weight ต้องเป็นตัวเลข"}), 400
+                if not (20 <= new_dw <= 200):
+                    return jsonify({"error": "dry_weight อยู่นอกช่วงที่สมเหตุสมผล"}), 400
+                cur.execute("UPDATE hd_patient_mapping SET dry_weight = %s, updated_at = NOW() WHERE id = %s", (new_dw, patient_id))
+                cur.execute("UPDATE hd_prescriptions SET dry_weight_target = %s, updated_at = NOW() WHERE patient_id = %s AND is_active = TRUE",
+                            (new_dw, patient_id))
+                applied = new_dw
+            cur.execute("""UPDATE hd_dw_proposals SET status = %s, decided_by = %s, decided_at = NOW(), note = %s,
+                           proposed_dw = COALESCE(%s, proposed_dw) WHERE id = %s""",
+                        ("approved" if decision == "approve" else "rejected", who, note, applied, pid))
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action=f"dw.{decision}", resource_type="dw", resource_id=pid,
+               new_values={"hn": hn, "from": float(current) if current is not None else None, "to": applied, "note": note},
+               ip_address=request.remote_addr or "")
+    if applied is not None:
+        try:
+            push_nurse_group(f"🎯 ปรับน้ำหนักแห้ง: HN {hn} {float(current):.1f} → {applied:.1f} kg" + (f" ({note})" if note else "") +
+                             f"\nโดย {who} — ใช้ตั้งแต่รอบถัดไป", fallback_recipients=False)
+        except Exception as e:
+            logger.warning("dw nurse push: %s", e)
+    return jsonify({"ok": True, "decision": decision, "applied": applied})
+
+
+@hd_bp.route("/dw/run", methods=["POST"])
+@require_role("physician", "admin")
+def dw_run_now():
+    try:
+        return jsonify(run_dw_autopilot(trigger="manual"))
+    except Exception as e:
+        logger.error("dw run: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -3834,6 +4015,7 @@ def update_settings():
         "patient_summary_auto",    # ว้าว #7: on/off auto LINE summary to patient
         "water_total_cl_max", "water_free_cl_max", "water_hardness_max",   # RO water daily check limits
         "water_interval_days", "water_sample_point",
+        "uf_rate_max", "uf_rate_caution", "dw_review_every", "dw_step_kg", "dw_min_interval_days",   # DW Autopilot
         "esa_target_low", "esa_target_high", "esa_hold_above",   # ESA Autopilot protocol
         "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
     ]

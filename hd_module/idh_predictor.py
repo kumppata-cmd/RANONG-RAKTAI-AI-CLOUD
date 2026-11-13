@@ -98,7 +98,10 @@ def score(features):
 def features_for(cur, session_id):
     """Collect predictor inputs for one session from the DB (read-only)."""
     cur.execute("""
-        SELECT s.uf_goal, s.pre_weight, s.duration_hours, p.dry_weight, p.date_of_birth, s.patient_id
+        SELECT s.uf_goal, s.pre_weight,
+               COALESCE((SELECT r.duration_hours FROM hd_prescriptions r
+                         WHERE r.patient_id = s.patient_id AND r.is_active = TRUE ORDER BY r.id DESC LIMIT 1), 4.0),
+               p.dry_weight, p.date_of_birth, s.patient_id
         FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id WHERE s.id = %s""", (session_id,))
     r = cur.fetchone()
     if not r:

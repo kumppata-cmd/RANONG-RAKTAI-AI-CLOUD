@@ -1,6 +1,6 @@
 {% extends "hd_base.html" %}
 {% block title %}ESA Autopilot{% endblock %}
-{% block page_title %}💊 ESA Autopilot{% endblock %}
+{% block page_title %}🤖 Autopilot — ESA · Dry Weight{% endblock %}
 {% block nav_esa %}active{% endblock %}
 
 {% block extra_css %}
@@ -42,7 +42,7 @@
 
 {% block content %}
 <div class="esa-bar">
-  <button class="btn btn-primary" id="btnRun" onclick="runNow()">🔄 รัน Autopilot ตอนนี้</button>
+  <button class="btn btn-primary" id="btnRun" onclick="runNow()">🔄 รัน ESA Autopilot ตอนนี้</button>
   <span id="runStatus" style="font-size:.8rem;color:var(--fg-muted)"></span>
   <span style="flex:1"></span>
   <a class="btn btn-secondary" href="/hd/settings" style="text-decoration:none;">⚙️ ตั้งค่า Protocol</a>
@@ -50,10 +50,13 @@
 </div>
 <div class="esa-proto" id="proto"></div>
 <div class="esa-tabs">
-  <button class="on" data-tab="pending" onclick="setTab('pending')">⏳ รออนุมัติ <span id="cntPending"></span></button>
-  <button data-tab="all" onclick="setTab('all')">📜 ประวัติ</button>
+  <button class="on" data-tab="pending" onclick="setTab('pending')">💊 ESA รออนุมัติ <span id="cntPending"></span></button>
+  <button data-tab="all" onclick="setTab('all')">💊 ประวัติ ESA</button>
+  <button data-tab="dw" onclick="setTab('dw')">🎯 Dry Weight รออนุมัติ <span id="cntDw"></span></button>
+  <button data-tab="dwall" onclick="setTab('dwall')">🎯 ประวัติ DW</button>
 </div>
 <div class="esa-list" id="list"><div class="esa-empty">กำลังโหลด…</div></div>
+<div class="esa-note" id="dwNote" style="display:none">🎯 <b>Dry Weight Autopilot</b> ทบทวนทุกเช้า 07:00 จาก 10 รอบล่าสุด: น้ำหนักหลังฟอกเทียบ DW, IDH/ตะคริว, BP หลังฟอก, บวม, UF ไม่ถึงเป้า → <b>เสนอ</b> ปรับ ±0.5 kg พร้อมเหตุผล · DW ในระบบเปลี่ยนเมื่อแพทย์กด ✓ เท่านั้น (แก้ตัวเลขก่อนกดได้) แล้วแจ้งกลุ่มพยาบาล · เว้นอย่างน้อย 21 วันหลังตัดสินใจครั้งล่าสุด</div>
 <div class="esa-note">ระบบ <b>เสนอ</b> ขนาดยาตาม protocol ที่แพทย์ตั้งไว้ จาก Hb ใหม่ล่าสุด (เอกสารแล็บ/บันทึกรอบฟอก) — ไม่มีการปรับยาอัตโนมัติ
 ขนาดยาในระบบจะเปลี่ยนเฉพาะเมื่อแพทย์กด ✓ อนุมัติ (แก้ขนาดก่อนกดได้) และจะแจ้งกลุ่มพยาบาลทันที · ไม่เสนอซ้ำภายในช่วง min interval หลังการตัดสินใจครั้งล่าสุด</div>
 {% endblock %}
@@ -65,7 +68,51 @@ const ST_TH = {pending:'รออนุมัติ', approved:'อนุมั�
 let tab = 'pending';
 const ROLE = (function(){ try { return JSON.parse(atob((getHdToken()||'').split('.')[1]||'')).role || ''; } catch(e){ return ''; } })();
 
-function setTab(t){ tab = t; document.querySelectorAll('.esa-tabs button').forEach(b=>b.classList.toggle('on', b.dataset.tab===t)); load(); }
+function setTab(t){ tab = t; document.querySelectorAll('.esa-tabs button').forEach(b=>b.classList.toggle('on', b.dataset.tab===t));
+  const isDw = t.startsWith('dw'); document.getElementById('dwNote').style.display = isDw ? '' : 'none';
+  document.getElementById('btnRun').textContent = isDw ? '🔄 ทบทวน Dry Weight ตอนนี้' : '🔄 รัน ESA Autopilot ตอนนี้';
+  isDw ? loadDw() : load(); }
+
+async function loadDw(){
+  const list = document.getElementById('list');
+  try{
+    const r = await hdFetch('/hd/api/v1/dw/proposals?status=' + (tab==='dwall'?'all':'pending'));
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    const L = d.limits || {};
+    document.getElementById('proto').innerHTML = `<span>เพดาน UF <b>${L.uf_rate_max}</b> mL/kg/h (ระวัง &gt; <b>${L.uf_rate_caution}</b>)</span><span>ปรับครั้งละ <b>${L.dw_step_kg}</b> kg</span><span>เว้น <b>${L.dw_min_interval_days}</b> วัน</span>`;
+    const items = d.items || [];
+    if (tab==='dw') document.getElementById('cntDw').textContent = items.length ? `(${items.length})` : '';
+    if (!items.length){ list.innerHTML = `<div class="esa-empty">${tab==='dw'?'✅ ไม่มีข้อเสนอปรับ Dry Weight':'ยังไม่มีประวัติ'}</div>`; return; }
+    list.innerHTML = items.map(it=>{
+      const canAct = it.status==='pending' && ROLE==='physician';
+      const ev = it.evidence || {};
+      const arrow = it.direction==='up' ? '⬆️' : '⬇️';
+      return `<div class="esa-item ${it.direction==='up'?'increase':'decrease'}">
+        <div>
+          <div class="esa-who">${esc(it.name||'')}<small>HN ${esc(it.hn||'')}</small><span class="esa-badge b-${it.status}">${ST_TH[it.status]||it.status}</span></div>
+          <div style="display:flex;gap:16px;align-items:center;margin-top:6px;flex-wrap:wrap">
+            <div class="esa-hb">${it.current_dw!=null?it.current_dw.toFixed(1):'—'}<small>DW ปัจจุบัน (kg)</small></div>
+            <div class="esa-dose">${arrow} เสนอ <span class="new">${it.proposed_dw!=null?it.proposed_dw.toFixed(1):'—'} kg</span></div>
+          </div>
+          <div class="esa-why">${esc(it.rationale||'')}</div>
+          <div class="esa-why">จาก ${it.sessions_used||'-'} รอบ · มัธยฐานหลังฟอก ${ev.median_post??'-'} kg · ต่ำกว่า DW ${ev.below_dw??0} · สูงกว่า ${ev.above_dw??0} · IDH ${ev.idh??0} · ตะคริว ${ev.cramp??0} · SBP&lt;100 ${ev.post_sbp_low??0} · SBP≥160 ${ev.post_sbp_high??0} · บวม ${ev.edema??0} · UF ไม่ถึง ${ev.uf_short??0}</div>
+          ${it.status!=='pending' ? `<div class="esa-why">โดย ${esc(it.decided_by||'')} · ${fmtDate(it.decided_at)}${it.note?' · '+esc(it.note):''}</div>` : ''}
+        </div>
+        ${canAct ? `<div class="esa-act">
+          <input id="dwv_${it.id}" type="number" step="0.1" placeholder="แก้ค่า DW (ถ้าต้องการ) เช่น ${it.proposed_dw!=null?it.proposed_dw.toFixed(1):''}">
+          <input id="dwn_${it.id}" placeholder="หมายเหตุ (ไม่บังคับ)">
+          <div class="row"><button class="btn btn-primary" onclick="decideDw(${it.id},'approve')">✓ อนุมัติ</button><button class="btn btn-secondary" onclick="decideDw(${it.id},'reject')">✗ ไม่ปรับ</button></div></div>`
+          : (it.status==='pending' ? `<div class="esa-act" style="font-size:.75rem;color:var(--fg-muted)">รอแพทย์อนุมัติ</div>` : '')}
+      </div>`; }).join('');
+  }catch(e){ list.innerHTML = `<div class="esa-empty">โหลดไม่สำเร็จ: ${esc(e.message||e)}</div>`; }
+}
+async function decideDw(id, decision){
+  const dw = (document.getElementById('dwv_'+id)||{}).value || '';
+  const note = (document.getElementById('dwn_'+id)||{}).value || '';
+  try{ const r = await hdFetch(`/hd/api/v1/dw/proposals/${id}/decide`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({decision, dry_weight: dw||null, note})});
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status); loadDw(); }
+  catch(e){ document.getElementById('runStatus').textContent = '❌ ' + (e.message||e); }
+}
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function fmtDate(iso){ if(!iso) return ''; const d=new Date(iso); return d.toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'}); }
@@ -123,13 +170,14 @@ async function decide(id, decision){
 
 async function runNow(){
   const b = document.getElementById('btnRun'), s = document.getElementById('runStatus');
-  b.disabled = true; s.textContent = 'กำลังตรวจ Hb ใหม่…';
+  const isDw = tab.startsWith('dw');
+  b.disabled = true; s.textContent = isDw ? 'กำลังทบทวน DW จาก 10 รอบล่าสุด…' : 'กำลังตรวจ Hb ใหม่…';
   try{
-    const r = await hdFetch('/hd/api/v1/esa/run', {method:'POST'});
+    const r = await hdFetch(isDw ? '/hd/api/v1/dw/run' : '/hd/api/v1/esa/run', {method:'POST'});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error||r.status);
-    s.textContent = d.created ? `✅ เสนอใหม่ ${d.created} รายการ (LINE แพทย์ ${d.line_sent})` : '✅ ไม่มี Hb ใหม่ที่ต้องปรับ';
-    setTab('pending');
+    s.textContent = d.created ? `✅ เสนอใหม่ ${d.created} รายการ (LINE แพทย์ ${d.line_sent})` : (isDw ? '✅ ไม่มีผู้ป่วยที่ควรปรับ DW ตอนนี้' : '✅ ไม่มี Hb ใหม่ที่ต้องปรับ');
+    setTab(isDw ? 'dw' : 'pending');
   }catch(e){ s.textContent = '❌ ' + (e.message||e); }
   b.disabled = false;
 }

@@ -154,6 +154,8 @@ def _run_hd_migrations():
                     hbsag VARCHAR(20), antihcv VARCHAR(20), antihbs VARCHAR(20),
                     synced_at TIMESTAMP DEFAULT NOW())""",
                 "CREATE INDEX IF NOT EXISTS ix_hd_lab_docs_hn_date ON hd_lab_docs(hn, specimen_date DESC)",
+                # Dry Weight Autopilot proposals
+                __import__("hd_module.dw_autopilot", fromlist=["CREATE_SQL"]).CREATE_SQL,
                 # ตรวจระบบน้ำ RO ประจำวัน (Hardness / Free Cl / Total Cl)
                 *[stmt.strip() for stmt in __import__("hd_module.water_check", fromlist=["CREATE_SQL"]).CREATE_SQL.split(";") if stmt.strip()],
                 # Set alert_recipients
@@ -548,6 +550,15 @@ def _start_daily_reminder_scheduler(app):
                                     logger.info("ESA autopilot: %s proposals", r["created"])
                         except Exception as ex:
                             logger.warning("ESA autopilot failed: %s", ex)
+                        # ว้าว รอบ 2 #1: Dry Weight review — once a day at the 07:00 tick
+                        try:
+                            if lab_tick % 12 == 0 and now.hour == 7:
+                                from .blueprint import run_dw_autopilot
+                                r = run_dw_autopilot()
+                                if r.get("created"):
+                                    logger.info("DW autopilot: %s proposals", r["created"])
+                        except Exception as ex:
+                            logger.warning("DW autopilot failed: %s", ex)
                 lab_tick += 1
                 # Send at 18:00 Thai time
                 if now.hour == 18 and now.minute < 5 and last_sent_date != now.date():

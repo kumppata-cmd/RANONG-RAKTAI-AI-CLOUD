@@ -141,6 +141,22 @@
     <div class="idwg-calc" id="idwgCalc" style="display:none;">
       IDWG: <span class="value" id="idwgValue">-</span> kg (<span id="idwgPct">-</span>% ของ DW)
     </div>
+    <!-- ว้าว รอบ 2 #1 UF Planner + #5 "ถ้า…จะ…" simulator (advisory; nothing saved until the nurse/physician sets it) -->
+    <div id="ufPlan" style="display:none;margin-top:10px;border-radius:8px;padding:10px 12px;border:1px solid var(--border);background:var(--bg);">
+      <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+        <strong id="ufPlanHead">🎯 UF Planner</strong>
+        <span style="flex:1"></span>
+        <label style="font-size:.78rem;color:var(--fg-muted)">เวลาฟอก
+          <select id="ufHours" class="form-control" style="display:inline-block;width:auto;padding:3px 6px;font-size:.8rem;" onchange="ufPlanRefresh()">
+            <option value="3">3 ชม.</option><option value="3.5">3.5</option><option value="4" selected>4 ชม.</option><option value="4.5">4.5</option><option value="5">5 ชม.</option>
+          </select></label>
+        <label style="font-size:.78rem;color:var(--fg-muted)">UF (L)
+          <input type="number" id="ufSim" step="0.1" min="0" class="form-control" style="display:inline-block;width:80px;padding:3px 6px;font-size:.8rem;" oninput="ufPlanRefresh(true)"></label>
+      </div>
+      <div id="ufPlanBody" style="font-size:.84rem;margin-top:6px;"></div>
+      <div id="ufPlanOpts" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"></div>
+      <div id="idhSim" style="font-size:.8rem;margin-top:8px;color:var(--fg-muted);"></div>
+    </div>
   </div>
 
   <!-- Dialyzer + Heparin + VA — auto-filled from last session -->
@@ -805,7 +821,51 @@ function calcIDWG(){
       document.getElementById('ufGoal').textContent = ufGoal;
       sessionData.uf_goal = ufGoal;
     }
-  } else { el.style.display = 'none'; }
+    ufPlanRefresh(false);
+  } else { el.style.display = 'none'; const up = document.getElementById('ufPlan'); if(up) up.style.display = 'none'; }
+}
+
+/* ── UF Planner / simulator: server does the math with the limits from ⚙️; IDH score re-run with the planned values ── */
+let _ufTimer = null;
+function ufPlanRefresh(fromSim){
+  const w = parseFloat(document.getElementById('preWeight').value), dw = parseFloat(document.getElementById('dryWeight').value);
+  const box = document.getElementById('ufPlan');
+  if(!(w && dw && dw > 0)){ box.style.display = 'none'; return; }
+  box.style.display = 'block';
+  const hours = parseFloat(document.getElementById('ufHours').value) || 4;
+  const simEl = document.getElementById('ufSim');
+  if(!fromSim && !simEl.dataset.touched) simEl.value = Math.max(0, w - dw).toFixed(1);
+  if(fromSim) simEl.dataset.touched = '1';
+  const ufL = parseFloat(simEl.value);
+  clearTimeout(_ufTimer);
+  _ufTimer = setTimeout(async () => {
+    try{
+      const r = await hdFetch(`/hd/api/v1/uf-plan?pre_weight=${w}&dry_weight=${dw}&hours=${hours}`);
+      const p = await r.json(); if(!r.ok) throw new Error(p.error||r.status);
+      const ufMl = isFinite(ufL) ? Math.round(ufL*1000) : p.uf_ml;
+      const rate = ufMl / dw / hours;
+      const lim = p.level; const col = rate > 13 ? 'var(--danger)' : (rate > 10 ? '#e67e22' : 'var(--success)');
+      document.getElementById('ufPlanBody').innerHTML =
+        `<span style="font-weight:800;color:${col}">${(ufMl/1000).toFixed(1)} L / ${hours} ชม. = ${rate.toFixed(1)} mL/kg/h</span> ` +
+        `<span style="color:var(--fg-muted)">${rate > 13 ? '— เกินเพดาน 13 (เสี่ยง IDH/ตะคริว)' : (rate > 10 ? '— ระวัง (10–13)' : '— ในเกณฑ์')}</span>` +
+        (p.idwg_pct > 4 ? `<div style="color:#e67e22">IDWG ${p.gain_kg} kg (${p.idwg_pct}% ของ DW) — ทบทวนจำกัดน้ำ/เกลือ</div>` : '');
+      document.getElementById('ufPlanOpts').innerHTML = (p.options||[]).map(o =>
+        `<button type="button" class="btn btn-outline" style="font-size:.75rem;padding:4px 8px" onclick="ufApply(${o.type==='time'?o.hours:'null'}, ${o.type==='cap'?o.uf_ml:'null'})">${o.text}</button>`).join('');
+      if(sessionData.session_id){
+        const q = `uf_goal=${ufMl}&duration_hours=${hours}&pre_weight=${w}`;
+        const r2 = await hdFetch(`/hd/api/v1/sessions/${sessionData.session_id}/idh-risk?${q}`);
+        if(r2.ok){ const s = await r2.json(); const c2 = s.level==='high'?'var(--danger)':(s.level==='moderate'?'#e67e22':'var(--success)');
+          document.getElementById('idhSim').innerHTML = `🧪 ถ้าใช้แผนนี้ → คะแนนเสี่ยง IDH <b style="color:${c2}">${s.score}</b> (${s.level==='high'?'สูง':(s.level==='moderate'?'ปานกลาง':'ต่ำ')})` +
+            (s.factors.length ? ' · ' + s.factors.slice(0,3).map(f=>f.text).join(' · ') : '') + (s.advice ? `<br>💡 ${s.advice}` : ''); }
+      } else { document.getElementById('idhSim').textContent = 'บันทึกรอบก่อน จะเห็นคะแนน IDH ของแผนนี้'; }
+    }catch(e){ document.getElementById('ufPlanBody').textContent = 'คำนวณไม่ได้: ' + (e.message||e); }
+  }, 350);
+}
+function ufApply(hours, ufMl){
+  if(hours){ document.getElementById('ufHours').value = String(hours); sessionData.duration_hours = hours; }
+  if(ufMl){ document.getElementById('ufSim').value = (ufMl/1000).toFixed(1); document.getElementById('ufSim').dataset.touched = '1';
+    document.getElementById('ufGoal').textContent = ufMl; sessionData.uf_goal = ufMl; }
+  ufPlanRefresh(true);
 }
 
 function calcActualUF(){
