@@ -6879,6 +6879,29 @@ def admin_compare_page(hn):
         _cmp_va = _cmp_patient.vascular_access or ""
         _cmp_schedule = _cmp_patient.dialysis_schedule or ""
         _cmp_hd = _cmp_patient.hd_per_week or 0
+    # Fallback: ทะเบียน HD (hd_patient_mapping) — VA ถูกอัปเดตทุกครั้งที่บันทึก session
+    if not _cmp_va or not _cmp_esa or not _cmp_schedule:
+        try:
+            import psycopg2 as _pg
+            _db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+            if _db_url:
+                _c = _pg.connect(_db_url, connect_timeout=5)
+                with _c.cursor() as _cur:
+                    _cur.execute("""SELECT vascular_access, va_location, esa_drug, esa_dose, schedule_days, hd_per_week
+                                    FROM hd_patient_mapping WHERE UPPER(hn) = %s OR UPPER(hospital_hn) = %s LIMIT 1""",
+                                 (str(hn_q).upper(), str(hn_q).upper()))
+                    _r = _cur.fetchone()
+                _c.close()
+                if _r:
+                    if not _cmp_va and _r[0]:
+                        _cmp_va = _r[0] + (f" ({_r[1]})" if _r[1] else "")
+                    if not _cmp_esa and _r[2]:
+                        _cmp_esa = _r[2] + (f" {_r[3]}" if _r[3] else "")
+                    if not _cmp_schedule and _r[4]:
+                        _cmp_schedule = _r[4]
+                        _cmp_hd = _r[5] or _cmp_hd
+        except Exception as _e:
+            logger.debug("compare hd fallback: %s", _e)
 
     # ── ค้นเอกสารตาม type ──
     all_docs = []
