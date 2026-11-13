@@ -297,6 +297,12 @@ def patient_360_page(hn):
     return render_template("hd_patient_360.html", patient_hn=hn)
 
 
+@hd_web.route("/anemia")
+def anemia_page():
+    """Anemia Command Center — iron + ESA + Hb trajectory for every patient."""
+    return render_template("hd_anemia.html")
+
+
 @hd_web.route("/va-watch")
 def va_watch_page():
     """VA Watch — vascular access trend per patient."""
@@ -1201,6 +1207,8 @@ def esa_decide(pid):
                     cur.execute("UPDATE hd_patient_mapping SET esa_dose = %s, updated_at = NOW() WHERE id = %s",
                                 (new_dose, patient_id))
                     applied = new_dose
+                elif action == "iron":
+                    applied = "iron"          # ESA dose unchanged; physician orders iron
             cur.execute("""UPDATE hd_esa_proposals SET status = %s, decided_by = %s, decided_at = NOW(), note = %s,
                            proposed_dose = COALESCE(NULLIF(%s, ''), proposed_dose) WHERE id = %s""",
                         ("approved" if decision == "approve" else "rejected", who, note, override_dose, pid))
@@ -1212,7 +1220,8 @@ def esa_decide(pid):
     # tell the nurse group so the next session uses the new dose
     if decision == "approve" and applied:
         try:
-            cur_txt = f"ESA ปรับแล้ว: HN {hn} → {'งด ESA ชั่วคราว' if applied == 'hold' else applied}" + (f" ({note})" if note else "")
+            cur_txt = (f"ให้เหล็ก IV ก่อน (ESA คงเดิม): HN {hn}" if applied == "iron" else
+                       f"ESA ปรับแล้ว: HN {hn} → {'งด ESA ชั่วคราว' if applied == 'hold' else applied}") + (f" ({note})" if note else "")
             push_nurse_group(f"💊 {cur_txt}\nโดย {who} — ใช้ขนาดใหม่ตั้งแต่รอบถัดไป", fallback_recipients=False)
         except Exception as e:
             logger.warning("esa nurse push: %s", e)
@@ -1227,6 +1236,38 @@ def esa_run_now():
     except Exception as e:
         logger.error("esa run: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+# ── ว้าว รอบ 2 #4: Anemia Command Center ──
+
+def _anemia_limits():
+    from .anemia import DEFAULTS
+    out = {}
+    for k, dv in DEFAULTS.items():
+        v = get_setting_value(k, "")
+        try:
+            out[k] = float(v) if v not in ("", None) else dv
+        except ValueError:
+            out[k] = dv
+    return out
+
+
+@hd_bp.route("/anemia", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def anemia_center():
+    import os
+    import psycopg2
+    from .anemia import collect
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        items = collect(conn, _anemia_limits())
+    finally:
+        conn.close()
+    counts = {}
+    for i in items:
+        counts[i["tag"]] = counts.get(i["tag"], 0) + 1
+    return jsonify({"items": items, "counts": counts, "limits": _anemia_limits()})
 
 
 # ── ว้าว รอบ 2 #1: Dry Weight Autopilot + UF Planner ──
@@ -4016,6 +4057,7 @@ def update_settings():
         "water_total_cl_max", "water_free_cl_max", "water_hardness_max",   # RO water daily check limits
         "water_interval_days", "water_sample_point",
         "uf_rate_max", "uf_rate_caution", "dw_review_every", "dw_step_kg", "dw_min_interval_days",   # DW Autopilot
+        "anemia_ferritin_low", "anemia_tsat_low", "anemia_ferritin_high", "anemia_eri_high", "anemia_eri_mod",
         "esa_target_low", "esa_target_high", "esa_hold_above",   # ESA Autopilot protocol
         "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
     ]

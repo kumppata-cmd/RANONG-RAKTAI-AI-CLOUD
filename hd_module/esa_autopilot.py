@@ -142,6 +142,18 @@ def generate(conn, protocol=None, lookback_days=60):
             prop = propose(hb, dose, p, held=held)
             if not prop:
                 continue
+            # ว้าว รอบ 2 #4: Hb ต่ำ + ขาดเหล็ก → เสนอเหล็ก IV ก่อนเพิ่ม ESA (KDOQI: ferritin <200 / TSAT <20%)
+            if prop["action"] in ("increase", "review") and hb < float(p["esa_target_low"]):
+                try:
+                    from .anemia import iron_status_for
+                    st, fer, tsat = iron_status_for(cur, pid)
+                    if st == "deficient":
+                        fer_s = f"{fer:g}" if fer is not None else "?"
+                        tsat_s = f"{tsat:g}%" if tsat is not None else "?"
+                        prop = {"action": "iron", "proposed_dose": "เหล็ก IV ตาม protocol",
+                                "rationale": f"Hb {float(hb):.1f} < {p['esa_target_low']} แต่ขาดเหล็ก (ferritin {fer_s} / TSAT {tsat_s}) — เติมเหล็กก่อน ยังไม่เพิ่ม ESA"}
+                except Exception as e:
+                    logger.info("iron check skipped: %s", e)
             cur.execute("""INSERT INTO hd_esa_proposals (patient_id, hn, hb, hb_date, hb_source, current_drug,
                            current_dose, action, proposed_dose, rationale)
                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
@@ -152,7 +164,7 @@ def generate(conn, protocol=None, lookback_days=60):
     return created
 
 
-ACTION_TH = {"increase": "เพิ่ม", "decrease": "ลด", "hold": "งด", "resume": "กลับมาให้", "review": "ทบทวน"}
+ACTION_TH = {"increase": "เพิ่ม", "decrease": "ลด", "hold": "งด", "resume": "กลับมาให้", "review": "ทบทวน", "iron": "ให้เหล็กก่อน"}
 
 
 def line_summary(created, base_url):

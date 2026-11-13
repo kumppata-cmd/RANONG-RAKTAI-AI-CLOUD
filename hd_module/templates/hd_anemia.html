@@ -1,0 +1,103 @@
+{% extends "hd_base.html" %}
+{% block title %}Anemia Center{% endblock %}
+{% block page_title %}🧲 Anemia Command Center{% endblock %}
+{% block nav_anemia %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.an-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.an-stats{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px}
+.an-stat{border:1px solid var(--border);background:var(--bg-card);border-radius:14px;padding:4px 10px;font-size:.78rem;cursor:pointer;color:var(--fg-muted)}
+.an-stat.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.an-stat b{color:inherit}
+.an-lim{font-size:.76rem;color:var(--fg-muted);margin-bottom:10px}
+.an-list{display:grid;gap:8px}
+.an-item{background:var(--bg-card);border:1px solid var(--border);border-left:4px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;display:grid;grid-template-columns:1fr auto;gap:6px 14px;align-items:start}
+.an-item.p3{border-left-color:var(--danger)}.an-item.p2{border-left-color:#e67e22}.an-item.p1{border-left-color:var(--accent)}.an-item.p0{border-left-color:var(--success)}
+.an-who{font-weight:700}.an-who small{font-weight:500;color:var(--fg-muted);margin-left:6px}
+.an-row{display:flex;gap:14px;flex-wrap:wrap;margin-top:4px;font-size:.8rem;font-variant-numeric:tabular-nums}
+.an-row b{font-size:.95rem}
+.an-rec{font-size:.82rem;margin-top:6px;padding:6px 8px;border-radius:6px;background:var(--bg)}
+.an-why{font-size:.74rem;color:var(--fg-muted);margin-top:4px}
+.an-tag{display:inline-block;padding:2px 8px;border-radius:10px;font-size:.7rem;font-weight:700;background:rgba(127,140,141,.15)}
+.an-spark{width:120px;height:40px}
+.an-empty{padding:24px;text-align:center;color:var(--fg-muted);background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--radius-sm)}
+.an-note{font-size:.72rem;color:var(--fg-muted);margin-top:12px}
+.lo{color:var(--danger)}.hi{color:#e67e22}.okc{color:var(--success)}
+@media (max-width:640px){.an-item{grid-template-columns:1fr}}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="an-bar">
+  <button class="btn btn-secondary" onclick="load()">🔄 โหลดใหม่</button>
+  <span style="flex:1"></span>
+  <a class="btn btn-secondary" href="/hd/esa" style="text-decoration:none;">🤖 Autopilot</a>
+  <a class="btn btn-secondary" href="/hd/settings" style="text-decoration:none;">⚙️ เกณฑ์</a>
+</div>
+<div class="an-lim" id="lim"></div>
+<div class="an-stats" id="stats"></div>
+<div class="an-list" id="list"><div class="an-empty">กำลังโหลด…</div></div>
+<div class="an-note">รวม Hb จากเอกสารแล็บ/แล็บที่กรอก/รอบฟอก · ferritin/TSAT ล่าสุด · ESA ที่ให้จริง 4 สัปดาห์ (ถ้าไม่มี ใช้ขนาดประจำ × รอบ/สัปดาห์) · <b>ERI</b> = IU/สัปดาห์ ÷ kg ÷ Hb (≥15 = ไม่ตอบสนอง) · เกณฑ์เหล็ก KDOQI-HD: ferritin &lt;200 หรือ TSAT &lt;20% = ขาดเหล็ก · แนวโน้ม Hb จาก ≤6 ค่าล่าสุด (g/dL ต่อ 4 สัปดาห์) ·
+ระบบ<b>เสนอ</b>เท่านั้น — ESA Autopilot จะเสนอ "ให้เหล็กก่อน" แทนเพิ่ม ESA เมื่อขาดเหล็ก · คำสั่งยาเป็นดุลยพินิจแพทย์</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let ITEMS = [], FILTER = '';
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function dTH(iso){ if(!iso) return '—'; return new Date(iso+'T00:00:00').toLocaleDateString('th-TH',{day:'numeric',month:'short'}); }
+function f1(v){ return v==null?'—':Number(v).toFixed(1); }
+function spark(pts, lo, hi){
+  if(!pts || pts.length < 2) return '';
+  const W=120,H=40,P=4, vals=pts.map(p=>p[1]), mn=Math.min(...vals,lo)-0.5, mx=Math.max(...vals,hi)+0.5;
+  const x=i=>P+(W-2*P)*i/(pts.length-1), y=v=>H-P-(v-mn)/(mx-mn)*(H-2*P);
+  return `<svg class="an-spark" viewBox="0 0 ${W} ${H}"><rect x="${P}" y="${y(hi)}" width="${W-2*P}" height="${y(lo)-y(hi)}" fill="var(--success)" opacity=".12"/>
+    <polyline fill="none" stroke="#8e44ad" stroke-width="2" points="${pts.map((p,i)=>x(i)+','+y(p[1])).join(' ')}"/>
+    ${pts.map((p,i)=>`<circle cx="${x(i)}" cy="${y(p[1])}" r="2.2" fill="${p[1]<lo||p[1]>hi?'var(--danger)':'#8e44ad'}"><title>${p[0]}: ${p[1]}</title></circle>`).join('')}</svg>`;
+}
+async function load(){
+  const list = document.getElementById('list');
+  try{
+    const r = await hdFetch('/hd/api/v1/anemia'); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    ITEMS = d.items||[]; const L = d.limits||{};
+    document.getElementById('lim').textContent = `เป้า Hb ${L.anemia_hb_low}–${L.anemia_hb_high} · ขาดเหล็ก: ferritin <${L.anemia_ferritin_low} หรือ TSAT <${L.anemia_tsat_low}% · ERI สูง ≥${L.anemia_eri_high}`;
+    const c = d.counts||{}; const order = ['iron_first','hyporesponse','check_iron','inflammation','esa_up','hb_high','iron_maint','drifting','overload','no_hb','ok'];
+    const TAGS = Object.fromEntries(ITEMS.map(i=>[i.tag,i.tag_th]));
+    document.getElementById('stats').innerHTML = `<span class="an-stat ${FILTER===''?'on':''}" onclick="setF('')">ทั้งหมด <b>${ITEMS.length}</b></span>` +
+      order.filter(t=>c[t]).map(t=>`<span class="an-stat ${FILTER===t?'on':''}" onclick="setF('${t}')">${TAGS[t]||t} <b>${c[t]}</b></span>`).join('');
+    render(L);
+  }catch(e){ list.innerHTML = `<div class="an-empty">โหลดไม่สำเร็จ: ${esc(e.message||e)}</div>`; }
+}
+function setF(t){ FILTER = t; load(); }
+function render(L){
+  const rows = FILTER ? ITEMS.filter(i=>i.tag===FILTER) : ITEMS;
+  const list = document.getElementById('list');
+  if(!rows.length){ list.innerHTML = '<div class="an-empty">ไม่มีผู้ป่วยในกลุ่มนี้</div>'; return; }
+  const lo = L.anemia_hb_low||10, hi = L.anemia_hb_high||12;
+  list.innerHTML = rows.map(i => {
+    const hbc = i.hb==null?'':(i.hb<lo?'lo':(i.hb>hi?'hi':'okc'));
+    const ferc = i.ferritin==null?'':(i.ferritin<L.anemia_ferritin_low?'lo':(i.ferritin>L.anemia_ferritin_high?'hi':'okc'));
+    const tsc = i.tsat==null?'':(i.tsat<L.anemia_tsat_low?'lo':'okc');
+    const eric = i.eri==null?'':(i.eri>=L.anemia_eri_high?'lo':(i.eri>=L.anemia_eri_mod?'hi':'okc'));
+    return `<div class="an-item p${i.priority}">
+      <div>
+        <div class="an-who"><a href="/hd/patient/${encodeURIComponent(i.hn)}/360" style="color:inherit;text-decoration:none">${esc(i.name||'')}</a><small>HN ${esc(i.hn||'')}</small> <span class="an-tag">${esc(i.tag_th||'')}</span></div>
+        <div class="an-row">
+          <span>Hb <b class="${hbc}">${f1(i.hb)}</b> <small style="color:var(--fg-muted)">${dTH(i.hb_date)}</small></span>
+          <span>แนวโน้ม <b>${i.slope==null?'—':(i.slope>0?'+':'')+i.slope}</b>/4 สป.${i.hb_4w!=null?` → ≈${i.hb_4w}`:''}</span>
+          <span>Ferritin <b class="${ferc}">${i.ferritin==null?'—':Math.round(i.ferritin)}</b></span>
+          <span>TSAT <b class="${tsc}">${i.tsat==null?'—':Math.round(i.tsat)+'%'}</b> <small style="color:var(--fg-muted)">${dTH(i.iron_date)}</small></span>
+          <span>ESA <b>${esc(i.esa_drug||'-')} ${esc(i.esa_dose||'')}</b> ${i.esa_weekly_iu?`≈${i.esa_weekly_iu} IU/สป.`:''}${i.esa_given_rate!=null?` (ได้จริง ${i.esa_given_rate}%)`:''}</span>
+          <span>ERI <b class="${eric}">${i.eri==null?'—':i.eri}</b></span>
+          <span>เหล็ก 90 วัน <b>${i.iron_recent_mg?Math.round(i.iron_recent_mg)+' mg':'—'}</b>${i.iron_last_date?` <small style="color:var(--fg-muted)">ล่าสุด ${dTH(i.iron_last_date)}</small>`:''}</span>
+        </div>
+        <div class="an-rec">💡 ${esc(i.recommendation||'')}</div>
+        ${i.reasons&&i.reasons.length?`<div class="an-why">${i.reasons.map(esc).join(' · ')}</div>`:''}
+      </div>
+      <div>${spark(i.hb_points, lo, hi)}</div>
+    </div>`; }).join('');
+}
+load();
+</script>
+{% endblock %}
