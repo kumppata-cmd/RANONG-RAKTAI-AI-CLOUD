@@ -101,7 +101,9 @@ def adequacy(conn, days=90):
         for sql in ("""SELECT patient_id, COALESCE(specimen_date, doc_date), ktv, urr FROM hd_lab_docs
                        WHERE patient_id = ANY(%s) AND (ktv IS NOT NULL OR urr IS NOT NULL) AND COALESCE(specimen_date, doc_date) >= %s""",
                     """SELECT patient_id, session_date, kt_v, urr FROM hd_sessions
-                       WHERE patient_id = ANY(%s) AND (kt_v IS NOT NULL OR urr IS NOT NULL) AND session_date >= %s"""):
+                       WHERE patient_id = ANY(%s) AND (kt_v IS NOT NULL OR urr IS NOT NULL) AND session_date >= %s""",
+                    """SELECT patient_id, lab_date, kt_v, urr FROM hd_lab_results
+                       WHERE patient_id = ANY(%s) AND (kt_v IS NOT NULL OR urr IS NOT NULL) AND lab_date >= %s"""):
             for pid, d, k, u in _q(cur, sql, (ids, since)):
                 cur_d = meas.get(pid, (None,))[0]
                 if d and (cur_d is None or d > cur_d):
@@ -186,7 +188,8 @@ def collect_month(conn, year, month):
         # adequacy in month
         kt = {}
         for sql in ("""SELECT patient_id, COALESCE(specimen_date, doc_date), ktv, urr FROM hd_lab_docs WHERE (ktv IS NOT NULL OR urr IS NOT NULL) AND COALESCE(specimen_date, doc_date) BETWEEN %s AND %s""",
-                    """SELECT patient_id, session_date, kt_v, urr FROM hd_sessions WHERE (kt_v IS NOT NULL OR urr IS NOT NULL) AND session_date BETWEEN %s AND %s"""):
+                    """SELECT patient_id, session_date, kt_v, urr FROM hd_sessions WHERE (kt_v IS NOT NULL OR urr IS NOT NULL) AND session_date BETWEEN %s AND %s""",
+                    """SELECT patient_id, lab_date, kt_v, urr FROM hd_lab_results WHERE (kt_v IS NOT NULL OR urr IS NOT NULL) AND lab_date BETWEEN %s AND %s"""):
             for pid, d, k, u in _q(cur, sql, (f, l)):
                 if d and (pid not in kt or d > kt[pid][0]):
                     kt[pid] = (d, _f(k), _f(u))

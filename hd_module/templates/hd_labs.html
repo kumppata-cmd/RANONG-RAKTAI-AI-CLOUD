@@ -44,7 +44,7 @@
 <div class="lab-history">
   <h4 style="margin:0 0 8px;font-size:.9rem">📋 ประวัติ Lab</h4>
   <table class="lab-tbl">
-    <thead><tr><th>วันที่</th><th>BUN</th><th>Cr</th><th>K</th><th>Na</th><th>Ca</th><th>PO4</th><th>Alb</th><th>Hb</th><th>Ferritin</th><th>iPTH</th></tr></thead>
+    <thead><tr><th>วันที่</th><th>BUN</th><th>Cr</th><th>K</th><th>Na</th><th>Ca</th><th>PO4</th><th>Alb</th><th>Hb</th><th>Ferritin</th><th>iPTH</th><th>Kt/V</th><th>HBsAg</th></tr></thead>
     <tbody id="labHistoryBody"><tr><td colspan="11" style="color:var(--fg-muted)">กำลังโหลด...</td></tr></tbody>
   </table>
 </div>
@@ -75,6 +75,13 @@
       <div class="add-field"><label>iPTH (pg/mL)</label><input type="number" step="1" id="lIpth"></div>
       <div class="add-field"><label>Albumin (g/dL)</label><input type="number" step="0.1" id="lAlb"></div>
     </div>
+    <h4 style="font-size:.8rem;color:var(--fg-muted);margin:8px 0 4px">🧪 Adequacy · 🦠 Serology</h4>
+    <div class="add-grid">
+      <div class="add-field"><label>Kt/V</label><input type="number" step="0.01" id="lKtv" placeholder="1.4"></div>
+      <div class="add-field"><label>URR (%)</label><input type="number" step="1" id="lUrr" placeholder="70"></div>
+      <div class="add-field"><label>HBsAg</label><select id="lHbv"><option value="">—</option><option value="negative">Negative</option><option value="positive">Positive</option></select></div>
+      <div class="add-field"><label>Anti-HCV</label><select id="lHcv"><option value="">—</option><option value="negative">Negative</option><option value="positive">Positive</option></select></div>
+    </div>
     <button class="btn btn-success" onclick="saveLab()" style="width:100%;padding:14px;font-size:1rem;margin-top:12px">💾 บันทึก</button>
     <button class="btn" onclick="closeAddLab()" style="width:100%;margin-top:8px;padding:10px">ยกเลิก</button>
   </div>
@@ -84,9 +91,9 @@
 {% block extra_js %}
 <script>
 const HN='{{ patient_hn }}';
-const RANGES={bun:[7,20],creatinine:[0.6,1.2],potassium:[3.5,5.0],sodium:[136,145],calcium:[8.5,10.5],phosphate:[2.5,4.5],albumin:[3.5,5.0],ipth:[150,600],hemoglobin:[10,12],hematocrit:[30,36],ferritin:[200,500],tsat:[20,50]};
-const UNITS={bun:'mg/dL',creatinine:'mg/dL',potassium:'mEq/L',sodium:'mEq/L',calcium:'mg/dL',phosphate:'mg/dL',albumin:'g/dL',ipth:'pg/mL',hemoglobin:'g/dL',hematocrit:'%',ferritin:'ng/mL',tsat:'%'};
-const LABELS={bun:'BUN',creatinine:'Cr',potassium:'K',sodium:'Na',calcium:'Ca',phosphate:'PO4',albumin:'Alb',ipth:'iPTH',hemoglobin:'Hb',hematocrit:'Hct',ferritin:'Ferritin',tsat:'TSAT'};
+const RANGES={bun:[7,20],creatinine:[0.6,1.2],potassium:[3.5,5.0],sodium:[136,145],calcium:[8.5,10.5],phosphate:[2.5,4.5],albumin:[3.5,5.0],ipth:[150,600],hemoglobin:[10,12],hematocrit:[30,36],ferritin:[200,500],tsat:[20,50],kt_v:[1.2,2.5],urr:[65,100]};
+const UNITS={bun:'mg/dL',creatinine:'mg/dL',potassium:'mEq/L',sodium:'mEq/L',calcium:'mg/dL',phosphate:'mg/dL',albumin:'g/dL',ipth:'pg/mL',hemoglobin:'g/dL',hematocrit:'%',ferritin:'ng/mL',tsat:'%',kt_v:'',urr:'%'};
+const LABELS={bun:'BUN',creatinine:'Cr',potassium:'K',sodium:'Na',calcium:'Ca',phosphate:'PO4',albumin:'Alb',ipth:'iPTH',hemoglobin:'Hb',hematocrit:'Hct',ferritin:'Ferritin',tsat:'TSAT',kt_v:'Kt/V',urr:'URR'};
 
 function flagClass(key,val){
   if(!val||!RANGES[key]) return '';
@@ -114,7 +121,7 @@ function loadLabs(){
     if(!d.labs||!d.labs.length){tbody.innerHTML='<tr><td colspan="11" style="color:var(--fg-muted)">ยังไม่มีผล Lab</td></tr>';return}
     tbody.innerHTML=d.labs.map(l=>{
       function cell(k){const v=l[k];if(v==null)return'<td>—</td>';const c=flagClass(k,v);return'<td class="'+(c==='high'?'flag-high':c==='low'?'flag-low':'')+'">'+v+'</td>'}
-      return'<tr><td>'+l.date+'</td>'+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('ferritin')+cell('ipth')+'</tr>';
+      return'<tr><td>'+l.date+'</td>'+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('ferritin')+cell('ipth')+cell('kt_v')+'<td>'+(l.hep_b?(l.hep_b==='positive'?'<span style="color:var(--danger);font-weight:700">+</span>':'−'):'')+'</td></tr>';
     }).join('');
   }).catch(()=>{document.getElementById('labPatient').textContent='โหลดไม่สำเร็จ'});
 }
@@ -139,6 +146,10 @@ function saveLab(){
     tsat:parseFloat(document.getElementById('lTsat').value)||null,
     ipth:parseFloat(document.getElementById('lIpth').value)||null,
     albumin:parseFloat(document.getElementById('lAlb').value)||null,
+    kt_v:parseFloat(document.getElementById('lKtv').value)||null,
+    urr:parseFloat(document.getElementById('lUrr').value)||null,
+    hepatitis_b:document.getElementById('lHbv').value||null,
+    hepatitis_c:document.getElementById('lHcv').value||null,
   };
   hdFetch('/hd/api/v1/patients/'+HN+'/labs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
     .then(r=>r.json()).then(d=>{

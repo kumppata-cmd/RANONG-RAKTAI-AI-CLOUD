@@ -5525,7 +5525,7 @@ def get_patient_labs(hn):
                        l.iron, l.tibc, l.wbc, l.platelet, l.hba1c,
                        l.uric_acid, l.ast, l.alt,
                        l.hepatitis_b, l.hepatitis_c, l.hiv,
-                       l.notes, l.source
+                       l.notes, l.source, l.kt_v, l.urr
                 FROM hd_lab_results l
                 JOIN hd_patient_mapping p ON p.id = l.patient_id
                 WHERE p.hn = %s
@@ -5536,7 +5536,7 @@ def get_patient_labs(hn):
         cols = ["id","date","bun","creatinine","potassium","sodium","calcium",
                 "phosphate","albumin","ipth","hemoglobin","hematocrit","ferritin",
                 "tsat","iron","tibc","wbc","platelet","hba1c","uric_acid",
-                "ast","alt","hep_b","hep_c","hiv","notes","source"]
+                "ast","alt","hep_b","hep_c","hiv","notes","source","kt_v","urr"]
         labs = []
         for r in rows:
             entry = {}
@@ -5587,7 +5587,7 @@ def save_lab_result(hn):
             lab_cols = ["bun","creatinine","potassium","sodium","calcium","phosphate",
                         "albumin","ipth","hemoglobin","hematocrit","ferritin","tsat",
                         "iron","tibc","wbc","platelet","hba1c","uric_acid","ast","alt",
-                        "hepatitis_b","hepatitis_c","hiv","notes","source"]
+                        "hepatitis_b","hepatitis_c","hiv","notes","source","kt_v","urr"]
             vals = [data.get(c) for c in lab_cols]
             placeholders = ", ".join(["%s"] * (len(lab_cols) + 2))
             col_str = ", ".join(["patient_id", "lab_date"] + lab_cols)

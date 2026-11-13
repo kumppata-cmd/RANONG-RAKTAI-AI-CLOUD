@@ -154,6 +154,9 @@ def _run_hd_migrations():
                     hbsag VARCHAR(20), antihcv VARCHAR(20), antihbs VARCHAR(20),
                     synced_at TIMESTAMP DEFAULT NOW())""",
                 "CREATE INDEX IF NOT EXISTS ix_hd_lab_docs_hn_date ON hd_lab_docs(hn, specimen_date DESC)",
+                # manual lab form: adequacy values
+                "ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS kt_v NUMERIC(4,2)",
+                "ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS urr NUMERIC(5,1)",
                 # Dry Weight Autopilot proposals
                 __import__("hd_module.dw_autopilot", fromlist=["CREATE_SQL"]).CREATE_SQL,
                 # ตรวจระบบน้ำ RO ประจำวัน (Hardness / Free Cl / Total Cl)
