@@ -3552,12 +3552,19 @@ def _admin_api_auth() -> "tuple | None":
     auth = request.headers.get("X-Admin-Secret", "")
     # เทียบเป็น bytes — compare_digest โยน TypeError ถ้า str มีอักขระนอก
     # ASCII (header latin-1 ส่งค่านั้นมาได้) ซึ่งจะกลายเป็น 500 แทน 401
-    if not auth or not hmac.compare_digest(
+    if auth and hmac.compare_digest(
         auth.encode("utf-8", "surrogateescape"),
         admin_secret.encode("utf-8"),
     ):
-        return jsonify({"error": "Unauthorized"}), 401
-    return None
+        return None
+    # หน้าเว็บ admin ที่ login ด้วยฟอร์มแล้ว: cookie HttpOnly (SameSite=Lax, path=/admin)
+    # — ดูข้อมูลผ่าน JS ของหน้านั้นได้โดยไม่ต้องฝัง secret ใน URL (13 พ.ย. 2569)
+    # อนุญาตเฉพาะ GET (อ่าน) และคำขอ same-origin เท่านั้น; POST/DELETE ยังต้องใช้ header
+    if request.method == "GET" and _admin_cookie_ok():
+        _origin = request.headers.get("Sec-Fetch-Site", "same-origin")
+        if _origin in ("same-origin", "none"):
+            return None
+    return jsonify({"error": "Unauthorized"}), 401
 
 
 @app.route("/admin/api/v2/vendors/list", methods=["GET"])
