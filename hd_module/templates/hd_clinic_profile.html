@@ -171,6 +171,14 @@
     </div>
     <button class="save-btn" onclick="saveLicenseTab()">💾 บันทึก</button>
   </div>
+
+  <!-- สำเนาใบอนุญาต / ใบรับรอง (เก็บไฟล์จริงไว้ในระบบ — 14 พ.ย. 2569) -->
+  <div class="cp-card" style="margin-top:12px">
+    <h3>📎 สำเนาเอกสาร (สแกน/รูปถ่าย)</h3>
+    <div style="font-size:.75rem;color:var(--fg-muted);margin-bottom:8px">อัปโหลดสำเนาใบอนุญาต/ใบรับรองเก็บไว้ในระบบ เพื่อใช้ยื่นตรวจประเมินหรือต่ออายุ — PDF/รูปภาพ สูงสุด 10 MB ต่อไฟล์ เก็บได้หลายฉบับ (ฉบับเก่าไม่ถูกลบ)</div>
+    <div id="licDocs" style="display:flex;flex-direction:column;gap:10px"></div>
+    <input type="file" id="licFileInput" accept=".pdf,.png,.jpg,.jpeg,.heic" style="display:none" onchange="uploadLicFile()">
+  </div>
 </div>
 
 <!-- Tab 7: KPI -->
@@ -406,6 +414,7 @@ function switchCpTab(tab){
   else if(tab==='water') loadWaterLogs();
   else if(tab==='ic') loadIncidents();
   else if(tab==='sop') loadSops();
+  else if(tab==='license') loadLicDocs();
   else if(tab==='assess') loadSelfAssessment();
   /* Save to localStorage */
   try{localStorage.setItem('cp_tab',tab)}catch(e){}
@@ -462,6 +471,7 @@ function loadProfileData(){
     fill('f_lic_sso','license','sso_hcode');
     fill('f_lic_pdpa','license','pdpa');
     fill('f_lic_fda','license','fda');
+    if(document.getElementById('panel-license')?.classList.contains('active')) loadLicDocs();
     /* Tab 8: IC */
     fill('f_ic_screening','ic','screening');
     fill('f_ic_drill','ic','drill_date');
@@ -490,6 +500,60 @@ function saveFacilityTab(){
 function saveWaterTab(){
   saveSection('water',[['f_ro_brand','ro_brand'],['f_ro_capacity','ro_capacity'],['f_water_vendor','vendor'],['f_water_phone','vendor_phone']]);
 }
+/* ── สำเนาใบอนุญาต/ใบรับรอง: เก็บใน hd_sop_files ด้วย sop_key = license_<kind> ── */
+const LIC_DOCS=[
+  {key:'license_clinic',title:'📜 ใบอนุญาตประกอบกิจการสถานพยาบาล (คลินิก)',exp:'f_lic_clinic_exp'},
+  {key:'license_srt',title:'🏅 ใบรับรองมาตรฐาน ศ.ร.ต. (ตรต.)',exp:'f_lic_srt_exp'},
+  {key:'license_nhso',title:'🏥 หนังสือขึ้นทะเบียนหน่วยบริการ สปสช.'},
+  {key:'license_sso',title:'🏛 หนังสือขึ้นทะเบียน ประกันสังคม'},
+  {key:'license_fda',title:'🧰 อ.ย. เครื่องมือแพทย์ / ใบรับรองเครื่อง RO'},
+  {key:'license_other',title:'📂 อื่น ๆ (ใบอนุญาตผู้ดำเนินการ, ใบรับรองพยาบาลไตเทียม ฯลฯ)'},
+];
+let _licUploadKey='';
+function loadLicDocs(){
+  const box=document.getElementById('licDocs'); if(!box)return;
+  hdFetch('/hd/api/v1/clinic-profile/sop-files').then(r=>r.json()).then(d=>{
+    const files=(d.files||[]).filter(f=>(f.sop_key||'').startsWith('license_'));
+    box.innerHTML=LIC_DOCS.map(doc=>{
+      const mine=files.filter(f=>f.sop_key===doc.key);
+      const expEl=doc.exp?document.getElementById(doc.exp):null;
+      let expTxt='';
+      if(expEl&&expEl.value){const days=Math.round((new Date(expEl.value)-new Date())/86400000);
+        expTxt=`<span style="font-size:.7rem;padding:2px 8px;border-radius:999px;background:${days<0?'var(--danger)':days<90?'#f59e0b':'var(--success,#16a34a)'};color:#fff">${days<0?'หมดอายุแล้ว':'เหลือ '+days+' วัน'}</span>`;}
+      const list=mine.length?mine.map(f=>{const kb=Math.round((f.size||0)/1024);const dt=f.uploaded_at?new Date(f.uploaded_at).toLocaleDateString('th-TH'):'';
+        return `<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px">
+          <div style="flex:1;min-width:0"><div style="font-size:.8rem;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f.filename}</div>
+          <div style="font-size:.65rem;color:var(--fg-muted)">${kb} KB · ${dt}</div></div>
+          <a href="/hd/api/v1/clinic-profile/sop-files/${f.id}/download" target="_blank" style="background:var(--accent);color:#fff;padding:4px 10px;border-radius:6px;font-size:.7rem;font-weight:600;text-decoration:none;white-space:nowrap">📥 เปิด</a>
+          <button onclick="deleteLicFile(${f.id},'${f.filename.replace(/'/g,"\\'")}')" style="border:none;background:none;cursor:pointer;font-size:.8rem" title="ลบ">🗑️</button></div>`;}).join('')
+        :'<div style="font-size:.72rem;color:var(--fg-muted);padding:4px 2px">ยังไม่มีไฟล์</div>';
+      return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+          <div style="flex:1;min-width:0;font-size:.85rem;font-weight:700">${doc.title}</div>${expTxt}
+          <button class="add-btn" style="font-size:.75rem" onclick="pickLicFile('${doc.key}')">📤 อัปโหลด</button></div>
+        <div style="display:flex;flex-direction:column;gap:4px">${list}</div></div>`;
+    }).join('');
+  }).catch(()=>{box.innerHTML='<span style="font-size:.75rem;color:var(--danger)">โหลดไฟล์ไม่สำเร็จ</span>';});
+}
+function pickLicFile(key){_licUploadKey=key;document.getElementById('licFileInput').click();}
+function uploadLicFile(){
+  const input=document.getElementById('licFileInput');const file=input.files[0];if(!file||!_licUploadKey)return;
+  if(file.size>10*1024*1024){showToast('ไฟล์ใหญ่เกิน 10 MB','danger');input.value='';return}
+  const fd=new FormData();fd.append('file',file);fd.append('sop_key',_licUploadKey);fd.append('uploaded_by','');
+  showToast('กำลังอัปโหลด...','info');
+  const token=getHdToken();
+  fetch('/hd/api/v1/clinic-profile/sop-files',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd})
+    .then(r=>r.json()).then(d=>{input.value='';if(d.error){showToast(d.error,'danger');return}
+      showToast('เก็บสำเนา "'+d.filename+'" แล้ว','success');loadLicDocs();})
+    .catch(()=>{input.value='';showToast('อัปโหลดไม่สำเร็จ','danger');});
+}
+function deleteLicFile(id,name){
+  if(!confirm('ลบสำเนา "'+name+'" ?'))return;
+  hdFetch('/hd/api/v1/clinic-profile/sop-files/'+id,{method:'DELETE'}).then(r=>r.json()).then(d=>{
+    if(d.error){showToast(d.error,'danger');return}showToast('ลบแล้ว','success');loadLicDocs();})
+    .catch(()=>showToast('ลบไม่สำเร็จ','danger'));
+}
+
 function saveLicenseTab(){
   saveSection('license',[['f_lic_clinic','clinic_license'],['f_lic_clinic_exp','clinic_license_exp'],
     ['f_lic_srt','srt_number'],['f_lic_srt_exp','srt_expiry'],['f_lic_nhso','nhso_hcode'],
