@@ -6838,7 +6838,11 @@ def admin_compare_page(hn):
             f"/admin/compare/{hn}?type={doc_type}", code=302,
         ))
     else:
-        return "⛔ ไม่มีสิทธิ์เข้าถึง (ลิงก์หมดอายุ — ขอลิงก์ใหม่จาก LINE)", 401
+        # ไม่มี cookie/token → แสดงฟอร์มกรอก ADMIN_SECRET (เหมือน /admin/dashboard)
+        # — เดิมตอบ 401 เฉย ๆ ทำให้หมอไม่มีที่กรอกรหัส (13 พ.ย. 2569)
+        _gate = _admin_page_auth(f"/admin/compare/{hn}?type={doc_type}")
+        if _gate is not None:
+            return _gate
     # ไม่ฝัง secret ลงในหน้าเว็บอีกต่อไป — ใช้ cookie
     base_url = os.getenv("RENDER_EXTERNAL_URL", "").rstrip("/")
     hn_q = hn.replace("HN", "").replace("hn", "").strip()
