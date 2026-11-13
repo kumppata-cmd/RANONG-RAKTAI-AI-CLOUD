@@ -5261,7 +5261,7 @@ def _resolve_nurse_line_ids() -> list[str]:
     return nurse_ids
 
 
-@app.route("/admin/doc/view/<doc_id>")
+@app.route("/admin/doc/view/<doc_id>", methods=["GET", "POST"])  # POST = ฟอร์มกรอก ADMIN_SECRET
 def admin_doc_view(doc_id):
     """ดูเอกสาร — ลิงก์ถาวรไม่หมดอายุ (สร้าง Signed URL ใหม่ทุกครั้งที่เปิด)
 
@@ -5313,7 +5313,7 @@ def admin_doc_view(doc_id):
     return redirect(signed_url)
 
 
-@app.route("/admin/annotate/<doc_id>")
+@app.route("/admin/annotate/<doc_id>", methods=["GET", "POST"])  # POST = ฟอร์มกรอก ADMIN_SECRET
 def admin_annotate_page(doc_id):
     """หน้าเว็บสำหรับแพทย์สั่งการรักษา — เปิดจาก LINE Flex Message
 
@@ -6812,7 +6812,7 @@ def _admin_page_auth(clean_url: str = ""):
     return _login_resp
 
 
-@app.route("/admin/compare/<hn>")
+@app.route("/admin/compare/<hn>", methods=["GET", "POST"])  # POST = ฟอร์มกรอก ADMIN_SECRET
 def admin_compare_page(hn):
     """หน้าเว็บเปรียบเทียบเอกสาร — แสดงรูปจริง 2 รูปคู่กัน + ปุ่มสั่งการ
 
