@@ -1744,7 +1744,9 @@ def dw_proposals():
                       "evidence": r[8] or {}, "sessions_used": r[9], "status": r[10],
                       "created_at": (r[11].isoformat() + "Z") if r[11] else None, "decided_by": r[12],
                       "decided_at": (r[13].isoformat() + "Z") if r[13] else None, "note": r[14],
-                      "now_dw": float(r[15]) if r[15] is not None else None} for r in cur.fetchall()]
+                      "now_dw": float(r[15]) if r[15] is not None else None,
+                      "stale": bool(r[10] == "pending" and abs((float(r[4]) if r[4] is not None else -1) - (float(r[15]) if r[15] is not None else -1)) > 0.05)}
+                     for r in cur.fetchall()]
     finally:
         conn.close()
     return jsonify({"items": items, "limits": _dw_limits()})
@@ -1768,13 +1770,23 @@ def dw_decide(pid):
     applied = None
     try:
         with conn.cursor() as cur:
-            cur.execute("SELECT patient_id, proposed_dw, current_dw, status, hn FROM hd_dw_proposals WHERE id = %s", (pid,))
+            cur.execute("""SELECT d.patient_id, d.proposed_dw, d.current_dw, d.status, d.hn, p.dry_weight
+                           FROM hd_dw_proposals d JOIN hd_patient_mapping p ON p.id = d.patient_id WHERE d.id = %s""", (pid,))
             r = cur.fetchone()
             if not r:
                 return jsonify({"error": "not found"}), 404
             if r[3] != "pending":
                 return jsonify({"error": f"already {r[3]}"}), 409
-            patient_id, proposed, current, _, hn = r
+            patient_id, proposed, current, _, hn, live_dw = r
+            cur_f = float(current) if current is not None else -1
+            live_f = float(live_dw) if live_dw is not None else -1
+            if decision == "approve" and abs(cur_f - live_f) > 0.05:
+                from .dw_autopilot import supersede_stale
+                supersede_stale(cur)
+                conn.commit()
+                return jsonify({"error": "ข้อเสนอนี้ทำไว้ตอน DW " + (f"{cur_f:.1f}" if cur_f >= 0 else "ยังไม่มี") +
+                                f" kg แต่ตอนนี้ DW ในระบบเป็น {live_f:.1f} kg แล้ว — ระบบยกเลิกข้อเสนอเก่าให้ กด 'ทบทวน Dry Weight ตอนนี้' เพื่อประเมินใหม่"}), 409
+            current = live_dw if live_dw is not None else current
             if decision == "approve":
                 try:
                     new_dw = float(override) if override not in (None, "") else float(proposed)
@@ -1797,7 +1809,7 @@ def dw_decide(pid):
                ip_address=request.remote_addr or "")
     if applied is not None:
         try:
-            push_nurse_group(f"🎯 ปรับน้ำหนักแห้ง: HN {hn} {float(current):.1f} → {applied:.1f} kg" + (f" ({note})" if note else "") +
+            push_nurse_group(f"🎯 ปรับน้ำหนักแห้ง: HN {hn} {(f'{float(current):.1f}' if current is not None else 'ยังไม่มี')} → {applied:.1f} kg" + (f" ({note})" if note else "") +
                              f"\nโดย {who} — ใช้ตั้งแต่รอบถัดไป", fallback_recipients=False)
         except Exception as e:
             logger.warning("dw nurse push: %s", e)
@@ -4221,6 +4233,15 @@ def import_patient_roster():
     try:
         conn = psycopg2.connect(db_url, connect_timeout=10)
         summary = apply_roster(conn, rows, confirm=confirm, hct_date=hct_date, source="import:" + f.filename[:40])
+        if confirm:
+            try:
+                from .dw_autopilot import CREATE_SQL as _DW_SQL, supersede_stale
+                with conn.cursor() as cur:
+                    cur.execute(_DW_SQL)
+                    summary["dw_proposals_superseded"] = supersede_stale(cur)
+                conn.commit()
+            except Exception as e:  # never fail the import over this
+                logger.warning("roster import supersede dw: %s", e)
         conn.close()
     except Exception as e:
         logger.error("roster import: %s", e)
@@ -5465,6 +5486,16 @@ def update_patient(hn):
             if not row:
                 conn.close()
                 return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            if "dry_weight" in data:
+                # keep the active prescription in step and retire DW proposals made against the old value
+                try:
+                    cur.execute("UPDATE hd_prescriptions SET dry_weight_target = %s, updated_at = NOW() WHERE patient_id = %s AND is_active = TRUE",
+                                (float(data["dry_weight"]) if data["dry_weight"] else None, row[0]))
+                    from .dw_autopilot import CREATE_SQL as _DW_SQL, supersede_stale
+                    cur.execute(_DW_SQL)
+                    supersede_stale(cur)
+                except Exception as e:
+                    logger.warning("patient.update dw sync: %s", e)
         conn.commit()
         conn.close()
 

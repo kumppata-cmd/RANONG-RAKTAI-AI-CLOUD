@@ -138,6 +138,27 @@ class GenerateWithBcmTests(unittest.TestCase):
         self.assertEqual((stats["patients"], stats["with_dw"], stats["with_bcm"], stats["from_bcm"], stats["no_signal"]), (3, 0, 2, 2, 1))
         self.assertTrue(conn.committed)
         self.assertEqual(conn.c.inserts[0][4], "set")
+        self.assertEqual(stats["superseded"], 0)
+
+    def test_generate_supersedes_stale_pending_first(self):
+        """A pending proposal made when DW was empty must be closed once DW exists (import/edit)."""
+        from hd_module.dw_autopilot import SUPERSEDE_SQL, generate
+        conn = self.Conn()
+        seen = []
+        orig = conn.c.execute
+
+        def spy(sql, params=None):
+            seen.append(sql)
+            if sql == SUPERSEDE_SQL:
+                conn.c.rowcount = 3
+            return orig(sql, params)
+        conn.c.execute = spy
+        stats = {}
+        generate(conn, stats=stats)
+        self.assertEqual(stats["superseded"], 3)
+        self.assertLess(seen.index(SUPERSEDE_SQL), next(i for i, q in enumerate(seen) if "FROM hd_patient_mapping p WHERE p.is_active" in q))
+        self.assertIn("status = 'pending'", SUPERSEDE_SQL)
+        self.assertIn("'superseded'", SUPERSEDE_SQL)
 
 
 if __name__ == "__main__":

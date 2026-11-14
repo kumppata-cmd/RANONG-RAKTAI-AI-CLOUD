@@ -34,6 +34,7 @@
 .b-pending{background:rgba(230,126,34,.15);color:#e67e22}
 .b-approved{background:rgba(39,174,96,.15);color:var(--success)}
 .b-rejected{background:rgba(127,140,141,.15);color:var(--fg-muted)}
+.b-superseded{background:rgba(230,126,34,.15);color:#b45309}
 .esa-empty{padding:28px;text-align:center;color:var(--fg-muted);font-size:.9rem;background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--radius-sm)}
 .esa-note{font-size:.72rem;color:var(--fg-muted);margin-top:12px}
 @media (max-width:640px){.esa-item{grid-template-columns:1fr}.esa-act{min-width:0}}
@@ -64,7 +65,7 @@
 {% block extra_js %}
 <script>
 const ACT_TH = {increase:'⬆️ เพิ่ม', decrease:'⬇️ ลด', hold:'⏸ งดชั่วคราว', resume:'▶️ กลับมาให้', review:'🔍 ทบทวน'};
-const ST_TH = {pending:'รออนุมัติ', approved:'อนุมัติแล้ว', rejected:'ไม่ปรับ'};
+const ST_TH = {pending:'รออนุมัติ', approved:'อนุมัติแล้ว', rejected:'ไม่ปรับ', superseded:'ยกเลิกอัตโนมัติ — DW เปลี่ยน'};
 let tab = 'pending';
 const ROLE = (function(){ try { return JSON.parse(atob((getHdToken()||'').split('.')[1]||'')).role || ''; } catch(e){ return ''; } })();
 
@@ -91,15 +92,16 @@ async function loadDw(){
         <div>
           <div class="esa-who">${esc(it.name||'')}<small>HN ${esc(it.hn||'')}</small><span class="esa-badge b-${it.status}">${ST_TH[it.status]||it.status}</span></div>
           <div style="display:flex;gap:16px;align-items:center;margin-top:6px;flex-wrap:wrap">
-            <div class="esa-hb">${it.current_dw!=null?it.current_dw.toFixed(1):'—'}<small>DW ปัจจุบัน (kg)</small></div>
+            <div class="esa-hb">${it.status==='pending' ? (it.now_dw!=null?it.now_dw.toFixed(1):'—') : (it.current_dw!=null?it.current_dw.toFixed(1):'—')}<small>DW ${it.status==='pending'?'ปัจจุบัน':'ตอนเสนอ'} (kg)</small></div>
             <div class="esa-dose">${arrow} เสนอ <span class="new">${it.proposed_dw!=null?it.proposed_dw.toFixed(1):'—'} kg</span></div>
           </div>
+          ${it.stale ? `<div class="esa-why" style="color:#b45309;font-weight:700">⚠️ ข้อเสนอนี้ทำไว้ตอน DW ${it.current_dw!=null?it.current_dw.toFixed(1)+' kg':'ยังไม่มีในระบบ'} — ตอนนี้ DW เป็น ${it.now_dw!=null?it.now_dw.toFixed(1):'—'} kg แล้ว (นำเข้า/แก้ไขภายหลัง) → อนุมัติไม่ได้ กด "ทบทวน Dry Weight ตอนนี้" เพื่อให้ระบบเทียบ BCM กับ DW ใหม่</div>` : ''}
           <div class="esa-why">${esc(it.rationale||'')}</div>
           ${ev.n ? `<div class="esa-why">จาก ${it.sessions_used||'-'} รอบ · มัธยฐานหลังฟอก ${ev.median_post??'-'} kg · ต่ำกว่า DW ${ev.below_dw??0} · สูงกว่า ${ev.above_dw??0} · IDH ${ev.idh??0} · ตะคริว ${ev.cramp??0} · SBP&lt;100 ${ev.post_sbp_low??0} · SBP≥160 ${ev.post_sbp_high??0} · บวม ${ev.edema??0} · UF ไม่ถึง ${ev.uf_short??0}</div>` : ''}
           ${ev.dw_bcm!=null ? `<div class="esa-why">💧 BCM ${esc(ev.bcm_date||'')}: น้ำหนัก ${ev.bcm_weight} kg · OH ${ev.bcm_oh>0?'+':''}${ev.bcm_oh} L${ev.bcm_rel_oh!=null?' ('+ev.bcm_rel_oh+'% ECW)':''} · DW ตาม BCM <b>${ev.dw_bcm}</b> kg</div>` : ''}
           ${it.status!=='pending' ? `<div class="esa-why">โดย ${esc(it.decided_by||'')} · ${fmtDate(it.decided_at)}${it.note?' · '+esc(it.note):''}</div>` : ''}
         </div>
-        ${canAct ? `<div class="esa-act">
+        ${canAct && !it.stale ? `<div class="esa-act">
           <input id="dwv_${it.id}" type="number" step="0.1" placeholder="แก้ค่า DW (ถ้าต้องการ) เช่น ${it.proposed_dw!=null?it.proposed_dw.toFixed(1):''}">
           <input id="dwn_${it.id}" placeholder="หมายเหตุ (ไม่บังคับ)">
           <div class="row"><button class="btn btn-primary" onclick="decideDw(${it.id},'approve')">✓ อนุมัติ</button><button class="btn btn-secondary" onclick="decideDw(${it.id},'reject')">✗ ไม่ปรับ</button></div></div>`
@@ -179,7 +181,7 @@ async function runNow(){
     if(!r.ok) throw new Error(d.error||r.status);
     s.textContent = d.created ? `✅ เสนอใหม่ ${d.created} รายการ (LINE แพทย์ ${d.line_sent})` : (isDw ? '✅ ไม่มีผู้ป่วยที่ควรปรับ DW ตอนนี้' : '✅ ไม่มี Hb ใหม่ที่ต้องปรับ');
     if(isDw && d.stats){ const t = d.stats;
-      s.textContent += ` · ตรวจ ${t.patients} คน: มี DW ${t.with_dw} · มี BCM ≤180 วัน ${t.with_bcm} · มี ≥5 รอบ ${t.enough_sessions} · เสนอจาก BCM ${t.from_bcm} / จากรอบฟอก ${t.from_sessions} / ทั้งสอง ${t.both} · รอตัดสินใจอยู่แล้ว ${t.skipped_pending} · เพิ่งตัดสินใจ <21 วัน ${t.skipped_recent_decision} · ไม่มีสัญญาณ ${t.no_signal}`; }
+      s.textContent += ` · ยกเลิกข้อเสนอเก่าที่ DW เปลี่ยน ${t.superseded||0} · ตรวจ ${t.patients} คน: มี DW ${t.with_dw} · มี BCM ≤180 วัน ${t.with_bcm} · มี ≥5 รอบ ${t.enough_sessions} · เสนอจาก BCM ${t.from_bcm} / จากรอบฟอก ${t.from_sessions} / ทั้งสอง ${t.both} · รอตัดสินใจอยู่แล้ว ${t.skipped_pending} · เพิ่งตัดสินใจ <21 วัน ${t.skipped_recent_decision} · ไม่มีสัญญาณ ${t.no_signal}`; }
     setTab(isDw ? 'dw' : 'pending');
   }catch(e){ s.textContent = '❌ ' + (e.message||e); }
   b.disabled = false;

@@ -206,6 +206,26 @@ def bcm_signal(bcm, dry_weight, limits=None):
             "rationale": f"{base} · สูงกว่า DW ปัจจุบัน {dw:.1f} อยู่ {diff:.1f} kg (น้ำขาด เสี่ยง IDH) → เสนอเพิ่มทีละ {step:g} kg"}
 
 
+SUPERSEDE_SQL = """
+UPDATE hd_dw_proposals d
+   SET status = 'superseded', decided_by = 'system', decided_at = NOW(),
+       note = 'DW ปัจจุบันเปลี่ยนหลังเสนอ (' || COALESCE(d.current_dw::text, 'ไม่มี') || ' → ' || COALESCE(p.dry_weight::text, 'ไม่มี')
+              || ' kg จากการนำเข้า/แก้ไขทะเบียน) — ระบบประเมินใหม่ในรอบถัดไป'
+  FROM hd_patient_mapping p
+ WHERE p.id = d.patient_id AND d.status = 'pending'
+   AND ABS(COALESCE(d.current_dw, -1) - COALESCE(p.dry_weight, -1)) > 0.05
+"""
+
+
+def supersede_stale(cur):
+    """Close pending proposals whose snapshot DW no longer matches the patient's current DW
+    (DW was imported/edited after the proposal was made). Approving such a proposal would
+    overwrite the newer DW with an estimate made without it. Returns rows closed."""
+    cur.execute(SUPERSEDE_SQL)
+    rc = getattr(cur, "rowcount", 0)
+    return rc if isinstance(rc, int) and rc > 0 else 0
+
+
 def generate(conn, limits=None, stats=None):
     """Scan active patients; create DW proposals where the pattern is clear. Returns created list.
     Signals: (1) session pattern over the last 10 rounds, (2) latest BCM vs DW; both are merged
@@ -220,6 +240,7 @@ def generate(conn, limits=None, stats=None):
     import json
     with conn.cursor() as cur:
         cur.execute(CREATE_SQL)
+        st["superseded"] = supersede_stale(cur)
         cur.execute("""SELECT p.id, p.hn, p.patient_name, p.dry_weight,
                               (SELECT COUNT(*) FROM hd_sessions s WHERE s.patient_id = p.id AND s.status = 'completed'
                                  AND s.session_date >= CURRENT_DATE - 60)
