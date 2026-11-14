@@ -292,6 +292,18 @@ def hd_tv_page():
     return resp
 
 
+@hd_web.after_request
+def _no_cache_sw(resp):
+    """Service worker + manifest must never be cached by the browser/CDN, or a broken SW lingers for days."""
+    try:
+        if request.path.endswith(("/static/sw.js", "/static/manifest.json")):
+            resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+            resp.headers["Service-Worker-Allowed"] = "/hd/"
+    except Exception:
+        pass
+    return resp
+
+
 @hd_web.route("/fluid")
 def fluid_page():
     """Fluid Status Center — BCM quarterly assessments vs dry weight."""
