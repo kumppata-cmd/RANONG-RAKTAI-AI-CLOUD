@@ -191,10 +191,21 @@ def require_role(*allowed_roles):
             if role not in allowed_roles:
                 return jsonify({"error": f"Role '{role}' not permitted"}), 403
 
+            # 📺 display tokens (TV link): long-lived, read-only; revoked by bumping ⚙️ tv_link_generation
+            if role == "display":
+                try:
+                    from .blueprint import get_setting_value
+                    gen = int(get_setting_value("tv_link_generation", "1") or 1)
+                except Exception:
+                    gen = 1
+                if int(payload.get("gen", 0)) != gen:
+                    return jsonify({"error": "TV link revoked — สร้างลิงก์ใหม่ใน ⚙️"}), 401
+
             # Attach user info to Flask g
             g.hd_user_id = payload.get("user_id")
             g.hd_username = payload.get("username")
             g.hd_role = role
+            g.hd_token_payload = payload
 
             return fn(*args, **kwargs)
         return wrapper

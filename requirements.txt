@@ -94,3 +94,5 @@ pyotp==2.9.0
 openpyxl==3.1.5
 # PDF generation for HD daily records (Thai font bundled in hd_module/fonts)
 reportlab==4.2.5
+# QR code สำหรับลิงก์จอ TV (pure Python, ไม่มี dependency)
+segno==1.6.6

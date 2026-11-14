@@ -244,6 +244,32 @@
   <div id="backupStatus" style="font-size:.8rem;margin-top:8px;color:var(--fg-muted)">กำลังโหลดสถานะ…</div>
 </div>
 
+<!-- 📺 TV link (14 พ.ย. 2569) -->
+<div class="card setting-card">
+  <div class="card-header"><span>📺 จอ TV หน้าหน่วย (TV Mode)</span></div>
+  <div class="setting-desc">สร้างลิงก์สำหรับ Smart TV / กล่อง Android TV / คอมที่ต่อ HDMI — เปิดลิงก์นี้ในเบราว์เซอร์ของ TV ครั้งเดียว ไม่ต้องล็อกอินซ้ำ 90 วัน · ลิงก์นี้<b>ดูได้อย่างเดียว</b> (เฉพาะหน้าเตียง) · ยกเลิกได้ทุกเมื่อถ้าลิงก์หลุด</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+    <input id="tvName" placeholder="ชื่อจอ เช่น TV หน้าเคาน์เตอร์" style="padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:inherit;font-size:.85rem">
+    <button class="btn btn-primary" onclick="tvLink(false)">🔗 สร้างลิงก์ + QR</button>
+    <button class="btn btn-secondary" onclick="tvLink(true)">⛔ ยกเลิกลิงก์เก่าทั้งหมดแล้วสร้างใหม่</button>
+    <span id="tvInfo" style="font-size:.78rem;color:var(--fg-muted)"></span>
+  </div>
+  <div id="tvOut" style="margin-top:10px;display:none">
+    <div style="display:flex;gap:14px;flex-wrap:wrap;align-items:flex-start">
+      <img id="tvQr" alt="QR" style="width:180px;height:180px;background:#fff;border-radius:8px;display:none">
+      <div style="flex:1;min-width:240px">
+        <div style="font-size:.78rem;color:var(--fg-muted)">ลิงก์ (ยาว — กดคัดลอกแล้วไปวาง/พิมพ์ในเบราว์เซอร์ของ TV หรือสแกน QR ด้วยมือถือแล้วส่งเข้า TV)</div>
+        <textarea id="tvUrl" readonly style="width:100%;height:70px;font-size:.7rem;margin-top:4px;padding:6px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:inherit"></textarea>
+        <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap">
+          <button class="btn btn-secondary" onclick="navigator.clipboard.writeText(document.getElementById('tvUrl').value).then(()=>showToast('คัดลอกลิงก์แล้ว','success'))">📋 คัดลอกลิงก์</button>
+          <a class="btn btn-secondary" id="tvOpen" target="_blank" style="text-decoration:none">▶ เปิดทดสอบบนเครื่องนี้</a>
+        </div>
+        <div style="font-size:.74rem;color:var(--fg-muted);margin-top:8px">วิธีต่อจอ: <b>Smart TV</b> → แอปเบราว์เซอร์ของทีวี → วางลิงก์ → กดเต็มจอ · <b>Android TV/Chromecast with Google TV</b> → ติดตั้งเบราว์เซอร์ (เช่น TV Bro) → วางลิงก์ · <b>คอม/มินิพีซี + HDMI</b> → เปิดลิงก์ใน Chrome → F11 · หน้าจอจะรีเฟรชเองทุก 30 วิ</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Ops watchdog: สถานะงานอัตโนมัติ + LINE (14 พ.ย. 2569) -->
 <div class="card setting-card">
   <div class="card-header">
@@ -346,6 +372,18 @@ async function runBackup(restore){
 }
 document.addEventListener('DOMContentLoaded', loadBackupStatus);
 
+/* 📺 TV link */
+async function tvLink(revoke){
+  if(revoke && !confirm('ยกเลิกลิงก์ TV เก่าทั้งหมด? จอที่ใช้ลิงก์เดิมจะต้องใส่ลิงก์ใหม่')) return;
+  const name = (document.getElementById('tvName').value||'TV').trim();
+  try{ const r = await hdFetch('/hd/api/v1/ops/tv-link' + (revoke?'?revoke=1':''), {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({name})});
+    const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    document.getElementById('tvOut').style.display = 'block';
+    document.getElementById('tvUrl').value = d.url; document.getElementById('tvOpen').href = d.url;
+    const img = document.getElementById('tvQr'); if(d.qr){ img.src = d.qr; img.style.display='block'; } else { img.style.display='none'; }
+    document.getElementById('tvInfo').textContent = `สร้างเมื่อ ${d.issued_at.replace('T',' ')} · ใช้ได้ ${d.expires_days} วัน · รุ่นลิงก์ #${d.generation}`;
+  }catch(e){ showToast('สร้างลิงก์ไม่สำเร็จ: '+(e.message||e),'danger'); }
+}
 /* Ops watchdog */
 const JOB_TH = {lab_sync:'ซิงก์ผลแล็บ (ทุก 30 นาที)', esa_autopilot:'ESA Autopilot (ทุกชั่วโมง 06–20)', dw_autopilot:'Dry Weight Autopilot (07:00)',
   morning_brief:'Morning Brief (07:30)', pre_hd_reminder:'เตือนก่อนฟอกพรุ่งนี้ (18:00)', bed_plan_push:'แผนเตียงพรุ่งนี้ (18:00)',

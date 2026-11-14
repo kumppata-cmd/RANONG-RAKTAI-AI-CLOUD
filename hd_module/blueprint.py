@@ -1997,6 +1997,45 @@ def ops_backup_run():
         return jsonify({"error": str(e)}), 500
 
 
+@hd_bp.route("/ops/tv-link", methods=["GET", "POST"])
+@require_role("physician", "admin")
+def ops_tv_link():
+    """📺 ลิงก์สำหรับจอ TV: token อ่านอย่างเดียว (role=display) อายุ 90 วัน ใช้ได้เฉพาะ TV Mode
+    POST สร้างลิงก์ใหม่ (?revoke=1 ยกเลิกลิงก์เก่าทั้งหมดก่อน) · GET ดูสถานะ"""
+    import os
+    from .auth import create_token
+    gen = int(get_setting_value("tv_link_generation", "1") or 1)
+    base = (os.environ.get("RENDER_EXTERNAL_URL") or request.url_root.rstrip("/")).rstrip("/")
+    if request.method == "GET":
+        return jsonify({"generation": gen, "issued_at": get_setting_value("tv_link_issued_at", ""), "days": 90})
+    if request.args.get("revoke") == "1":
+        gen += 1
+        _set_setting("tv_link_generation", str(gen))
+    name = (request.get_json(silent=True) or {}).get("name") or "TV"
+    import jwt as pyjwt
+    from .config import HdConfig
+    payload = {"user_id": g.get("hd_user_id"), "username": f"display:{name}"[:50], "role": "display", "gen": gen,
+               "exp": datetime.now(timezone.utc) + timedelta(days=90), "iat": datetime.now(timezone.utc)}
+    token = pyjwt.encode(payload, HdConfig.JWT_SECRET, algorithm=HdConfig.JWT_ALGORITHM) if pyjwt else create_token(g.get("hd_user_id"), f"display:{name}", "display", 90 * 24 * 60)
+    url = f"{base}/hd/tv?token={token}"
+    now = (datetime.now(timezone.utc) + timedelta(hours=7)).isoformat(timespec="minutes")
+    _set_setting("tv_link_issued_at", now)
+    qr = None
+    try:
+        import io
+        import segno
+        buf = io.BytesIO()
+        segno.make(url, error="m").save(buf, kind="png", scale=6, border=2)
+        import base64
+        qr = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        pass
+    log_action(user_id=g.get("hd_user_id"), action="ops.tv_link", resource_type="ops", resource_id=None,
+               new_values={"generation": gen, "name": name, "revoked_previous": request.args.get("revoke") == "1"},
+               ip_address=request.remote_addr or "")
+    return jsonify({"url": url, "qr": qr, "generation": gen, "expires_days": 90, "issued_at": now})
+
+
 @hd_bp.route("/ops/status", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def ops_status_api():
@@ -4260,7 +4299,7 @@ def get_patient_history(hn):
 # ── Dashboard ─────────────────────────────────────────────
 
 @hd_bp.route("/dashboard/beds", methods=["GET"])
-@require_role("physician", "nurse", "admin")
+@require_role("physician", "nurse", "admin", "display")
 def bed_dashboard():
     """25-bed real-time dashboard with active sessions, filtered by shift."""
     import os
