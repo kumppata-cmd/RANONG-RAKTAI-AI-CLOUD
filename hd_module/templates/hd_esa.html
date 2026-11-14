@@ -86,8 +86,8 @@ async function loadDw(){
     list.innerHTML = items.map(it=>{
       const canAct = it.status==='pending' && ROLE==='physician';
       const ev = it.evidence || {};
-      const arrow = it.direction==='up' ? '⬆️' : '⬇️';
-      return `<div class="esa-item ${it.direction==='up'?'increase':'decrease'}">
+      const arrow = it.direction==='up' ? '⬆️' : (it.direction==='set' ? '🆕' : '⬇️');
+      return `<div class="esa-item ${it.direction==='up'?'increase':(it.direction==='set'?'':'decrease')}">
         <div>
           <div class="esa-who">${esc(it.name||'')}<small>HN ${esc(it.hn||'')}</small><span class="esa-badge b-${it.status}">${ST_TH[it.status]||it.status}</span></div>
           <div style="display:flex;gap:16px;align-items:center;margin-top:6px;flex-wrap:wrap">
@@ -95,7 +95,8 @@ async function loadDw(){
             <div class="esa-dose">${arrow} เสนอ <span class="new">${it.proposed_dw!=null?it.proposed_dw.toFixed(1):'—'} kg</span></div>
           </div>
           <div class="esa-why">${esc(it.rationale||'')}</div>
-          <div class="esa-why">จาก ${it.sessions_used||'-'} รอบ · มัธยฐานหลังฟอก ${ev.median_post??'-'} kg · ต่ำกว่า DW ${ev.below_dw??0} · สูงกว่า ${ev.above_dw??0} · IDH ${ev.idh??0} · ตะคริว ${ev.cramp??0} · SBP&lt;100 ${ev.post_sbp_low??0} · SBP≥160 ${ev.post_sbp_high??0} · บวม ${ev.edema??0} · UF ไม่ถึง ${ev.uf_short??0}</div>
+          ${ev.n ? `<div class="esa-why">จาก ${it.sessions_used||'-'} รอบ · มัธยฐานหลังฟอก ${ev.median_post??'-'} kg · ต่ำกว่า DW ${ev.below_dw??0} · สูงกว่า ${ev.above_dw??0} · IDH ${ev.idh??0} · ตะคริว ${ev.cramp??0} · SBP&lt;100 ${ev.post_sbp_low??0} · SBP≥160 ${ev.post_sbp_high??0} · บวม ${ev.edema??0} · UF ไม่ถึง ${ev.uf_short??0}</div>` : ''}
+          ${ev.dw_bcm!=null ? `<div class="esa-why">💧 BCM ${esc(ev.bcm_date||'')}: น้ำหนัก ${ev.bcm_weight} kg · OH ${ev.bcm_oh>0?'+':''}${ev.bcm_oh} L${ev.bcm_rel_oh!=null?' ('+ev.bcm_rel_oh+'% ECW)':''} · DW ตาม BCM <b>${ev.dw_bcm}</b> kg</div>` : ''}
           ${it.status!=='pending' ? `<div class="esa-why">โดย ${esc(it.decided_by||'')} · ${fmtDate(it.decided_at)}${it.note?' · '+esc(it.note):''}</div>` : ''}
         </div>
         ${canAct ? `<div class="esa-act">

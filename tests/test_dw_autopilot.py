@@ -56,3 +56,27 @@ class DwReviewTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BcmSignalTests(unittest.TestCase):
+    def test_set_when_no_dw(self):
+        from hd_module.dw_autopilot import bcm_signal
+        b = {"date": "2026-09-16", "days_ago": 59, "weight": 69.0, "oh": 3.0, "rel_oh": 19.0, "dw_bcm": 66.0}
+        p = bcm_signal(b, None)
+        self.assertEqual((p["direction"], p["proposed_dw"]), ("set", 66.0))
+        self.assertIn("ยังไม่มีน้ำหนักแห้ง", p["rationale"])
+
+    def test_down_is_bounded_by_step(self):
+        from hd_module.dw_autopilot import bcm_signal
+        b = {"date": "2026-09-16", "days_ago": 59, "weight": 69.0, "oh": 3.0, "rel_oh": 19.0, "dw_bcm": 66.0}
+        p = bcm_signal(b, 68.0)
+        self.assertEqual((p["direction"], p["proposed_dw"]), ("down", 67.5))
+        self.assertEqual(p["evidence"]["dw_diff"], -2.0)
+
+    def test_up_and_threshold(self):
+        from hd_module.dw_autopilot import bcm_signal
+        b = {"date": "2026-09-16", "days_ago": 10, "weight": 57.5, "oh": -1.5, "rel_oh": -10.0, "dw_bcm": 59.0}
+        p = bcm_signal(b, 58.3)
+        self.assertEqual((p["direction"], p["proposed_dw"]), ("up", 58.8))   # 0.7 kg gap → one 0.5 step
+        self.assertIsNone(bcm_signal(b, 58.7))                               # 0.3 kg → inside threshold
+        self.assertIsNone(bcm_signal(None, 60))

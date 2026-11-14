@@ -23,7 +23,7 @@ from statistics import median
 logger = logging.getLogger(__name__)
 
 DEFAULTS = {"uf_rate_max": 13.0, "uf_rate_caution": 10.0, "dw_review_every": 10,
-            "dw_step_kg": 0.5, "dw_min_interval_days": 21}
+            "dw_step_kg": 0.5, "dw_min_interval_days": 21, "dw_bcm_diff": 0.5}
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS hd_dw_proposals (
@@ -160,20 +160,67 @@ def collect_sessions(cur, patient_id, n=10):
     return out
 
 
+def _bcm_latest(cur, patient_id, max_age_days=180):
+    """Latest bioimpedance (Fluid Status) for the BCM signal, or None (table may not exist yet)."""
+    try:
+        cur.execute("SAVEPOINT dwbcm")
+        cur.execute("""SELECT assessed_at, weight_kg, oh_pre_l, rel_oh_pct, lti FROM hd_fluid_assessments
+                       WHERE patient_id = %s AND oh_pre_l IS NOT NULL AND weight_kg IS NOT NULL
+                       ORDER BY assessed_at DESC, id DESC LIMIT 1""", (patient_id,))
+        r = cur.fetchone()
+        cur.execute("RELEASE SAVEPOINT dwbcm")
+    except Exception:
+        cur.execute("ROLLBACK TO SAVEPOINT dwbcm")
+        return None
+    if not r or (_thai_today() - r[0]).days > max_age_days:
+        return None
+    w, oh = float(r[1]), float(r[2])
+    return {"date": r[0].isoformat(), "days_ago": (_thai_today() - r[0]).days, "weight": w, "oh": oh,
+            "rel_oh": _f(r[3]), "lti": _f(r[4]), "dw_bcm": round(w - oh, 1)}
+
+
+def bcm_signal(bcm, dry_weight, limits=None):
+    """Third DW signal (design HD-FLUID-STATUS-DW): BCM normohydration weight vs current DW.
+    → None, or {"direction": set|up|down, "proposed_dw", "rationale", "evidence"}; the step is
+    bounded by dw_step_kg so a large gap is closed over several reviews, never at once."""
+    if not bcm:
+        return None
+    lim = dict(DEFAULTS, **(limits or {}))
+    step = float(lim["dw_step_kg"])
+    thr = float(lim.get("dw_bcm_diff", 0.5))
+    when = f"{bcm['days_ago']} วันก่อน" if bcm["days_ago"] < 60 else f"{bcm['days_ago'] // 30} เดือนก่อน"
+    base = (f"BCM {when}: น้ำหนักขณะตรวจ {bcm['weight']:.1f} kg, OH {bcm['oh']:+.1f} L"
+            f"{' (' + format(bcm['rel_oh'], '.0f') + '% ECW)' if bcm.get('rel_oh') is not None else ''} → DW ตาม BCM ≈ {bcm['dw_bcm']:.1f} kg")
+    ev = {"bcm_date": bcm["date"], "bcm_weight": bcm["weight"], "bcm_oh": bcm["oh"], "bcm_rel_oh": bcm.get("rel_oh"), "dw_bcm": bcm["dw_bcm"]}
+    dw = _f(dry_weight)
+    if dw is None:
+        return {"direction": "set", "proposed_dw": bcm["dw_bcm"], "evidence": ev,
+                "rationale": f"ยังไม่มีน้ำหนักแห้งในระบบ — {base} · เสนอใช้เป็น DW เริ่มต้น (แพทย์ปรับได้ก่อนอนุมัติ)"}
+    diff = round(bcm["dw_bcm"] - dw, 1)
+    if abs(diff) < thr:
+        return None
+    if diff < 0:
+        return {"direction": "down", "proposed_dw": round(max(dw - step, bcm["dw_bcm"]), 1), "evidence": dict(ev, dw_diff=diff),
+                "rationale": f"{base} · ต่ำกว่า DW ปัจจุบัน {dw:.1f} อยู่ {abs(diff):.1f} kg (น้ำเกิน) → เสนอลดทีละ {step:g} kg"}
+    return {"direction": "up", "proposed_dw": round(min(dw + step, bcm["dw_bcm"]), 1), "evidence": dict(ev, dw_diff=diff),
+            "rationale": f"{base} · สูงกว่า DW ปัจจุบัน {dw:.1f} อยู่ {diff:.1f} kg (น้ำขาด เสี่ยง IDH) → เสนอเพิ่มทีละ {step:g} kg"}
+
+
 def generate(conn, limits=None):
-    """Scan active patients; create DW proposals where the pattern is clear. Returns created list."""
+    """Scan active patients; create DW proposals where the pattern is clear. Returns created list.
+    Signals: (1) session pattern over the last 10 rounds, (2) latest BCM vs DW; both are merged
+    into one proposal per patient, and a patient with no DW yet gets a 'set' proposal from BCM."""
     lim = dict(DEFAULTS, **(limits or {}))
     created = []
+    import json
     with conn.cursor() as cur:
         cur.execute(CREATE_SQL)
         cur.execute("""SELECT p.id, p.hn, p.patient_name, p.dry_weight,
                               (SELECT COUNT(*) FROM hd_sessions s WHERE s.patient_id = p.id AND s.status = 'completed'
                                  AND s.session_date >= CURRENT_DATE - 60)
-                       FROM hd_patient_mapping p WHERE p.is_active = TRUE AND p.dry_weight IS NOT NULL""")
+                       FROM hd_patient_mapping p WHERE p.is_active = TRUE""")
         pats = cur.fetchall()
         for pid, hn, name, dw, recent in pats:
-            if recent < 5:
-                continue
             cur.execute("""SELECT status, decided_at, created_at FROM hd_dw_proposals WHERE patient_id = %s
                            ORDER BY id DESC LIMIT 1""", (pid,))
             last = cur.fetchone()
@@ -181,16 +228,26 @@ def generate(conn, limits=None):
                 continue
             if last and (last[1] or last[2]) and (_thai_today() - (last[1] or last[2]).date()).days < int(lim["dw_min_interval_days"]):
                 continue
-            sess = collect_sessions(cur, pid, 10)
-            prop = review_dry_weight(sess, dw, lim)
+            bcm = _bcm_latest(cur, pid)
+            sess = collect_sessions(cur, pid, 10) if (dw is not None and recent >= 5) else []
+            prop = review_dry_weight(sess, dw, lim) if sess else None
+            b = bcm_signal(bcm, dw, lim)
+            if prop and b:
+                if prop["direction"] == b["direction"]:
+                    prop["rationale"] += " · ✅ สอดคล้องกับ " + b["rationale"]
+                else:
+                    prop["rationale"] += " · ⚠️ ขัดกับ " + b["rationale"] + " — โปรดพิจารณา"
+                prop["evidence"].update(b["evidence"])
+            elif b:
+                prop = b
+                prop["evidence"] = dict(b["evidence"], source="bcm")
             if not prop:
                 continue
-            import json
             cur.execute("""INSERT INTO hd_dw_proposals (patient_id, hn, current_dw, proposed_dw, direction, rationale, evidence, sessions_used)
                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                         (pid, hn, dw, prop["proposed_dw"], prop["direction"], prop["rationale"],
                          json.dumps(prop["evidence"]), len(sess)))
-            created.append({"id": cur.fetchone()[0], "hn": hn, "name": name, "current_dw": float(dw),
+            created.append({"id": cur.fetchone()[0], "hn": hn, "name": name, "current_dw": float(dw) if dw is not None else None,
                             "proposed_dw": prop["proposed_dw"], "direction": prop["direction"], "rationale": prop["rationale"]})
     conn.commit()
     return created
@@ -201,8 +258,9 @@ def line_summary(created, base_url):
         return ""
     L = [f"🎯 Dry Weight Autopilot — {len(created)} คน เสนอปรับ DW (รออนุมัติ)", "━━━━━━━━━━━━"]
     for c in created[:8]:
-        arrow = "⬆️" if c["direction"] == "up" else "⬇️"
-        L.append(f"• {c['name']} (HN {c['hn']}) DW {c['current_dw']:.1f} → {arrow} {c['proposed_dw']:.1f} kg")
+        arrow = {"up": "⬆️", "down": "⬇️"}.get(c["direction"], "🆕")
+        cur_txt = f"{c['current_dw']:.1f}" if c.get("current_dw") is not None else "ยังไม่มี"
+        L.append(f"• {c['name']} (HN {c['hn']}) DW {cur_txt} → {arrow} {c['proposed_dw']:.1f} kg")
     if len(created) > 8:
         L.append(f"… อีก {len(created) - 8} คน")
     L.append("━━━━━━━━━━━━")
