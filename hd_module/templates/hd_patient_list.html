@@ -216,7 +216,7 @@ function renderPatients(patients){
     const incomplete = isIncomplete(p);
     const rowClass = incomplete ? 'needs-review' : '';
     const rowAlert = p.unacked_alerts > 0 ? 'style="border-left:3px solid var(--danger);"' : '';
-    const editBtn = `<button class="btn" onclick="event.stopPropagation();openEditModal('${p.hn}')" style="font-size:.7rem;padding:2px 8px;margin-left:4px;" title="แก้ไข">✏️</button>`;
+    const editBtn = `<button class="btn" onclick="event.stopPropagation();openEditModal('${p.hn}')" style="font-size:.7rem;padding:2px 8px;margin-left:4px;" title="แก้ไข">✏️</button><button class="btn" onclick="event.stopPropagation();window.location.href='/hd/patient/${encodeURIComponent(p.hn)}/360'" style="font-size:.7rem;padding:2px 8px;margin-left:2px;background:rgba(41,128,185,.12);color:var(--accent)" title="Patient 360 — ภาพรวมผู้ป่วยทั้งหมด">🧭 360</button>`;
     const schedCell = p.schedule_days ? '<span class="schedule-badge">'+p.schedule_days+'</span>' : '<span style="color:var(--warning);font-size:.8rem;">⚠️ ไม่ระบุ</span>';
     const SH = {morning:['🌅 เช้า','#b45309','#fef3c7'], afternoon:['☀️ บ่าย','#1d4ed8','#dbeafe'], evening:['🌙 ค่ำ','#6d28d9','#ede9fe']};
     const sh = SH[p.default_shift];
