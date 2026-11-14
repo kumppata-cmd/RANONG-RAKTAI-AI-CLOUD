@@ -65,7 +65,7 @@ jobs:
             check '.accepting_documents'   'true'      'accepting_documents'
             check '.status'                'running'   'status'
             # งานอัตโนมัติ + LINE (ops watchdog): scheduler ต้องเดินอยู่ และ LINE ต้องส่งได้
-            ops_ok=$(echo "$json" | jq -r '.ops.healthy // empty')
+            ops_ok=$(echo "$json" | jq -r 'if .ops.healthy == false then "false" else "" end')
             if [ "$ops_ok" = "false" ]; then
               while IFS= read -r line; do problems+=("งานอัตโนมัติ: $line"); done < <(echo "$json" | jq -r '.ops.problems[]?')
             fi

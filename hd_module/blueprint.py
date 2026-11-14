@@ -1928,11 +1928,14 @@ def run_db_backup(trigger="scheduled", restore_test=False, send_line=True):
         ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
         # quiet success: only on Monday (weekly restore test) or on any problem
         if not ok_all or restore_test or trigger == "manual":
-            for uid in [r.strip() for r in ids.split(",") if r.strip()]:
-                try:
-                    push_fn and push_fn(uid, msg)
-                except Exception as e:
-                    logger.warning("db backup push: %s", e)
+            from . import ops_status as ops
+            import contextlib
+            with (ops.critical() if not ok_all else contextlib.nullcontext()):
+                for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+                    try:
+                        push_fn and push_fn(uid, msg)
+                    except Exception as e:
+                        logger.warning("db backup push: %s", e)
     return status
 
 
@@ -1954,6 +1957,10 @@ def ops_status_api():
     """กระดานสถานะงานอัตโนมัติ + LINE (ops watchdog)."""
     import os
     from . import ops_status as ops
+    try:
+        ops.set_reserve(int(get_setting_value("line_quota_reserve", "") or ops.QUOTA_RESERVE_DEFAULT))
+    except Exception:
+        pass
     if request.args.get("refresh_quota"):
         ops.check_line_quota(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip())
     s = ops.snapshot()
@@ -1972,7 +1979,8 @@ def ops_status_test_line():
         return jsonify({"ok": False, "error": "LINE ไม่พร้อม หรือยังไม่ตั้ง alert_recipients"}), 400
     from . import ops_status as ops
     now = (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%d/%m %H:%M")
-    sent = sum(1 for u in ids if push_fn(u, f"📨 ทดสอบระบบแจ้งเตือน {now} — ถ้าได้รับข้อความนี้ แสดงว่า LINE ส่งได้ปกติ"))
+    with ops.critical():
+        sent = sum(1 for u in ids if push_fn(u, f"📨 ทดสอบระบบแจ้งเตือน {now} — ถ้าได้รับข้อความนี้ แสดงว่า LINE ส่งได้ปกติ"))
     snap = ops.snapshot()
     log_action(user_id=g.get("hd_user_id"), action="ops.test_line", resource_type="ops", resource_id=None,
                new_values={"sent": sent, "recipients": len(ids)}, ip_address=request.remote_addr or "")

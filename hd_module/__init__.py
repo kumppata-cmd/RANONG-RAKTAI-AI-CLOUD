@@ -566,6 +566,11 @@ def _start_daily_reminder_scheduler(app):
                         # LINE monthly quota — once an hour (and on the first pass)
                         if lab_tick % 12 == 0:
                             import os as _os
+                            try:
+                                from .blueprint import get_setting_value as _gsv
+                                ops.set_reserve(int(_gsv("line_quota_reserve", "") or ops.QUOTA_RESERVE_DEFAULT))
+                            except Exception:
+                                pass
                             ops.check_line_quota(_os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip())
                 lab_tick += 1
                 # Send at 18:00 Thai time

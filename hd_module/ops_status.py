@@ -34,8 +34,16 @@ JOB_STUCK_SEC = 20 * 60
 TICK_STALE_SEC = 20 * 60
 
 
+_THAI = timezone(timedelta(hours=7))
+_CRITICAL = threading.local()
+# Keep this many messages of the monthly LINE quota for critical alerts
+# (BP drop, equipment failure, backup failure). Informational pushes stop
+# first when the quota runs low. Overridable via ⚙️ line_quota_reserve.
+QUOTA_RESERVE_DEFAULT = 60
+
+
 def _now():
-    return datetime.now(timezone.utc) + timedelta(hours=7)
+    return datetime.now(_THAI)
 
 
 def _iso(dt=None):
@@ -69,6 +77,9 @@ def line_result(ok, status=None, body=""):
         if ok:
             L["last_ok"] = _iso()
             L["ok_count"] += 1
+            q = L.get("quota")
+            if q and q.get("used") is not None:
+                q["used"] = int(q["used"]) + 1
         else:
             L["fail_count"] += 1
             L["last_error_at"] = _iso()
@@ -78,6 +89,51 @@ def line_result(ok, status=None, body=""):
 def line_quota(info):
     with _LOCK:
         _STATE["line"]["quota"] = dict(info or {}, checked_at=_iso())
+
+
+def quota_remaining():
+    q = _STATE["line"].get("quota") or {}
+    if not q.get("value") or q.get("used") is None:
+        return None
+    return max(0, int(q["value"]) - int(q["used"]))
+
+
+def set_reserve(n):
+    with _LOCK:
+        _STATE["reserve"] = int(n)
+
+
+def quota_low():
+    r = quota_remaining()
+    return r is not None and r <= int(_STATE.get("reserve", QUOTA_RESERVE_DEFAULT))
+
+
+class critical:
+    """`with ops.critical():` — pushes inside are never suppressed by the quota guard."""
+    def __enter__(self):
+        _CRITICAL.depth = getattr(_CRITICAL, "depth", 0) + 1
+
+    def __exit__(self, *a):
+        _CRITICAL.depth = max(0, getattr(_CRITICAL, "depth", 1) - 1)
+
+
+def allow_push():
+    """False → informational push should be skipped (quota reserved for critical alerts)."""
+    if getattr(_CRITICAL, "depth", 0) > 0:
+        return True
+    if quota_low():
+        with _LOCK:
+            _STATE["line"]["suppressed"] = _STATE["line"].get("suppressed", 0) + 1
+        return False
+    return True
+
+
+def note_sent():
+    """Count a successful push against the cached quota so the guard reacts between hourly checks."""
+    with _LOCK:
+        q = _STATE["line"].get("quota")
+        if q and q.get("used") is not None:
+            q["used"] = int(q["used"]) + 1
 
 
 def snapshot():
@@ -105,6 +161,8 @@ def snapshot():
     s["stuck_jobs"] = stuck
     q = s["line"].get("quota") or {}
     s["line"]["quota_exhausted"] = bool(q.get("value") and q.get("used") is not None and q["used"] >= q["value"])
+    s["line"]["quota_low"] = quota_low()
+    s["line"]["suppressed"] = _STATE["line"].get("suppressed", 0)
     problems = []
     if age is None:
         problems.append("scheduler ยังไม่เริ่ม")
@@ -113,7 +171,9 @@ def snapshot():
     if stuck:
         problems.append("งานค้าง: " + ", ".join(stuck))
     if s["line"]["quota_exhausted"]:
-        problems.append("LINE ครบโควตาข้อความรายเดือน")
+        problems.append("LINE ครบโควตาข้อความรายเดือน — ส่งไม่ได้ทุกข้อความจนกว่าจะขึ้นเดือนใหม่/อัปเกรดแพ็กเกจ")
+    elif s["line"]["quota_low"]:
+        problems.append(f"LINE โควตาใกล้หมด (เหลือ {quota_remaining()}) — ส่งเฉพาะแจ้งเตือนวิกฤต")
     le = s["line"].get("last_error")
     lo = s["line"].get("last_ok")
     if le and (not lo or (s["line"].get("last_error_at") or "") > lo):
@@ -213,7 +273,7 @@ def line_text(s):
         L.append(f"scheduler เดินล่าสุด {s['tick_age_sec'] // 60} นาทีก่อน (รอบที่ {s['tick_count']}, restart {s['restarts']})")
     q = (s.get("line") or {}).get("quota") or {}
     if q.get("value"):
-        L.append(f"LINE ใช้ไป {q.get('used', '?')}/{q['value']} ข้อความ/เดือน")
+        L.append(f"LINE ใช้ไป {q.get('used', '?')}/{q['value']} ข้อความ/เดือน" + (f" · งดส่งข้อความทั่วไปแล้ว {s['line'].get('suppressed', 0)} ครั้ง" if s['line'].get('suppressed') else ""))
     for p in s.get("problems", []):
         L.append("• " + p)
     return "\n".join(L)

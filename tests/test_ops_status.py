@@ -55,6 +55,7 @@ class OpsStatusTests(unittest.TestCase):
         self.assertIsNotNone(ops.snapshot()["jobs"]["slow"]["running_since"])
 
     def test_line_failure_and_quota(self):
+        ops.set_reserve(60)
         ops.tick()
         ops.line_result(False, 429, '{"message":"You have reached your monthly limit."}')
         s = ops.snapshot()
@@ -65,7 +66,7 @@ class OpsStatusTests(unittest.TestCase):
         ops.line_quota({"type": "limited", "value": 200, "used": 200})
         s = ops.snapshot()
         self.assertTrue(s["line"]["quota_exhausted"])
-        self.assertIn("LINE ครบโควตาข้อความรายเดือน", s["problems"])
+        self.assertTrue(any(p.startswith("LINE ครบโควตาข้อความรายเดือน") for p in s["problems"]))
         self.assertIn("200/200", ops.line_text(s))
 
     def test_check_line_quota_uses_api(self):
@@ -82,6 +83,39 @@ class OpsStatusTests(unittest.TestCase):
         info = ops.check_line_quota("tok", http=H())
         self.assertEqual(info, {"type": "limited", "value": 200, "used": 57})
         self.assertIsNone(ops.check_line_quota("", http=H()))
+
+
+class QuotaGuardTests(unittest.TestCase):
+    def setUp(self):
+        with ops._LOCK:
+            ops._STATE["line"] = {"last_ok": None, "last_error": None, "last_error_at": None, "ok_count": 0,
+                                  "fail_count": 0, "quota": None}
+            ops._STATE["reserve"] = 60
+
+    def test_unknown_quota_allows(self):
+        self.assertTrue(ops.allow_push())
+
+    def test_low_quota_blocks_informational_but_not_critical(self):
+        ops.line_quota({"type": "limited", "value": 300, "used": 250})
+        self.assertFalse(ops.allow_push())
+        with ops.critical():
+            self.assertTrue(ops.allow_push())
+        self.assertFalse(ops.allow_push())
+        self.assertEqual(ops.snapshot()["line"]["suppressed"], 2)
+        self.assertTrue(any("ใกล้หมด" in p for p in ops.snapshot()["problems"]))
+
+    def test_successful_push_counts_against_cached_quota(self):
+        ops.line_quota({"type": "limited", "value": 300, "used": 238})
+        self.assertTrue(ops.allow_push())
+        ops.line_result(True)
+        ops.line_result(True)
+        self.assertEqual(ops.quota_remaining(), 60)
+        self.assertFalse(ops.allow_push())
+
+    def test_reserve_setting(self):
+        ops.line_quota({"type": "limited", "value": 300, "used": 250})
+        ops.set_reserve(10)
+        self.assertTrue(ops.allow_push())
 
 
 if __name__ == "__main__":

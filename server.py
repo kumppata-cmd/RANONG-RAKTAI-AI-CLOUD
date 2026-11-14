@@ -12853,6 +12853,18 @@ def _ops_line_result(ok, status=None, body=""):
         pass
 
 
+def _ops_allow_push() -> bool:
+    """โควตา LINE รายเดือนใกล้หมด → งดข้อความทั่วไป เก็บไว้ให้แจ้งเตือนวิกฤต (ops_status.critical)"""
+    try:
+        from hd_module import ops_status as _ops
+        if not _ops.allow_push():
+            logger.warning("[PUSH] งดส่งข้อความทั่วไป — โควตา LINE เหลือ %s (สำรองไว้แจ้งเตือนวิกฤต)", _ops.quota_remaining())
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def push_message(user_id: str, text: str) -> bool:
     """ส่งข้อความ Push ไปยัง LINE user.
 
@@ -12862,6 +12874,8 @@ def push_message(user_id: str, text: str) -> bool:
     """
     if IS_TESTING and not IS_TESTING_DOCS:
         logger.info("TESTING MODE: ไม่ส่ง push message")
+        return False
+    if not _ops_allow_push():
         return False
     if not LINE_CHANNEL_ACCESS_TOKEN:
         logger.error("[PUSH] ไม่มี LINE_CHANNEL_ACCESS_TOKEN — ส่ง push message ไม่ได้")
@@ -12924,6 +12938,8 @@ def push_messages(user_id: str, messages: list[dict]) -> bool:
     Returns True if sent successfully, False otherwise.
     """
     if IS_TESTING and not IS_TESTING_DOCS:
+        return False
+    if not _ops_allow_push():
         return False
     if not LINE_CHANNEL_ACCESS_TOKEN:
         logger.error("[PUSH] ไม่มี LINE_CHANNEL_ACCESS_TOKEN")
@@ -13082,7 +13098,12 @@ app.config["DOC_INDEX"] = doc_index        # HD lab sync reads lab documents →
 try:
     from hd_module.alert_push import HdAlertPushService
     _hd_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    hd_alert_push = HdAlertPushService(push_fn=push_message, db_url=_hd_db)
+    def _critical_push(uid, text):
+        """แจ้งเตือนวิกฤต (BP ตก ฯลฯ) — ไม่ถูกงดเมื่อโควตา LINE ใกล้หมด"""
+        from hd_module import ops_status as _ops
+        with _ops.critical():
+            return push_message(uid, text)
+    hd_alert_push = HdAlertPushService(push_fn=_critical_push, db_url=_hd_db)
     logger.info("HD Alert Push: initialized (%d recipients)", hd_alert_push.recipient_count)
 except Exception as _hd_push_err:
     logger.warning("HD Alert Push: init failed — %s", _hd_push_err)
