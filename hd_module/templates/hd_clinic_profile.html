@@ -146,9 +146,13 @@
 <!-- Tab 5: อุปกรณ์ -->
 <div class="cp-panel" id="panel-equipment">
   <div class="cp-card">
-    <h3>⚙️ ทะเบียนอุปกรณ์ <button class="add-btn" onclick="openEquipModal()" style="margin-left:auto">➕ เพิ่ม</button></h3>
+    <h3>⚙️ ทะเบียนอุปกรณ์
+      <button class="add-btn" onclick="document.getElementById('equipImportFile').click()" style="margin-left:auto">📥 นำเข้าจากไฟล์ (CSV/Excel)</button>
+      <input type="file" id="equipImportFile" accept=".csv,.xlsx" style="display:none" onchange="importEquipment()">
+      <button class="add-btn" onclick="openEquipModal()">➕ เพิ่ม</button></h3>
+    <div id="equipContractSummary" style="font-size:.78rem;margin-bottom:6px"></div>
     <div style="overflow-x:auto;-webkit-overflow-scrolling:touch">
-      <table class="cp-table"><thead><tr><th>ประเภท</th><th>ยี่ห้อ/รุ่น</th><th>S/N</th><th>เตียง</th><th>สถานะ</th><th>PM ถัดไป</th><th>จัดการ</th></tr></thead>
+      <table class="cp-table"><thead><tr><th>ประเภท</th><th>ยี่ห้อ/รุ่น</th><th>S/N</th><th>เตียง</th><th>ปีที่ซื้อ</th><th>สัญญาสิ้นสุด</th><th>สถานะ</th><th>PM ถัดไป</th><th>จัดการ</th></tr></thead>
         <tbody id="equipBody"><tr><td colspan="6" class="cp-empty">กำลังโหลด...</td></tr></tbody>
       </table>
     </div>
@@ -323,9 +327,12 @@
       <div class="cp-field"><div class="flabel">ยี่ห้อ</div><input id="eq_brand" placeholder="เช่น Nikkiso, Fresenius"></div>
       <div class="cp-field"><div class="flabel">รุ่น</div><input id="eq_model" placeholder="เช่น DBB-27"></div>
       <div class="cp-field"><div class="flabel">Serial Number</div><input id="eq_serial"></div>
-      <div class="cp-field"><div class="flabel">ประจำเตียง</div><input id="eq_bed" type="number" min="1" max="25" placeholder="1-25"></div>
+      <div class="cp-field"><div class="flabel">ประจำเตียง</div><input id="eq_bed" type="number" min="1" max="40" placeholder="1-25 (เครื่องสำรอง 26+)"></div>
       <div class="cp-field"><div class="flabel">PM ล่าสุด</div><input type="date" id="eq_last_pm"></div>
       <div class="cp-field"><div class="flabel">PM ถัดไป</div><input type="date" id="eq_next_pm"></div>
+      <div class="cp-field"><div class="flabel">ปีที่ซื้อ/เช่า (พ.ศ.)</div><input id="eq_purchase_year" type="number" placeholder="เช่น 2567"></div>
+      <div class="cp-field"><div class="flabel">สัญญาบำรุงรักษาสิ้นสุด</div><input type="date" id="eq_contract_end"></div>
+      <div class="cp-field"><div class="flabel">บริษัทผู้รับจ้างดูแล</div><input id="eq_contract_vendor" placeholder="เช่น NIKKISO Thailand"></div>
       <div class="cp-field" style="grid-column:1/-1"><div class="flabel">หมายเหตุ</div><input id="eq_notes" placeholder="รายละเอียดเพิ่มเติม"></div>
     </div>
     <button class="save-btn" onclick="saveEquipment()">💾 บันทึก</button>
@@ -651,16 +658,25 @@ function loadEquipment(){
     const body = document.getElementById('equipBody');
     const list = d.equipment||[];
     _equipData = list;
-    if(!list.length){body.innerHTML='<tr><td colspan="7" class="cp-empty">ยังไม่มีข้อมูล — กด ➕ เพิ่ม</td></tr>';return}
+    if(!list.length){body.innerHTML='<tr><td colspan="9" class="cp-empty">ยังไม่มีข้อมูล — กด ➕ เพิ่ม หรือ 📥 นำเข้าจากไฟล์</td></tr>';document.getElementById('equipContractSummary').textContent='';return}
     const typeMap={dialysis_machine:'เครื่องฟอก',defibrillator:'Defibrillator',ro_system:'RO System',scale:'เครื่องชั่ง',bp_monitor:'BP Monitor',o2:'O2 Tank',suction:'Suction'};
+    const mach = list.filter(e=>e.type==='dialysis_machine');
+    const expired = mach.filter(e=>e.contract_days_left!=null && e.contract_days_left<0).length, soon = mach.filter(e=>e.contract_days_left!=null && e.contract_days_left>=0 && e.contract_days_left<=90).length;
+    document.getElementById('equipContractSummary').innerHTML = `เครื่องฟอก <b>${mach.length}</b> เครื่อง · สัญญาบำรุงรักษา: <span style="color:var(--danger);font-weight:700">หมดอายุแล้ว ${expired}</span> · <span style="color:#e67e22;font-weight:700">ใกล้หมด (≤90 วัน) ${soon}</span> · ปกติ ${mach.length-expired-soon}`;
+    const thDate = iso => iso ? new Date(iso+'T00:00:00').toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'numeric'}) : '-';
     body.innerHTML=list.map(e=>{
       const stCls = e.status==='active'?'status-active':e.status==='repair'?'status-repair':'status-spare';
       const stLabel = {active:'ใช้งาน',spare:'สำรอง',repair:'ซ่อม',retired:'ปลดระวาง'}[e.status]||e.status;
+      const d = e.contract_days_left;
+      const cStyle = d==null?'':(d<0?'color:var(--danger);font-weight:700':(d<=90?'color:#e67e22;font-weight:700':''));
+      const cTxt = e.contract_end ? thDate(e.contract_end)+(d!=null?(d<0?' (หมดแล้ว '+(-d)+' วัน)':(d<=90?' (อีก '+d+' วัน)':'')):'') : '-';
       return `<tr>
         <td>${typeMap[e.type]||e.type}</td>
         <td style="font-weight:600">${e.brand||'-'} ${e.model||''}</td>
         <td style="font-size:.7rem">${e.serial||'-'}</td>
         <td>${e.bed||'-'}</td>
+        <td>${e.purchase_year?e.purchase_year+543:'-'}</td>
+        <td style="${cStyle};white-space:nowrap">${cTxt}</td>
         <td><span class="status-badge ${stCls}">${stLabel}</span></td>
         <td>${e.next_pm||'-'}</td>
         <td style="white-space:nowrap">
@@ -685,7 +701,25 @@ function editEquip(id){
   document.getElementById('eq_last_pm').value = e.last_pm||'';
   document.getElementById('eq_next_pm').value = e.next_pm||'';
   document.getElementById('eq_notes').value = e.notes||'';
+  document.getElementById('eq_purchase_year').value = e.purchase_year ? e.purchase_year+543 : '';
+  document.getElementById('eq_contract_end').value = e.contract_end||'';
+  document.getElementById('eq_contract_vendor').value = e.contract_vendor||'';
   document.getElementById('equipModal').classList.add('open');
+}
+function importEquipment(){
+  const inp = document.getElementById('equipImportFile'); const f = inp.files[0]; if(!f) return;
+  const token = getHdToken(); const fd = new FormData(); fd.append('file', f);
+  showToast('กำลังอ่านไฟล์…','info');
+  fetch('/hd/api/v1/clinic-profile/equipment/import?dry_run=1',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd}).then(r=>r.json()).then(d=>{
+    if(d.error){ showToast(d.error,'danger'); inp.value=''; return; }
+    const lines = d.rows.slice(0,30).map(r=>`${r.action==='insert'?'➕':'✏️'} เครื่อง ${r.bed||'-'}: ${r.brand} ${r.model||''} S/N ${r.serial||'-'} · ซื้อ ${r.purchase_year?r.purchase_year+543:'-'} · สัญญาถึง ${r.contract_end||'-'}`).join('\n');
+    if(!confirm(`พบ ${d.rows.length} เครื่อง — เพิ่มใหม่ ${d.to_insert} · อัปเดต (S/N ตรงกัน) ${d.to_update}${d.errors.length?'\n⚠️ '+d.errors.join('\n'):''}\n\n${lines}${d.rows.length>30?'\n…':''}\n\nยืนยันนำเข้า?`)){ inp.value=''; return; }
+    const fd2 = new FormData(); fd2.append('file', f);
+    return fetch('/hd/api/v1/clinic-profile/equipment/import',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd2}).then(r=>r.json()).then(d2=>{
+      inp.value=''; if(d2.error){ showToast(d2.error,'danger'); return; }
+      showToast(`นำเข้าแล้ว: เพิ่ม ${d2.inserted} · อัปเดต ${d2.updated}`,'success'); loadEquipment();
+    });
+  }).catch(()=>{ inp.value=''; showToast('นำเข้าไม่สำเร็จ','danger'); });
 }
 
 function deleteEquip(id, name){
@@ -795,6 +829,7 @@ function openEquipModal(){
   });
   document.getElementById('eq_type').value='dialysis_machine';
   document.getElementById('eq_status').value='active';
+  ['eq_purchase_year','eq_contract_end','eq_contract_vendor'].forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   document.getElementById('equipModal').classList.add('open');
 }
 function saveEquipment(){
@@ -810,6 +845,9 @@ function saveEquipment(){
     last_pm: document.getElementById('eq_last_pm').value||null,
     next_pm: document.getElementById('eq_next_pm').value||null,
     notes: document.getElementById('eq_notes').value,
+    purchase_year: document.getElementById('eq_purchase_year').value||null,
+    contract_end: document.getElementById('eq_contract_end').value||null,
+    contract_vendor: document.getElementById('eq_contract_vendor').value||null,
   };
   if(!data.brand){showToast('กรุณาระบุยี่ห้อ','danger');return}
   hdFetch('/hd/api/v1/clinic-profile/equipment',{method:'POST',body:JSON.stringify(data)})

@@ -7763,14 +7763,18 @@ def get_equipment():
                 created_at TIMESTAMP DEFAULT NOW())""")
             conn.commit()
             cur.execute("""SELECT id, equipment_type, brand, model, serial_number, bed_number,
-                    purchase_date, status, last_pm_date, next_pm_date, notes
+                    purchase_date, status, last_pm_date, next_pm_date, notes, purchase_year, contract_end, contract_vendor
                     FROM hd_equipment ORDER BY equipment_type, bed_number""")
+            today = (datetime.now(timezone.utc) + timedelta(hours=7)).date()
             for r in cur.fetchall():
+                ce = r[12]
                 equipment.append({
                     "id": r[0], "type": r[1], "brand": r[2], "model": r[3], "serial": r[4],
                     "bed": r[5], "purchase_date": r[6].isoformat() if r[6] else None,
                     "status": r[7], "last_pm": r[8].isoformat() if r[8] else None,
                     "next_pm": r[9].isoformat() if r[9] else None, "notes": r[10],
+                    "purchase_year": r[11], "contract_end": ce.isoformat() if ce else None, "contract_vendor": r[13],
+                    "contract_days_left": (ce - today).days if ce else None,
                 })
         conn.close()
     except Exception as e:
@@ -7797,22 +7801,30 @@ def save_equipment():
                 next_pm_date DATE, pm_interval_days INTEGER DEFAULT 90, notes VARCHAR(300),
                 created_at TIMESTAMP DEFAULT NOW())""")
             eid = data.get("id")
+            py = data.get("purchase_year")
+            try:
+                py = int(py) if py not in (None, "") else None
+                if py and py > 2400:
+                    py -= 543          # พ.ศ. → ค.ศ.
+            except (TypeError, ValueError):
+                py = None
             if eid:
                 cur.execute("""UPDATE hd_equipment SET equipment_type=%s, brand=%s, model=%s,
-                    serial_number=%s, bed_number=%s, status=%s, last_pm_date=%s, next_pm_date=%s, notes=%s
+                    serial_number=%s, bed_number=%s, status=%s, last_pm_date=%s, next_pm_date=%s, notes=%s,
+                    purchase_year=%s, contract_end=%s, contract_vendor=%s
                     WHERE id=%s""",
                     (data.get("type","dialysis_machine"), data.get("brand"), data.get("model"),
                      data.get("serial"), data.get("bed"), data.get("status","active"),
                      data.get("last_pm") or None, data.get("next_pm") or None,
-                     data.get("notes"), eid))
+                     data.get("notes"), py, data.get("contract_end") or None, data.get("contract_vendor") or None, eid))
             else:
                 cur.execute("""INSERT INTO hd_equipment (equipment_type, brand, model, serial_number,
-                    bed_number, status, last_pm_date, next_pm_date, notes)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+                    bed_number, status, last_pm_date, next_pm_date, notes, purchase_year, contract_end, contract_vendor)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
                     (data.get("type","dialysis_machine"), data.get("brand"), data.get("model"),
                      data.get("serial"), data.get("bed"), data.get("status","active"),
                      data.get("last_pm") or None, data.get("next_pm") or None,
-                     data.get("notes")))
+                     data.get("notes"), py, data.get("contract_end") or None, data.get("contract_vendor") or None))
                 eid = cur.fetchone()[0]
             conn.commit()
         conn.close()
@@ -7820,6 +7832,62 @@ def save_equipment():
     except Exception as e:
         logger.warning("equipment POST: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/clinic-profile/equipment/import", methods=["POST"])
+@require_role("physician", "admin")
+def import_equipment():
+    """นำเข้าทะเบียนเครื่องจากไฟล์ CSV/XLSX (คอลัมน์: เครื่องที่/เตียง, ยี่ห้อ, รุ่น, รหัสเครื่อง/S/N, ปีที่ซื้อ, สัญญาสิ้นสุด[, ประเภท, สถานะ]).
+    จับคู่ด้วย Serial Number: มีอยู่แล้ว → อัปเดต, ไม่มี → เพิ่ม · ?dry_run=1 แสดงผลก่อน"""
+    import os
+    import psycopg2
+    from .equipment_import import parse_file
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "ไม่มีไฟล์"}), 400
+    try:
+        rows, errors = parse_file(f.filename, f.read())
+    except Exception as e:
+        return jsonify({"error": f"อ่านไฟล์ไม่ได้: {e}"}), 400
+    if not rows:
+        return jsonify({"error": "; ".join(errors) or "ไม่พบแถวเครื่องในไฟล์"}), 400
+    dry = request.args.get("dry_run") == "1"
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    ins = upd = 0
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, serial_number FROM hd_equipment WHERE serial_number IS NOT NULL")
+            by_sn = {str(sn).strip().upper(): eid for eid, sn in cur.fetchall()}
+            for r in rows:
+                eid = by_sn.get(r["serial"].upper()) if r.get("serial") else None
+                r["action"] = "update" if eid else "insert"
+                if dry:
+                    continue
+                if eid:
+                    cur.execute("""UPDATE hd_equipment SET brand=%s, model=%s, bed_number=%s, purchase_year=%s, contract_end=%s,
+                                   contract_vendor=COALESCE(%s, contract_vendor), equipment_type=%s,
+                                   status=COALESCE(%s, status), notes=COALESCE(%s, notes) WHERE id=%s""",
+                                (r["brand"], r["model"], r["bed"], r["purchase_year"], r["contract_end"], r.get("vendor"),
+                                 r["type"], r.get("status"), r.get("notes"), eid))
+                    upd += 1
+                else:
+                    cur.execute("""INSERT INTO hd_equipment (equipment_type, brand, model, serial_number, bed_number, status,
+                                   purchase_year, contract_end, contract_vendor, notes)
+                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                                (r["type"], r["brand"], r["model"], r["serial"], r["bed"], r.get("status") or "active",
+                                 r["purchase_year"], r["contract_end"], r.get("vendor"), r.get("notes")))
+                    ins += 1
+            if not dry:
+                conn.commit()
+    finally:
+        conn.close()
+    if not dry:
+        log_action(user_id=g.get("hd_user_id"), action="equipment.import", resource_type="equipment", resource_id=None,
+                   new_values={"file": f.filename, "inserted": ins, "updated": upd}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "dry_run": dry, "rows": rows, "inserted": ins, "updated": upd,
+                    "to_insert": sum(1 for r in rows if r["action"] == "insert"), "to_update": sum(1 for r in rows if r["action"] == "update"),
+                    "errors": errors})
 
 
 @hd_bp.route("/clinic-profile/equipment/<int:equip_id>", methods=["DELETE"])
