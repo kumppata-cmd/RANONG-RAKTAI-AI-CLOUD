@@ -58,6 +58,11 @@ def build(conn, patient_id, days=365):
         patient = {"id": p[0], "hn": p[1], "name": p[2], "access": p[3], "dry_weight": _f(p[4]), "esa_drug": p[5],
                    "esa_dose": p[6], "schedule_days": p[7], "is_active": p[9],
                    "default_shift": p[10] if len(p) > 10 else None}
+        try:
+            from .serology import latest_for as _sero_latest
+            patient["serology"] = _sero_latest(cur, [p[0]]).get(p[0])
+        except Exception:
+            patient["serology"] = None
         if p[8]:
             today = (datetime.now(timezone.utc) + timedelta(hours=7)).date()
             patient["age"] = today.year - p[8].year - ((today.month, today.day) < (p[8].month, p[8].day))

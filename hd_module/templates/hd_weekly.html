@@ -21,6 +21,8 @@
 .nm:hover{background:rgba(41,128,185,.12)}
 .nm small{color:var(--fg-dim);font-size:.65rem}
 .nm.hit{background:#fef3c7;color:#92400e;font-weight:700}
+.nm.sero{color:#c0392b;font-weight:900}
+.nm.sero small.sv{color:#c0392b;font-weight:900;border:1.5px solid #c0392b;border-radius:4px;padding:0 3px;font-size:.62rem}
 .wk.big{font-size:1.05rem}.wk.big .nm{line-height:1.45}.wk.big .cnt b{font-size:1.3rem}
 .legend{font-size:.72rem;color:var(--fg-muted);margin-top:8px}
 .nodays{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:10px;margin-top:10px;font-size:.8rem}
@@ -40,7 +42,7 @@
   <button class="btn btn-secondary" onclick="load()">🔄</button>
 </div>
 <div class="wk-wrap"><table class="wk" id="tbl"><tr><td style="padding:24px;text-align:center;color:var(--fg-muted)">กำลังโหลด…</td></tr></table></div>
-<div class="legend">ตัวเลขมุมซ้ายของแต่ละช่อง = จำนวนผู้ป่วย / จำนวนเตียง · <span style="color:#e67e22;font-weight:700">ส้ม</span> = เต็มพอดี · <span style="color:var(--danger);font-weight:700">แดง</span> = เกินจำนวนเตียง ต้องจัดเพิ่มรอบ/วัน ·
+<div class="legend"><b style="color:#c0392b">ชื่อสีแดง 🩸</b> = HBsAg+ / Anti-HCV+ (ใช้เครื่อง/โซนแยก) · ตัวเลขมุมซ้ายของแต่ละช่อง = จำนวนผู้ป่วย / จำนวนเตียง · <span style="color:#e67e22;font-weight:700">ส้ม</span> = เต็มพอดี · <span style="color:var(--danger);font-weight:700">แดง</span> = เกินจำนวนเตียง ต้องจัดเพิ่มรอบ/วัน ·
 ข้อมูลจากทะเบียนผู้ป่วย (วันฟอก + รอบประจำ) — แก้รายคนได้ที่ 👥 ผู้ป่วย → ✏️ · คลิกชื่อเพื่อเปิด Patient 360</div>
 <div class="nodays" id="noDays" style="display:none"></div>
 {% endblock %}
@@ -81,7 +83,9 @@ function render(){
       h += `<td class="${d===TODAY?'today':''}"><div class="cnt ${cls}"><b>${n}</b><span>${sh==='unknown'?'':'/ '+cap+' เตียง'}</span></div>`;
       h += list.map(p => {
         const hit = q && ((p.name||'').toLowerCase().includes(q) || (p.hn||'').toLowerCase().includes(q));
-        return `<span class="nm ${hit?'hit':''}" onclick="location.href='/hd/patient/${encodeURIComponent(p.hn)}/360'" title="HN ${esc(p.hn)} · ${esc(p.va)}">${esc(p.name)}${showHn?` <small>${esc(p.hn)}</small>`:''}${showVa&&p.va?` <small>${esc(p.va)}</small>`:''}</span>`;
+        const sero = p.hbsag==='positive'||p.antihcv==='positive';
+        const sv = sero ? ` <small class="sv">🩸 ${[p.hbsag==='positive'?'HBsAg+':'',p.antihcv==='positive'?'HCV+':''].filter(Boolean).join(' ')}</small>` : '';
+        return `<span class="nm ${hit?'hit':''} ${sero?'sero':''}" onclick="location.href='/hd/patient/${encodeURIComponent(p.hn)}/360'" title="HN ${esc(p.hn)} · ${esc(p.va)}">${esc(p.name)}${showHn?` <small>${esc(p.hn)}</small>`:''}${showVa&&p.va?` <small>${esc(p.va)}</small>`:''}${sv}</span>`;
       }).join('');
       h += '</td>';
     });

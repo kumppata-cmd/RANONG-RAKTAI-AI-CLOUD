@@ -4133,6 +4133,12 @@ def list_patients():
                        ORDER BY p.hn LIMIT 300"""
             cur.execute(sql, params)
             rows = cur.fetchall()
+            try:
+                from .serology import latest_for as _sero_latest
+                sero = _sero_latest(cur, [r[0] for r in rows])
+            except Exception as se:
+                logger.warning("list_patients serology: %s", se)
+                sero = {}
         conn.close()
         patients = []
         alert_count = 0
@@ -4149,6 +4155,7 @@ def list_patients():
                 "last_hd": str(r[11]) if r[11] else None,
                 "unacked_alerts": unacked,
                 "default_shift": r[13] if len(r) > 13 else None,
+                "serology": sero.get(r[0]),
             })
         # Collect unique schedule and access values for dynamic filters
         schedules = sorted(set(p["schedule_days"] for p in patients if p.get("schedule_days")))
@@ -4182,11 +4189,16 @@ def patients_weekly_grid():
         import psycopg2
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
-            cur.execute("""SELECT hn, patient_name, schedule_days, default_shift, vascular_access, hd_per_week
+            cur.execute("""SELECT hn, patient_name, schedule_days, default_shift, vascular_access, hd_per_week, id
                            FROM hd_patient_mapping WHERE is_active = TRUE ORDER BY patient_name""")
-            for hn, name, days, shift, va, hdw in cur.fetchall():
+            prow = cur.fetchall()
+            from .serology import latest_for as _sero_latest
+            sero = _sero_latest(cur, [r[6] for r in prow])
+            for hn, name, days, shift, va, hdw, pid in prow:
                 total += 1
-                item = {"hn": hn, "name": name, "va": va or "", "shift": shift or "", "hd_per_week": hdw}
+                sr = sero.get(pid) or {}
+                item = {"hn": hn, "name": name, "va": va or "", "shift": shift or "", "hd_per_week": hdw,
+                        "hbsag": sr.get("hbsag"), "antihcv": sr.get("antihcv")}
                 parts = [x.strip() for x in str(days or "").replace("/", ",").split(",") if x.strip()]
                 parts = [x for x in parts if x in WEEK_DAYS]
                 if not parts:
@@ -4202,6 +4214,46 @@ def patients_weekly_grid():
     return jsonify({"days": WEEK_DAYS, "shifts": SHIFT_ORDER, "capacity": HdConfig.TOTAL_BEDS, "grid": grid,
                     "counts": counts, "no_days": no_days, "total": total,
                     "generated_at": (datetime.now(timezone.utc) + timedelta(hours=7)).isoformat(timespec="minutes")})
+
+
+@hd_bp.route("/labs/serology/import", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def serology_import():
+    """Upload CSV/XLSX of HN · ชื่อ · HBsAg · Anti-HCV · วันที่. form confirm=1 writes; otherwise preview only.
+    Rows are matched by HN and the first name must agree with the registry — mismatches are listed, never written."""
+    import os
+    import psycopg2
+    from .lab_import import parse_date as _pd
+    from .serology import apply as _sero_apply, parse_import
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "ไม่มีไฟล์"}), 400
+    confirm = request.form.get("confirm") == "1"
+    default_date = _pd(request.form.get("date", ""), None)
+    try:
+        rows, errors = parse_import(f.filename, f.read(), default_date)
+    except Exception as e:
+        return jsonify({"error": f"อ่านไฟล์ไม่ได้: {e}"}), 400
+    if not rows:
+        return jsonify({"error": "ไม่พบแถวข้อมูล", "errors": errors}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=10)
+        with conn.cursor() as cur:
+            res = _sero_apply(cur, rows, confirm=confirm, source="import:" + (f.filename or "serology")[:40])
+        if confirm:
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error("serology import: %s", e)
+        return jsonify({"error": str(e)}), 500
+    res["errors"] = errors
+    res["confirmed"] = confirm
+    if confirm:
+        log_action(user_id=g.get("hd_user_id"), action="labs.import_serology", resource_type="labs",
+                   new_values={"written": res["written"], "pos_hbsag": res["pos_hbsag"], "pos_antihcv": res["pos_antihcv"],
+                               "file": (f.filename or "")[:80]}, ip_address=request.remote_addr or "")
+    return jsonify(res)
 
 
 @hd_bp.route("/patients/import-roster", methods=["POST"])
@@ -4283,6 +4335,7 @@ def get_patient(hn):
             row = cur.fetchone()
             # Get va_location separately (column may not exist yet)
             va_loc = None
+            sero = None
             if row:
                 try:
                     cur.execute("SELECT va_location FROM hd_patient_mapping WHERE hn = %s", (hn,))
@@ -4291,6 +4344,11 @@ def get_patient(hn):
                         va_loc = vr[0]
                 except Exception:
                     pass  # column doesn't exist yet
+                try:
+                    from .serology import latest_for as _sero_latest
+                    sero = _sero_latest(cur, [row[0]]).get(row[0])
+                except Exception:
+                    sero = None
         conn.close()
         if not row:
             return jsonify({"hn": hn, "status": "not_found"}), 404
@@ -4305,6 +4363,7 @@ def get_patient(hn):
             "schedule_days": row[10], "esa_drug": row[11], "esa_dose": row[12],
             "primary_diagnosis": row[13], "is_active": row[14],
             "created_at": row[15].isoformat() if row[15] else None,
+            "serology": sero,
         })
     except Exception as e:
         logger.error("get_patient error: %s", e)
@@ -4639,6 +4698,12 @@ def bed_dashboard():
                         lab = labs.get(pid_by_sid.get(sid))
                         if lab and 1 <= bnum <= len(beds):
                             beds[bnum - 1]["labs"] = lab
+                    from .serology import latest_for as _sero_latest
+                    sero = _sero_latest(cur, list({p for p in pid_by_sid.values() if p}))
+                    for sid, bnum in session_ids:
+                        sr = sero.get(pid_by_sid.get(sid))
+                        if sr and 1 <= bnum <= len(beds):
+                            beds[bnum - 1]["serology"] = sr
                 except Exception as le:
                     logger.warning("bed labs: %s", le)
                     try:

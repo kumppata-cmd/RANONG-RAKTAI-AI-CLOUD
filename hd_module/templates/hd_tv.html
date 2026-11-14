@@ -140,7 +140,7 @@ function render(d){
     const al = (b.alerts||[]).filter(a=>!a.physician_order && a.severity!=='info')[0];
     return `<div class="bed ${st}">
       <div class="n">เตียง ${b.bed_number}</div>
-      <div class="nm">${esc(b.patient_name||'')}</div>
+      <div class="nm">${esc(b.patient_name||'')}${b.serology&&(b.serology.hbsag==='positive'||b.serology.antihcv==='positive')?` <span style="color:#ff5c5c;font-weight:900;border:2px solid #ff5c5c;border-radius:6px;padding:0 6px;font-size:.8em;white-space:nowrap">🩸 ${[b.serology.hbsag==='positive'?'HBsAg+':'',b.serology.antihcv==='positive'?'Anti-HCV+':''].filter(Boolean).join(' ')}</span>`:''}</div>
       <div class="sub">${esc(b.vascular_access||'')}${b.esa_given?' · 💉ESA':''} ${idh}${b.shift_mismatch&&b.usual_shift?` <span class="tag w">⇄ ปกติ${({morning:'เช้า',afternoon:'บ่าย',evening:'ค่ำ'})[b.usual_shift]}</span>`:''}</div>
       <div class="row"><div class="bp ${bpCls}">${v.sbp?`${v.sbp}/${v.dbp||'-'}<small>HR ${v.hr||'-'}</small>`:'<span style="color:var(--muted);font-size:1rem">ยังไม่วัด BP</span>'}</div><span style="flex:1"></span>${spark(b.sbp_trend)}</div>
       <div class="row"><span class="${mAgo!=null&&mAgo>45?'stale':''}">${mAgo!=null?`วัดล่าสุด ${mAgo} นาที`:''}</span><span style="flex:1"></span><span>${e.txt}</span></div>

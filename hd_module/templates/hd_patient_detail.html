@@ -110,6 +110,9 @@ const HN = '{{ patient_hn }}';
       const name = p.patient_name||'ไม่ทราบชื่อ';
       document.getElementById('pName').textContent = name;
       document.getElementById('pSub').textContent = 'HN: '+p.hn+(p.vascular_access?' | '+p.vascular_access:'');
+      if(p.serology){ const sp=[]; if(p.serology.hbsag==='positive') sp.push('HBsAg POSITIVE'); if(p.serology.antihcv==='positive') sp.push('Anti-HCV POSITIVE');
+        if(sp.length){ const el=document.createElement('div'); el.style.cssText='margin-top:6px;display:inline-block;color:#c0392b;font-weight:900;font-size:1rem;border:2px solid #c0392b;border-radius:8px;padding:3px 10px;background:#fdecea'; el.textContent='🩸 '+sp.join(' · ')+' — แยกโซน/เครื่องตามมาตรการ IC'; document.getElementById('pSub').after(el); }
+        else if(p.serology.hbsag==='negative'){ document.getElementById('pSub').textContent += ' | HBsAg −' + (p.serology.antihcv==='negative'?' · Anti-HCV −':''); } }
       document.getElementById('pHn').textContent = p.hn||'-';
       document.getElementById('pVa').innerHTML = p.vascular_access ? '<span class="access-badge">'+p.vascular_access+'</span>' : '-';
       document.getElementById('pSched').textContent = p.schedule_days||'-';

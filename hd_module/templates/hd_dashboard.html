@@ -359,6 +359,22 @@ function idhLine(b){
   const why = (r.factors||[]).map(f=>f.text).join(' · ');
   return `<div class="bed-chk" style="margin-top:3px;color:${col};font-weight:700" title="${why.replace(/"/g,'')}">⚡ เสี่ยง IDH ${r.score}%${r.level==='high'?' — วัด BP ทุก 15 นาที':''}</div>`;
 }
+function seroBadge(sr, size){
+  if(!sr) return '';
+  const fs = size||'.72rem', out=[];
+  if(sr.hbsag==='positive') out.push(`<span style="color:#c0392b;font-weight:900;font-size:${fs};background:#fdecea;border:1.5px solid #c0392b;border-radius:6px;padding:1px 6px;white-space:nowrap">🩸 HBsAg +</span>`);
+  if(sr.antihcv==='positive') out.push(`<span style="color:#c0392b;font-weight:900;font-size:${fs};background:#fdecea;border:1.5px solid #c0392b;border-radius:6px;padding:1px 6px;white-space:nowrap">🩸 Anti-HCV +</span>`);
+  return out.join(' ');
+}
+function seroText(sr){
+  if(!sr) return '<span style="color:var(--fg-dim);font-size:.75rem">ยังไม่มีผล</span>';
+  const p=[];
+  if(sr.hbsag==='positive') p.push('<b style="color:#c0392b;font-size:.95rem">HBsAg +</b>');
+  if(sr.antihcv==='positive') p.push('<b style="color:#c0392b;font-size:.95rem">Anti-HCV +</b>');
+  if(sr.hbsag==='negative') p.push('<span style="color:var(--fg-muted);font-size:.75rem">HBsAg −</span>');
+  if(sr.antihcv==='negative') p.push('<span style="color:var(--fg-muted);font-size:.75rem">Anti-HCV −</span>');
+  return p.join('<br>') || '<span style="color:var(--fg-dim);font-size:.75rem">ยังไม่มีผล</span>';
+}
 function labLine(b){
   const L = b.labs; if(!L) return '';
   const hot = {}; (L.flags||[]).forEach(f=>{ hot[f.code.split('_')[0]] = f.sev; });
@@ -551,7 +567,7 @@ function renderBeds(beds){
 
     card.innerHTML = `
       <div class="bed-num">${b.bed_number}</div>
-      <div class="bed-patient">${pName}</div>
+      <div class="bed-patient">${pName}${seroBadge(b.serology,'.68rem')?' '+seroBadge(b.serology,'.68rem'):''}</div>
       ${hnLine}
       ${filterContent}
       ${alertLine}
@@ -959,6 +975,7 @@ function fetchAllRounds(){
           else if(_activeFilter==='epo') extraLine = eBadge||'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
           else if(_activeFilter==='va') extraLine = va?'<span class="bed-access '+vaC(va)+'" style="font-size:.7rem;padding:3px 8px;">'+va+'</span>':'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
 
+          const seroB = seroBadge(b.serology,'.62rem');
           const card = document.createElement('div');
           card.className = 'bed-card '+s.cls;
           card.style.minHeight = '80px';
@@ -969,7 +986,7 @@ function fetchAllRounds(){
               <span class="bed-num" style="font-size:1.1rem;">${b.bed_number}</span>
               ${va&&_activeFilter!=='va' ? '<span class="bed-access '+vaC(va)+'" style="font-size:.6rem;">'+va+'</span>' : ''}
             </div>
-            <div class="bed-patient" style="font-size:.72rem;">${pName}</div>
+            <div class="bed-patient" style="font-size:.72rem;">${pName}${seroB?' '+seroB:''}</div>
             <div class="bed-hn" style="font-size:.6rem;">${b.patient_hn?'HN '+b.patient_hn:''}${b.shift_mismatch&&b.usual_shift?' <span style="color:#b45309">⇄ ปกติ'+({morning:'เช้า',afternoon:'บ่าย',evening:'ค่ำ'})[b.usual_shift]+'</span>':''}</div>
             ${extraLine}
             ${(b.status==='critical'||b.status==='warning') ? '<div style="font-size:.62rem;font-weight:700;color:'+(b.status==='critical'?'var(--danger)':'var(--warning)')+';margin-top:2px">'+(b.status==='critical'?'🔴 ':'🟡 ')+(b.alert_reason||'มีการแจ้งเตือน')+'</div>' : ''}

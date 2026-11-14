@@ -756,6 +756,13 @@ if(params.get('bed')) document.getElementById('bedSelect').value = params.get('b
     });
 })();
 
+function _showSero(sr){
+  let el = document.getElementById('seroFlag');
+  if(!el){ el = document.createElement('div'); el.id='seroFlag'; const pi=document.getElementById('patientInfo'); if(pi) pi.after(el); else return; }
+  const sp=[]; if(sr&&sr.hbsag==='positive') sp.push('HBsAg POSITIVE'); if(sr&&sr.antihcv==='positive') sp.push('Anti-HCV POSITIVE');
+  if(sp.length){ el.style.cssText='margin-top:6px;display:inline-block;color:#c0392b;font-weight:900;font-size:1rem;border:2px solid #c0392b;border-radius:8px;padding:3px 10px;background:#fdecea'; el.textContent='🩸 '+sp.join(' · ')+' — ใช้เครื่อง/โซนแยกตามมาตรการ IC'; }
+  else { el.style.cssText='margin-top:4px;font-size:.75rem;color:var(--fg-muted)'; el.textContent = sr&&sr.hbsag==='negative' ? 'HBsAg −'+(sr.antihcv==='negative'?' · Anti-HCV −':'') : ''; }
+}
 function onPatientSelect(){
   const hn = document.getElementById('patientSelect').value;
   if(!hn) return;
@@ -764,6 +771,7 @@ function onPatientSelect(){
   fetch('/hd/api/v1/patients/'+hn, {headers}).then(r=>r.ok?r.json():Promise.reject()).then(p=>{
     document.getElementById('patientName').textContent = p.patient_name || p.name || 'HN '+hn;
     document.getElementById('patientInfo').textContent = 'HN: '+hn+' | ตาราง: '+(p.schedule_days||'-')+' | Access: '+(p.vascular_access||'-');
+    _showSero(p.serology);
     if(p.dry_weight) document.getElementById('dryWeight').value = p.dry_weight;
     document.getElementById('bedDisplay').textContent = document.getElementById('bedSelect').value || '-';
     /* Auto-fill VA from patient record */
@@ -1009,6 +1017,7 @@ function loadExistingSession(sid){
       /* Fill header */
       document.getElementById('patientName').textContent = d.patient_name || 'ผู้ป่วย';
       document.getElementById('patientInfo').textContent = 'HN: '+(d.patient_hn||'-')+' | ตาราง: '+(d.schedule_days||'-')+' | Access: '+(d.vascular_access||'-');
+      if(d.patient_hn){ hdFetch('/hd/api/v1/patients/'+encodeURIComponent(d.patient_hn)).then(r=>r.ok?r.json():null).then(p=>{ if(p) _showSero(p.serology); }).catch(()=>{}); }
       document.getElementById('bedDisplay').textContent = d.bed_number || '-';
       if(d.patient_hn){
         document.getElementById('patientSelect').value = d.patient_hn;

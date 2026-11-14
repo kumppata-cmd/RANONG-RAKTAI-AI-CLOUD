@@ -54,8 +54,24 @@
 <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
   <input type="file" id="rosterFile" accept=".xlsx,.xlsm" style="display:none" onchange="previewRoster()">
   <button class="btn btn-primary" onclick="document.getElementById('rosterFile').click()" style="font-size:.85rem">📥 นำเข้า Excel รายชื่อประจำปี (VA / BFR / วันฟอก / รอบ / ยาฉีด / Hct / iPTH / Ferritin)</button>
+  <input type="file" id="seroFile" accept=".xlsx,.csv" style="display:none" onchange="previewSero()">
+  <button class="btn" onclick="document.getElementById('seroFile').click()" style="font-size:.85rem;border:1.5px solid #c0392b;color:#c0392b;font-weight:700">🩸 นำเข้าผล HBsAg / Anti-HCV</button>
   <label style="font-size:.75rem;color:var(--fg-muted)">วันที่ตรวจ Hct ในไฟล์ <input type="date" id="rosterHctDate" style="font-size:.8rem;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card);color:inherit"></label>
   <span style="font-size:.72rem;color:var(--fg-muted)">ระบบอ่านตามชื่อหัวคอลัมน์ จับคู่ด้วย HN แล้วแสดงตัวอย่างก่อนบันทึก (ไม่แก้ชื่อ · ไม่อ่านเลขบัตร · ผลแล็บซ้ำถูกข้าม)</span>
+</div>
+
+<!-- Serology preview modal -->
+<div class="edit-overlay" id="seroOverlay" onclick="if(event.target===this)closeSero()">
+  <div class="edit-modal" style="max-width:600px;max-height:88vh;overflow-y:auto">
+    <h3 style="margin:0 0 10px">🩸 ตัวอย่างการนำเข้าผล HBsAg / Anti-HCV</h3>
+    <div id="seroSummary" style="font-size:.85rem;line-height:1.7"></div>
+    <div id="seroProblems" style="margin-top:8px;font-size:.78rem"></div>
+    <details style="margin-top:8px" open><summary style="cursor:pointer;font-size:.8rem">รายการที่จะบันทึก</summary>
+      <div id="seroChanges" style="font-size:.74rem;max-height:260px;overflow:auto;margin-top:6px"></div>
+    </details>
+    <button class="btn btn-success" id="seroConfirmBtn" onclick="confirmSero()" style="width:100%;padding:14px;font-size:1rem;margin-top:12px">✅ ยืนยันบันทึก</button>
+    <button class="btn" onclick="closeSero()" style="width:100%;margin-top:8px;padding:10px">ยกเลิก</button>
+  </div>
 </div>
 
 <!-- Roster preview modal -->
@@ -77,6 +93,14 @@
   <input type="search" class="form-control" id="searchInput" placeholder="🔍 ค้นหา HN, ชื่อ..." autocomplete="off">
   <select class="form-control" id="filterSchedule">
     <option value="">ทุกตาราง</option>
+  </select>
+  <select class="form-control" id="filterSero">
+    <option value="">ไวรัสตับอักเสบ: ทั้งหมด</option>
+    <option value="pos">🩸 HBsAg+ / Anti-HCV+</option>
+    <option value="hbv">HBsAg+</option>
+    <option value="hcv">Anti-HCV+</option>
+    <option value="neg">ผลลบ</option>
+    <option value="none">ยังไม่มีผล</option>
   </select>
   <select class="form-control" id="filterShift">
     <option value="">ทุกรอบ</option>
@@ -100,12 +124,13 @@
           <th>วันฟอก</th>
           <th>รอบ</th>
           <th>Vascular Access</th>
+          <th>HBsAg / Anti-HCV</th>
           <th>DW (kg)</th>
           <th>ฟอกล่าสุด</th>
         </tr>
       </thead>
       <tbody id="patientTableBody">
-        <tr><td colspan="7" style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</td></tr>
+        <tr><td colspan="8" style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</td></tr>
       </tbody>
     </table>
   </div>
@@ -207,7 +232,7 @@ function isIncomplete(p){
 function renderPatients(patients){
   const tbody = document.getElementById('patientTableBody');
   if(!patients.length){
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่พบผู้ป่วย</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่พบผู้ป่วย</td></tr>';
     return;
   }
   tbody.innerHTML = patients.map(p => {
@@ -220,15 +245,17 @@ function renderPatients(patients){
     const schedCell = p.schedule_days ? '<span class="schedule-badge">'+p.schedule_days+'</span>' : '<span style="color:var(--warning);font-size:.8rem;">⚠️ ไม่ระบุ</span>';
     const SH = {morning:['🌅 เช้า','#b45309','#fef3c7'], afternoon:['☀️ บ่าย','#1d4ed8','#dbeafe'], evening:['🌙 ค่ำ','#6d28d9','#ede9fe']};
     const sh = SH[p.default_shift];
+    const seroName = p.serology && (p.serology.hbsag==='positive'||p.serology.antihcv==='positive') ? ' '+seroBadge(p.serology,'.68rem') : '';
     const shiftCell = sh ? `<span class="schedule-badge" style="color:${sh[1]};background:${sh[2]}">${sh[0]}</span>` : '<span style="color:var(--fg-muted);font-size:.8rem;">-</span>';
     const vaCell = p.vascular_access ? '<span class="access-badge '+accessClass(p.vascular_access)+'">'+p.vascular_access+'</span>' : '<span style="color:var(--warning);font-size:.8rem;">⚠️ ไม่ระบุ</span>';
     return `
     <tr class="${rowClass}" onclick="window.location.href='/hd/patient/${p.hn}'" ${rowAlert}>
-      <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(name)}</div><span>${name}${alertDot}${editBtn}</span></div></td>
+      <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(name)}</div><span>${name}${seroName}${alertDot}${editBtn}</span></div></td>
       <td><strong>${p.hn||'-'}</strong></td>
       <td>${schedCell}</td>
       <td>${shiftCell}</td>
       <td>${vaCell}</td>
+      <td>${seroText(p.serology)}</td>
       <td>${p.dry_weight||'-'}</td>
       <td>${formatDate(p.last_hd)}</td>
     </tr>`;
@@ -257,6 +284,12 @@ function filterPatients(){
   const shiftSel = (document.getElementById('filterShift')||{}).value || '';
   if(shiftSel){
     filtered = filtered.filter(p => p.default_shift === shiftSel);
+  }
+  const seroSel = (document.getElementById('filterSero')||{}).value || '';
+  if(seroSel){
+    filtered = filtered.filter(p => { const s=p.serology; const hb=s&&s.hbsag==='positive', hc=s&&s.antihcv==='positive';
+      if(seroSel==='pos') return hb||hc; if(seroSel==='hbv') return hb; if(seroSel==='hcv') return hc;
+      if(seroSel==='neg') return s && !hb && !hc && (s.hbsag||s.antihcv); return !s || (!s.hbsag && !s.antihcv); });
   }
   renderPatients(filtered);
   /* Update count display */
@@ -334,7 +367,7 @@ function fetchPatients(){
     .catch(err=>{
       console.error('fetchPatients error:', err);
       document.getElementById('patientTableBody').innerHTML =
-        '<tr><td colspan="7" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่สามารถโหลดข้อมูลได้</td></tr>';
+        '<tr><td colspan="8" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่สามารถโหลดข้อมูลได้</td></tr>';
     });
 }
 
@@ -435,6 +468,47 @@ function confirmRoster(){
 }
 function closeRoster(){ document.getElementById('rosterOverlay').classList.remove('open'); }
 
+/* ── Serology import (HBsAg / Anti-HCV) ── */
+let _seroFile = null;
+function _seroPost(confirm){
+  const fd = new FormData(); fd.append('file', _seroFile); fd.append('confirm', confirm?'1':'0');
+  const token = getHdToken();
+  return fetch('/hd/api/v1/labs/serology/import', {method:'POST', headers: token?{'Authorization':'Bearer '+token}:{}, body: fd}).then(r=>r.json());
+}
+const SV = {positive:'<b style="color:#c0392b">+ POSITIVE</b>', negative:'<span style="color:var(--fg-muted)">− negative</span>'};
+function previewSero(){
+  const inp = document.getElementById('seroFile'); _seroFile = inp.files[0]; if(!_seroFile) return;
+  showToast('กำลังอ่านไฟล์...','info');
+  _seroPost(false).then(d=>{
+    inp.value='';
+    if(d.error){ showToast(d.error,'danger'); return; }
+    const m = d.matched||[];
+    document.getElementById('seroSummary').innerHTML =
+      `จับคู่ HN + ชื่อได้ <b style="color:var(--success)">${m.length}</b> คน · จะบันทึกใหม่ <b style="color:var(--accent)">${d.to_write}</b> · ตรงกับผลล่าสุดอยู่แล้ว ${m.length-d.to_write}<br>`+
+      `<b style="color:#c0392b;font-size:1rem">HBsAg + ${d.pos_hbsag} คน · Anti-HCV + ${d.pos_antihcv} คน</b>`;
+    const pr=[];
+    if((d.unmatched||[]).length) pr.push(`<div style="color:var(--danger)">⚠️ ไม่พบ HN ในระบบ ${d.unmatched.length}: ${d.unmatched.slice(0,10).map(u=>u.hn+' '+u.name).join(', ')}</div>`);
+    if((d.name_mismatch||[]).length) pr.push(`<div style="color:var(--danger)">⛔ ชื่อไม่ตรงกับ HN (จะไม่บันทึก) ${d.name_mismatch.length}: ${d.name_mismatch.map(u=>`HN ${u.hn} ไฟล์ "${u.name}" ≠ ระบบ "${u.registered_name}"`).join(' · ')}</div>`);
+    if((d.errors||[]).length) pr.push(`<div style="color:var(--warning)">${d.errors.slice(0,8).join('<br>')}</div>`);
+    document.getElementById('seroProblems').innerHTML = pr.join('') || '<span style="color:var(--success)">✅ ชื่อและ HN ตรงกันทุกราย</span>';
+    const pos = m.filter(x=>x.hbsag==='positive'||x.antihcv==='positive'), rest = m.filter(x=>!(x.hbsag==='positive'||x.antihcv==='positive'));
+    const line = x=>`<div style="padding:3px 0;border-bottom:1px solid var(--border);${x.duplicate?'opacity:.55':''}"><b>HN ${x.hn}</b> ${x.registered_name} — ${x.hbsag?'HBsAg '+SV[x.hbsag]:''} ${x.antihcv?' · Anti-HCV '+SV[x.antihcv]:''} <span style="color:var(--fg-dim)">${x.date}${x.duplicate?' · เหมือนเดิม':''}</span></div>`;
+    document.getElementById('seroChanges').innerHTML = pos.map(line).join('') + (rest.length?`<div style="margin-top:6px;color:var(--fg-muted)">ผลลบ ${rest.length} คน</div>`+rest.map(line).join(''):'');
+    document.getElementById('seroConfirmBtn').disabled = !(d.to_write>0);
+    document.getElementById('seroOverlay').classList.add('open');
+  }).catch(()=>{ inp.value=''; showToast('อ่านไฟล์ไม่สำเร็จ','danger'); });
+}
+function confirmSero(){
+  const btn=document.getElementById('seroConfirmBtn'); btn.disabled=true; btn.textContent='กำลังบันทึก...';
+  _seroPost(true).then(d=>{
+    btn.disabled=false; btn.textContent='✅ ยืนยันบันทึก';
+    if(d.error){ showToast(d.error,'danger'); return; }
+    showToast(`✅ บันทึกผล ${d.written} คน (HBsAg+ ${d.pos_hbsag} · Anti-HCV+ ${d.pos_antihcv}) · ข้ามซ้ำ ${d.skipped_same}`,'success');
+    closeSero(); fetchPatients();
+  }).catch(()=>{ btn.disabled=false; btn.textContent='✅ ยืนยันบันทึก'; showToast('บันทึกไม่สำเร็จ','danger'); });
+}
+function closeSero(){ document.getElementById('seroOverlay').classList.remove('open'); }
+
 function filterIncomplete(){
   const incomplete = allPatients.filter(isIncomplete);
   renderPatients(incomplete);
@@ -451,6 +525,24 @@ document.getElementById('searchInput').addEventListener('change', filterPatients
 document.getElementById('filterSchedule').addEventListener('change', filterPatients);
 document.getElementById('filterAccess').addEventListener('change', filterPatients);
 document.getElementById('filterShift').addEventListener('change', filterPatients);
+document.getElementById('filterSero').addEventListener('change', filterPatients);
+function seroBadge(sr, size){
+  if(!sr) return '';
+  const fs = size||'.72rem', out=[];
+  if(sr.hbsag==='positive') out.push(`<span style="color:#c0392b;font-weight:900;font-size:${fs};background:#fdecea;border:1.5px solid #c0392b;border-radius:6px;padding:1px 6px;white-space:nowrap">🩸 HBsAg +</span>`);
+  if(sr.antihcv==='positive') out.push(`<span style="color:#c0392b;font-weight:900;font-size:${fs};background:#fdecea;border:1.5px solid #c0392b;border-radius:6px;padding:1px 6px;white-space:nowrap">🩸 Anti-HCV +</span>`);
+  return out.join(' ');
+}
+function seroText(sr){
+  if(!sr) return '<span style="color:var(--fg-dim);font-size:.75rem">ยังไม่มีผล</span>';
+  const p=[];
+  if(sr.hbsag==='positive') p.push('<b style="color:#c0392b;font-size:.95rem">HBsAg +</b>');
+  if(sr.antihcv==='positive') p.push('<b style="color:#c0392b;font-size:.95rem">Anti-HCV +</b>');
+  if(sr.hbsag==='negative') p.push('<span style="color:var(--fg-muted);font-size:.75rem">HBsAg −</span>');
+  if(sr.antihcv==='negative') p.push('<span style="color:var(--fg-muted);font-size:.75rem">Anti-HCV −</span>');
+  return p.join('<br>') || '<span style="color:var(--fg-dim);font-size:.75rem">ยังไม่มีผล</span>';
+}
+
 
 fetchPatients();
 </script>
