@@ -380,7 +380,7 @@ function previewRoster(){
       `พบในไฟล์ <b>${d.total_rows}</b> คน · จับคู่กับระบบได้ <b style="color:var(--success)">${d.matched}</b> คน<br>`+
       `ทะเบียน: จะอัปเดต <b style="color:var(--accent)">${d.to_update}</b> คน · ตรงอยู่แล้ว ${d.unchanged} คน<br>`+
       `ใบสั่งฟอก (BFR/ครั้ง-สัปดาห์/เส้นฟอก): แก้ไข ${d.rx_to_update||0} · สร้างใหม่ <b>${d.rx_to_create||0}</b><br>`+
-      `ผลแล็บ (Hct ${d.hct_date? new Date(d.hct_date+'T00:00:00').toLocaleDateString('th-TH'):''} · iPTH/Ferritin ตามเดือนในหัวคอลัมน์): ใหม่ <b style="color:var(--accent)">${d.labs_new||0}</b> จาก ${d.labs_total||0} รายการ (ซ้ำถูกข้าม)<br>`+
+      `ผลแล็บ (Hct ${d.hct_date? new Date(d.hct_date+'T00:00:00').toLocaleDateString('th-TH'):''} หรือตามเดือนของชีต · iPTH/Ferritin/Kt/V ตามเดือนในหัวคอลัมน์ · Dry weight → น้ำหนักแห้ง+ใบสั่งฟอก): ใหม่ <b style="color:var(--accent)">${d.labs_new||0}</b> จาก ${d.labs_total||0} รายการ (ซ้ำถูกข้าม)<br>`+
       `<span style="color:var(--fg-muted)">Vascular Access: ${va}</span>`;
     const um = d.unmatched||[];
     document.getElementById('rosterUnmatched').innerHTML = um.length

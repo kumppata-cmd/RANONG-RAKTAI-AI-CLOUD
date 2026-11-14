@@ -32,7 +32,7 @@ class FakeCur:
         if "hd_patient_mapping" in self.sql:
             return [(7, "68443", "KHIN MAR CHO"), (8, "12345", "สมชาย ใจดี"), (9, "55555", "ไม่มีวันที่")]
         if "hd_lab_results" in self.sql:
-            return [(8, date(2026, 11, 2), 11.0, 33.0, None, None, None)]
+            return [(8, date(2026, 11, 2), 11.0, 33.0, None, None, None, None)]
         return []
 
 

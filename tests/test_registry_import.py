@@ -6,7 +6,7 @@ from datetime import date
 import openpyxl
 
 from hd_module.registry_import import (
-    apply_roster, lab_header, normalize_bfr, normalize_esa, normalize_schedule, normalize_shift,
+    apply_roster, lab_header, sheet_month, normalize_bfr, normalize_esa, normalize_schedule, normalize_shift,
     normalize_va, parse_regimen, parse_roster,
 )
 
@@ -117,6 +117,12 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(lab_header("iPTH ม.ค.69"), ("ipth", date(2026, 1, 1)))
         self.assertEqual(lab_header("Ferritin ก.ค.69"), ("ferritin", date(2026, 7, 1)))
         self.assertEqual(lab_header("Hb กค 2569"), ("hemoglobin", date(2026, 7, 1)))
+        self.assertEqual(lab_header("Kt/v เดือนก.ค", default_year=2026), ("kt_v", date(2026, 7, 1)))
+        self.assertEqual(lab_header("Kt/v เดือนต.ค.", default_year=2026), ("kt_v", date(2026, 10, 1)))
+        self.assertIsNone(lab_header("Kt/v เดือนก.ค"))          # no year anywhere
+        self.assertEqual(sheet_month("ตค69"), date(2026, 10, 1))
+        self.assertEqual(sheet_month("พ.ย.69"), date(2026, 11, 1))
+        self.assertIsNone(sheet_month("Sheet1"))
         self.assertIsNone(lab_header("Vascular Access"))
         self.assertIsNone(lab_header("BFR/min"))
 
@@ -164,9 +170,9 @@ class ApplyTests(unittest.TestCase):
     def setUp(self):
         # id, hn, hospital_hn, name, va, bfr, hd_per_week, schedule_days, esa_drug, esa_dose, esa_per_week, default_shift
         self.db = [
-            (1, "56001", "00007567", "ปิยะ", "", 0, 3, "", "", "", None, None),
-            (2, "57051", "7562", "มณี", "AVF", 300, 3, "จ,พ,ศ", "Hypercrit", "", None, None),
-            (3, "99999", None, "คนอื่น", "AVG", 250, 2, "อ,ส", "", "", None, None),
+            (1, "56001", "00007567", "ปิยะ", "", 0, 3, "", "", "", None, None, None),
+            (2, "57051", "7562", "มณี", "AVF", 300, 3, "จ,พ,ศ", "Hypercrit", "", None, None, None),
+            (3, "99999", None, "คนอื่น", "AVG", 250, 2, "อ,ส", "", "", None, None, None),
         ]
         self.rows, _ = parse_roster(_xlsx([
             [1, "นาย", "ปิยะ ทดสอบ", "00007567", "56001", 1, "E4", "จ/พ/ศ", None, 3, "AVF", 350],
@@ -176,7 +182,7 @@ class ApplyTests(unittest.TestCase):
         ]))
 
     def test_dry_run_matches_but_writes_nothing(self):
-        conn = FakeConn(self.db, rx=[(2, 20, 300, 3, "AVF")])
+        conn = FakeConn(self.db, rx=[(2, 20, 300, 3, "AVF", None)])
         s = apply_roster(conn, self.rows, confirm=False)
         self.assertEqual(s["total_rows"], 4)
         self.assertEqual(s["matched"], 2)
@@ -194,7 +200,7 @@ class ApplyTests(unittest.TestCase):
         self.assertNotIn("_id", d0)
 
     def test_confirm_writes_mapping_and_creates_prescription(self):
-        conn = FakeConn(self.db, rx=[(2, 20, 300, 3, "AVF")])
+        conn = FakeConn(self.db, rx=[(2, 20, 300, 3, "AVF", None)])
         s = apply_roster(conn, self.rows, confirm=True)
         self.assertEqual((s["written"], s["rx_created"], s["rx_written"]), (1, 1, 0))
         self.assertTrue(conn.committed)
@@ -207,7 +213,7 @@ class ApplyTests(unittest.TestCase):
             [1, "นาย", "ปิยะ ทดสอบ", "00007567", "56001", 1, "E4", 31, "8000ū 2time/wk", "จ/พ/ศ", "รอบเช้า", 3, "AVF", 350, 2085, 18.4, 1344, 796.8],
         ], HDR_2569))
         # Hct 31 on 2026-11-02 already stored → that lab row is a duplicate; the 2 iPTH/Ferritin months are new
-        conn = FakeConn(self.db, labs=[(1, date(2026, 11, 2), None, 31.0, None, None, None)])
+        conn = FakeConn(self.db, labs=[(1, date(2026, 11, 2), None, 31.0, None, None, None, None)])
         s = apply_roster(conn, rows, confirm=True, hct_date=date(2026, 11, 2), source="import:test.xlsx")
         self.assertEqual(s["labs_total"], 3)
         self.assertEqual(s["labs_new"], 2)
@@ -220,7 +226,7 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual((params["esa_per_week"], params["shift"], params["schedule_days"]), (2.0, "morning", "จ,พ,ศ"))
 
     def test_hospital_hn_fallback_ignores_zero_padding(self):
-        db = [(9, "C-1", "00000003", "ใครสักคน", "", 0, 3, "", "", "", None, None)]
+        db = [(9, "C-1", "00000003", "ใครสักคน", "", 0, 3, "", "", "", None, None, None)]
         conn = FakeConn(db)
         s = apply_roster(conn, self.rows, confirm=False)
         hit = [d for d in s["details"] if d["hn"] == "C-1"]
@@ -231,3 +237,50 @@ class ApplyTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+HDR_MONTH = ["ลำดับ", "ชื่อ-สกุล", None, "HN รพ", " HN clinic", "ID", "ยาฉีด", "Hematocrit", "จำนวนการฉีด",
+             "วันฟอก", "รอบการฟอก", "จำนวน HD/wk", "Dry weight ", "Kt/v เดือนก.ค", "Vascular Access", "BFR/min"]
+
+
+class MonthlySheetsTests(unittest.TestCase):
+    """The 'รายชื่อ Pt' workbook: one sheet per month (ตค69, พย69), Hct + Dry weight per month, Kt/v month header."""
+
+    def _wb(self):
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "ตค69"
+        ws.append([None] * 12)
+        ws.append([None, "รายชื่อผู้ป่วย ต.ค.69"])
+        ws.append(HDR_MONTH)
+        ws.append([1, "นาย", "ปิยะ อะนะบุหรง", "00007567", "56001", "x", "E4", 30, "8000ū 2time/wk", "จ/พ/ศ", "รอบเช้า", 3, 72.5, 1.4, "AVF", 350])
+        ws2 = wb.create_sheet("พย69")
+        ws2.append([None] * 12)
+        ws2.append([None, "รายชื่อผู้ป่วย พ.ย.69"])
+        ws2.append([(h.replace("ก.ค", "ต.ค.") if h else h) for h in HDR_MONTH])
+        ws2.append([1, "นาย", "ปิยะ อะนะบุหรง", "00007567", "56001", "x", "E4", 31, "8000ū 2time/wk", "จ/พ/ศ", "รอบเช้า", 3, 74.0, 1.5, "AVF", 350])
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    def test_merges_sheets_latest_month_wins(self):
+        rows, skipped = parse_roster(self._wb())
+        self.assertEqual(len(rows), 1)
+        r = rows[0]
+        self.assertEqual(r["dry_weight"], 74.0)            # November value
+        self.assertEqual(r["sheet_month"], "2026-11-01")
+        self.assertIsNone(r["hct"])                        # Hct became dated labs
+        labs = {(x["field"], x["date"]): x["value"] for x in r["labs"]}
+        self.assertEqual(labs, {("hematocrit", "2026-10-01"): 30.0, ("hematocrit", "2026-11-01"): 31.0,
+                                ("kt_v", "2026-07-01"): 1.4, ("kt_v", "2026-10-01"): 1.5})
+
+    def test_apply_writes_dry_weight_to_mapping_and_prescription(self):
+        rows, _ = parse_roster(self._wb())
+        db = [(1, "56001", "00007567", "ปิยะ", "AVF", 350, 3, "จ,พ,ศ", "Epiao", "4000 IU x2/สัปดาห์", 2.0, "morning", 72.5)]
+        conn = FakeConn(db, rx=[(1, 10, 350, 3, "AVF", 72.5)])
+        st = apply_roster(conn, rows, confirm=True)
+        self.assertEqual(st["matched"], 1)
+        self.assertEqual(conn.cur.executed[0]["dry_weight"], 74.0)
+        self.assertEqual(conn.cur.rx_updates[0][4], 74.0)
+        self.assertEqual(len(conn.cur.lab_inserts), 3)   # Oct Hct + Kt/V share one row
+        self.assertTrue(any("kt_v" in sql for sql, _ in conn.cur.lab_inserts))

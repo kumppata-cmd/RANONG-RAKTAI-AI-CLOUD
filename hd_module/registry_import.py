@@ -47,6 +47,7 @@ HEADERS = {  # normalised header → field
     "วันฟอก": "schedule_days", "รอบการฟอก": "shift", "รอบฟอก": "shift",
     "จำนวนhd/wk": "hd_per_week", "hd/wk": "hd_per_week", "vascularaccess": "vascular_access", "va": "vascular_access",
     "bfr/min": "bfr", "bfr": "bfr",
+    "dryweight": "dry_weight", "dw": "dry_weight", "น้ำหนักแห้ง": "dry_weight",
 }
 LAB_WORDS = {"ipth": "ipth", "pth": "ipth", "ferritin": "ferritin", "feritin": "ferritin", "hb": "hemoglobin",
              "hct": "hematocrit", "tsat": "tsat", "alb": "albumin", "albumin": "albumin", "k": "potassium",
@@ -70,22 +71,43 @@ def _norm_header(h):
     return re.sub(r"\s+", "", _clean(h)).lower()
 
 
-def lab_header(h):
-    """'iPTH ม.ค.69' / 'Ferritin กค 69' / 'Hb ม.ค.2569' → (field, date(1st of month)) or None."""
-    s = _clean(h)
-    m = re.match(r"^([A-Za-z/]+)\s*([ก-๙.]+?)\s*\.?\s*(\d{2,4})$", s)
+def _month_of(txt):
+    k = _clean(txt).replace(" ", "").replace("เดือน", "").rstrip(".")
+    return TH_MONTH.get(k) or TH_MONTH.get(k.replace(".", ""))
+
+
+def _year_of(txt):
+    m = re.search(r"(\d{2,4})\s*$", _clean(txt))
     if not m:
         return None
-    word, mon, yr = m.group(1).lower(), m.group(2).replace(" ", ""), int(m.group(3))
-    field = LAB_WORDS.get(word)
-    mon_key = mon.rstrip(".")
-    month = TH_MONTH.get(mon_key) or TH_MONTH.get(mon_key.replace(".", ""))
-    if not field or not month:
-        return None
+    yr = int(m.group(1))
     if yr < 100:
         yr += 2500
-    if yr > 2400:
-        yr -= 543
+    return yr - 543 if yr > 2400 else yr
+
+
+def sheet_month(title):
+    """Sheet/title text 'ตค69' / 'พ.ย.69' / 'รายชื่อ… ต.ค.69' → date(y, m, 1) or None."""
+    s = _clean(title)
+    m = re.search(r"([ก-๙.]{2,6})\s*(\d{2,4})\s*$", s)
+    if not m:
+        return None
+    mon, yr = _month_of(m.group(1)), _year_of(m.group(2))
+    return date(yr, mon, 1) if mon and yr else None
+
+
+def lab_header(h, default_year=None):
+    """'iPTH ม.ค.69' / 'Ferritin กค 69' / 'Hb ม.ค.2569' / 'Kt/v เดือนก.ค' (year from sheet) → (field, date) or None."""
+    s = _clean(h)
+    m = re.match(r"^([A-Za-z/]+)\s*(?:เดือน)?\s*([ก-๙.]+?)\s*\.?\s*(\d{2,4})?$", s)
+    if not m:
+        return None
+    word = m.group(1).lower()
+    field = LAB_WORDS.get(word)
+    month = _month_of(m.group(2))
+    yr = _year_of(m.group(3)) if m.group(3) else default_year
+    if not field or not month or not yr:
+        return None
     return field, date(yr, month, 1)
 
 
@@ -173,7 +195,7 @@ def _num(v):
     return float(m.group(0)) if m else None
 
 
-def _find_header(ws_rows):
+def _find_header(ws_rows, default_year=None):
     for i, r in enumerate(ws_rows[:15]):
         cols = {}
         labs = {}
@@ -184,7 +206,7 @@ def _find_header(ws_rows):
             if key in HEADERS:
                 cols.setdefault(HEADERS[key], ci)
                 continue
-            lh = lab_header(h)
+            lh = lab_header(h, default_year)
             if lh:
                 labs[ci] = lh
         if "hn_clinic" in cols and ("vascular_access" in cols or "esa_code" in cols or "hd_per_week" in cols):
@@ -193,13 +215,54 @@ def _find_header(ws_rows):
 
 
 def parse_roster(file_bytes):
-    """→ (rows, skipped). Each row: name, hn_clinic, hn_hospital, vascular_access, bfr, hd_per_week,
-    schedule_days, shift, esa_drug, esa_dose, esa_per_week, hct, labs=[{field, date, value}]"""
+    """→ (rows, skipped). Reads EVERY sheet; a sheet named/titled with a month (ตค69, พ.ย.69) dates its
+    Hematocrit / Dry weight to that month, and month-only lab headers ('Kt/v เดือนก.ค') take the sheet's year.
+    Rows of the same patient across sheets are merged: scalar fields from the latest month, labs unioned."""
     import openpyxl
     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True, read_only=True)
-    ws = wb.worksheets[0]
-    all_rows = [list(r) for r in ws.iter_rows(min_row=1, values_only=True)]
-    hdr_i, cols, labs = _find_header(all_rows)
+    merged, skipped = {}, []
+    order = []
+    for ws in wb.worksheets:
+        all_rows = [list(r) for r in ws.iter_rows(min_row=1, values_only=True)]
+        if not all_rows:
+            continue
+        sm = sheet_month(ws.title)
+        if not sm:
+            for r in all_rows[:4]:
+                for c in r[:6]:
+                    sm = sm or (sheet_month(c) if isinstance(c, str) else None)
+        rows_s, skipped_s = _parse_sheet(all_rows, sm)
+        skipped.extend(skipped_s)
+        key_month = sm or date(1900, 1, 1)
+        for r in rows_s:
+            k = r["hn_clinic"] or ("H" + r["hn_hospital"])
+            r["sheet_month"] = sm.isoformat() if sm else None
+            if k in merged:
+                prev = merged[k]
+                newer = key_month >= prev["_month"]
+                base, over = (prev, r) if newer else (r, prev)
+                labs = prev["labs"] + [x for x in r["labs"] if x not in prev["labs"]]
+                for f, v in over.items():
+                    if f in ("labs", "row"):
+                        continue
+                    if v not in (None, ""):
+                        base[f] = v
+                base["labs"] = labs
+                base["_month"] = max(key_month, prev["_month"])
+                merged[k] = base
+            else:
+                r["_month"] = key_month
+                merged[k] = r
+                order.append(k)
+    rows = [merged[k] for k in order]
+    for r in rows:
+        r.pop("_month", None)
+    return rows, skipped
+
+
+def _parse_sheet(all_rows, sm=None):
+    """One sheet → (rows, skipped). sm = the sheet's month (date) when known."""
+    hdr_i, cols, labs = _find_header(all_rows, sm.year if sm else None)
     legacy = hdr_i is None
     # 2568 layout called the schedule column "รอบการฟอก" (values จ/พ/ศ); 2569 uses it for the shift.
     if not legacy and "shift" in cols and "schedule_days" not in cols:
@@ -252,13 +315,21 @@ def parse_roster(file_bytes):
             v = _num(r[ci])
             if v is not None:
                 lab_vals.append({"field": field, "date": d.isoformat(), "value": v})
+        hct = _num(g("hct")) if "hct" in cols else None
+        if hct is not None and sm:
+            # Hct of a month sheet → lab dated the 1st of that month (deduped against same-month values)
+            lab_vals.append({"field": "hematocrit", "date": sm.isoformat(), "value": hct})
+            hct = None
+        dw = _num(g("dry_weight")) if "dry_weight" in cols else None
+        if dw is not None and not (20 <= dw <= 200):
+            dw = None
         rows.append({
             "row": idx, "name": f"{title} {name}".strip()[:60], "hn_clinic": hn_clinic, "hn_hospital": hn_hosp,
             "vascular_access": normalize_va(g("vascular_access")), "bfr": normalize_bfr(g("bfr")),
             "hd_per_week": int(float(hdw)) if re.match(r"^\d+(\.0)?$", hdw) else None,
             "schedule_days": normalize_schedule(g("schedule_days")), "shift": normalize_shift(g("shift")),
             "esa_drug": esa_drug, "esa_dose": esa_dose, "esa_per_week": esa_per_week,
-            "hct": _num(g("hct")) if "hct" in cols else None, "labs": lab_vals,
+            "dry_weight": dw, "hct": hct, "labs": lab_vals,
         })
     return rows, skipped
 
@@ -273,11 +344,12 @@ UPDATE hd_patient_mapping SET
     esa_dose        = CASE WHEN %(esa_dose)s <> '' THEN %(esa_dose)s ELSE esa_dose END,
     esa_per_week    = COALESCE(%(esa_per_week)s, esa_per_week),
     default_shift   = CASE WHEN %(shift)s <> '' THEN %(shift)s ELSE default_shift END,
+    dry_weight      = COALESCE(%(dry_weight)s, dry_weight),
     updated_at      = NOW()
 WHERE id = %(id)s
 """
 
-FIELDS = ("vascular_access", "bfr", "hd_per_week", "schedule_days", "esa_drug", "esa_dose", "esa_per_week", "shift")
+FIELDS = ("vascular_access", "bfr", "hd_per_week", "schedule_days", "esa_drug", "esa_dose", "esa_per_week", "shift", "dry_weight")
 
 
 def apply_roster(conn, rows, confirm=False, hct_date=None, source="import:roster"):
@@ -287,19 +359,21 @@ def apply_roster(conn, rows, confirm=False, hct_date=None, source="import:roster
     hct_date = hct_date or date.today()
     with conn.cursor() as cur:
         cur.execute("""SELECT id, hn, hospital_hn, patient_name, vascular_access, bfr, hd_per_week,
-                              schedule_days, esa_drug, esa_dose, esa_per_week, default_shift FROM hd_patient_mapping""")
+                              schedule_days, esa_drug, esa_dose, esa_per_week, default_shift, dry_weight FROM hd_patient_mapping""")
         by_clinic, by_hosp = {}, {}
-        for pid, hn, hhn, pname, va, bfr, hdw, sched, esa, dose, epw, shift in cur.fetchall():
+        for pid, hn, hhn, pname, va, bfr, hdw, sched, esa, dose, epw, shift, dwt in cur.fetchall():
             rec = {"id": pid, "hn": hn, "name": pname, "vascular_access": va or "", "bfr": bfr, "hd_per_week": hdw,
                    "schedule_days": sched or "", "esa_drug": esa or "", "esa_dose": dose or "",
-                   "esa_per_week": float(epw) if epw is not None else None, "shift": shift or ""}
+                   "esa_per_week": float(epw) if epw is not None else None, "shift": shift or "",
+                   "dry_weight": float(dwt) if dwt is not None else None}
             if _norm_hn(hn):
                 by_clinic[_norm_hn(hn)] = rec
             if _norm_hn(hhn):
                 by_hosp[_norm_hn(hhn)] = rec
-        cur.execute("""SELECT DISTINCT ON (patient_id) patient_id, id, blood_flow_rate, frequency_per_week, access_type
+        cur.execute("""SELECT DISTINCT ON (patient_id) patient_id, id, blood_flow_rate, frequency_per_week, access_type, dry_weight_target
                        FROM hd_prescriptions WHERE is_active = TRUE ORDER BY patient_id, effective_date DESC, id DESC""")
-        rx = {pid: {"id": rid, "bfr": b, "freq": f, "access": a or ""} for pid, rid, b, f, a in cur.fetchall()}
+        rx = {pid: {"id": rid, "bfr": b, "freq": f, "access": a or "", "dw": float(d) if d is not None else None}
+              for pid, rid, b, f, a, d in cur.fetchall()}
 
     matched, unmatched, unchanged = [], [], 0
     lab_rows = []
@@ -321,7 +395,7 @@ def apply_roster(conn, rows, confirm=False, hct_date=None, source="import:roster
             if f in ("bfr", "hd_per_week"):
                 if new != (old or 0):
                     changes[f] = [old, new]
-            elif f == "esa_per_week":
+            elif f in ("esa_per_week", "dry_weight"):
                 if old is None or abs(float(old) - float(new)) > 0.01:
                     changes[f] = [old, new]
             elif new != old:
@@ -335,6 +409,8 @@ def apply_roster(conn, rows, confirm=False, hct_date=None, source="import:roster
             rx_change["frequency_per_week"] = [p["freq"] if p else None, r["hd_per_week"]]
         if r["vascular_access"] and (not p or p["access"] != r["vascular_access"]):
             rx_change["access_type"] = [p["access"] if p else None, r["vascular_access"]]
+        if r.get("dry_weight") and p and (p.get("dw") is None or abs(float(p["dw"]) - float(r["dry_weight"])) > 0.01):
+            rx_change["dry_weight_target"] = [p.get("dw"), r["dry_weight"]]
         if rx_change:
             changes["prescription" if p else "prescription_new"] = rx_change
         # labs
@@ -378,22 +454,23 @@ def apply_roster(conn, rows, confirm=False, hct_date=None, source="import:roster
                     if mt["_rx"]:
                         cur.execute("""UPDATE hd_prescriptions SET blood_flow_rate = COALESCE(%s, blood_flow_rate),
                                        frequency_per_week = COALESCE(%s, frequency_per_week),
-                                       access_type = CASE WHEN %s <> '' THEN %s ELSE access_type END, updated_at = NOW()
+                                       access_type = CASE WHEN %s <> '' THEN %s ELSE access_type END,
+                                       dry_weight_target = COALESCE(%s, dry_weight_target), updated_at = NOW()
                                        WHERE id = %s""",
-                                    (vals["bfr"], vals["hd_per_week"], vals["vascular_access"], vals["vascular_access"], mt["_rx"]["id"]))
+                                    (vals["bfr"], vals["hd_per_week"], vals["vascular_access"], vals["vascular_access"],
+                                     vals.get("dry_weight"), mt["_rx"]["id"]))
                         rx_written += 1
                     else:
                         cur.execute("""INSERT INTO hd_prescriptions (patient_id, frequency_per_week, blood_flow_rate, access_type,
-                                       effective_date, is_active, notes) VALUES (%s, %s, %s, %s, CURRENT_DATE, TRUE, %s)""",
+                                       dry_weight_target, effective_date, is_active, notes) VALUES (%s, %s, %s, %s, %s, CURRENT_DATE, TRUE, %s)""",
                                     (mt["_id"], vals["hd_per_week"] or 3, vals["bfr"], vals["vascular_access"] or None,
-                                     "สร้างจากทะเบียนผู้ป่วยประจำปี (นำเข้า) — ตรวจสอบเวลา/dialyzer"))
+                                     vals.get("dry_weight"), "สร้างจากทะเบียนผู้ป่วยประจำปี (นำเข้า) — ตรวจสอบเวลา/dialyzer"))
                         rx_created += 1
             if lab_new:
                 for x in lab_new:
-                    if "ipth" in x or "ferritin" in x:
-                        d = date.fromisoformat(x["lab_date"])
-                        if d.day == 1:
-                            x["notes"] = f"เดือน {TH_MONTH_NAME[d.month]} {d.year + 543} (ไม่ระบุวัน) — ทะเบียนประจำปี"
+                    d = date.fromisoformat(x["lab_date"])
+                    if d.day == 1:
+                        x["notes"] = f"เดือน {TH_MONTH_NAME[d.month]} {d.year + 543} (ไม่ระบุวัน) — ทะเบียนประจำปี"
                 res = li.insert_rows(cur, lab_new, source)
                 labs_written = res["inserted"]
         conn.commit()

@@ -176,10 +176,14 @@ def match_patients(cur, rows):
     existing = {}
     if pids:
         dates = sorted({r["lab_date"] for r in rows})
-        cur.execute("""SELECT patient_id, lab_date, hemoglobin, hematocrit, ferritin, tsat, ipth FROM hd_lab_results
-                       WHERE patient_id = ANY(%s) AND lab_date = ANY(%s::date[])""", (pids, dates))
-        for pid, d, hb, hct, fer, ts, pth in cur.fetchall():
-            existing.setdefault((pid, d.isoformat()), []).append({"hemoglobin": hb, "hematocrit": hct, "ferritin": fer, "tsat": ts, "ipth": pth})
+        # same date, plus (for month-dated rows = day 1) anything in the same month → same values are duplicates
+        cur.execute("""SELECT patient_id, lab_date, hemoglobin, hematocrit, ferritin, tsat, ipth, kt_v FROM hd_lab_results
+                       WHERE patient_id = ANY(%s) AND (lab_date = ANY(%s::date[])
+                          OR date_trunc('month', lab_date) = ANY(%s::date[]))""", (pids, dates, [d for d in dates if d.endswith("-01")]))
+        for pid, d, hb, hct, fer, ts, pth, ktv in cur.fetchall():
+            rec = {"hemoglobin": hb, "hematocrit": hct, "ferritin": fer, "tsat": ts, "ipth": pth, "kt_v": ktv}
+            existing.setdefault((pid, d.isoformat()), []).append(rec)
+            existing.setdefault((pid, d.strftime("%Y-%m-01")), []).append(rec)
     matched, unmatched = [], []
     for r in rows:
         p = pmap.get(r["hn"])
@@ -190,7 +194,7 @@ def match_patients(cur, rows):
         dup = False
         for ex in existing.get((p[0], r["lab_date"]), []):
             if all((ex.get(f) is None and r.get(f) is None) or (ex.get(f) is not None and r.get(f) is not None and abs(float(ex[f]) - float(r[f])) < 0.05)
-                   for f in ("hemoglobin", "hematocrit", "ferritin", "tsat", "ipth") if f in r or ex.get(f) is not None):
+                   for f in ("hemoglobin", "hematocrit", "ferritin", "tsat", "ipth", "kt_v") if f in r):
                 dup = True
                 break
         r["duplicate"] = dup
