@@ -632,6 +632,13 @@ let currentShift = detectShift();
   if(btn) btn.classList.add('active');
 })();
 
+function toggleTodayList(){
+  const body = document.getElementById('todayPatientsBody'); if(!body) return;
+  const open = body.style.display === 'none';
+  body.style.display = open ? '' : 'none';
+  const hdr = body.previousElementSibling; if(hdr){ hdr.style.marginBottom = open ? '8px' : '0'; const lbl = hdr.lastElementChild; if(lbl) lbl.textContent = open ? '▲ ย่อ' : '▼ แสดงรายชื่อ'; }
+  try{ localStorage.setItem('hd_today_list_open', open ? '1' : '0'); }catch(e){}
+}
 function fetchBeds(){
   let _dateParam = _selectedDate ? '&date='+_selectedDate : '';
   hdFetch('/hd/api/v1/dashboard/beds?shift='+encodeURIComponent(currentShift)+_dateParam)
@@ -664,13 +671,18 @@ function fetchBeds(){
           el.style.cssText = 'margin-bottom:16px;background:var(--bg-card);border-radius:var(--radius-sm);border:1px solid var(--border);padding:12px;';
           document.getElementById('statsBar').after(el);
         }
-        el.innerHTML = '<div style="font-weight:600;margin-bottom:8px;font-size:.9rem;">📋 ผู้ป่วยนัดฟอกวันนี้ ('+data.today_patients.length+' คน)</div>'
+        /* ย่อ/ขยายได้ (ค่าเริ่มต้น = ย่อ) เพื่อไม่ให้รายชื่อ 60+ คนดันเนื้อหาด้านล่าง — จำสถานะไว้ในเครื่อง */
+        const openList = (function(){ try{ return localStorage.getItem('hd_today_list_open') === '1'; }catch(e){ return false; } })();
+        el.innerHTML = '<div onclick="toggleTodayList()" style="display:flex;justify-content:space-between;align-items:center;cursor:pointer;user-select:none;font-weight:600;font-size:.9rem;'+(openList?'margin-bottom:8px;':'')+'">'
+          + '<span>📋 ผู้ป่วยนัดฟอกวันนี้ ('+data.today_patients.length+' คน)</span>'
+          + '<span style="font-size:.78rem;color:var(--accent);font-weight:600;">'+(openList?'▲ ย่อ':'▼ แสดงรายชื่อ')+'</span></div>'
+          + '<div id="todayPatientsBody" style="'+(openList?'':'display:none;')+'max-height:60vh;overflow-y:auto;">'
           + data.today_patients.map(p=>
             '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:.85rem;">'
             + '<span>'+p.hn+' — '+p.name+(p.va?' <span class="bed-access '+(function(v){var u=(v||'').toUpperCase();if(u.includes('AVF'))return'bed-access-avf';if(u.includes('AVG'))return'bed-access-avg';if(u.includes('DLC')||u.includes('CVC'))return'bed-access-dlc';return'bed-access-avf'})(p.va)+'">'+p.va+'</span>':' <span style="font-size:.65rem;color:var(--fg-muted);">ไม่ระบุ VA</span>')+'</span>'
             + '<a href="/hd/session/new?hn='+encodeURIComponent(p.hn)+'&shift='+currentShift+'" style="font-size:.8rem;color:var(--success);font-weight:600;text-decoration:none;">▶ เริ่มฟอก</a>'
             + '</div>'
-          ).join('');
+          ).join('') + '</div>';
       }
     })
     .catch(e=>{
