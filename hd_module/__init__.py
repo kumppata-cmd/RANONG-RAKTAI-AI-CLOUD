@@ -160,6 +160,10 @@ def _run_hd_migrations():
                 # annual roster import 2569: ESA injections/week + usual shift
                 "ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS esa_per_week NUMERIC(4,2)",
                 "ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS default_shift VARCHAR(20)",
+                # Fluid Status (BCM)
+                __import__("hd_module.fluid_status", fromlist=["CREATE_SQL"]).CREATE_SQL,
+                __import__("hd_module.fluid_status", fromlist=["CREATE_INDEX_SQL"]).CREATE_INDEX_SQL,
+                __import__("hd_module.fluid_status", fromlist=["CREATE_MAP_SQL"]).CREATE_MAP_SQL,
                 # PDPA consents
                 __import__("hd_module.pdpa", fromlist=["CREATE_SQL"]).CREATE_SQL,
                 __import__("hd_module.pdpa", fromlist=["CREATE_INDEX_SQL"]).CREATE_INDEX_SQL,

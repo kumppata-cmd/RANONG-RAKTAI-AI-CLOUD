@@ -848,7 +848,8 @@ function ufPlanRefresh(fromSim){
       document.getElementById('ufPlanBody').innerHTML =
         `<span style="font-weight:800;color:${col}">${(ufMl/1000).toFixed(1)} L / ${hours} ชม. = ${rate.toFixed(1)} mL/kg/h</span> ` +
         `<span style="color:var(--fg-muted)">${rate > 13 ? '— เกินเพดาน 13 (เสี่ยง IDH/ตะคริว)' : (rate > 10 ? '— ระวัง (10–13)' : '— ในเกณฑ์')}</span>` +
-        (p.idwg_pct > 4 ? `<div style="color:#e67e22">IDWG ${p.gain_kg} kg (${p.idwg_pct}% ของ DW) — ทบทวนจำกัดน้ำ/เกลือ</div>` : '');
+        (p.idwg_pct > 4 ? `<div style="color:#e67e22">IDWG ${p.gain_kg} kg (${p.idwg_pct}% ของ DW) — ทบทวนจำกัดน้ำ/เกลือ</div>` : '') +
+        (window._fluidHint ? `<div style="margin-top:4px;color:${window._fluidHintColor||'var(--fg-muted)'}">${window._fluidHint}</div>` : '');
       document.getElementById('ufPlanOpts').innerHTML = (p.options||[]).map(o =>
         `<button type="button" class="btn btn-outline" style="font-size:.75rem;padding:4px 8px" onclick="ufApply(${o.type==='time'?o.hours:'null'}, ${o.type==='cap'?o.uf_ml:'null'})">${o.text}</button>`).join('');
       if(sessionData.session_id){
@@ -858,6 +859,16 @@ function ufPlanRefresh(fromSim){
           document.getElementById('idhSim').innerHTML = `🧪 ถ้าใช้แผนนี้ → คะแนนเสี่ยง IDH <b style="color:${c2}">${s.score}</b> (${s.level==='high'?'สูง':(s.level==='moderate'?'ปานกลาง':'ต่ำ')})` +
             (s.factors.length ? ' · ' + s.factors.slice(0,3).map(f=>f.text).join(' · ') : '') + (s.advice ? `<br>💡 ${s.advice}` : ''); }
       } else { document.getElementById('idhSim').textContent = 'บันทึกรอบก่อน จะเห็นคะแนน IDH ของแผนนี้'; }
+      /* 💧 BCM ล่าสุดของผู้ป่วย (Fluid Status) — โหลดครั้งเดียวต่อผู้ป่วย แล้วแทรกบรรทัดใน UF Planner */
+      const hnNow = (sessionData.hn || (document.getElementById('patientHN')||{}).value || '');
+      if(hnNow && window._fluidHintHN !== hnNow){
+        window._fluidHintHN = hnNow;
+        try{ const rf = await hdFetch('/hd/api/v1/patients/'+encodeURIComponent(hnNow)+'/fluid'); const fd = await rf.json();
+          if(rf.ok && fd.hint){ window._fluidHint = fd.hint; const fl = (fd.latest||{}).flags||[];
+            window._fluidHintColor = fl.includes('over_severe')?'var(--danger)':(fl.includes('under')?'#2980b9':(fl.includes('over')?'#e67e22':'var(--success)'));
+            document.getElementById('ufPlanBody').insertAdjacentHTML('beforeend', `<div style="margin-top:4px;color:${window._fluidHintColor}">${window._fluidHint}</div>`); }
+          else { window._fluidHint = ''; } }catch(e){}
+      }
     }catch(e){ document.getElementById('ufPlanBody').textContent = 'คำนวณไม่ได้: ' + (e.message||e); }
   }, 350);
 }

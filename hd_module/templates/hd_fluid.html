@@ -1,0 +1,133 @@
+{% extends "hd_base.html" %}
+{% block title %}Fluid Status{% endblock %}
+{% block page_title %}💧 Fluid Status — สารน้ำ (BCM) vs น้ำหนักแห้ง{% endblock %}
+{% block nav_fluid %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.fl-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.fl-stats{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.fl-stat{border:1px solid var(--border);background:var(--bg-card);border-radius:14px;padding:4px 10px;font-size:.78rem;cursor:pointer;color:var(--fg-muted)}
+.fl-stat.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.fl-box{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:12px}
+.fl-table{width:100%;border-collapse:collapse;font-size:.8rem;font-variant-numeric:tabular-nums}
+.fl-table th{text-align:left;padding:6px 6px;border-bottom:2px solid var(--border);font-size:.72rem;color:var(--fg-muted);white-space:nowrap;position:sticky;top:0;background:var(--bg-card)}
+.fl-table td{padding:6px 6px;border-bottom:1px solid var(--border);vertical-align:top}
+.fl-table tr.p3 td:first-child{border-left:4px solid var(--danger)}.fl-table tr.p2 td:first-child{border-left:4px solid #e67e22}.fl-table tr.p1 td:first-child{border-left:4px solid #2980b9}.fl-table tr.p0 td:first-child{border-left:4px solid var(--success)}.fl-table tr.p4 td:first-child{border-left:4px solid var(--border)}
+.tag{display:inline-block;padding:1px 7px;border-radius:10px;font-size:.68rem;font-weight:700;background:rgba(127,140,141,.15);margin:1px 2px 1px 0;white-space:nowrap}
+.lo{color:var(--danger);font-weight:700}.hi{color:#e67e22;font-weight:700}.cold{color:#2980b9;font-weight:700}.okc{color:var(--success)}
+.fl-note{font-size:.72rem;color:var(--fg-muted);margin-top:10px}
+.scroll{max-height:70vh;overflow:auto}
+input.hnedit{width:72px;font-size:.78rem;padding:2px 4px;border:1px solid var(--danger);border-radius:4px;background:var(--bg);color:inherit}
+@media (max-width:700px){.fl-table{font-size:.72rem}.fl-table td,.fl-table th{padding:4px 4px}}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="fl-bar">
+  <button class="btn btn-secondary" onclick="load()">🔄 โหลดใหม่</button>
+  <button class="btn btn-primary" onclick="document.getElementById('flFile').click()">📥 นำเข้าผล BCM (zip / PDF / xlsx)</button>
+  <input type="file" id="flFile" accept=".zip,.pdf,.xlsx" style="display:none" onchange="flPreview()">
+  <button class="btn btn-secondary" onclick="flPush()">📨 สรุปเข้ากลุ่มพยาบาล</button>
+  <span style="flex:1"></span>
+  <a class="btn btn-secondary" href="/hd/esa" style="text-decoration:none;">🤖 Autopilot (DW)</a>
+</div>
+
+<div id="impBox" class="fl-box" style="display:none">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <b id="impTitle">📥 ตรวจทานก่อนบันทึก</b><span style="flex:1"></span>
+    <button class="btn btn-primary" id="impCommitBtn" onclick="flCommit()">✅ ยืนยันบันทึก</button>
+    <button class="btn btn-secondary" onclick="impClose()">ยกเลิก</button>
+  </div>
+  <div id="impSummary" style="font-size:.8rem;margin:8px 0;color:var(--fg-muted)"></div>
+  <div class="scroll"><table class="fl-table" id="impTable"></table></div>
+</div>
+
+<div class="fl-stats" id="stats"></div>
+<div id="lim" style="font-size:.74rem;color:var(--fg-muted);margin-bottom:8px"></div>
+<div class="fl-box" style="padding:0"><div class="scroll"><table class="fl-table" id="tbl"><tr><td style="padding:20px;text-align:center;color:var(--fg-muted)">กำลังโหลด…</td></tr></table></div></div>
+<div class="fl-note">
+<b>DW ตาม BCM</b> = น้ำหนักขณะตรวจ − OH (น้ำหนักที่ไม่มีน้ำเกิน) · <b>ต่าง</b> = DW ตาม BCM − DW ปัจจุบัน (ลบ = DW ปัจจุบันสูงไป / มีน้ำเกิน) ·
+ธง: 🔴 OH &gt; <span id="l1"></span> L หรือ Rel.OH &gt; <span id="l2"></span>% · 🟠 OH &gt; <span id="l3"></span> L · 🔵 OH &lt; <span id="l4"></span> L · 🍗 LTI &lt; 10 ช. / 9 ญ. · ⚪ ตรวจล่าสุดเกิน <span id="l5"></span> วัน ·
+ระบบ<b>เสนอ</b>เท่านั้น — การปรับน้ำหนักแห้งเป็นดุลยพินิจแพทย์ (อนุมัติใน 🤖 Autopilot) · ปรับเกณฑ์ได้ใน ⚙️ (fluid_oh_high, fluid_rel_oh_high, fluid_oh_mild, fluid_oh_low, fluid_due_days, fluid_dw_diff)
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let OV = null, FILTER = '', IMP = null;
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function dTH(iso){ if(!iso) return '—'; return new Date(iso+'T00:00:00').toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'}); }
+function f1(v){ return v==null?'—':Number(v).toFixed(1); }
+function ohCls(f){ return f.includes('over_severe')?'lo':(f.includes('over')?'hi':(f.includes('under')?'cold':'okc')); }
+function pri(f){ return f.includes('over_severe')?3:(f.includes('under')?1:(f.includes('over')?2:(f.includes('lti_low')?2:(f.includes('due')?4:0)))); }
+function trend(a,b){ if(a==null||b==null) return ''; const d=a-b; if(Math.abs(d)<0.3) return '<span style="color:var(--fg-muted)">→</span>'; return d>0?'<span class="hi">↑'+d.toFixed(1)+'</span>':'<span class="okc">↓'+Math.abs(d).toFixed(1)+'</span>'; }
+
+async function load(){
+  try{
+    const r = await hdFetch('/hd/api/v1/fluid/overview'); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
+    OV = d; const s = d.stats, L = d.limits;
+    ['l1','l2','l3','l4','l5'].forEach((id,i)=>{ document.getElementById(id).textContent = [L.oh_high,L.rel_oh_high,L.oh_mild,L.oh_low,L.due_days][i]; });
+    document.getElementById('stats').innerHTML = [
+      ['', `ทั้งหมด ${s.n} · ตรวจแล้ว <b>${s.assessed}</b>`], ['over_severe', `🔴 น้ำเกินมาก <b>${s.over_severe}</b>`], ['over', `🟠 น้ำเกิน <b>${s.over}</b>`],
+      ['under', `🔵 น้ำขาด <b>${s.under}</b>`], ['lti_low', `🍗 LTI ต่ำ <b>${s.lti_low}</b>`], ['dw', `⚖️ DW ต่าง ≥${L.dw_diff} kg <b>${s.dw_diff}</b>`], ['due', `⚪ ครบกำหนด <b>${s.due}</b>`]
+    ].map(([k,t])=>`<span class="fl-stat ${FILTER===k?'on':''}" onclick="FILTER='${k}';render()">${t}</span>`).join('');
+    render();
+  }catch(e){ document.getElementById('tbl').innerHTML = `<tr><td style="color:var(--danger);padding:16px">โหลดไม่สำเร็จ: ${esc(e.message||e)}</td></tr>`; }
+}
+function render(){
+  if(!OV) return;
+  let rows = OV.patients;
+  if(FILTER==='dw') rows = rows.filter(p=>p.dw_diff!=null && Math.abs(p.dw_diff)>=OV.limits.dw_diff);
+  else if(FILTER) rows = rows.filter(p=>p.flags.includes(FILTER));
+  const head = '<tr><th>HN</th><th>ชื่อ</th><th>ตรวจล่าสุด</th><th>OH (L)</th><th>Rel.OH %</th><th>เทียบครั้งก่อน</th><th>น้ำหนัก</th><th>DW ปัจจุบัน</th><th>DW ตาม BCM</th><th>ต่าง</th><th>LTI</th><th>FTI</th><th>ธง</th></tr>';
+  document.getElementById('tbl').innerHTML = head + (rows.length ? rows.map(p=>{
+    const l = p.latest || {}, f = p.flags;
+    const dwc = p.dw_diff==null?'':(Math.abs(p.dw_diff)>=OV.limits.dw_diff?(p.dw_diff<0?'lo':'hi'):'okc');
+    return `<tr class="p${pri(f)}"><td><a href="/hd/patient/${encodeURIComponent(p.hn)}/360" style="font-weight:700;text-decoration:none">${esc(p.hn)}</a></td><td>${esc(p.name||'')}</td>
+      <td>${l.date?dTH(l.date)+(p.days_since>OV.limits.due_days?' <span class="hi">('+p.days_since+' วัน)</span>':''):'<span style="color:var(--fg-muted)">ยังไม่เคยตรวจ</span>'}</td>
+      <td class="${ohCls(f)}">${l.oh==null?'—':(l.oh>0?'+':'')+f1(l.oh)}</td><td class="${ohCls(f)}">${f1(l.rel_oh)}</td>
+      <td>${p.previous?trend(l.oh,p.previous.oh)+' <span style="color:var(--fg-muted);font-size:.7rem">('+dTH(p.previous.date)+' '+(p.previous.oh>0?'+':'')+f1(p.previous.oh)+')</span>':''}</td>
+      <td>${f1(l.weight)}</td><td>${f1(p.dry_weight)}</td><td><b>${f1(p.dw_bcm)}</b></td><td class="${dwc}">${p.dw_diff==null?'—':(p.dw_diff>0?'+':'')+f1(p.dw_diff)}</td>
+      <td class="${f.includes('lti_low')?'lo':''}">${f1(l.lti)}</td><td>${f1(l.fti)}</td><td>${(p.flags_th||[]).map(t=>'<span class="tag">'+t+'</span>').join('')}</td></tr>`; }).join('')
+    : '<tr><td colspan="13" style="padding:16px;text-align:center;color:var(--fg-muted)">ไม่มีรายการ</td></tr>');
+}
+
+/* ── นำเข้า BCM ── */
+async function flPreview(){
+  const inp = document.getElementById('flFile'); const f = inp.files[0]; if(!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  document.getElementById('impBox').style.display = 'block';
+  document.getElementById('impSummary').textContent = 'กำลังอ่านไฟล์… (zip 30 ไฟล์ใช้เวลา ~10 วินาที)'; document.getElementById('impTable').innerHTML = '';
+  try{
+    const r = await hdFetch('/hd/api/v1/fluid/import/preview', {method:'POST', body: fd}); const d = await r.json();
+    if(!r.ok){ document.getElementById('impSummary').innerHTML = '<span style="color:var(--danger)">'+esc(d.error||r.status)+'</span>'; inp.value=''; return; }
+    IMP = d; inp.value = '';
+    const HOW = {device_id:'รหัสเครื่อง (เคยยืนยัน)', hn:'HN ในไฟล์', name:'ชื่อตรงกัน', name_fuzzy:'ชื่อใกล้เคียง — ตรวจ', eng_name:'ชื่ออังกฤษ — ตรวจ', none:'ไม่พบ — กรอก HN', manual:'กรอกเอง'};
+    const newRows = d.rows.filter(x=>x.patient_id && !x.duplicate).length;
+    document.getElementById('impTitle').textContent = `📥 ${d.filename} — ตรวจทานก่อนบันทึก`;
+    document.getElementById('impSummary').innerHTML = `อ่านได้ <b>${d.rows.length}</b> ราย · จับคู่ HN <b style="color:var(--success)">${d.matched}</b> (ต้องตรวจ ${d.review}) · <span style="color:${d.unmatched?'var(--danger)':'inherit'}">ไม่พบ ${d.unmatched} — กรอก HN ในช่องสีแดงได้</span> · ซ้ำ (ข้าม) ${d.duplicates} · <b>จะบันทึก ${newRows}</b>`;
+    document.getElementById('impTable').innerHTML = '<tr><th>HN</th><th>ชื่อไฟล์/เครื่อง</th><th>ชื่อในทะเบียน</th><th>จับคู่</th><th>วันที่</th><th>น้ำหนัก</th><th>OH</th><th>Rel.OH</th><th>LTI</th><th>FTI</th><th>ธง</th><th>สถานะ</th></tr>'
+      + d.rows.map((x,i)=>`<tr class="${x.patient_id?'':'p3'}" style="${x.duplicate?'opacity:.5':''}">
+        <td>${x.patient_id && x.how!=='none' ? esc(x.hn) : '<input class="hnedit" placeholder="HN" value="'+esc(x.hn||'')+'" onchange="IMP.rows['+i+'].hn=this.value.trim();IMP.rows['+i+'].hn_edited=true">'}</td>
+        <td>${esc(x.file_name||'')}<br><span style="color:var(--fg-muted);font-size:.68rem">${esc(x.measured_name||'')} ${esc(x.device_id||'')}</span></td>
+        <td>${esc(x.registry_name||'')}</td><td style="${x.how==='name_fuzzy'||x.how==='eng_name'?'background:#fff2cc;color:#000':''}">${HOW[x.how]||x.how}${x.ratio?' '+x.ratio:''}</td>
+        <td>${dTH(x.assessed_at)}</td><td>${f1(x.weight_kg)}</td><td class="${ohCls(x.flags||[])}">${x.oh_pre_l==null?'—':(x.oh_pre_l>0?'+':'')+f1(x.oh_pre_l)}</td><td>${f1(x.rel_oh_pct)}</td><td class="${(x.flags||[]).includes('lti_low')?'lo':''}">${f1(x.lti)}</td><td>${f1(x.fti)}</td>
+        <td>${(x.flags_th||[]).map(t=>'<span class="tag">'+t+'</span>').join('')}</td><td>${x.duplicate?'ซ้ำ — ข้าม':(x.patient_id?'<span class="okc">ใหม่</span>':'<span class="lo">รอ HN</span>')}</td></tr>`).join('');
+    document.getElementById('impCommitBtn').disabled = newRows === 0 && d.unmatched === 0;
+  }catch(e){ document.getElementById('impSummary').innerHTML = '<span style="color:var(--danger)">ผิดพลาด: '+esc(e.message||e)+'</span>'; }
+}
+async function flCommit(){
+  if(!IMP) return; const btn = document.getElementById('impCommitBtn'); btn.disabled = true; btn.textContent = 'กำลังบันทึก…';
+  try{
+    const r = await hdFetch('/hd/api/v1/fluid/import/commit', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filename: IMP.filename, rows: IMP.rows})});
+    const d = await r.json(); if(!r.ok){ alert('บันทึกไม่สำเร็จ: '+(d.error||r.status)); btn.disabled=false; btn.textContent='✅ ยืนยันบันทึก'; return; }
+    document.getElementById('impSummary').innerHTML = `<b class="okc">✅ บันทึกแล้ว ${d.inserted} ราย</b> (ข้าม ${d.skipped}) — รหัสเครื่อง BCM ถูกจำคู่กับผู้ป่วยแล้ว ครั้งหน้าจับคู่อัตโนมัติ`;
+    document.getElementById('impTable').innerHTML = ''; btn.style.display='none'; IMP=null; load();
+  }catch(e){ alert('ผิดพลาด: '+(e.message||e)); btn.disabled=false; btn.textContent='✅ ยืนยันบันทึก'; }
+}
+function impClose(){ document.getElementById('impBox').style.display='none'; IMP=null; const b=document.getElementById('impCommitBtn'); b.style.display=''; b.disabled=false; b.textContent='✅ ยืนยันบันทึก'; }
+async function flPush(){ if(!confirm('ส่งสรุปสารน้ำเข้ากลุ่มพยาบาล?')) return; const r = await hdFetch('/hd/api/v1/fluid/push',{method:'POST'}); const d = await r.json(); alert(d.sent?'ส่งแล้ว':'ส่งไม่สำเร็จ: '+(d.error||'')); }
+document.addEventListener('DOMContentLoaded', load);
+</script>
+{% endblock %}

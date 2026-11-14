@@ -292,6 +292,12 @@ def hd_tv_page():
     return resp
 
 
+@hd_web.route("/fluid")
+def fluid_page():
+    """Fluid Status Center — BCM quarterly assessments vs dry weight."""
+    return render_template("hd_fluid.html")
+
+
 @hd_web.route("/patient/<hn>/360")
 def patient_360_page(hn):
     """Patient 360 — one timeline of sessions, alerts, labs, ESA, drugs, incidents."""
@@ -1636,6 +1642,32 @@ def run_dw_autopilot(trigger="scheduled"):
     return {"created": len(created), "line_sent": sent, "items": created}
 
 
+def _fluid_for_session(session_id):
+    """Latest BCM for the session's patient + a plain-Thai hint (None when unavailable)."""
+    try:
+        from . import fluid_status as fs
+        conn = _fluid_conn()
+        if not conn:
+            return None
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT patient_id FROM hd_sessions WHERE id = %s", (session_id,))
+                r = cur.fetchone()
+                if not r:
+                    return None
+                lim = _fluid_limits()
+                latest = fs.latest_for(cur, r[0], lim)
+        finally:
+            conn.close()
+        if not latest:
+            return None
+        latest["hint"] = fs.uf_hint(latest, lim)
+        return latest
+    except Exception as e:
+        logger.debug("fluid for session: %s", e)
+        return None
+
+
 @hd_bp.route("/uf-plan", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def uf_plan():
@@ -1663,6 +1695,7 @@ def uf_plan():
         pre = pre or r[0]; dw = dw or r[1]; hours = hours or r[2]
         plan = plan_uf(pre, dw, hours, lim)
         plan["uf_goal_set"] = float(r[3]) if r[3] is not None else None
+        plan["fluid"] = _fluid_for_session(sid)
         return jsonify(plan)
     return jsonify(plan_uf(pre, dw, hours or 4, lim))
 
@@ -2085,6 +2118,146 @@ def run_lab_sync():
         return sync_labs(conn, current_app.config.get("STORAGE_OBJ"), current_app.config.get("DOC_INDEX"))
     finally:
         conn.close()
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Fluid Status Center — BCM quarterly assessments (14 Nov 2026)
+# ═══════════════════════════════════════════════════════════════════════════
+def _fluid_limits():
+    from .fluid_status import limits_from
+    return limits_from(get_setting_value)
+
+
+def _fluid_conn():
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return None
+    return psycopg2.connect(db_url, connect_timeout=5)
+
+
+@hd_bp.route("/fluid/import/preview", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def fluid_import_preview():
+    """อัปโหลด .zip ของ PDF BCM / .pdf / .xlsx → อ่านค่า + จับคู่ HN → แสดงก่อนบันทึก (ไม่เขียนอะไร)."""
+    from . import fluid_status as fs
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "ไม่มีไฟล์"}), 400
+    data = f.read()
+    if len(data) > 60 * 1024 * 1024:
+        return jsonify({"error": "ไฟล์ใหญ่เกิน 60 MB"}), 400
+    try:
+        recs = fs.read_upload(f.filename, data)
+    except Exception as e:
+        return jsonify({"error": f"อ่านไฟล์ไม่ได้: {e}"}), 400
+    conn = _fluid_conn()
+    if not conn:
+        return jsonify({"error": "No database"}), 503
+    try:
+        with conn.cursor() as cur:
+            rows = fs.match(cur, recs)
+    finally:
+        conn.close()
+    lim = _fluid_limits()
+    for r in rows:
+        r["flags"] = fs.flags(r, lim)
+        r["flags_th"] = [fs.FLAG_TH[x] for x in r["flags"]]
+    return jsonify({"filename": f.filename, "rows": rows, "limits": lim,
+                    "matched": sum(1 for r in rows if r["patient_id"]), "unmatched": sum(1 for r in rows if not r["patient_id"]),
+                    "duplicates": sum(1 for r in rows if r["duplicate"]),
+                    "review": sum(1 for r in rows if r["how"] in ("name_fuzzy", "eng_name"))})
+
+
+@hd_bp.route("/fluid/import/commit", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def fluid_import_commit():
+    """บันทึกแถวที่ยืนยัน (แก้ HN ในหน้าจอได้ → ส่ง hn ใหม่มา) + จำ BCM ID ↔ ผู้ป่วย."""
+    from . import fluid_status as fs
+    body = request.get_json(silent=True) or {}
+    rows = body.get("rows") or []
+    if not rows:
+        return jsonify({"error": "ไม่มีแถว"}), 400
+    conn = _fluid_conn()
+    if not conn:
+        return jsonify({"error": "No database"}), 503
+    try:
+        with conn.cursor() as cur:
+            # rows whose HN was edited by the nurse: resolve patient_id again
+            fix = [r for r in rows if r.get("hn") and (not r.get("patient_id") or r.get("hn_edited"))]
+            if fix:
+                cur.execute("SELECT id, UPPER(hn) FROM hd_patient_mapping WHERE UPPER(hn) = ANY(%s)",
+                            ([str(r["hn"]).upper() for r in fix],))
+                m = {hn: pid for pid, hn in cur.fetchall()}
+                for r in fix:
+                    pid = m.get(str(r["hn"]).upper())
+                    if pid:
+                        r["patient_id"], r["how"], r["duplicate"] = pid, "manual", False
+                    else:
+                        r["patient_id"] = None
+            res = fs.insert(cur, rows, confirmed_by=g.get("hd_username") or "", source_file=body.get("filename") or "")
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="fluid.import", resource_type="hd_fluid_assessments", resource_id=None,
+               new_values={"file": (body.get("filename") or "")[:80], **res}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, **res})
+
+
+@hd_bp.route("/fluid/overview", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def fluid_overview():
+    from . import fluid_status as fs
+    conn = _fluid_conn()
+    if not conn:
+        return jsonify({"error": "No database"}), 503
+    try:
+        with conn.cursor() as cur:
+            ov = fs.overview(cur, _fluid_limits())
+    finally:
+        conn.close()
+    for p in ov["patients"]:
+        p["flags_th"] = [fs.FLAG_TH[x] for x in p["flags"]]
+    ov["text"] = fs.line_text(ov)
+    return jsonify(ov)
+
+
+@hd_bp.route("/fluid/push", methods=["POST"])
+@require_role("physician", "admin")
+def fluid_push():
+    """ส่งสรุปสารน้ำเข้ากลุ่มพยาบาล (ข้อความเดียว)."""
+    from . import fluid_status as fs
+    conn = _fluid_conn()
+    try:
+        with conn.cursor() as cur:
+            ov = fs.overview(cur, _fluid_limits())
+    finally:
+        conn.close()
+    r = push_nurse_group(fs.line_text(ov))
+    return jsonify(r)
+
+
+@hd_bp.route("/patients/<hn>/fluid", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def fluid_for_patient(hn):
+    from . import fluid_status as fs
+    conn = _fluid_conn()
+    if not conn:
+        return jsonify({"error": "No database"}), 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, dry_weight FROM hd_patient_mapping WHERE UPPER(hn) = %s", (hn.upper(),))
+            r = cur.fetchone()
+            if not r:
+                return jsonify({"error": "ไม่พบ HN"}), 404
+            lim = _fluid_limits()
+            latest = fs.latest_for(cur, r[0], lim)
+            series = fs.series_for(cur, r[0])
+    finally:
+        conn.close()
+    return jsonify({"hn": hn, "dry_weight": float(r[1]) if r[1] is not None else None, "latest": latest, "series": series,
+                    "hint": fs.uf_hint(latest, lim), "limits": lim})
 
 
 @hd_bp.route("/labs/import/preview", methods=["POST"])
