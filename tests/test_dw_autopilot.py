@@ -159,6 +159,30 @@ class GenerateWithBcmTests(unittest.TestCase):
         self.assertLess(seen.index(SUPERSEDE_SQL), next(i for i, q in enumerate(seen) if "FROM hd_patient_mapping p WHERE p.is_active" in q))
         self.assertIn("status = 'pending'", SUPERSEDE_SQL)
         self.assertIn("'superseded'", SUPERSEDE_SQL)
+        last_q = [q for q in seen if "FROM hd_dw_proposals" in q and "ORDER BY id DESC LIMIT 1" in q]
+        self.assertTrue(last_q and all("status <> 'superseded'" in q for q in last_q),
+                        "superseded rows must not count as a recent decision")
+
+    def test_superseded_does_not_start_quiet_period(self):
+        """Patient with a superseded proposal decided today must still be evaluated (BCM → proposal)."""
+        from datetime import datetime
+        from hd_module.dw_autopilot import generate
+        conn = self.Conn()
+        orig_fetchone = conn.c.fetchone
+
+        def fetchone():
+            # emulate the DB honouring the status filter: a superseded row is never returned
+            if "FROM hd_dw_proposals" in conn.c.sql and "status <> 'superseded'" in conn.c.sql:
+                return None
+            if "FROM hd_dw_proposals" in conn.c.sql:
+                return ("superseded", datetime.now(), datetime.now())
+            return orig_fetchone()
+        conn.c.fetchone = fetchone
+        stats = {}
+        created = generate(conn, stats=stats)
+        self.assertEqual(len(created), 2)
+        self.assertEqual(stats["skipped_recent_decision"], 0)
+        self.assertEqual(stats["with_bcm"], 2)
 
 
 if __name__ == "__main__":

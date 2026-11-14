@@ -252,8 +252,11 @@ def generate(conn, limits=None, stats=None):
                 st["with_dw"] += 1
             if recent >= 5:
                 st["enough_sessions"] += 1
-            cur.execute("""SELECT status, decided_at, created_at FROM hd_dw_proposals WHERE patient_id = %s
-                           ORDER BY id DESC LIMIT 1""", (pid,))
+            # 'superseded' rows are system housekeeping, not a physician decision: they must neither block
+            # (pending) nor start the 21-day quiet period — otherwise every patient whose DW was imported
+            # after a proposal would be silently skipped for three weeks (bug seen 14 Nov 2026).
+            cur.execute("""SELECT status, decided_at, created_at FROM hd_dw_proposals
+                           WHERE patient_id = %s AND status <> 'superseded' ORDER BY id DESC LIMIT 1""", (pid,))
             last = cur.fetchone()
             if last and last[0] == "pending":
                 st["skipped_pending"] += 1
