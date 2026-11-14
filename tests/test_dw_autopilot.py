@@ -54,10 +54,6 @@ class DwReviewTests(unittest.TestCase):
         self.assertIsNone(review_dry_weight(ss[:3], 50.0))
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class BcmSignalTests(unittest.TestCase):
     def test_set_when_no_dw(self):
         from hd_module.dw_autopilot import bcm_signal
@@ -80,3 +76,69 @@ class BcmSignalTests(unittest.TestCase):
         self.assertEqual((p["direction"], p["proposed_dw"]), ("up", 58.8))   # 0.7 kg gap → one 0.5 step
         self.assertIsNone(bcm_signal(b, 58.7))                               # 0.3 kg → inside threshold
         self.assertIsNone(bcm_signal(None, 60))
+
+
+class GenerateWithBcmTests(unittest.TestCase):
+    """End-to-end generate() against a fake DB shaped like production on 14 Nov 2026:
+    patients have BCM results but no dry weight yet → one 'set' proposal each."""
+
+    class Cur:
+        def __init__(self):
+            self.sql = ""
+            self.inserts = []
+            self._one = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=None):
+            self.sql, self.params = sql, params
+            if "FROM hd_dw_proposals" in sql:
+                self._one = None
+            elif "FROM hd_fluid_assessments" in sql:
+                from datetime import date
+                pid = params[0]
+                self._one = (date(2026, 9, 8), 73.7, 7.5, 34.2, 14.9) if pid == 1 else ((date(2026, 9, 16), 69.0, -0.3, -2.3, 6.8) if pid == 2 else None)
+            elif sql.lstrip().startswith("INSERT INTO hd_dw_proposals"):
+                self.inserts.append(params)
+                self._one = (len(self.inserts),)
+
+        def fetchone(self):
+            return self._one
+
+        def fetchall(self):
+            if "FROM hd_patient_mapping" in self.sql:
+                return [(1, "67401", "พระพงศกร", None, 0), (2, "67361", "สะรีฝ้า", None, 0), (3, "99999", "ไม่มี BCM", None, 0)]
+            return []
+
+    class Conn:
+        def __init__(self):
+            self.c = GenerateWithBcmTests.Cur()
+            self.committed = False
+
+        def cursor(self):
+            return self.c
+
+        def commit(self):
+            self.committed = True
+
+    def test_generate_sets_dw_from_bcm(self):
+        from hd_module.dw_autopilot import generate
+        conn = self.Conn()
+        stats = {}
+        created = generate(conn, stats=stats)
+        self.assertEqual(len(created), 2)                  # both BCM patients get a 'set' proposal; the third has no BCM
+        self.assertEqual([c["direction"] for c in created], ["set", "set"])
+        self.assertEqual(created[0]["proposed_dw"], 66.2)  # 73.7 − 7.5
+        self.assertEqual(created[1]["proposed_dw"], 69.3)  # 69.0 − (−0.3)
+        self.assertIsNone(created[0]["current_dw"])
+        self.assertEqual((stats["patients"], stats["with_dw"], stats["with_bcm"], stats["from_bcm"], stats["no_signal"]), (3, 0, 2, 2, 1))
+        self.assertTrue(conn.committed)
+        self.assertEqual(conn.c.inserts[0][4], "set")
+
+
+if __name__ == "__main__":
+    unittest.main()

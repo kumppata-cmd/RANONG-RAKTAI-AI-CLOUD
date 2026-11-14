@@ -206,12 +206,17 @@ def bcm_signal(bcm, dry_weight, limits=None):
             "rationale": f"{base} · สูงกว่า DW ปัจจุบัน {dw:.1f} อยู่ {diff:.1f} kg (น้ำขาด เสี่ยง IDH) → เสนอเพิ่มทีละ {step:g} kg"}
 
 
-def generate(conn, limits=None):
+def generate(conn, limits=None, stats=None):
     """Scan active patients; create DW proposals where the pattern is clear. Returns created list.
     Signals: (1) session pattern over the last 10 rounds, (2) latest BCM vs DW; both are merged
-    into one proposal per patient, and a patient with no DW yet gets a 'set' proposal from BCM."""
+    into one proposal per patient, and a patient with no DW yet gets a 'set' proposal from BCM.
+    stats (optional dict) is filled with a self-check: how many patients were scanned, had a DW,
+    had a recent BCM, were skipped for a pending/recent decision — so "0 proposals" is explainable."""
     lim = dict(DEFAULTS, **(limits or {}))
     created = []
+    st = stats if stats is not None else {}
+    st.update({"patients": 0, "with_dw": 0, "with_bcm": 0, "enough_sessions": 0, "skipped_pending": 0,
+               "skipped_recent_decision": 0, "no_signal": 0, "from_bcm": 0, "from_sessions": 0, "both": 0})
     import json
     with conn.cursor() as cur:
         cur.execute(CREATE_SQL)
@@ -220,18 +225,35 @@ def generate(conn, limits=None):
                                  AND s.session_date >= CURRENT_DATE - 60)
                        FROM hd_patient_mapping p WHERE p.is_active = TRUE""")
         pats = cur.fetchall()
+        st["patients"] = len(pats)
         for pid, hn, name, dw, recent in pats:
+            if dw is not None:
+                st["with_dw"] += 1
+            if recent >= 5:
+                st["enough_sessions"] += 1
             cur.execute("""SELECT status, decided_at, created_at FROM hd_dw_proposals WHERE patient_id = %s
                            ORDER BY id DESC LIMIT 1""", (pid,))
             last = cur.fetchone()
             if last and last[0] == "pending":
+                st["skipped_pending"] += 1
                 continue
             if last and (last[1] or last[2]) and (_thai_today() - (last[1] or last[2]).date()).days < int(lim["dw_min_interval_days"]):
+                st["skipped_recent_decision"] += 1
                 continue
             bcm = _bcm_latest(cur, pid)
+            if bcm:
+                st["with_bcm"] += 1
             sess = collect_sessions(cur, pid, 10) if (dw is not None and recent >= 5) else []
             prop = review_dry_weight(sess, dw, lim) if sess else None
             b = bcm_signal(bcm, dw, lim)
+            if prop and b:
+                st["both"] += 1
+            elif prop:
+                st["from_sessions"] += 1
+            elif b:
+                st["from_bcm"] += 1
+            else:
+                st["no_signal"] += 1
             if prop and b:
                 if prop["direction"] == b["direction"]:
                     prop["rationale"] += " · ✅ สอดคล้องกับ " + b["rationale"]

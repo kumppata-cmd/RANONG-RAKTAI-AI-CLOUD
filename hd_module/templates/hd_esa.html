@@ -178,6 +178,8 @@ async function runNow(){
     const d = await r.json();
     if(!r.ok) throw new Error(d.error||r.status);
     s.textContent = d.created ? `✅ เสนอใหม่ ${d.created} รายการ (LINE แพทย์ ${d.line_sent})` : (isDw ? '✅ ไม่มีผู้ป่วยที่ควรปรับ DW ตอนนี้' : '✅ ไม่มี Hb ใหม่ที่ต้องปรับ');
+    if(isDw && d.stats){ const t = d.stats;
+      s.textContent += ` · ตรวจ ${t.patients} คน: มี DW ${t.with_dw} · มี BCM ≤180 วัน ${t.with_bcm} · มี ≥5 รอบ ${t.enough_sessions} · เสนอจาก BCM ${t.from_bcm} / จากรอบฟอก ${t.from_sessions} / ทั้งสอง ${t.both} · รอตัดสินใจอยู่แล้ว ${t.skipped_pending} · เพิ่งตัดสินใจ <21 วัน ${t.skipped_recent_decision} · ไม่มีสัญญาณ ${t.no_signal}`; }
     setTab(isDw ? 'dw' : 'pending');
   }catch(e){ s.textContent = '❌ ' + (e.message||e); }
   b.disabled = false;

@@ -1621,8 +1621,9 @@ def run_dw_autopilot(trigger="scheduled"):
     if not db_url:
         return {"created": 0}
     conn = psycopg2.connect(db_url, connect_timeout=5)
+    stats = {}
     try:
-        created = generate(conn, _dw_limits())
+        created = generate(conn, _dw_limits(), stats=stats)
     finally:
         conn.close()
     sent = 0
@@ -1639,7 +1640,7 @@ def run_dw_autopilot(trigger="scheduled"):
                 logger.warning("dw autopilot push: %s", e)
         log_action(user_id=None, action="dw.proposals_created", resource_type="dw",
                    new_values={"count": len(created), "trigger": trigger, "line_sent": sent}, ip_address="")
-    return {"created": len(created), "line_sent": sent, "items": created}
+    return {"created": len(created), "line_sent": sent, "items": created, "stats": stats}
 
 
 def _fluid_for_session(session_id):
