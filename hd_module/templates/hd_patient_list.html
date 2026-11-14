@@ -53,8 +53,9 @@
 <!-- Import roster -->
 <div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
   <input type="file" id="rosterFile" accept=".xlsx,.xlsm" style="display:none" onchange="previewRoster()">
-  <button class="btn btn-primary" onclick="document.getElementById('rosterFile').click()" style="font-size:.85rem">📥 นำเข้า Excel รายชื่อ (VA / BFR / รอบฟอก / ยาฉีด)</button>
-  <span style="font-size:.72rem;color:var(--fg-muted)">ไฟล์ "รายชื่อผู้ป่วยประจำปี" — ระบบจับคู่ด้วย HN แล้วแสดงตัวอย่างก่อนบันทึก (ไม่แก้ชื่อ, ไม่เก็บเลขบัตร)</span>
+  <button class="btn btn-primary" onclick="document.getElementById('rosterFile').click()" style="font-size:.85rem">📥 นำเข้า Excel รายชื่อประจำปี (VA / BFR / วันฟอก / รอบ / ยาฉีด / Hct / iPTH / Ferritin)</button>
+  <label style="font-size:.75rem;color:var(--fg-muted)">วันที่ตรวจ Hct ในไฟล์ <input type="date" id="rosterHctDate" style="font-size:.8rem;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card);color:inherit"></label>
+  <span style="font-size:.72rem;color:var(--fg-muted)">ระบบอ่านตามชื่อหัวคอลัมน์ จับคู่ด้วย HN แล้วแสดงตัวอย่างก่อนบันทึก (ไม่แก้ชื่อ · ไม่อ่านเลขบัตร · ผลแล็บซ้ำถูกข้าม)</span>
 </div>
 
 <!-- Roster preview modal -->
@@ -360,6 +361,7 @@ function _rosterPost(confirm){
   const fd = new FormData();
   fd.append('file', _rosterFile);
   fd.append('confirm', confirm ? '1' : '0');
+  fd.append('hct_date', (document.getElementById('rosterHctDate')||{}).value || '');
   const token = getHdToken();
   return fetch('/hd/api/v1/patients/import-roster', {
     method:'POST', headers: token ? {'Authorization':'Bearer '+token} : {}, body: fd
@@ -376,7 +378,9 @@ function previewRoster(){
     const va = Object.entries(d.va_counts||{}).map(([k,v])=>k+' '+v).join(' · ');
     document.getElementById('rosterSummary').innerHTML =
       `พบในไฟล์ <b>${d.total_rows}</b> คน · จับคู่กับระบบได้ <b style="color:var(--success)">${d.matched}</b> คน<br>`+
-      `จะอัปเดต <b style="color:var(--accent)">${d.to_update}</b> คน · ข้อมูลตรงอยู่แล้ว ${d.unchanged} คน<br>`+
+      `ทะเบียน: จะอัปเดต <b style="color:var(--accent)">${d.to_update}</b> คน · ตรงอยู่แล้ว ${d.unchanged} คน<br>`+
+      `ใบสั่งฟอก (BFR/ครั้ง-สัปดาห์/เส้นฟอก): แก้ไข ${d.rx_to_update||0} · สร้างใหม่ <b>${d.rx_to_create||0}</b><br>`+
+      `ผลแล็บ (Hct ${d.hct_date? new Date(d.hct_date+'T00:00:00').toLocaleDateString('th-TH'):''} · iPTH/Ferritin ตามเดือนในหัวคอลัมน์): ใหม่ <b style="color:var(--accent)">${d.labs_new||0}</b> จาก ${d.labs_total||0} รายการ (ซ้ำถูกข้าม)<br>`+
       `<span style="color:var(--fg-muted)">Vascular Access: ${va}</span>`;
     const um = d.unmatched||[];
     document.getElementById('rosterUnmatched').innerHTML = um.length
@@ -386,9 +390,9 @@ function previewRoster(){
     const ch = (d.details||[]).filter(m=>Object.keys(m.changes).length);
     document.getElementById('rosterChanges').innerHTML = ch.length
       ? ch.map(m=>`<div style="padding:3px 0;border-bottom:1px solid var(--border)"><b>HN ${m.hn}</b> ${m.db_name||m.name}: `+
-          Object.entries(m.changes).map(([k,[a,b]])=>`${k}: ${a??'-'} → <b>${b}</b>`).join(', ')+`</div>`).join('')
+          Object.entries(m.changes).map(([k,v])=>Array.isArray(v)?`${k}: ${v[0]??'-'} → <b>${v[1]}</b>`:`${k}: `+Object.entries(v).map(([kk,[a,b]])=>`${kk} ${a??'-'}→<b>${b}</b>`).join(' ')).join(', ')+(m.labs?` · แล็บ ${m.labs} ค่า`:'')+`</div>`).join('')
       : '<div style="color:var(--fg-muted)">ไม่มีรายการเปลี่ยนแปลง</div>';
-    document.getElementById('rosterConfirmBtn').disabled = d.to_update === 0;
+    document.getElementById('rosterConfirmBtn').disabled = (d.to_update === 0 && !(d.labs_new>0) && !(d.rx_to_create>0));
     document.getElementById('rosterOverlay').classList.add('open');
   }).catch(()=>{ inp.value=''; showToast('อ่านไฟล์ไม่สำเร็จ','danger'); });
 }
@@ -398,7 +402,7 @@ function confirmRoster(){
   _rosterPost(true).then(d=>{
     btn.disabled = false; btn.textContent = '✅ ยืนยันนำเข้า';
     if(d.error){ showToast(d.error,'danger'); return; }
-    showToast(`✅ อัปเดตแล้ว ${d.written} คน (จับคู่ ${d.matched}/${d.total_rows})`,'success');
+    showToast(`✅ ทะเบียน ${d.written} คน · ใบสั่งฟอก แก้ ${d.rx_written||0}/สร้าง ${d.rx_created||0} · แล็บ ${d.labs_written||0} รายการ (จับคู่ ${d.matched}/${d.total_rows})`,'success');
     closeRoster();
     fetchPatients();
   }).catch(()=>{ btn.disabled=false; btn.textContent='✅ ยืนยันนำเข้า'; showToast('บันทึกไม่สำเร็จ','danger'); });

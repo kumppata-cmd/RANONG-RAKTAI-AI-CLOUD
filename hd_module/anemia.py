@@ -157,7 +157,7 @@ def collect(conn, limits=None, days=90):
     since_long = (_thai_today() - timedelta(days=180)).isoformat()
     out = []
     with conn.cursor() as cur:
-        cur.execute("""SELECT id, hn, patient_name, dry_weight, esa_drug, esa_dose, COALESCE(hd_per_week, 3)
+        cur.execute("""SELECT id, hn, patient_name, dry_weight, esa_drug, esa_dose, COALESCE(esa_per_week, hd_per_week, 3)
                        FROM hd_patient_mapping WHERE is_active = TRUE ORDER BY patient_name""")
         pats = cur.fetchall()
         ids = [p[0] for p in pats]
@@ -231,6 +231,7 @@ def collect(conn, limits=None, days=90):
             cur.execute("ROLLBACK TO SAVEPOINT an4")
 
     for pid, hn, name, dw, esa_drug, esa_dose, per_week in pats:
+        per_week = float(per_week) if per_week is not None else 3.0   # esa_per_week may be NUMERIC
         pts = sorted(hbp.get(pid, {}).items())
         recent = [(d, h) for d, h in pts if d.isoformat() >= since]
         hb, hb_date = (recent[-1][1], recent[-1][0]) if recent else (None, None)

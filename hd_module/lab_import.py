@@ -176,10 +176,10 @@ def match_patients(cur, rows):
     existing = {}
     if pids:
         dates = sorted({r["lab_date"] for r in rows})
-        cur.execute("""SELECT patient_id, lab_date, hemoglobin, hematocrit, ferritin, tsat FROM hd_lab_results
+        cur.execute("""SELECT patient_id, lab_date, hemoglobin, hematocrit, ferritin, tsat, ipth FROM hd_lab_results
                        WHERE patient_id = ANY(%s) AND lab_date = ANY(%s::date[])""", (pids, dates))
-        for pid, d, hb, hct, fer, ts in cur.fetchall():
-            existing.setdefault((pid, d.isoformat()), []).append({"hemoglobin": hb, "hematocrit": hct, "ferritin": fer, "tsat": ts})
+        for pid, d, hb, hct, fer, ts, pth in cur.fetchall():
+            existing.setdefault((pid, d.isoformat()), []).append({"hemoglobin": hb, "hematocrit": hct, "ferritin": fer, "tsat": ts, "ipth": pth})
     matched, unmatched = [], []
     for r in rows:
         p = pmap.get(r["hn"])
@@ -190,7 +190,7 @@ def match_patients(cur, rows):
         dup = False
         for ex in existing.get((p[0], r["lab_date"]), []):
             if all((ex.get(f) is None and r.get(f) is None) or (ex.get(f) is not None and r.get(f) is not None and abs(float(ex[f]) - float(r[f])) < 0.05)
-                   for f in ("hemoglobin", "hematocrit", "ferritin", "tsat") if f in r or ex.get(f) is not None):
+                   for f in ("hemoglobin", "hematocrit", "ferritin", "tsat", "ipth") if f in r or ex.get(f) is not None):
                 dup = True
                 break
         r["duplicate"] = dup
@@ -209,7 +209,9 @@ def insert_rows(cur, rows, source):
         if not cols:
             skip += 1
             continue
-        vals = [r[f] for f in cols]
+        if r.get("notes"):
+            cols.append("notes")
+        vals = [str(r[f])[:300] if f == "notes" else r[f] for f in cols]
         cur.execute(f"""INSERT INTO hd_lab_results (patient_id, lab_date, {", ".join(cols)}, source)
                         VALUES (%s, %s, {", ".join(["%s"] * len(cols))}, %s)""",
                     [r["patient_id"], r["lab_date"]] + vals + [source[:50]])

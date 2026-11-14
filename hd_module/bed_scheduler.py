@@ -62,9 +62,12 @@ def load_context(conn, total_beds, hbv_beds="", hcv_beds=""):
     ctx = {"total_beds": int(total_beds), "hbv_beds": parse_beds(hbv_beds), "hcv_beds": parse_beds(hcv_beds),
            "patients": [], "bad_beds": {}}
     with conn.cursor() as cur:
-        cur.execute("""SELECT id, hn, patient_name, schedule_days, vascular_access, COALESCE(hd_per_week,3), primary_diagnosis
+        cur.execute("""SELECT id, hn, patient_name, schedule_days, vascular_access, COALESCE(hd_per_week,3), primary_diagnosis,
+                              default_shift
                        FROM hd_patient_mapping WHERE is_active = TRUE""")
         pats = cur.fetchall()
+        default_shift = {p[0]: p[7] for p in pats if p[7] in SHIFTS}
+        pats = [p[:7] for p in pats]
         ids = [p[0] for p in pats]
         # usual shift / bed
         usual = {}
@@ -117,7 +120,7 @@ def load_context(conn, total_beds, hbv_beds="", hcv_beds=""):
         hbv = i["hbv"] or "HBV" in dxl or "HBSAG" in dxl
         hcv = i["hcv"] or "HCV" in dxl
         ctx["patients"].append({"id": pid, "hn": hn, "name": name, "days": letters(sd), "access": va, "per_week": pw,
-                                "usual_shift": (u["shift"].most_common(1)[0][0] if u["shift"] else "morning"),
+                                "usual_shift": (u["shift"].most_common(1)[0][0] if u["shift"] else default_shift.get(pid, "morning")),
                                 "usual_bed": (u["bed"].most_common(1)[0][0] if u["bed"] else None),
                                 "hbv": hbv, "hcv": hcv})
     return ctx

@@ -3876,9 +3876,12 @@ def import_patient_roster():
         rows, skipped = parse_roster(data)
     except Exception as e:
         return jsonify({"error": f"อ่านไฟล์ไม่ได้: {e}"}), 400
+    # วันที่ของคอลัมน์ Hematocrit ในไฟล์ (ค่าเริ่มต้น = วันนี้) — ผล iPTH/Ferritin ใช้เดือนจากหัวคอลัมน์
+    from .lab_import import parse_date as _pd
+    hct_date = _pd(request.form.get("hct_date", ""), None) or date.today()
     try:
         conn = psycopg2.connect(db_url, connect_timeout=10)
-        summary = apply_roster(conn, rows, confirm=confirm)
+        summary = apply_roster(conn, rows, confirm=confirm, hct_date=hct_date, source="import:" + f.filename[:40])
         conn.close()
     except Exception as e:
         logger.error("roster import: %s", e)
@@ -3888,7 +3891,9 @@ def import_patient_roster():
         log_action(user_id=g.get("hd_user_id"), action="patients.import_roster",
                    resource_type="patient",
                    new_values={"file": f.filename, "matched": summary["matched"],
-                               "written": summary["written"], "unmatched": len(summary["unmatched"])},
+                               "written": summary["written"], "unmatched": len(summary["unmatched"]),
+                               "rx_written": summary["rx_written"], "rx_created": summary["rx_created"],
+                               "labs_written": summary["labs_written"]},
                    ip_address=request.remote_addr or "")
         logger.info("roster import by %s: matched=%d written=%d unmatched=%d",
                     g.get("hd_username"), summary["matched"], summary["written"],

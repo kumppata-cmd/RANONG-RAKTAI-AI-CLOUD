@@ -157,6 +157,9 @@ def _run_hd_migrations():
                 # manual lab form: adequacy values
                 "ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS kt_v NUMERIC(4,2)",
                 "ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS urr NUMERIC(5,1)",
+                # annual roster import 2569: ESA injections/week + usual shift
+                "ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS esa_per_week NUMERIC(4,2)",
+                "ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS default_shift VARCHAR(20)",
                 # PDPA consents
                 __import__("hd_module.pdpa", fromlist=["CREATE_SQL"]).CREATE_SQL,
                 __import__("hd_module.pdpa", fromlist=["CREATE_INDEX_SQL"]).CREATE_INDEX_SQL,
