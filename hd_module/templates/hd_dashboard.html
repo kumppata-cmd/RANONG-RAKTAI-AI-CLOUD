@@ -169,13 +169,13 @@ body.tv-mode .ac-head { font-size: 1.1rem; }
 <!-- View Mode Toggle -->
 <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
   <button class="shift-btn active" id="viewSingle" onclick="setViewMode('single')">🔘 รอบเดียว</button>
-  <button class="shift-btn" id="viewAll" onclick="setViewMode('all')">📊 ดูทุกรอบ (EMMA)</button>
+  <button class="shift-btn" id="viewAll" onclick="setViewMode('all')">📊 ดูทุกรอบ (RNRT)</button>
   <button class="btn btn-outline" onclick="shiftHandover()" style="margin-left:auto;color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่งเวร</button>
   <button class="btn btn-outline" onclick="autoAssignBeds()" style="color:var(--info);border-color:var(--info);font-size:.8rem;">🤖 จัดเตียง</button>
   <a id="newSessionLink" href="/hd/session/new" class="btn btn-success" style="font-size:.85rem;" onclick="this.href='/hd/session/new?shift='+currentShift">➕ เริ่มฟอก</a>
 </div>
 
-<!-- Quick Filter Tabs (EMMA-style context switch) -->
+<!-- Quick Filter Tabs (RNRT context switch) -->
 <div class="filter-bar" id="filterBar">
   <button class="filter-tab active" data-filter="default" onclick="setFilter('default')">📊 สถานะ</button>
   <button class="filter-tab" data-filter="dialyzer" onclick="setFilter('dialyzer')">🔧 Dialyzer</button>
@@ -203,7 +203,7 @@ body.tv-mode .ac-head { font-size: 1.1rem; }
   {% endfor %}
 </div>
 
-<!-- All-Rounds View (EMMA style) — hidden by default -->
+<!-- All-Rounds View (RNRT) — hidden by default -->
 <div id="allRoundsView" style="display:none;">
   <div class="round-section" id="roundMorning">
     <div class="round-header">🌅 รอบเช้า <span class="round-count" id="countMorning">HD: 0 คน</span></div>
