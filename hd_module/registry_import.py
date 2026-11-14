@@ -33,8 +33,8 @@ logger = logging.getLogger(__name__)
 VA_MAP = {"AVF": "AVF", "AVG": "AVG", "PC": "Perm Cath", "PERM": "Perm Cath", "PERMCATH": "Perm Cath",
           "DLC": "DLC", "CVC": "CVC"}
 ESA_PREFIX = {"E": "Epiao", "H": "Hema-plus", "HM": "Hemax", "HYPERCRIT": "Hypercrit", "EPOSIS": "Eposis"}
-SHIFT_MAP = {"เช้า": "morning", "1": "morning", "บ่าย": "afternoon", "2": "afternoon",
-             "ค่ำ": "evening", "เย็น": "evening", "3": "evening", "ดึก": "evening"}
+SHIFT_MAP = {"เช้า": "morning", "เช่า": "morning", "เชัา": "morning", "1": "morning", "บ่าย": "afternoon", "บาย": "afternoon", "2": "afternoon",
+             "ค่ำ": "evening", "คำ": "evening", "เย็น": "evening", "3": "evening", "ดึก": "evening"}
 TH_MONTH = {"มค": 1, "ม.ค": 1, "กพ": 2, "ก.พ": 2, "มีค": 3, "มี.ค": 3, "เมย": 4, "เม.ย": 4, "พค": 5, "พ.ค": 5,
             "มิย": 6, "มิ.ย": 6, "กค": 7, "ก.ค": 7, "สค": 8, "ส.ค": 8, "กย": 9, "ก.ย": 9, "ตค": 10, "ต.ค": 10,
             "พย": 11, "พ.ย": 11, "ธค": 12, "ธ.ค": 12}

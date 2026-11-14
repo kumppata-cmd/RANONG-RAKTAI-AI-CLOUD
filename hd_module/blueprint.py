@@ -4083,13 +4083,15 @@ def list_patients():
         search = request.args.get("q", "").strip()
         schedule = request.args.get("schedule", "").strip()
         access = request.args.get("access", "").strip()
+        shift_q = request.args.get("shift", "").strip()
         with conn.cursor() as cur:
             # Join with hd_sessions to get last_hd date + unacked alert count
             sql = """SELECT p.id, p.hn, p.hospital_hn, p.patient_name,
                             p.vascular_access, p.dry_weight, p.schedule_days,
                             p.esa_drug, p.esa_dose, p.primary_diagnosis, p.is_active,
                             MAX(s.started_at)::date AS last_hd,
-                            COALESCE(SUM(CASE WHEN a.acknowledged = FALSE THEN 1 ELSE 0 END), 0) AS unacked_alerts
+                            COALESCE(SUM(CASE WHEN a.acknowledged = FALSE THEN 1 ELSE 0 END), 0) AS unacked_alerts,
+                            p.default_shift
                      FROM hd_patient_mapping p
                      LEFT JOIN hd_sessions s ON s.patient_id = p.id
                      LEFT JOIN hd_clinical_alerts a ON a.session_id = s.id AND a.acknowledged = FALSE
@@ -4104,9 +4106,12 @@ def list_patients():
             if access:
                 sql += " AND UPPER(p.vascular_access) LIKE UPPER(%s)"
                 params.append(f"%{access}%")
+            if shift_q:
+                sql += " AND p.default_shift = %s"
+                params.append(shift_q)
             sql += """ GROUP BY p.id, p.hn, p.hospital_hn, p.patient_name,
                                p.vascular_access, p.dry_weight, p.schedule_days,
-                               p.esa_drug, p.esa_dose, p.primary_diagnosis, p.is_active
+                               p.esa_drug, p.esa_dose, p.primary_diagnosis, p.is_active, p.default_shift
                        ORDER BY p.hn LIMIT 300"""
             cur.execute(sql, params)
             rows = cur.fetchall()
@@ -4125,6 +4130,7 @@ def list_patients():
                 "primary_diagnosis": r[9], "is_active": r[10],
                 "last_hd": str(r[11]) if r[11] else None,
                 "unacked_alerts": unacked,
+                "default_shift": r[13] if len(r) > 13 else None,
             })
         # Collect unique schedule and access values for dynamic filters
         schedules = sorted(set(p["schedule_days"] for p in patients if p.get("schedule_days")))
@@ -5371,7 +5377,9 @@ def update_patient(hn):
         return jsonify({"error": "No data"}), 400
 
     allowed = {"patient_name", "schedule_days", "vascular_access", "dry_weight",
-               "esa_drug", "esa_dose", "primary_diagnosis", "needs_review", "is_active"}
+               "esa_drug", "esa_dose", "primary_diagnosis", "needs_review", "is_active", "default_shift"}
+    if "default_shift" in data and data["default_shift"] not in ("", None, "morning", "afternoon", "evening"):
+        return jsonify({"error": "default_shift ต้องเป็น morning / afternoon / evening"}), 400
     updates = []
     params = []
     for key in allowed:

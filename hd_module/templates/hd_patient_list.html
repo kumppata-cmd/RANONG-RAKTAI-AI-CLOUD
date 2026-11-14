@@ -78,6 +78,12 @@
   <select class="form-control" id="filterSchedule">
     <option value="">ทุกตาราง</option>
   </select>
+  <select class="form-control" id="filterShift">
+    <option value="">ทุกรอบ</option>
+    <option value="morning">🌅 รอบเช้า</option>
+    <option value="afternoon">☀️ รอบบ่าย</option>
+    <option value="evening">🌙 รอบค่ำ</option>
+  </select>
   <select class="form-control" id="filterAccess">
     <option value="">ทุก Vascular Access</option>
   </select>
@@ -91,14 +97,15 @@
         <tr>
           <th>ผู้ป่วย</th>
           <th>HN</th>
-          <th>ตาราง</th>
+          <th>วันฟอก</th>
+          <th>รอบ</th>
           <th>Vascular Access</th>
           <th>DW (kg)</th>
           <th>ฟอกล่าสุด</th>
         </tr>
       </thead>
       <tbody id="patientTableBody">
-        <tr><td colspan="6" style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</td></tr>
+        <tr><td colspan="7" style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</td></tr>
       </tbody>
     </table>
   </div>
@@ -119,6 +126,15 @@
         <option value="จ/พ/ศ (บ่าย)">จ/พ/ศ (บ่าย)</option>
         <option value="อ/พฤ/ส (เช้า)">อ/พฤ/ส (เช้า)</option>
         <option value="อ/พฤ/ส (บ่าย)">อ/พฤ/ส (บ่าย)</option>
+      </select>
+    </div>
+    <div class="edit-field">
+      <label>รอบฟอกประจำ</label>
+      <select id="editShift">
+        <option value="">ไม่ระบุ</option>
+        <option value="morning">🌅 รอบเช้า</option>
+        <option value="afternoon">☀️ รอบบ่าย</option>
+        <option value="evening">🌙 รอบค่ำ</option>
       </select>
     </div>
     <div class="edit-field">
@@ -191,7 +207,7 @@ function isIncomplete(p){
 function renderPatients(patients){
   const tbody = document.getElementById('patientTableBody');
   if(!patients.length){
-    tbody.innerHTML = '<tr><td colspan="6" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่พบผู้ป่วย</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่พบผู้ป่วย</td></tr>';
     return;
   }
   tbody.innerHTML = patients.map(p => {
@@ -202,12 +218,16 @@ function renderPatients(patients){
     const rowAlert = p.unacked_alerts > 0 ? 'style="border-left:3px solid var(--danger);"' : '';
     const editBtn = `<button class="btn" onclick="event.stopPropagation();openEditModal('${p.hn}')" style="font-size:.7rem;padding:2px 8px;margin-left:4px;" title="แก้ไข">✏️</button>`;
     const schedCell = p.schedule_days ? '<span class="schedule-badge">'+p.schedule_days+'</span>' : '<span style="color:var(--warning);font-size:.8rem;">⚠️ ไม่ระบุ</span>';
+    const SH = {morning:['🌅 เช้า','#b45309','#fef3c7'], afternoon:['☀️ บ่าย','#1d4ed8','#dbeafe'], evening:['🌙 ค่ำ','#6d28d9','#ede9fe']};
+    const sh = SH[p.default_shift];
+    const shiftCell = sh ? `<span class="schedule-badge" style="color:${sh[1]};background:${sh[2]}">${sh[0]}</span>` : '<span style="color:var(--fg-muted);font-size:.8rem;">-</span>';
     const vaCell = p.vascular_access ? '<span class="access-badge '+accessClass(p.vascular_access)+'">'+p.vascular_access+'</span>' : '<span style="color:var(--warning);font-size:.8rem;">⚠️ ไม่ระบุ</span>';
     return `
     <tr class="${rowClass}" onclick="window.location.href='/hd/patient/${p.hn}'" ${rowAlert}>
       <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(name)}</div><span>${name}${alertDot}${editBtn}</span></div></td>
       <td><strong>${p.hn||'-'}</strong></td>
       <td>${schedCell}</td>
+      <td>${shiftCell}</td>
       <td>${vaCell}</td>
       <td>${p.dry_weight||'-'}</td>
       <td>${formatDate(p.last_hd)}</td>
@@ -233,6 +253,10 @@ function filterPatients(){
   }
   if(access){
     filtered = filtered.filter(p => (p.vascular_access||'').toUpperCase().includes(access.toUpperCase()));
+  }
+  const shiftSel = (document.getElementById('filterShift')||{}).value || '';
+  if(shiftSel){
+    filtered = filtered.filter(p => p.default_shift === shiftSel);
   }
   renderPatients(filtered);
   /* Update count display */
@@ -310,7 +334,7 @@ function fetchPatients(){
     .catch(err=>{
       console.error('fetchPatients error:', err);
       document.getElementById('patientTableBody').innerHTML =
-        '<tr><td colspan="6" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่สามารถโหลดข้อมูลได้</td></tr>';
+        '<tr><td colspan="7" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่สามารถโหลดข้อมูลได้</td></tr>';
     });
 }
 
@@ -324,6 +348,7 @@ function openEditModal(hn){
   document.getElementById('editName').textContent = p.patient_name||'';
   document.getElementById('editPatientName').value = p.patient_name||'';
   document.getElementById('editSchedule').value = p.schedule_days||'';
+  document.getElementById('editShift').value = p.default_shift||'';
   document.getElementById('editVA').value = p.vascular_access||'';
   document.getElementById('editDW').value = p.dry_weight||'';
   document.getElementById('editESA').value = p.esa_drug||'';
@@ -339,6 +364,7 @@ function savePatientEdit(){
   const data = {
     patient_name: document.getElementById('editPatientName').value,
     schedule_days: document.getElementById('editSchedule').value,
+    default_shift: document.getElementById('editShift').value,
     vascular_access: document.getElementById('editVA').value,
     dry_weight: parseFloat(document.getElementById('editDW').value)||null,
     esa_drug: document.getElementById('editESA').value,
@@ -424,6 +450,7 @@ document.getElementById('searchInput').addEventListener('input', debounceFilter)
 document.getElementById('searchInput').addEventListener('change', filterPatients);
 document.getElementById('filterSchedule').addEventListener('change', filterPatients);
 document.getElementById('filterAccess').addEventListener('change', filterPatients);
+document.getElementById('filterShift').addEventListener('change', filterPatients);
 
 fetchPatients();
 </script>
