@@ -69,6 +69,7 @@ jobs:
             if [ "$ops_ok" = "false" ]; then
               while IFS= read -r line; do problems+=("งานอัตโนมัติ: $line"); done < <(echo "$json" | jq -r '.ops.problems[]?')
             fi
+            echo "ops: $(echo "$json" | jq -c '.ops // "n/a"')"
             docs=$(echo "$json" | jq -r '.document_search.indexed_documents // 0')
             echo "indexed_documents=$docs" >> "$GITHUB_OUTPUT"
           fi
