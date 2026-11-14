@@ -115,6 +115,9 @@ async function flPreview(){
         <td>${dTH(x.assessed_at)}</td><td>${f1(x.weight_kg)}</td><td class="${ohCls(x.flags||[])}">${x.oh_pre_l==null?'—':(x.oh_pre_l>0?'+':'')+f1(x.oh_pre_l)}</td><td>${f1(x.rel_oh_pct)}</td><td class="${(x.flags||[]).includes('lti_low')?'lo':''}">${f1(x.lti)}</td><td>${f1(x.fti)}</td>
         <td>${(x.flags_th||[]).map(t=>'<span class="tag">'+t+'</span>').join('')}</td><td>${x.duplicate?'ซ้ำ — ข้าม':(x.patient_id?'<span class="okc">ใหม่</span>':'<span class="lo">รอ HN</span>')}</td></tr>`).join('');
     document.getElementById('impCommitBtn').disabled = newRows === 0 && d.unmatched === 0;
+    if(newRows === 0 && d.unmatched === 0){
+      document.getElementById('impSummary').innerHTML += `<div style="margin-top:6px;padding:8px 10px;border-radius:8px;background:var(--bg);color:var(--success);font-weight:700">✅ ข้อมูลชุดนี้ถูกบันทึกไว้ในระบบครบแล้ว (${d.duplicates} ราย) — ไม่ต้องบันทึกซ้ำ กด "ยกเลิก" เพื่อปิดหน้าตรวจทาน แล้วดูผลในตารางด้านล่าง</div>`;
+    }
   }catch(e){ document.getElementById('impSummary').innerHTML = '<span style="color:var(--danger)">ผิดพลาด: '+esc(e.message||e)+'</span>'; }
 }
 async function flCommit(){
