@@ -1,0 +1,102 @@
+{% extends "hd_base.html" %}
+{% block title %}ตารางฟอกรายสัปดาห์{% endblock %}
+{% block page_title %}📅 ตารางฟอกรายสัปดาห์ — ใครฟอกวันไหน รอบไหน{% endblock %}
+{% block nav_weekly %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.wk-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.wk-wrap{overflow-x:auto;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius)}
+.wk{width:100%;border-collapse:collapse;table-layout:fixed;min-width:900px;font-size:.78rem}
+.wk th{padding:8px 6px;border-bottom:2px solid var(--border);text-align:center;font-size:.85rem;background:var(--bg-card);position:sticky;top:0;z-index:1}
+.wk th.today{background:rgba(41,128,185,.18);color:var(--accent)}
+.wk td{border:1px solid var(--border);vertical-align:top;padding:6px}
+.wk td.sh{width:84px;font-weight:700;text-align:center;font-size:.9rem;background:var(--bg)}
+.wk td.today{background:rgba(41,128,185,.07)}
+.cnt{display:flex;justify-content:space-between;align-items:center;font-size:.72rem;color:var(--fg-muted);margin-bottom:4px;border-bottom:1px dashed var(--border);padding-bottom:3px}
+.cnt b{font-size:.95rem;color:var(--fg)}
+.cnt.over b{color:var(--danger)}
+.cnt.full b{color:#e67e22}
+.nm{display:block;line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;padding:1px 2px;border-radius:4px}
+.nm:hover{background:rgba(41,128,185,.12)}
+.nm small{color:var(--fg-dim);font-size:.65rem}
+.nm.hit{background:#fef3c7;color:#92400e;font-weight:700}
+.wk.big{font-size:1.05rem}.wk.big .nm{line-height:1.45}.wk.big .cnt b{font-size:1.3rem}
+.legend{font-size:.72rem;color:var(--fg-muted);margin-top:8px}
+.nodays{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:10px;margin-top:10px;font-size:.8rem}
+@media print{.sidebar,.topbar,.wk-bar,.legend,.nodays button{display:none!important}.main{margin:0!important;width:auto!important}.wk{font-size:.7rem;min-width:0}.wk th{position:static}}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="wk-bar">
+  <input type="search" id="q" class="form-control" placeholder="🔍 ค้นหาชื่อ/HN — ไฮไลต์ในตาราง" style="max-width:260px" oninput="render()">
+  <label style="font-size:.78rem"><input type="checkbox" id="showHn" onchange="render()"> แสดง HN</label>
+  <label style="font-size:.78rem"><input type="checkbox" id="showVa" onchange="render()"> แสดง VA</label>
+  <label style="font-size:.78rem"><input type="checkbox" id="big" onchange="render()"> ตัวใหญ่ (ติดผนัง/TV)</label>
+  <span style="flex:1"></span>
+  <span id="meta" style="font-size:.74rem;color:var(--fg-muted)"></span>
+  <button class="btn btn-secondary" onclick="window.print()">🖨 พิมพ์</button>
+  <button class="btn btn-secondary" onclick="load()">🔄</button>
+</div>
+<div class="wk-wrap"><table class="wk" id="tbl"><tr><td style="padding:24px;text-align:center;color:var(--fg-muted)">กำลังโหลด…</td></tr></table></div>
+<div class="legend">ตัวเลขมุมซ้ายของแต่ละช่อง = จำนวนผู้ป่วย / จำนวนเตียง · <span style="color:#e67e22;font-weight:700">ส้ม</span> = เต็มพอดี · <span style="color:var(--danger);font-weight:700">แดง</span> = เกินจำนวนเตียง ต้องจัดเพิ่มรอบ/วัน ·
+ข้อมูลจากทะเบียนผู้ป่วย (วันฟอก + รอบประจำ) — แก้รายคนได้ที่ 👥 ผู้ป่วย → ✏️ · คลิกชื่อเพื่อเปิด Patient 360</div>
+<div class="nodays" id="noDays" style="display:none"></div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let D = null;
+const SH = {morning:'🌅 เช้า', afternoon:'☀️ บ่าย', evening:'🌙 ค่ำ', unknown:'❓ ไม่ระบุรอบ'};
+const DAY_FULL = {'จ':'จันทร์','อ':'อังคาร','พ':'พุธ','พฤ':'พฤหัสบดี','ศ':'ศุกร์','ส':'เสาร์','อา':'อาทิตย์'};
+const TODAY = ['อา','จ','อ','พ','พฤ','ศ','ส'][new Date().getDay()];
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+async function load(){
+  try{
+    const r = await hdFetch('/hd/api/v1/patients/weekly-grid');
+    D = await r.json();
+    if(D.error) throw new Error(D.error);
+    render();
+  }catch(e){
+    document.getElementById('tbl').innerHTML = `<tr><td style="padding:24px;text-align:center;color:var(--danger)">โหลดไม่ได้: ${esc(e.message)}</td></tr>`;
+  }
+}
+
+function render(){
+  if(!D) return;
+  const q = (document.getElementById('q').value||'').trim().toLowerCase();
+  const showHn = document.getElementById('showHn').checked, showVa = document.getElementById('showVa').checked;
+  const tbl = document.getElementById('tbl');
+  tbl.className = 'wk' + (document.getElementById('big').checked ? ' big' : '');
+  const shifts = D.shifts.concat(D.days.some(d => (D.counts[d].unknown||0) > 0) ? ['unknown'] : []);
+  let h = '<thead><tr><th>รอบ \\ วัน</th>' + D.days.map(d => `<th class="${d===TODAY?'today':''}">${DAY_FULL[d]}${d===TODAY?' · วันนี้':''}<div style="font-size:.68rem;font-weight:400;color:var(--fg-muted)">รวม ${D.days ? Object.values(D.counts[d]).reduce((a,b)=>a+b,0) : 0} คน</div></th>`).join('') + '</tr></thead><tbody>';
+  shifts.forEach(sh => {
+    h += `<tr><td class="sh">${SH[sh]}</td>`;
+    D.days.forEach(d => {
+      const list = D.grid[d][sh] || [];
+      const n = list.length, cap = D.capacity;
+      const cls = sh==='unknown' ? '' : (n > cap ? 'over' : (n === cap ? 'full' : ''));
+      h += `<td class="${d===TODAY?'today':''}"><div class="cnt ${cls}"><b>${n}</b><span>${sh==='unknown'?'':'/ '+cap+' เตียง'}</span></div>`;
+      h += list.map(p => {
+        const hit = q && ((p.name||'').toLowerCase().includes(q) || (p.hn||'').toLowerCase().includes(q));
+        return `<span class="nm ${hit?'hit':''}" onclick="location.href='/hd/patient/${encodeURIComponent(p.hn)}/360'" title="HN ${esc(p.hn)} · ${esc(p.va)}">${esc(p.name)}${showHn?` <small>${esc(p.hn)}</small>`:''}${showVa&&p.va?` <small>${esc(p.va)}</small>`:''}</span>`;
+      }).join('');
+      h += '</td>';
+    });
+    h += '</tr>';
+  });
+  tbl.innerHTML = h + '</tbody>';
+  const t = new Date(D.generated_at);
+  document.getElementById('meta').textContent = `ผู้ป่วย active ${D.total} คน · ${D.capacity} เตียง · ข้อมูล ${t.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'})}`;
+  const nd = document.getElementById('noDays');
+  if(D.no_days && D.no_days.length){
+    nd.style.display = '';
+    nd.innerHTML = `<b>⚠️ ยังไม่ระบุวันฟอก ${D.no_days.length} คน</b> — ใส่ได้ที่ 👥 ผู้ป่วย → ✏️: ` + D.no_days.map(p=>`<a href="/hd/patient/${encodeURIComponent(p.hn)}/360">${esc(p.name)}</a>`).join(' · ');
+  } else nd.style.display = 'none';
+}
+load();
+setInterval(load, 10*60*1000);
+</script>
+{% endblock %}

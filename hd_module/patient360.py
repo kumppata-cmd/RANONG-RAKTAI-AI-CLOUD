@@ -51,12 +51,13 @@ def build(conn, patient_id, days=365):
     series = {"weight": [], "hb": [], "vp": [], "idwg": [], "ktv": []}
     with conn.cursor() as cur:
         r = _q(cur, """SELECT id, hn, patient_name, vascular_access, dry_weight, esa_drug, esa_dose, schedule_days,
-                              date_of_birth, is_active FROM hd_patient_mapping WHERE id = %s""", (patient_id,))
+                              date_of_birth, is_active, default_shift FROM hd_patient_mapping WHERE id = %s""", (patient_id,))
         if not r:
             return None
         p = r[0]
         patient = {"id": p[0], "hn": p[1], "name": p[2], "access": p[3], "dry_weight": _f(p[4]), "esa_drug": p[5],
-                   "esa_dose": p[6], "schedule_days": p[7], "is_active": p[9]}
+                   "esa_dose": p[6], "schedule_days": p[7], "is_active": p[9],
+                   "default_shift": p[10] if len(p) > 10 else None}
         if p[8]:
             today = (datetime.now(timezone.utc) + timedelta(hours=7)).date()
             patient["age"] = today.year - p[8].year - ((today.month, today.day) < (p[8].month, p[8].day))

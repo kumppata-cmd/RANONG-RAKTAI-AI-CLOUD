@@ -304,6 +304,12 @@ def _no_cache_sw(resp):
     return resp
 
 
+@hd_web.route("/weekly")
+def weekly_page():
+    """ตารางฟอกรายสัปดาห์ 7 วัน × 3 รอบ — for the unit wall / TV."""
+    return render_template("hd_weekly.html")
+
+
 @hd_web.route("/fluid")
 def fluid_page():
     """Fluid Status Center — BCM quarterly assessments vs dry weight."""
@@ -4145,6 +4151,47 @@ def list_patients():
         return jsonify({"patients": [], "total": 0, "error": str(e)})
 
 
+WEEK_DAYS = ["จ", "อ", "พ", "พฤ", "ศ", "ส", "อา"]
+SHIFT_ORDER = ["morning", "afternoon", "evening"]
+
+
+@hd_bp.route("/patients/weekly-grid", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor", "display")
+def patients_weekly_grid():
+    """Who dialyses on which day and round: 7 days × 3 shifts from the roster
+    (hd_patient_mapping.schedule_days / default_shift). Read-only; capacity = TOTAL_BEDS."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    grid = {d: {sh: [] for sh in SHIFT_ORDER + ["unknown"]} for d in WEEK_DAYS}
+    no_days, total = [], 0
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT hn, patient_name, schedule_days, default_shift, vascular_access, hd_per_week
+                           FROM hd_patient_mapping WHERE is_active = TRUE ORDER BY patient_name""")
+            for hn, name, days, shift, va, hdw in cur.fetchall():
+                total += 1
+                item = {"hn": hn, "name": name, "va": va or "", "shift": shift or "", "hd_per_week": hdw}
+                parts = [x.strip() for x in str(days or "").replace("/", ",").split(",") if x.strip()]
+                parts = [x for x in parts if x in WEEK_DAYS]
+                if not parts:
+                    no_days.append(item)
+                    continue
+                for d in parts:
+                    grid[d][shift if shift in SHIFT_ORDER else "unknown"].append(item)
+        conn.close()
+    except Exception as e:
+        logger.error("weekly_grid error: %s", e)
+        return jsonify({"error": str(e)}), 500
+    counts = {d: {sh: len(grid[d][sh]) for sh in grid[d]} for d in WEEK_DAYS}
+    return jsonify({"days": WEEK_DAYS, "shifts": SHIFT_ORDER, "capacity": HdConfig.TOTAL_BEDS, "grid": grid,
+                    "counts": counts, "no_days": no_days, "total": total,
+                    "generated_at": (datetime.now(timezone.utc) + timedelta(hours=7)).isoformat(timespec="minutes")})
+
+
 @hd_bp.route("/patients/import-roster", methods=["POST"])
 @require_role("physician", "admin")
 def import_patient_roster():
@@ -4417,7 +4464,8 @@ def bed_dashboard():
                            s.esa_given, s.esa_drug_given,
                            s.shift as saved_shift,
                            s.ended_at, s.pre_weight, s.post_weight, s.actual_uf,
-                           (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id) AS n_alerts
+                           (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id) AS n_alerts,
+                           p.default_shift, p.schedule_days
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.status IN ('scheduled', 'in_progress', 'completed')
@@ -4484,6 +4532,10 @@ def bed_dashboard():
                             "esa_drug_given": row[11],
                             "current_vitals": None,
                             "alerts": [],
+                            # regular shift/days from the roster — flag when today's round differs
+                            "usual_shift": row[18] if len(row) > 18 else None,
+                            "schedule_days": row[19] if len(row) > 19 else None,
+                            "shift_mismatch": bool(len(row) > 18 and row[18] and row[18] != current_shift),
                         }
                         session_ids.append((row[1], bed_num))
 

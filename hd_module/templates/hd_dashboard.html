@@ -471,7 +471,10 @@ function renderBeds(beds){
       return 'bed-access-avf'; /* default */
     }
     if(pHn || va){
-      hnLine = `<div class="bed-hn">${pHn ? 'HN '+pHn : ''}${va ? ' <span class="bed-access '+vaClass(va)+'">'+va+'</span>' : ''}</div>`;
+      const SHN = {morning:'เช้า',afternoon:'บ่าย',evening:'ค่ำ'};
+      const mism = b.shift_mismatch && b.usual_shift ? ` <span class="bed-access" style="background:#fef3c7;color:#92400e;border:1px solid #f59e0b" title="ปกติฟอกรอบ${SHN[b.usual_shift]} (${b.schedule_days||''})">⇄ ปกติ${SHN[b.usual_shift]}</span>` : '';
+      const days = b.schedule_days ? ` <span style="font-size:.6rem;color:var(--fg-dim)">${b.schedule_days}</span>` : '';
+      hnLine = `<div class="bed-hn">${pHn ? 'HN '+pHn : ''}${va ? ' <span class="bed-access '+vaClass(va)+'">'+va+'</span>' : ''}${mism}${days}</div>`;
     }
 
     /* Next scheduled badge (when bed has active + scheduled) */
@@ -967,7 +970,7 @@ function fetchAllRounds(){
               ${va&&_activeFilter!=='va' ? '<span class="bed-access '+vaC(va)+'" style="font-size:.6rem;">'+va+'</span>' : ''}
             </div>
             <div class="bed-patient" style="font-size:.72rem;">${pName}</div>
-            <div class="bed-hn" style="font-size:.6rem;">${b.patient_hn?'HN '+b.patient_hn:''}</div>
+            <div class="bed-hn" style="font-size:.6rem;">${b.patient_hn?'HN '+b.patient_hn:''}${b.shift_mismatch&&b.usual_shift?' <span style="color:#b45309">⇄ ปกติ'+({morning:'เช้า',afternoon:'บ่าย',evening:'ค่ำ'})[b.usual_shift]+'</span>':''}</div>
             ${extraLine}
             ${(b.status==='critical'||b.status==='warning') ? '<div style="font-size:.62rem;font-weight:700;color:'+(b.status==='critical'?'var(--danger)':'var(--warning)')+';margin-top:2px">'+(b.status==='critical'?'🔴 ':'🟡 ')+(b.alert_reason||'มีการแจ้งเตือน')+'</div>' : ''}
             ${vitalAge(b)}${ufBar(b)}${ufWatchLine(b)}${idhLine(b)}${labLine(b)}

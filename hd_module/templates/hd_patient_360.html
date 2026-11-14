@@ -91,7 +91,7 @@ async function load(){
 function render(){
   const p = DATA.patient, s = DATA.summary, se = DATA.series;
   document.getElementById('head').innerHTML = `<span class="nm">${esc(p.name)}</span><span class="meta">HN ${esc(p.hn)}${p.age?' · อายุ '+p.age+' ปี':''}</span>
-    <span class="meta">เส้นฟอก ${esc(p.access||'-')}</span><span class="meta">DW ${f1(p.dry_weight)} kg</span><span class="meta">ESA ${esc(p.esa_drug||'-')} ${esc(p.esa_dose||'')}</span><span class="meta">ตาราง ${esc(p.schedule_days||'-')}</span>${p.is_active?'':'<span class="p3-tag">ไม่ active</span>'}`;
+    <span class="meta">เส้นฟอก ${esc(p.access||'-')}</span><span class="meta">DW ${f1(p.dry_weight)} kg</span><span class="meta">ESA ${esc(p.esa_drug||'-')} ${esc(p.esa_dose||'')}</span><span class="meta">วันฟอก ${esc(p.schedule_days||'-')}</span><span class="meta">รอบ ${({morning:'🌅 เช้า',afternoon:'☀️ บ่าย',evening:'🌙 ค่ำ'})[p.default_shift]||'-'}</span>${p.is_active?'':'<span class="p3-tag">ไม่ active</span>'}`;
   const k = [['รอบฟอก', s.sessions], ['มี IDH/alert', s.idh_sessions, s.idh_sessions?'var(--danger)':''], ['Alert รวม', s.alerts], ['รอคำสั่งแพทย์', s.orders_pending, s.orders_pending?'var(--danger)':''],
              ['Hb ล่าสุด', f1(s.last_hb), s.last_hb!=null&&s.last_hb<10?'var(--danger)':''], ['IDWG เฉลี่ย', s.avg_idwg_pct!=null?s.avg_idwg_pct+'%':'—', s.avg_idwg_pct>4?'var(--danger)':''], ['UF ได้ตามเป้า', s.uf_achieved_pct!=null?s.uf_achieved_pct+'%':'—'], ['แล็บ', s.labs]];
   document.getElementById('kpis').innerHTML = k.map(x=>`<div class="p3-kpi"><div class="n" style="color:${x[2]||'inherit'}">${x[1]??'—'}</div><div class="l">${x[0]}</div></div>`).join('');

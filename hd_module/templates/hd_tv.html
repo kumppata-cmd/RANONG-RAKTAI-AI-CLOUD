@@ -141,7 +141,7 @@ function render(d){
     return `<div class="bed ${st}">
       <div class="n">เตียง ${b.bed_number}</div>
       <div class="nm">${esc(b.patient_name||'')}</div>
-      <div class="sub">${esc(b.vascular_access||'')}${b.esa_given?' · 💉ESA':''} ${idh}</div>
+      <div class="sub">${esc(b.vascular_access||'')}${b.esa_given?' · 💉ESA':''} ${idh}${b.shift_mismatch&&b.usual_shift?` <span class="tag w">⇄ ปกติ${({morning:'เช้า',afternoon:'บ่าย',evening:'ค่ำ'})[b.usual_shift]}</span>`:''}</div>
       <div class="row"><div class="bp ${bpCls}">${v.sbp?`${v.sbp}/${v.dbp||'-'}<small>HR ${v.hr||'-'}</small>`:'<span style="color:var(--muted);font-size:1rem">ยังไม่วัด BP</span>'}</div><span style="flex:1"></span>${spark(b.sbp_trend)}</div>
       <div class="row"><span class="${mAgo!=null&&mAgo>45?'stale':''}">${mAgo!=null?`วัดล่าสุด ${mAgo} นาที`:''}</span><span style="flex:1"></span><span>${e.txt}</span></div>
       <div class="row">${uf!=null?`UF <div class="bar"><i class="${e.over?'over':''}" style="width:${uf}%"></i></div> ${uf}%`:`<div class="bar"><i style="width:${e.pct}%"></i></div>`} ${uw}</div>
