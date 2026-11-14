@@ -2087,6 +2087,67 @@ def run_lab_sync():
         conn.close()
 
 
+@hd_bp.route("/labs/import/preview", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def labs_import_preview():
+    """อัปโหลดไฟล์ Excel/CSV ผลแล็บทั้งหน่วย → จับคู่ HN + ตรวจซ้ำ → แสดงก่อนบันทึก (ยังไม่เขียนอะไร)."""
+    import os
+    from . import lab_import as li
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "ไม่มีไฟล์"}), 400
+    data = f.read()
+    if len(data) > 10 * 1024 * 1024:
+        return jsonify({"error": "ไฟล์ใหญ่เกิน 10 MB"}), 400
+    try:
+        parsed = li.parse_rows(li.read_file(f.filename, data))
+    except Exception as e:
+        return jsonify({"error": f"อ่านไฟล์ไม่ได้: {e}"}), 400
+    if not parsed["rows"]:
+        return jsonify({"error": "; ".join(parsed["errors"]) or "ไม่พบข้อมูลผู้ป่วยในไฟล์"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    import psycopg2
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            matched, unmatched = li.match_patients(cur, parsed["rows"])
+    finally:
+        conn.close()
+    return jsonify({"filename": f.filename, "fields": parsed["fields"], "default_date": parsed["default_date"],
+                    "errors": parsed["errors"], "matched": matched, "unmatched": unmatched,
+                    "duplicates": sum(1 for r in matched if r["duplicate"]), "summary": li.summary(matched)})
+
+
+@hd_bp.route("/labs/import/commit", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def labs_import_commit():
+    """บันทึกแถวที่ยืนยันแล้วลง hd_lab_results (source=import:<file>) — ไม่แก้/ลบของเดิม."""
+    import os
+    from . import lab_import as li
+    body = request.get_json(silent=True) or {}
+    rows = [r for r in (body.get("rows") or []) if r.get("patient_id") and r.get("lab_date")]
+    if not rows:
+        return jsonify({"error": "ไม่มีแถวที่จะบันทึก"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    import psycopg2
+    source = "import:" + (body.get("filename") or "file")[:40]
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            res = li.insert_rows(cur, rows, source)
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="labs.import", resource_type="hd_lab_results", resource_id=None,
+               new_values={"source": source, **res, "fields": body.get("fields")}, ip_address=request.remote_addr or "")
+    # ผล Hb ใหม่ → ESA Autopilot จะเสนอในรอบถัดไปเอง (ทุกชั่วโมง 06–20 น.)
+    return jsonify({"ok": True, **res, "source": source})
+
+
 @hd_bp.route("/labs/sync", methods=["POST"])
 @require_role("physician", "admin")
 def labs_sync_now():

@@ -32,8 +32,19 @@
 <div class="an-bar">
   <button class="btn btn-secondary" onclick="load()">🔄 โหลดใหม่</button>
   <span style="flex:1"></span>
+  <button class="btn btn-secondary" onclick="document.getElementById('impFile').click()">📥 นำเข้าผล Hb/Hct จากไฟล์</button>
+  <input type="file" id="impFile" accept=".xlsx,.csv" style="display:none" onchange="impPreview()">
   <a class="btn btn-secondary" href="/hd/esa" style="text-decoration:none;">🤖 Autopilot</a>
   <a class="btn btn-secondary" href="/hd/settings" style="text-decoration:none;">⚙️ เกณฑ์</a>
+</div>
+<div id="impBox" style="display:none;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:12px;margin-bottom:12px">
+  <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+    <b id="impTitle">📥 ตรวจทานก่อนบันทึก</b><span style="flex:1"></span>
+    <button class="btn btn-primary" id="impCommitBtn" onclick="impCommit()">✅ ยืนยันบันทึก</button>
+    <button class="btn btn-secondary" onclick="impClose()">ยกเลิก</button>
+  </div>
+  <div id="impSummary" style="font-size:.8rem;margin:8px 0;color:var(--fg-muted)"></div>
+  <div style="max-height:360px;overflow:auto"><table id="impTable" style="width:100%;border-collapse:collapse;font-size:.78rem"></table></div>
 </div>
 <div class="an-lim" id="lim"></div>
 <div class="an-stats" id="stats"></div>
@@ -56,6 +67,46 @@ function spark(pts, lo, hi){
     <polyline fill="none" stroke="#8e44ad" stroke-width="2" points="${pts.map((p,i)=>x(i)+','+y(p[1])).join(' ')}"/>
     ${pts.map((p,i)=>`<circle cx="${x(i)}" cy="${y(p[1])}" r="2.2" fill="${p[1]<lo||p[1]>hi?'var(--danger)':'#8e44ad'}"><title>${p[0]}: ${p[1]}</title></circle>`).join('')}</svg>`;
 }
+/* นำเข้าผลแล็บจากไฟล์ Excel/CSV (รายงาน Hct รายเดือนของคลินิก) */
+let IMP = null;
+async function impPreview(){
+  const inp = document.getElementById('impFile'); const f = inp.files[0]; if(!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  document.getElementById('impBox').style.display = 'block';
+  document.getElementById('impSummary').textContent = 'กำลังอ่านไฟล์…'; document.getElementById('impTable').innerHTML = '';
+  try{
+    const r = await hdFetch('/hd/api/v1/labs/import/preview', {method:'POST', body: fd}); const d = await r.json();
+    if(!r.ok){ document.getElementById('impSummary').innerHTML = '<span style="color:var(--danger)">'+esc(d.error||r.status)+'</span>'; inp.value=''; return; }
+    IMP = d; inp.value = '';
+    const FT = {hemoglobin:'Hb', hematocrit:'Hct', ferritin:'Ferritin', tsat:'TSAT', potassium:'K', sodium:'Na', calcium:'Ca', phosphate:'P', albumin:'Alb', ipth:'iPTH', bun:'BUN', creatinine:'Cr', kt_v:'Kt/V', urr:'URR', hepatitis_b:'HBsAg', hepatitis_c:'Anti-HCV'};
+    const sm = d.summary || {}; const newRows = d.matched.filter(x=>!x.duplicate).length;
+    document.getElementById('impTitle').textContent = `📥 ${d.filename} — ตรวจทานก่อนบันทึก`;
+    document.getElementById('impSummary').innerHTML =
+      `พบ <b>${d.matched.length}</b> คนในทะเบียน · จะบันทึกใหม่ <b style="color:var(--success)">${newRows}</b> · ซ้ำกับที่มีอยู่ (ข้าม) ${d.duplicates} · <span style="color:${d.unmatched.length?'var(--danger)':'inherit'}">ไม่พบ HN ${d.unmatched.length}</span> · วันที่ตรวจ ${d.default_date? dTH(d.default_date):'ตามไฟล์'} · ค่า: ${d.fields.map(f=>FT[f]||f).join(', ')}`
+      + (sm.n ? `<br>Hb เฉลี่ย <b>${sm.mean}</b> g/dL · &lt;8: <b style="color:var(--danger)">${sm.lt8}</b> · &lt;10: <b>${sm.lt10}</b> · 10–12: ${sm.in_range} · &gt;12: ${sm.gt12} (จาก ${sm.n} คน)` : '')
+      + (d.unmatched.length ? `<br><span style="color:var(--danger)">ไม่พบในทะเบียน: ${d.unmatched.map(u=>esc(u.hn+' '+(u.name||''))).join(', ')}</span>` : '')
+      + (d.errors.length ? `<br><span style="color:var(--danger)">${d.errors.map(esc).join(' · ')}</span>` : '');
+    const th = '<tr style="position:sticky;top:0;background:var(--bg-card)"><th style="text-align:left;padding:3px 6px">HN</th><th style="text-align:left;padding:3px 6px">ชื่อในไฟล์</th><th style="text-align:left;padding:3px 6px">ชื่อในทะเบียน</th><th style="padding:3px 6px">วันที่</th>' + d.fields.map(f=>`<th style="padding:3px 6px">${FT[f]||f}</th>`).join('') + '<th style="padding:3px 6px">สถานะ</th></tr>';
+    document.getElementById('impTable').innerHTML = th + d.matched.map(x=>{
+      const hbLow = x.hemoglobin!=null && x.hemoglobin < 8;
+      return `<tr style="border-top:1px solid var(--border);${x.duplicate?'opacity:.5':''}"><td style="padding:3px 6px">${esc(x.hn)}</td><td style="padding:3px 6px">${esc(x.name||'')}</td><td style="padding:3px 6px;color:var(--fg-muted)">${esc(x.registered_name||'')}</td><td style="padding:3px 6px;text-align:center">${dTH(x.lab_date)}</td>`
+        + d.fields.map(f=>`<td style="padding:3px 6px;text-align:center;${f==='hemoglobin'&&hbLow?'color:var(--danger);font-weight:700':''}">${x[f]==null?'—':esc(x[f])}</td>`).join('')
+        + `<td style="padding:3px 6px;text-align:center">${x.duplicate?'ซ้ำ — ข้าม':'<span style="color:var(--success)">ใหม่</span>'}</td></tr>`; }).join('');
+    document.getElementById('impCommitBtn').disabled = newRows === 0;
+  }catch(e){ document.getElementById('impSummary').innerHTML = '<span style="color:var(--danger)">ผิดพลาด: '+esc(e.message||e)+'</span>'; }
+}
+async function impCommit(){
+  if(!IMP) return; const btn = document.getElementById('impCommitBtn'); btn.disabled = true; btn.textContent = 'กำลังบันทึก…';
+  try{
+    const r = await hdFetch('/hd/api/v1/labs/import/commit', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({filename: IMP.filename, fields: IMP.fields, rows: IMP.matched})});
+    const d = await r.json();
+    if(!r.ok){ alert('บันทึกไม่สำเร็จ: ' + (d.error||r.status)); btn.disabled=false; btn.textContent='✅ ยืนยันบันทึก'; return; }
+    document.getElementById('impSummary').innerHTML = `<b style="color:var(--success)">✅ บันทึกแล้ว ${d.inserted} รายการ</b> (ข้าม ${d.skipped}) — ESA Autopilot จะประเมินผล Hb ใหม่ในรอบถัดไป (ทุกชั่วโมง 06–20 น.) หรือกด "รัน Autopilot ตอนนี้" ที่หน้า 🤖`;
+    document.getElementById('impTable').innerHTML = ''; btn.style.display = 'none'; IMP = null; load();
+  }catch(e){ alert('ผิดพลาด: ' + (e.message||e)); btn.disabled=false; btn.textContent='✅ ยืนยันบันทึก'; }
+}
+function impClose(){ document.getElementById('impBox').style.display='none'; IMP=null; const b=document.getElementById('impCommitBtn'); b.style.display=''; b.disabled=false; b.textContent='✅ ยืนยันบันทึก'; }
+
 async function load(){
   const list = document.getElementById('list');
   try{
