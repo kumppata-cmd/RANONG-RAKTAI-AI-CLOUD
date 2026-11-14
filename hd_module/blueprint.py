@@ -304,6 +304,12 @@ def _no_cache_sw(resp):
     return resp
 
 
+@hd_web.route("/my/<token>")
+def patient_portal_page(token):
+    """Patient Portal — mobile-friendly page for the patient to view their own HD results."""
+    return render_template("hd_patient_portal.html", token=token)
+
+
 @hd_web.route("/weekly")
 def weekly_page():
     """ตารางฟอกรายสัปดาห์ 7 วัน × 3 รอบ — for the unit wall / TV."""
@@ -7293,6 +7299,28 @@ def _format_qi_line(qi):
 # ══════════════════════════════════════════════════════════
 # F14: Patient Self-View (ผลฟอก + Hb trend)
 # ══════════════════════════════════════════════════════════
+
+@hd_bp.route("/my/<token>", methods=["GET"])
+def patient_portal_api(token):
+    """Patient Portal JSON API — full data for the patient-facing web page."""
+    import os
+    import psycopg2
+    from .patient_portal import portal_data
+    hn = token  # simple token for now
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "ระบบไม่พร้อม"}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        data = portal_data(conn, hn)
+        conn.close()
+        if not data:
+            return jsonify({"error": "ไม่พบข้อมูลผู้ป่วย"}), 404
+        return jsonify(data)
+    except Exception as e:
+        logger.error("patient_portal_api: %s", e)
+        return jsonify({"error": str(e)}), 500
+
 
 @hd_bp.route("/my-results/<token>", methods=["GET"])
 def patient_self_view(token):

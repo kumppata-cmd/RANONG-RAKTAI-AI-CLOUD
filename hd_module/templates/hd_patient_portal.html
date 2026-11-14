@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ผลฟอกเลือดของฉัน — รักษ์ไต</title>
+<style>
+  :root{--bg:#f5f7fa;--card:#fff;--accent:#2980b9;--danger:#e74c3c;--success:#27ae60;--warn:#f39c12;--text:#2c3e50;--muted:#7f8c8d;--border:#eaecf0}
+  @media(prefers-color-scheme:dark){:root{--bg:#0d1117;--card:#161b22;--accent:#58a6ff;--danger:#f85149;--success:#3fb950;--warn:#d29922;--text:#e6edf3;--muted:#8b949e;--border:#30363d}}
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);padding:0 0 80px;max-width:480px;margin:0 auto;line-height:1.5}
+  .hero{background:linear-gradient(135deg,#2980b9,#3498db);color:#fff;padding:28px 20px 24px;text-align:center;border-radius:0 0 24px 24px}
+  .hero h1{font-size:1.1rem;opacity:.9;font-weight:400}.hero .name{font-size:1.6rem;font-weight:800;margin-top:4px}
+  .hero .next{margin-top:12px;background:rgba(255,255,255,.18);border-radius:14px;padding:10px 16px;font-size:.95rem;font-weight:600}
+  .hero .next .big{font-size:1.5rem;display:block;margin-top:2px}
+  .card{background:var(--card);border-radius:16px;padding:16px;margin:12px 16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+  .card h2{font-size:.95rem;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+  .info-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:.88rem}
+  .info-row:last-child{border:none}.label{color:var(--muted)}.value{font-weight:600}
+  .interp{padding:10px 12px;border-radius:12px;margin:6px 0;font-size:.88rem;font-weight:600;display:flex;align-items:center;gap:8px}
+  .interp.ok{background:rgba(39,174,96,.1);color:var(--success)}.interp.low{background:rgba(243,156,18,.1);color:var(--warn)}
+  .interp.critical{background:rgba(231,76,60,.1);color:var(--danger)}.interp.high{background:rgba(243,156,18,.1);color:var(--warn)}
+  .chart-wrap{overflow-x:auto;margin:8px -8px}
+  table{width:100%;border-collapse:collapse;font-size:.78rem}
+  th{background:var(--accent);color:#fff;padding:8px 6px;text-align:left;font-weight:600;font-size:.72rem;white-space:nowrap}
+  td{padding:8px 6px;border-bottom:1px solid var(--border);white-space:nowrap}
+  .tip{padding:10px 12px;border-radius:12px;margin:6px 0;font-size:.85rem;background:rgba(41,128,185,.06);border-left:3px solid var(--accent)}
+  .fluid-gauge{display:flex;align-items:center;gap:12px;padding:8px 0}
+  .fluid-bar{flex:1;height:12px;background:var(--border);border-radius:6px;overflow:hidden;position:relative}
+  .fluid-fill{height:100%;border-radius:6px;transition:width .3s}
+  .footer{text-align:center;font-size:.72rem;color:var(--muted);margin-top:20px;padding:12px}
+  .footer a{color:var(--accent)}
+  .badge{display:inline-block;padding:2px 8px;border-radius:8px;font-size:.72rem;font-weight:700}
+  .badge.green{background:rgba(39,174,96,.15);color:var(--success)}.badge.red{background:rgba(231,76,60,.15);color:var(--danger)}
+  .badge.yellow{background:rgba(243,156,18,.15);color:var(--warn)}
+  @media(min-width:481px){body{padding-top:12px}.hero{margin:0 16px;border-radius:24px}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div style="text-align:center;padding:40px;color:var(--muted)">กำลังโหลด...</div>
+</div>
+<script>
+const TOKEN = '{{ token }}';
+async function load(){
+  try{
+    const r = await fetch('/hd/api/v1/my/'+TOKEN);
+    if(!r.ok) throw new Error('ไม่พบข้อมูล');
+    const D = await r.json();
+    render(D);
+  }catch(e){
+    document.getElementById('app').innerHTML = `<div style="text-align:center;padding:60px;color:var(--danger)">${e.message||'เกิดข้อผิดพลาด'}</div>`;
+  }
+}
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function render(D){
+  const p = D.profile, nd = p.next_dialysis;
+  let h = `<div class="hero">
+    <h1>🏥 คลินิกระนอง รักษ์ไต</h1>
+    <div class="name">${esc(p.name)}</div>
+    ${nd ? `<div class="next">นัดฟอกครั้งถัดไป<span class="big">${nd.in_days===0?'🟢 วันนี้':(nd.in_days===1?'📅 พรุ่งนี้':'📅 '+nd.text)}</span>${p.shift?' · '+p.shift:''}</div>` : ''}
+  </div>`;
+
+  /* Profile card */
+  h += `<div class="card"><h2>👤 ข้อมูลของฉัน</h2>
+    <div class="info-row"><span class="label">HN</span><span class="value">${esc(p.hn)}</span></div>
+    <div class="info-row"><span class="label">ตารางฟอก</span><span class="value">${esc(p.schedule||'-')} ${p.shift?'('+p.shift+')':''}</span></div>
+    <div class="info-row"><span class="label">เส้นฟอกเลือด</span><span class="value">${esc(p.va||'-')}</span></div>
+    <div class="info-row"><span class="label">น้ำหนักแห้ง (DW)</span><span class="value">${p.dry_weight?p.dry_weight.toFixed(1)+' kg':'-'}</span></div>
+    <div class="info-row"><span class="label">ยากระตุ้นเม็ดเลือด</span><span class="value">${esc(p.esa_drug||'-')} ${esc(p.esa_dose||'')}</span></div>
+  </div>`;
+
+  /* Interpretations */
+  const it = D.interpretations || {};
+  if(Object.keys(it).length){
+    h += `<div class="card"><h2>🩺 สรุปผลแล็บล่าสุด</h2>`;
+    for(const [k,v] of Object.entries(it)){
+      h += `<div class="interp ${v.status}">${v.emoji} ${esc(v.text)}</div>`;
+    }
+    h += `</div>`;
+  }
+
+  /* Fluid / BCM */
+  const fl = D.fluid;
+  if(fl){
+    const pct = Math.min(100, Math.max(0, 50 + fl.oh * 15));
+    const col = fl.oh > 2 ? 'var(--danger)' : (fl.oh > 1 ? 'var(--warn)' : (fl.oh < -1 ? 'var(--accent)' : 'var(--success)'));
+    h += `<div class="card"><h2>💧 สารน้ำในร่างกาย (BCM)</h2>
+      <div class="fluid-gauge">
+        <span style="font-size:.75rem;color:var(--muted)">น้อย</span>
+        <div class="fluid-bar"><div class="fluid-fill" style="width:${pct}%;background:${col}"></div></div>
+        <span style="font-size:.75rem;color:var(--muted)">มาก</span>
+      </div>
+      <div style="text-align:center;font-weight:700;color:${col};font-size:1rem">OH ${fl.oh>0?'+':''}${fl.oh.toFixed(1)} L</div>
+      <div style="text-align:center;font-size:.85rem;margin-top:4px">${esc(fl.text)}</div>
+      <div style="font-size:.72rem;color:var(--muted);margin-top:8px">ตรวจเมื่อ ${new Date(fl.date).toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'})}</div>
+    </div>`;
+  }
+
+  /* Lab trends chart (SVG) */
+  const labs = (D.labs||[]).slice().reverse();
+  if(labs.length >= 2){
+    const hbs = labs.filter(l=>l.hb!=null);
+    if(hbs.length >= 2){
+      h += `<div class="card"><h2>📈 แนวโน้ม Hb (ค่าเลือดจาง)</h2>
+        <div class="chart-wrap">${svgChart(hbs.map(l=>({x:l.date,y:l.hb})), 8, 15, 10, 12, 'Hb g/dL')}</div>
+        <div style="font-size:.72rem;color:var(--muted)">แถบเขียว = เป้าหมาย 10–12 g/dL</div>
+      </div>`;
+    }
+    const ktvs = labs.filter(l=>l.ktv!=null);
+    if(ktvs.length >= 2){
+      h += `<div class="card"><h2>📈 แนวโน้ม Kt/V (ประสิทธิภาพการฟอก)</h2>
+        <div class="chart-wrap">${svgChart(ktvs.map(l=>({x:l.date,y:l.ktv})), 0.5, 2.5, 1.2, 999, 'Kt/V')}</div>
+        <div style="font-size:.72rem;color:var(--muted)">เส้นเขียว = เป้า ≥ 1.2</div>
+      </div>`;
+    }
+  }
+
+  /* Sessions */
+  const ss = D.sessions||[];
+  if(ss.length){
+    h += `<div class="card"><h2>📋 ผลฟอกเลือด ${ss.length} รอบล่าสุด</h2><div class="chart-wrap"><table>
+      <tr><th>วันที่</th><th>น้ำหนัก</th><th>UF</th><th>Hb</th><th>ESA</th></tr>`;
+    ss.forEach(s=>{
+      const dt = new Date(s.date+'T00:00:00').toLocaleDateString('th-TH',{day:'numeric',month:'short'});
+      h += `<tr><td>${dt}</td><td>${s.pre_weight?s.pre_weight.toFixed(1):'−'}→${s.post_weight?s.post_weight.toFixed(1):'−'}</td>
+        <td>${s.uf?Math.round(s.uf)+' mL':'−'}</td><td>${s.hb?s.hb.toFixed(1):'−'}</td><td>${s.esa?'💉':'−'}</td></tr>`;
+    });
+    h += `</table></div></div>`;
+  }
+
+  /* Health tips */
+  const tips = D.tips||[];
+  if(tips.length){
+    h += `<div class="card"><h2>💡 คำแนะนำสำหรับคุณ</h2>`;
+    tips.forEach(t=>{ h += `<div class="tip">${t.icon} ${esc(t.text)}</div>`; });
+    h += `</div>`;
+  }
+
+  h += `<div class="footer">HD Smart Monitoring — คลินิกระนอง รักษ์ไต<br>
+    ข้อมูลนี้เป็นข้อมูลส่วนบุคคล กรุณาไม่เผยแพร่<br>
+    อัปเดต ${D.generated_at||''}</div>`;
+
+  document.getElementById('app').innerHTML = h;
+}
+
+function svgChart(pts, minY, maxY, targetLow, targetHigh, label){
+  const W=320, H=140, ml=36, mr=10, mt=15, mb=28;
+  const pw=W-ml-mr, ph=H-mt-mb;
+  const lo=Math.min(minY,...pts.map(p=>p.y)), hi=Math.max(maxY,...pts.map(p=>p.y));
+  const sx=i=>ml+i/(pts.length-1)*pw, sy=v=>mt+ph-(v-lo)/(hi-lo)*ph;
+  const tl=Math.max(lo,targetLow), th2=Math.min(hi,targetHigh);
+  let svg=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;max-width:${W}px">`;
+  if(tl<th2) svg+=`<rect x="${ml}" y="${sy(th2)}" width="${pw}" height="${sy(tl)-sy(th2)}" fill="rgba(39,174,96,.1)" rx="4"/>`;
+  /* grid */
+  for(let v=Math.ceil(lo);v<=hi;v+=Math.max(1,Math.round((hi-lo)/5))){
+    const y=sy(v); svg+=`<line x1="${ml}" y1="${y}" x2="${W-mr}" y2="${y}" stroke="var(--border)" stroke-width="0.5"/>`;
+    svg+=`<text x="${ml-4}" y="${y+3}" text-anchor="end" fill="var(--muted)" font-size="9">${v%1?v.toFixed(1):v}</text>`;
+  }
+  /* line + dots */
+  const path = pts.map((p,i)=>`${i?'L':'M'}${sx(i).toFixed(1)},${sy(p.y).toFixed(1)}`).join(' ');
+  svg+=`<path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
+  pts.forEach((p,i)=>{
+    const c = p.y>=targetLow&&p.y<=targetHigh?'var(--success)':(p.y<targetLow?'var(--danger)':'var(--warn)');
+    svg+=`<circle cx="${sx(i)}" cy="${sy(p.y)}" r="4" fill="${c}" stroke="var(--card)" stroke-width="2"/>`;
+    if(i%Math.max(1,Math.floor(pts.length/6))===0||i===pts.length-1){
+      const d=new Date(p.x+'T00:00:00'); const lb=`${d.getDate()}/${d.getMonth()+1}`;
+      svg+=`<text x="${sx(i)}" y="${H-4}" text-anchor="middle" fill="var(--muted)" font-size="8">${lb}</text>`;
+    }
+  });
+  if(targetLow<999) svg+=`<line x1="${ml}" y1="${sy(targetLow)}" x2="${W-mr}" y2="${sy(targetLow)}" stroke="var(--success)" stroke-width="1" stroke-dasharray="4,3"/>`;
+  svg+=`<text x="${ml+2}" y="${mt-4}" fill="var(--muted)" font-size="8">${label}</text></svg>`;
+  return svg;
+}
+
+load();
+</script>
+</body>
+</html>

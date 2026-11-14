@@ -226,6 +226,36 @@ def collect_month(conn, year, month):
         # dialyzer reuse
         r = _q(cur, "SELECT COUNT(*), COALESCE(AVG(reuse_count),0) FROM hd_dialyzer_tracking WHERE status='active'")
         D["dialyzer"] = {"active": r[0][0], "avg_reuse": round(float(r[0][1]), 1)} if r else {}
+        # ── ว้าว #3 additions ──
+        # Fluid Status / BCM: how many assessed in the month, how many OH>2L
+        r = _q(cur, """SELECT COUNT(DISTINCT patient_id),
+                              COUNT(DISTINCT patient_id) FILTER (WHERE oh_pre_l > 2),
+                              COUNT(DISTINCT patient_id) FILTER (WHERE oh_pre_l < -1),
+                              ROUND(AVG(oh_pre_l)::numeric, 2)
+                       FROM hd_fluid_assessments WHERE assessed_at BETWEEN %s AND %s""", (f, l))
+        D["fluid"] = {"assessed": r[0][0], "oh_high": r[0][1], "oh_low": r[0][2], "mean_oh": float(r[0][3]) if r[0][3] else None} if r else {}
+        # Serology screening coverage
+        r = _q(cur, """SELECT COUNT(*) FILTER (WHERE hepatitis_b IS NOT NULL OR hepatitis_c IS NOT NULL),
+                              COUNT(*) FILTER (WHERE hepatitis_b = 'positive'),
+                              COUNT(*) FILTER (WHERE hepatitis_c = 'positive')
+                       FROM (SELECT DISTINCT ON (patient_id) patient_id, hepatitis_b, hepatitis_c FROM hd_lab_results
+                             WHERE patient_id IN (SELECT id FROM hd_patient_mapping WHERE is_active = TRUE)
+                               AND (hepatitis_b IS NOT NULL OR hepatitis_c IS NOT NULL) ORDER BY patient_id, lab_date DESC) sub""")
+        D["serology"] = {"screened": r[0][0], "hbsag_pos": r[0][1], "antihcv_pos": r[0][2]} if r else {}
+        D["serology"]["total"] = D["active_patients"]
+        # IDWG: % of sessions with IDWG > 5% DW
+        r = _q(cur, """SELECT COUNT(*),
+                              COUNT(*) FILTER (WHERE p.dry_weight > 0 AND s.pre_weight > p.dry_weight AND (s.pre_weight - p.dry_weight) / p.dry_weight > 0.05),
+                              COUNT(*) FILTER (WHERE p.dry_weight > 0 AND s.pre_weight > p.dry_weight AND (s.pre_weight - p.dry_weight) / p.dry_weight > 0.03)
+                       FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                       WHERE s.status = 'completed' AND s.session_date BETWEEN %s AND %s AND s.pre_weight IS NOT NULL""", (f, l))
+        D["idwg"] = {"sessions": r[0][0], "over_5pct": r[0][1], "over_3pct": r[0][2]} if r else {}
+        # Equipment contracts
+        r = _q(cur, """SELECT COUNT(*),
+                              COUNT(*) FILTER (WHERE contract_end IS NOT NULL AND contract_end < CURRENT_DATE),
+                              COUNT(*) FILTER (WHERE contract_end IS NOT NULL AND contract_end >= CURRENT_DATE AND contract_end < CURRENT_DATE + 90)
+                       FROM hd_equipment WHERE equipment_type = 'dialysis_machine'""")
+        D["equipment"] = {"total": r[0][0], "expired": r[0][1], "expiring_soon": r[0][2]} if r else {}
     s = D["sessions"]
     D["idh_rate"] = round(D["idh_sessions"] / s["completed"] * 100, 1) if s.get("completed") else None
     return D
@@ -246,6 +276,18 @@ def line_text(D, base_url=""):
          f"💧 ตรวจน้ำ RO {D['water_daily'].get('checks', 0)} ครั้ง (ไม่ผ่าน {D['water_daily'].get('fail', 0)}) · แล็บน้ำ {D['water_lab'].get('tests', 0)}",
          f"⚠️ อุบัติการณ์ {D['incidents'].get('total', 0)} (เปิดอยู่ {D['incidents'].get('open', 0)})",
          f"🤖 ESA Autopilot เสนอ {D['esa_autopilot'].get('proposed', 0)} อนุมัติ {D['esa_autopilot'].get('approved', 0)} · DW เสนอ {D['dw_autopilot'].get('proposed', 0)}"]
+    fl = D.get("fluid", {})
+    if fl.get("assessed"):
+        L.append(f"💧 BCM ตรวจ {fl['assessed']} คน · OH > 2L: {fl.get('oh_high', 0)} · OH < -1L: {fl.get('oh_low', 0)} · เฉลี่ย OH {fl.get('mean_oh', '—')} L")
+    sr = D.get("serology", {})
+    if sr.get("total"):
+        L.append(f"🩸 Serology screening {sr.get('screened', 0)}/{sr['total']} คน · HBsAg+ {sr.get('hbsag_pos', 0)} · Anti-HCV+ {sr.get('antihcv_pos', 0)}")
+    idwg = D.get("idwg", {})
+    if idwg.get("sessions"):
+        L.append(f"💧 IDWG > 5%DW: {idwg['over_5pct']}/{idwg['sessions']} รอบ ({idwg['over_5pct'] / idwg['sessions'] * 100:.0f}%) · > 3%: {idwg['over_3pct']}")
+    eq = D.get("equipment", {})
+    if eq.get("expired") or eq.get("expiring_soon"):
+        L.append(f"🔧 เครื่องฟอก: สัญญาหมด {eq.get('expired', 0)} · หมดใน 90 วัน {eq.get('expiring_soon', 0)}")
     if D["adequacy_list"]:
         L.append(f"🔎 ฟอกไม่พอ (Kt/V <1.2) {len(D['adequacy_list'])} คน — ดูข้อเสนอที่ {base_url}/hd/adequacy")
     L.append("━━━━━━━━━━━━")
@@ -291,7 +333,11 @@ def pdf_bytes(D, clinic_name="คลินิกระนอง รักษ์�
                    ["ผลแล็บน้ำ (เพาะเชื้อ/endotoxin)", f"{D['water_lab'].get('tests', 0)} รายการ", f"ผ่าน {D['water_lab'].get('pass', 0)}"],
                    ["อุบัติการณ์", f"{D['incidents'].get('total', 0)}", f"ยังเปิด {D['incidents'].get('open', 0)}"],
                    ["Dialyzer reuse", f"{D['dialyzer'].get('active', 0)} ชิ้นใช้งาน", f"เฉลี่ย {D['dialyzer'].get('avg_reuse', 0)} ครั้ง"],
-                   ["Autopilot (เสนอ-แพทย์ตัดสิน)", f"ESA เสนอ {D['esa_autopilot'].get('proposed', 0)} / อนุมัติ {D['esa_autopilot'].get('approved', 0)}", f"DW เสนอ {D['dw_autopilot'].get('proposed', 0)} / อนุมัติ {D['dw_autopilot'].get('approved', 0)}"]],
+                   ["Autopilot (เสนอ-แพทย์ตัดสิน)", f"ESA เสนอ {D['esa_autopilot'].get('proposed', 0)} / อนุมัติ {D['esa_autopilot'].get('approved', 0)}", f"DW เสนอ {D['dw_autopilot'].get('proposed', 0)} / อนุมัติ {D['dw_autopilot'].get('approved', 0)}"],
+                   ["BCM / Fluid Status", f"ตรวจ {D.get('fluid',{}).get('assessed',0)} คน", f"OH>2L: {D.get('fluid',{}).get('oh_high',0)} · OH<-1L: {D.get('fluid',{}).get('oh_low',0)} · เฉลี่ย OH {D.get('fluid',{}).get('mean_oh','—')} L"],
+                   ["HBsAg / Anti-HCV", f"ผลครบ {D.get('serology',{}).get('screened',0)}/{D.get('serology',{}).get('total',0)} คน", f"HBsAg+ {D.get('serology',{}).get('hbsag_pos',0)} · HCV+ {D.get('serology',{}).get('antihcv_pos',0)}"],
+                   ["IDWG > 5% DW", f"{D.get('idwg',{}).get('over_5pct',0)}/{D.get('idwg',{}).get('sessions',0)} รอบ", f"เป้า < 5% (> 3%: {D.get('idwg',{}).get('over_3pct',0)})"],
+                   ["สัญญาเครื่องฟอก", f"ทั้งหมด {D.get('equipment',{}).get('total',0)} เครื่อง", f"สัญญาหมดอายุ {D.get('equipment',{}).get('expired',0)} · จะหมดใน 90 วัน {D.get('equipment',{}).get('expiring_soon',0)}"]],
                   [62 * mm, 62 * mm, 58 * mm]))
     el.append(Paragraph("2. เส้นฟอกเลือด (ผู้ป่วย active)", st["h2"]))
     acc = D["access"] or {}

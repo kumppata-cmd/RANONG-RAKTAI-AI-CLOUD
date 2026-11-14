@@ -357,7 +357,9 @@ function idhLine(b){
   const r = b.idh_risk; if(!r || r.level==='low') return '';
   const col = r.level==='high' ? 'var(--danger)' : 'var(--warning)';
   const why = (r.factors||[]).map(f=>f.text).join(' · ');
-  return `<div class="bed-chk" style="margin-top:3px;color:${col};font-weight:700" title="${why.replace(/"/g,'')}">⚡ เสี่ยง IDH ${r.score}%${r.level==='high'?' — วัด BP ทุก 15 นาที':''}</div>`;
+  const recs = (r.recommendations||[]).map(x=>`${x.icon} ${x.text}`).join('\n');
+  const tip = (why + (recs ? '\n─────\n' + recs : '')).replace(/"/g,'');
+  return `<div class="bed-chk" style="margin-top:3px;color:${col};font-weight:700" title="${tip}">⚡ เสี่ยง IDH ${r.score}%${r.level==='high'?' — วัด BP ทุก 15 นาที':''}</div>`;
 }
 function seroBadge(sr, size){
   if(!sr) return '';

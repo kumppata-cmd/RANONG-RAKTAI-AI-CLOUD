@@ -90,9 +90,28 @@ def score(features):
 
     pts = min(100, pts)
     level = "high" if pts >= 60 else ("moderate" if pts >= 35 else "low")
-    advice = {"high": "วัด BP ทุก 15 นาที · เตรียมแจ้งแพทย์หาก SBP ลดอีก", "moderate": "วัด BP ทุก 30 นาที · สังเกตอาการ",
+    # Personalized recommendations based on active risk factors
+    recs = []
+    factor_codes = {f["text"].split()[0] for f in factors}
+    if any("UF" in f["text"] and "mL/kg/h" in f["text"] for f in factors):
+        recs.append({"icon": "⏱", "text": "พิจารณายืดเวลาฟอกเพิ่ม 30 นาที เพื่อลด UF rate", "priority": "high"})
+        recs.append({"icon": "🌡️", "text": "ใช้น้ำยาอุณหภูมิ 35.5°C (cool dialysate) ช่วยคงความดัน", "priority": "medium"})
+    if any("IDWG" in f["text"] for f in factors):
+        recs.append({"icon": "💧", "text": "แนะนำผู้ป่วยจำกัดน้ำ < 1 ลิตร/วัน ระหว่างวันหยุดฟอก", "priority": "medium"})
+    if any("ตกต่อเนื่อง" in f["text"] or "ลดลง" in f["text"] for f in factors):
+        recs.append({"icon": "📊", "text": "พิจารณา sodium profiling หรือลด UF rate ใน 2 ชม.สุดท้าย", "priority": "high"})
+    if any("SBP ปัจจุบัน" in f["text"] for f in factors):
+        recs.append({"icon": "🔔", "text": "เตรียม NSS 100–200 mL · จัดท่า Trendelenburg ถ้า SBP < 90", "priority": "high"})
+    if any("IDH" in f["text"] and "ครั้ง" in f["text"] for f in factors):
+        recs.append({"icon": "📋", "text": "ผู้ป่วยมีประวัติ IDH ซ้ำ — ทบทวน DW กับผล BCM อีกครั้ง", "priority": "medium"})
+    if any("SBP ก่อนฟอก" in f["text"] for f in factors):
+        recs.append({"icon": "💊", "text": "พิจารณางดยาลดความดันก่อนฟอก (ถ้ายังไม่ได้งด)", "priority": "medium"})
+    if not recs and level != "low":
+        recs.append({"icon": "👁️", "text": "เฝ้าระวังทั่วไป — วัด BP ตามกำหนด", "priority": "low"})
+    advice = {"high": "⚠️ วัด BP ทุก 15 นาที · เตรียมแจ้งแพทย์หาก SBP ลดอีก",
+              "moderate": "วัด BP ทุก 30 นาที · สังเกตอาการหน้ามืด/คลื่นไส้",
               "low": ""}[level]
-    return {"score": pts, "level": level, "factors": factors, "advice": advice}
+    return {"score": pts, "level": level, "factors": factors, "advice": advice, "recommendations": recs}
 
 
 def features_for(cur, session_id):
