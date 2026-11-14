@@ -1948,6 +1948,37 @@ def ops_backup_run():
         return jsonify({"error": str(e)}), 500
 
 
+@hd_bp.route("/ops/status", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def ops_status_api():
+    """กระดานสถานะงานอัตโนมัติ + LINE (ops watchdog)."""
+    import os
+    from . import ops_status as ops
+    if request.args.get("refresh_quota"):
+        ops.check_line_quota(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip())
+    s = ops.snapshot()
+    s["text"] = ops.line_text(s)
+    return jsonify(s)
+
+
+@hd_bp.route("/ops/status/test-line", methods=["POST"])
+@require_role("physician", "admin")
+def ops_status_test_line():
+    """ส่งข้อความทดสอบถึง alert_recipients แล้วรายงานผลจริงจาก LINE API."""
+    from flask import current_app
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    ids = [r.strip() for r in (get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")).split(",") if r.strip()]
+    if not push_fn or not ids:
+        return jsonify({"ok": False, "error": "LINE ไม่พร้อม หรือยังไม่ตั้ง alert_recipients"}), 400
+    from . import ops_status as ops
+    now = (datetime.now(timezone.utc) + timedelta(hours=7)).strftime("%d/%m %H:%M")
+    sent = sum(1 for u in ids if push_fn(u, f"📨 ทดสอบระบบแจ้งเตือน {now} — ถ้าได้รับข้อความนี้ แสดงว่า LINE ส่งได้ปกติ"))
+    snap = ops.snapshot()
+    log_action(user_id=g.get("hd_user_id"), action="ops.test_line", resource_type="ops", resource_id=None,
+               new_values={"sent": sent, "recipients": len(ids)}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": sent > 0, "sent": sent, "recipients": len(ids), "line_last_error": snap["line"].get("last_error")})
+
+
 @hd_bp.route("/ops/backup/status", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def ops_backup_status():

@@ -492,16 +492,14 @@ def _claim_once(app, job, day):
 
 
 def _start_daily_reminder_scheduler(app):
-    """Start background thread that sends pre-HD reminders daily at 18:00."""
+    """Start the background scheduler thread (every 5 min) + a watchdog that
+    restarts it if it stops ticking (ops_status, 14 Nov 2026)."""
     import threading
     import time
     from datetime import datetime
+    from . import ops_status as ops
 
-    def _reminder_loop():
-        last_sent_date = None
-        last_export_date = None
-        last_brief_date = None
-        time.sleep(90)   # let server.py finish wiring storage / LINE
+    def _boot_tasks():
         try:
             global _BACKUP_STORAGE_OBJ
             _BACKUP_STORAGE_OBJ = app.config.get("STORAGE_OBJ")
@@ -528,43 +526,47 @@ def _start_daily_reminder_scheduler(app):
         try:
             with app.app_context():
                 from .blueprint import announce_deploy_once
-                announce_deploy_once()
+                ops.run_guarded("deploy_announce", announce_deploy_once, timeout=60)
         except Exception as e:
             logger.warning("deploy announce: %s", e)
+
+    def _loop(first=True):
+        from datetime import timezone as _tz, timedelta as _td
+        _thai_tz = _tz(_td(hours=7))
+        last_sent_date = None
+        last_export_date = None
+        last_brief_date = None
+        if first:
+            time.sleep(90)   # let server.py finish wiring storage / LINE
+            _boot_tasks()
         lab_tick = 0
         while True:
             try:
-                from datetime import timezone as _tz, timedelta as _td
-                _thai_tz = _tz(_td(hours=7))
+                ops.tick()
                 now = datetime.now(_thai_tz)
                 # Every 30 min (first pass right away): lab documents → hd_lab_docs
                 if lab_tick % 6 == 0:
                     with app.app_context():
-                        try:
-                            from .blueprint import run_lab_sync
-                            st = run_lab_sync()
-                            if st.get("inserted"):
-                                logger.info("Lab sync: %s", st)
-                        except Exception as ex:
-                            logger.warning("Lab sync failed: %s", ex)
+                        from .blueprint import run_lab_sync
+                        st = ops.run_guarded("lab_sync", run_lab_sync, timeout=180) or {}
+                        if st.get("inserted"):
+                            logger.info("Lab sync: %s", st)
                         # ว้าว #3: new Hb → ESA proposals (once per hour window, 06:00–20:00 Thai)
-                        try:
-                            if lab_tick % 12 == 0 and 6 <= now.hour <= 20:
-                                from .blueprint import run_esa_autopilot
-                                r = run_esa_autopilot()
-                                if r.get("created"):
-                                    logger.info("ESA autopilot: %s proposals", r["created"])
-                        except Exception as ex:
-                            logger.warning("ESA autopilot failed: %s", ex)
+                        if lab_tick % 12 == 0 and 6 <= now.hour <= 20:
+                            from .blueprint import run_esa_autopilot
+                            r = ops.run_guarded("esa_autopilot", run_esa_autopilot, timeout=180) or {}
+                            if r.get("created"):
+                                logger.info("ESA autopilot: %s proposals", r["created"])
                         # ว้าว รอบ 2 #1: Dry Weight review — once a day at the 07:00 tick
-                        try:
-                            if lab_tick % 12 == 0 and now.hour == 7:
-                                from .blueprint import run_dw_autopilot
-                                r = run_dw_autopilot()
-                                if r.get("created"):
-                                    logger.info("DW autopilot: %s proposals", r["created"])
-                        except Exception as ex:
-                            logger.warning("DW autopilot failed: %s", ex)
+                        if lab_tick % 12 == 0 and now.hour == 7:
+                            from .blueprint import run_dw_autopilot
+                            r = ops.run_guarded("dw_autopilot", run_dw_autopilot, timeout=180) or {}
+                            if r.get("created"):
+                                logger.info("DW autopilot: %s proposals", r["created"])
+                        # LINE monthly quota — once an hour (and on the first pass)
+                        if lab_tick % 12 == 0:
+                            import os as _os
+                            ops.check_line_quota(_os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip())
                 lab_tick += 1
                 # Send at 18:00 Thai time
                 if now.hour == 18 and now.minute < 5 and last_sent_date != now.date():
@@ -577,60 +579,51 @@ def _start_daily_reminder_scheduler(app):
                             registry = app.config.get("MASTER_REGISTRY")
                             if db_url and push_fn:
                                 from .pre_hd_reminder import send_pre_hd_reminders
-                                result = send_pre_hd_reminders(push_fn, db_url, registry)
+                                result = ops.run_guarded("pre_hd_reminder", send_pre_hd_reminders, push_fn, db_url, registry, timeout=300)
                                 logger.info("Daily pre-HD reminder: %s", result)
                             # ว้าว รอบ 2 #3: tomorrow's bed plan → nurse group
-                            try:
-                                from .blueprint import push_tomorrow_schedule
-                                logger.info("Tomorrow bed plan pushed: %s", push_tomorrow_schedule())
-                            except Exception as ex:
-                                logger.warning("Bed plan push failed: %s", ex)
+                            from .blueprint import push_tomorrow_schedule
+                            logger.info("Tomorrow bed plan pushed: %s", ops.run_guarded("bed_plan_push", push_tomorrow_schedule, timeout=120))
                 # 07:30 Thai time: Morning Brief → physician LINE (B7)
                 if now.hour == 7 and now.minute >= 30 and last_brief_date != now.date():
                     last_brief_date = now.date()
                     if _claim_once(app, "morning_brief", now.date()):
                         with app.app_context():
-                            try:
-                                from .blueprint import run_morning_brief
-                                res = run_morning_brief(trigger="scheduled")
-                                logger.info("Morning brief: %s", res)
-                            except Exception as ex:
-                                logger.error("Morning brief failed: %s", ex)
+                            from .blueprint import run_morning_brief
+                            logger.info("Morning brief: %s", ops.run_guarded("morning_brief", run_morning_brief, trigger="scheduled", timeout=180))
                 # Go-Live R1: 23:00 Thai time — full DB backup (+ restore test on Mondays)
+                # Runs in its own thread with a timeout so a slow dump/upload can never block the loop.
                 if now.hour == 23 and now.minute < 30 and _claim_once(app, "db_backup", now.date()):
                     with app.app_context():
-                        try:
-                            from .blueprint import run_db_backup
-                            st = run_db_backup(trigger="scheduled", restore_test=(now.weekday() == 0))
-                            logger.info("DB backup: %s tables %s rows gcs=%s drive=%s verify=%s",
-                                        st.get("tables"), st.get("rows"), bool(st.get("gcs")), st.get("drive"), st.get("verify"))
-                        except Exception as ex:
-                            logger.error("DB backup failed: %s", ex)
+                        from .blueprint import run_db_backup
+                        st = ops.run_guarded("db_backup", run_db_backup, trigger="scheduled",
+                                             restore_test=(now.weekday() == 0), timeout=900) or {}
+                        logger.info("DB backup: %s tables %s rows gcs=%s drive=%s verify=%s",
+                                    st.get("tables"), st.get("rows"), bool(st.get("gcs")), st.get("drive"), st.get("verify"))
                 # 22:30 Thai time: export today's records (CSV + PDFs) to GCS
                 if now.hour == 22 and now.minute >= 30 and last_export_date != now.date():
                     last_export_date = now.date()
                     if _claim_once(app, "daily_export", now.date()):
                         with app.app_context():
-                            try:
-                                from .blueprint import run_daily_export
-                                res = run_daily_export(now.date(), trigger="scheduled")
-                                logger.info("Daily record export: ok=%s failed=%s folder=%s",
-                                            res.get("ok"), res.get("failed"), res.get("folder"))
-                            except Exception as ex:
-                                logger.error("Daily record export failed: %s", ex)
+                            from .blueprint import run_daily_export
+                            res = ops.run_guarded("daily_export", run_daily_export, now.date(), trigger="scheduled", timeout=900) or {}
+                            logger.info("Daily record export: ok=%s failed=%s folder=%s",
+                                        res.get("ok"), res.get("failed"), res.get("folder"))
                     # ว้าว รอบ 2 #2: 1st of the month → quality report for the previous month
                     if now.day == 1 and _claim_once(app, "quality_report", now.date()):
                         with app.app_context():
-                            try:
-                                from .blueprint import run_quality_report
-                                res = run_quality_report(trigger="scheduled")
-                                logger.info("Quality report %s: drive=%s line=%s", res.get("month"), res.get("drive"), res.get("line_sent"))
-                            except Exception as ex:
-                                logger.error("Quality report failed: %s", ex)
+                            from .blueprint import run_quality_report
+                            res = ops.run_guarded("quality_report", run_quality_report, trigger="scheduled", timeout=600) or {}
+                            logger.info("Quality report %s: drive=%s line=%s", res.get("month"), res.get("drive"), res.get("line_sent"))
             except Exception as e:
                 logger.error("Reminder scheduler error: %s", e)
             time.sleep(300)  # Check every 5 minutes
 
-    t = threading.Thread(target=_reminder_loop, daemon=True, name="hd-reminder")
-    t.start()
-    logger.info("HD daily reminder scheduler started (18:00 Thai time)")
+    def _spawn(first=True):
+        t = threading.Thread(target=_loop, kwargs={"first": first}, daemon=True, name="hd-reminder")
+        t.start()
+        return t
+
+    _spawn(True)
+    ops.start_watchdog(lambda: _spawn(False))
+    logger.info("HD scheduler started (5-min loop + watchdog)")

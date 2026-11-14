@@ -12844,6 +12844,15 @@ def verify_signature(body: bytes, signature: str) -> bool:
     return hmac.compare_digest(expected, signature)
 
 
+def _ops_line_result(ok, status=None, body=""):
+    """บันทึกผลส่ง LINE ลงกระดานสถานะ (ops_status) — ไม่กระทบการส่ง"""
+    try:
+        from hd_module import ops_status as _ops
+        _ops.line_result(ok, status, body)
+    except Exception:
+        pass
+
+
 def push_message(user_id: str, text: str) -> bool:
     """ส่งข้อความ Push ไปยัง LINE user.
 
@@ -12880,6 +12889,7 @@ def push_message(user_id: str, text: str) -> bool:
         )
         resp.raise_for_status()
         logger.info(f"Push message สำเร็จ (status={resp.status_code})")
+        _ops_line_result(True)
         return True
     except Exception as e:
         status = getattr(getattr(e, "response", None), "status_code", "-")
@@ -12893,6 +12903,7 @@ def push_message(user_id: str, text: str) -> bool:
             f"[PUSH] Push message ไม่สำเร็จ: {type(e).__name__} "
             f"(status={status}) body={resp_body}"
         )
+        _ops_line_result(False, status, resp_body or type(e).__name__)
         return False
 
 
@@ -12939,13 +12950,20 @@ def push_messages(user_id: str, messages: list[dict]) -> bool:
             "Push messages สำเร็จ (%d msgs, status=%d)",
             len(messages), resp.status_code,
         )
+        _ops_line_result(True)
         return True
     except Exception as e:
         status = getattr(getattr(e, "response", None), "status_code", "-")
+        _body = ""
+        try:
+            _body = getattr(e, "response", None).text[:200]
+        except Exception:
+            pass
         logger.error(
-            "[PUSH] Push messages ไม่สำเร็จ: %s (status=%s)",
-            type(e).__name__, status,
+            "[PUSH] Push messages ไม่สำเร็จ: %s (status=%s) body=%s",
+            type(e).__name__, status, _body,
         )
+        _ops_line_result(False, status, _body or type(e).__name__)
         return False
 
 
@@ -19636,6 +19654,23 @@ def health():
         health_info["database"] = db.health()
     elif db:
         health_info["database"] = {"status": db.status}
+
+    # ── งานอัตโนมัติ + LINE (ops watchdog, 14 พ.ย. 2569) — ไม่มี id/เนื้อหาข้อความ ──
+    try:
+        from hd_module import ops_status as _ops
+        _snap = _ops.snapshot()
+        health_info["ops"] = {
+            "healthy": _snap["healthy"],
+            "problems": _snap["problems"],
+            "scheduler_tick_age_sec": _snap["tick_age_sec"],
+            "scheduler_restarts": _snap["restarts"],
+            "stuck_jobs": _snap["stuck_jobs"],
+            "line_last_ok": _snap["line"].get("last_ok"),
+            "line_last_error": _snap["line"].get("last_error"),
+            "line_quota": _snap["line"].get("quota"),
+        }
+    except Exception:
+        pass
 
     return jsonify(health_info), http_status
 

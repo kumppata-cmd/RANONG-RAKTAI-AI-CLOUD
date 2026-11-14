@@ -20,7 +20,10 @@ name: Production Health Monitor
 
 on:
   schedule:
+    # GitHub รัน cron แบบ best-effort (บางวันได้แค่ไม่กี่ครั้ง) — ตั้งถี่ไว้ให้ได้มากที่สุด
+    # และใช้ UptimeRobot (ฟรี, ทุก 5 นาที จริง) ยิง /health เป็นตัวหลัก ดู GO-LIVE-CHECKLIST
     - cron: "*/5 * * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -61,6 +64,11 @@ jobs:
             check '.external_ai_allowed'   'false'     'external_ai_allowed'
             check '.accepting_documents'   'true'      'accepting_documents'
             check '.status'                'running'   'status'
+            # งานอัตโนมัติ + LINE (ops watchdog): scheduler ต้องเดินอยู่ และ LINE ต้องส่งได้
+            ops_ok=$(echo "$json" | jq -r '.ops.healthy // empty')
+            if [ "$ops_ok" = "false" ]; then
+              while IFS= read -r line; do problems+=("งานอัตโนมัติ: $line"); done < <(echo "$json" | jq -r '.ops.problems[]?')
+            fi
             docs=$(echo "$json" | jq -r '.document_search.indexed_documents // 0')
             echo "indexed_documents=$docs" >> "$GITHUB_OUTPUT"
           fi

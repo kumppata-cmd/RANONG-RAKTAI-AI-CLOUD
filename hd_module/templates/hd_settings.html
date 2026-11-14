@@ -244,6 +244,20 @@
   <div id="backupStatus" style="font-size:.8rem;margin-top:8px;color:var(--fg-muted)">กำลังโหลดสถานะ…</div>
 </div>
 
+<!-- Ops watchdog: สถานะงานอัตโนมัติ + LINE (14 พ.ย. 2569) -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🩺 สถานะงานอัตโนมัติ &amp; การส่ง LINE</span>
+  </div>
+  <div class="setting-desc">ตัวจับเวลาในระบบเดินทุก 5 นาที (มี watchdog รีสตาร์ตให้เองถ้าหยุด) · งานทุกตัวรายงานผลล่าสุดที่นี่ · ถ้า LINE ส่งไม่ได้ (เช่น ครบโควตาข้อความรายเดือน) จะเห็นสาเหตุจริงจาก LINE ตรงนี้</div>
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
+    <button class="btn btn-secondary" onclick="loadOpsStatus(true)">🔄 ตรวจสอบตอนนี้</button>
+    <button class="btn btn-secondary" onclick="opsTestLine()">📨 ส่งข้อความทดสอบถึงแพทย์</button>
+    <span id="opsHeadline" style="font-weight:700"></span>
+  </div>
+  <div id="opsStatus" style="font-size:.8rem;margin-top:8px;color:var(--fg-muted)">กำลังโหลด…</div>
+</div>
+
 <!-- Smart Bed Scheduler -->
 <div class="card setting-card">
   <div class="card-header">
@@ -331,6 +345,36 @@ async function runBackup(restore){
     const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status); loadBackupStatus(); }catch(e){ el.textContent = '❌ ' + (e.message||e); }
 }
 document.addEventListener('DOMContentLoaded', loadBackupStatus);
+
+/* Ops watchdog */
+const JOB_TH = {lab_sync:'ซิงก์ผลแล็บ (ทุก 30 นาที)', esa_autopilot:'ESA Autopilot (ทุกชั่วโมง 06–20)', dw_autopilot:'Dry Weight Autopilot (07:00)',
+  morning_brief:'Morning Brief (07:30)', pre_hd_reminder:'เตือนก่อนฟอกพรุ่งนี้ (18:00)', bed_plan_push:'แผนเตียงพรุ่งนี้ (18:00)',
+  db_backup:'สำรองฐานข้อมูล (23:00)', daily_export:'สำเนาบันทึกประจำวัน (22:30)', quality_report:'รายงานคุณภาพ (วันที่ 1)', deploy_announce:'แจ้ง 🚀 Deploy'};
+async function loadOpsStatus(refresh){
+  const el = document.getElementById('opsStatus'), hd = document.getElementById('opsHeadline'); if(!el) return;
+  try{ const r = await hdFetch('/hd/api/v1/ops/status' + (refresh ? '?refresh_quota=1' : '')); const s = await r.json(); if(!r.ok) throw new Error(s.error||r.status);
+    hd.textContent = s.healthy ? '✅ ปกติ' : '⚠️ มีปัญหา'; hd.style.color = s.healthy ? 'var(--success,#16a34a)' : 'var(--danger)';
+    const fmt = t => t ? String(t).replace('T',' ').slice(5,16) : '-';
+    let h = '';
+    if(s.problems && s.problems.length) h += '<div style="color:var(--danger);font-weight:600;margin-bottom:6px">' + s.problems.map(p=>'• '+p).join('<br>') + '</div>';
+    h += `<div>⏱ ตัวจับเวลา: เดินล่าสุด ${s.tick_age_sec==null?'ยังไม่เริ่ม':Math.floor(s.tick_age_sec/60)+' นาทีก่อน'} · รอบที่ ${s.tick_count} · รีสตาร์ตอัตโนมัติ ${s.restarts} ครั้ง</div>`;
+    const L = s.line||{}; const q = L.quota||{};
+    h += `<div>📨 LINE: ส่งสำเร็จล่าสุด ${fmt(L.last_ok)} (สำเร็จ ${L.ok_count||0} · ล้มเหลว ${L.fail_count||0})` + (L.last_error ? ` · <span style="color:var(--danger)">ล้มเหลวล่าสุด ${fmt(L.last_error_at)}: ${L.last_error}</span>` : '') + '</div>';
+    if(q.value) h += `<div>📊 โควตา LINE เดือนนี้: ใช้ไป <b>${q.used??'?'}</b> / ${q.value} ข้อความ (${q.type||''})` + (L.quota_exhausted ? ' <span style="color:var(--danger);font-weight:700">— ครบโควตา ส่งไม่ได้จนกว่าจะขึ้นเดือนใหม่หรืออัปเกรดแพ็กเกจ</span>' : '') + '</div>';
+    const jobs = s.jobs||{}; const keys = Object.keys(JOB_TH).concat(Object.keys(jobs).filter(k=>!JOB_TH[k]));
+    h += '<table style="margin-top:6px;border-collapse:collapse;font-size:.78rem"><tr><th style="text-align:left;padding:2px 8px 2px 0">งาน</th><th style="text-align:left;padding:2px 8px">รันล่าสุด</th><th style="text-align:left;padding:2px 8px">ผล</th></tr>' +
+      keys.map(k=>{const j=jobs[k]; if(!j) return `<tr><td style="padding:2px 8px 2px 0">${JOB_TH[k]||k}</td><td style="padding:2px 8px;color:var(--fg-muted)">ยังไม่ถึงรอบ</td><td></td></tr>`;
+        const st = j.running_since ? '⏳ กำลังทำ' : (j.ok ? '✅' : '❌');
+        return `<tr><td style="padding:2px 8px 2px 0">${JOB_TH[k]||k}</td><td style="padding:2px 8px">${fmt(j.last_run||j.running_since)}${j.duration_s!=null?' ('+j.duration_s+' วิ)':''}</td><td style="padding:2px 8px">${st} <span style="color:var(--fg-muted)">${j.detail||''}</span></td></tr>`;}).join('') + '</table>';
+    el.innerHTML = h; }catch(e){ el.textContent = 'โหลดสถานะไม่ได้: ' + (e.message||e); }
+}
+async function opsTestLine(){
+  const el = document.getElementById('opsStatus'); el.textContent = 'กำลังส่งข้อความทดสอบ…';
+  try{ const r = await hdFetch('/hd/api/v1/ops/status/test-line', {method:'POST'}); const d = await r.json();
+    alert(d.ok ? `ส่งสำเร็จ ${d.sent}/${d.recipients} คน — ดูใน LINE` : `ส่งไม่สำเร็จ: ${d.error || d.line_last_error || 'ไม่ทราบสาเหตุ'}`); }catch(e){ alert('ผิดพลาด: ' + (e.message||e)); }
+  loadOpsStatus(false);
+}
+document.addEventListener('DOMContentLoaded', ()=>loadOpsStatus(false));
 
 /* Load current settings */
 (function loadSettings(){
