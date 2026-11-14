@@ -348,6 +348,11 @@ function sparkline(b){
   const last = t[t.length-1], col = last < 90 ? 'var(--danger)' : (t[0]-last >= 20 ? 'var(--warning)' : 'var(--fg-muted)');
   return `<svg class="bed-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-label="SBP trend"><polyline fill="none" stroke="${col}" stroke-width="1.5" points="${pts}"/><circle cx="${w}" cy="${h - ((last-mn)/(mx-mn||1))*(h-2) - 1}" r="2" fill="${col}"/></svg>`;
 }
+function ufWatchLine(b){
+  const u = b.uf_watch; if(!u || !u.flag || u.flag==='ok' || u.flag==='no_goal') return '';
+  const col = u.flag==='high_rate' ? 'var(--danger)' : 'var(--warning)';
+  return `<div class="bed-chk" style="margin-top:3px;color:${col};font-weight:700" title="${(u.text||'').replace(/"/g,'')}">${u.flag_th}${u.behind_ml>100?' −'+u.behind_ml+' mL':''}${u.need_rate_kg!=null&&(u.flag==='high_rate'||u.flag==='caution')?' · ต้องใช้ '+u.need_rate_kg+' mL/kg/ชม.':''}</div>`;
+}
 function idhLine(b){
   const r = b.idh_risk; if(!r || r.level==='low') return '';
   const col = r.level==='high' ? 'var(--danger)' : 'var(--warning)';
@@ -537,7 +542,7 @@ function renderBeds(beds){
         filterContent = va ? `<span class="bed-access ${vaClass(va)}" style="font-size:.75rem;padding:3px 10px;">${va}</span>` : '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่ระบุ VA</span>';
         break;
       default:
-        filterContent = `${dialyzerBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${idhLine(b)}${checklist(b)}${labLine(b)}`;
+        filterContent = `${dialyzerBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${ufWatchLine(b)}${idhLine(b)}${checklist(b)}${labLine(b)}`;
     }
     if(vitalAgeMin(b) !== null && vitalAgeMin(b) >= VITAL_DUE_MIN && (b.status==='active')) card.classList.add('vital-overdue');
 
@@ -965,7 +970,7 @@ function fetchAllRounds(){
             <div class="bed-hn" style="font-size:.6rem;">${b.patient_hn?'HN '+b.patient_hn:''}</div>
             ${extraLine}
             ${(b.status==='critical'||b.status==='warning') ? '<div style="font-size:.62rem;font-weight:700;color:'+(b.status==='critical'?'var(--danger)':'var(--warning)')+';margin-top:2px">'+(b.status==='critical'?'🔴 ':'🟡 ')+(b.alert_reason||'มีการแจ้งเตือน')+'</div>' : ''}
-            ${vitalAge(b)}${ufBar(b)}${idhLine(b)}${labLine(b)}
+            ${vitalAge(b)}${ufBar(b)}${ufWatchLine(b)}${idhLine(b)}${labLine(b)}
           `;
           grid.appendChild(card);
         });

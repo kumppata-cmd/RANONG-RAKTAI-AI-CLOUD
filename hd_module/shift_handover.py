@@ -42,13 +42,14 @@ def generate_handover_summary(db_url: str, shift: str = "morning") -> dict:
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT s.bed_number, p.patient_name, p.hn, s.status,
-                       s.started_at, s.uf_goal,
+                       s.started_at, s.uf_goal, s.id,
                        (SELECT sbp||'/'||dbp FROM hd_vital_signs
                         WHERE session_id=s.id AND sbp>0
                         ORDER BY recorded_at DESC LIMIT 1) as last_bp,
                        (SELECT heart_rate FROM hd_vital_signs
                         WHERE session_id=s.id AND heart_rate>0
-                        ORDER BY recorded_at DESC LIMIT 1) as last_hr
+                        ORDER BY recorded_at DESC LIMIT 1) as last_hr,
+                       p.dry_weight
                 FROM hd_sessions s
                 JOIN hd_patient_mapping p ON p.id = s.patient_id
                 WHERE s.status = 'in_progress'
@@ -60,11 +61,19 @@ def generate_handover_summary(db_url: str, shift: str = "morning") -> dict:
                     mins = (datetime.now(timezone.utc) - r[4].replace(
                         tzinfo=timezone.utc)).total_seconds() / 60
                     elapsed = f"{int(mins//60)}:{int(mins%60):02d}"
-                result["active_beds"].append({
+                item = {
                     "bed": r[0], "name": r[1], "hn": r[2],
                     "elapsed": elapsed, "uf_goal": r[5],
-                    "last_bp": r[6] or "-", "last_hr": r[7] or "-",
-                })
+                    "last_bp": r[7] or "-", "last_hr": r[8] or "-",
+                }
+                # UF Watch (สรุปเวรบอกว่าเตียงไหน UF ช้า/ยังไม่บันทึก/อัตราเกิน)
+                try:
+                    from .uf_watch import evaluate, latest_record
+                    rem, at = latest_record(cur, r[6])
+                    item["uf"] = evaluate(r[5], rem, r[4], 4.0, r[9], at)
+                except Exception:
+                    item["uf"] = None
+                result["active_beds"].append(item)
 
         # Completed today
         with conn.cursor() as cur:
@@ -119,6 +128,15 @@ def generate_handover_summary(db_url: str, shift: str = "morning") -> dict:
                 )
         else:
             msg_lines.append("🟢 ไม่มีเตียงกำลังฟอก")
+
+        try:
+            from .uf_watch import handover_lines
+            uf_lines = handover_lines(result["active_beds"])
+            if uf_lines:
+                msg_lines.append("")
+                msg_lines.extend(uf_lines)
+        except Exception:
+            pass
 
         if result["completed_beds"]:
             msg_lines.append(f"\n✅ เสร็จแล้ว {len(result['completed_beds'])} เตียง")

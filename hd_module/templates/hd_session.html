@@ -319,6 +319,9 @@
         <div class="progress-bar" id="ufProgressBar" style="width:0%;background:var(--success);">0%</div>
       </div>
       <p style="font-size:.8rem;color:var(--fg-muted);margin-top:6px;">UF Rate: <strong id="ufRate">-</strong> mL/hr | Remaining: <strong id="ufRemaining">-</strong> mL</p>
+      <div id="ufWatchLine" style="font-size:.8rem;margin-top:4px;font-weight:700"></div>
+      <svg id="ufChart" viewBox="0 0 320 110" style="width:100%;max-width:520px;height:auto;margin-top:8px;display:none" aria-label="UF จริง vs แผน"></svg>
+      <div id="ufChartNote" style="font-size:.68rem;color:var(--fg-muted);display:none">เส้นประ = แผน (เส้นตรงถึงเป้า) · จุด = UF ที่บันทึก · สีส้ม = ช้ากว่าแผน</div>
     </div>
   </div>
 
@@ -1059,6 +1062,8 @@ function loadExistingSession(sid){
           .then(ud=>{
             if(ud.uf_goal) document.getElementById('ufGoal').textContent = ud.uf_goal;
             let lastUf = 0, lastRate = 0, lastRemaining = 0;
+            _ufRecords = (ud.records||[]).map(u=>({t:u.recorded_at, removed:u.uf_removed})).filter(x=>x.t && x.removed!=null);
+            drawUfChart();
             (ud.records||[]).forEach(u=>{
               if(u.uf_removed > lastUf) lastUf = u.uf_removed;
               if(u.uf_removed > _lastUfRemoved) _lastUfRemoved = u.uf_removed;
@@ -1250,6 +1255,38 @@ function ackAlert(alertId){
 }
 setInterval(loadSessionAlerts, 60000);
 
+/* ── 📈 UF จริง vs แผน (ข้อ 2) ── */
+let _ufRecords = [];
+function drawUfChart(){
+  const svg = document.getElementById('ufChart'), note = document.getElementById('ufChartNote'); if(!svg) return;
+  const goal = parseInt(document.getElementById('ufGoal').textContent) || sessionData.uf_goal || 0;
+  const dur = parseFloat(sessionData.duration_hours) || 4;
+  const st = sessionData.start_time ? new Date(sessionData.start_time).getTime() : null;
+  if(!goal || !st){ svg.style.display='none'; note.style.display='none'; return; }
+  const W=320, H=110, L=34, R=8, T=8, B=22, pw=W-L-R, ph=H-T-B;
+  const maxY = Math.max(goal, ...(_ufRecords.map(r=>r.removed))) * 1.05;
+  const x = h => L + Math.min(1, Math.max(0, h/dur)) * pw, y = v => T + ph - (v/maxY)*ph;
+  const nowH = Math.min(dur, Math.max(0, (Date.now()-st)/3600000));
+  let g = `<line x1="${L}" y1="${y(0)}" x2="${W-R}" y2="${y(0)}" stroke="var(--border)"/><line x1="${L}" y1="${T}" x2="${L}" y2="${y(0)}" stroke="var(--border)"/>`;
+  g += `<line x1="${x(0)}" y1="${y(0)}" x2="${x(dur)}" y2="${y(goal)}" stroke="var(--fg-muted)" stroke-dasharray="4 3" stroke-width="1.5"/>`;
+  g += `<text x="${W-R}" y="${y(goal)-3}" font-size="9" text-anchor="end" fill="var(--fg-muted)">เป้า ${goal} mL</text>`;
+  g += `<line x1="${x(nowH)}" y1="${T}" x2="${x(nowH)}" y2="${y(0)}" stroke="var(--accent)" stroke-width="1" opacity=".5"/>`;
+  for(let h=0; h<=dur; h+=1){ g += `<text x="${x(h)}" y="${H-6}" font-size="9" text-anchor="middle" fill="var(--fg-muted)">${h} ชม.</text>`; }
+  g += `<text x="${L-4}" y="${T+8}" font-size="9" text-anchor="end" fill="var(--fg-muted)">${Math.round(maxY)}</text>`;
+  const pts = _ufRecords.map(r=>({h:(new Date(r.t).getTime()-st)/3600000, v:r.removed})).filter(p=>p.h>=0).sort((a,b)=>a.h-b.h);
+  if(pts.length){
+    const poly = [{h:0,v:0}].concat(pts).map(p=>`${x(p.h)},${y(p.v)}`).join(' ');
+    g += `<polyline fill="none" stroke="var(--success)" stroke-width="2" points="${poly}"/>`;
+    pts.forEach(p=>{ const exp = goal*p.h/dur; const behind = p.v < exp - Math.max(150, goal*0.1); g += `<circle cx="${x(p.h)}" cy="${y(p.v)}" r="3.5" fill="${behind?'#e67e22':'var(--success)'}"><title>${Math.round(p.h*60)} นาที: ${p.v} mL (แผน ${Math.round(exp)})</title></circle>`; });
+  }
+  svg.innerHTML = g; svg.style.display='block'; note.style.display='block';
+}
+function showUfWatch(w){
+  const el = document.getElementById('ufWatchLine'); if(!el || !w) return;
+  if(!w.flag || w.flag==='no_goal'){ el.textContent=''; return; }
+  const col = w.flag==='high_rate' ? 'var(--danger)' : (w.flag==='ok' ? 'var(--success)' : '#e67e22');
+  el.style.color = col; el.textContent = `${w.flag_th}${w.text?' — '+w.text:''}`;
+}
 /* ── 🧮 UF Auto-Calc (14 พ.ย. 2569) ──
    รู้: เป้า UF, น้ำหนักแห้ง, เวลาเริ่ม, ชั่วโมงที่สั่ง → คำนวณให้:
    ควรดึงได้แล้วเท่าไรตามแผน (เส้นตรง), เหลือเท่าไร, อัตราที่ต้องใช้ต่อจากนี้ให้ครบตามเวลา,
@@ -1344,10 +1381,13 @@ function saveUfRecord(){
     const now = new Date();
     const slotTime = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
     const ufBody = JSON.stringify({uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0, slot_time:slotTime});
+    _ufRecords.push({t:new Date().toISOString(), removed:parseInt(removed)||0}); drawUfChart();
     fetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
       method:'POST', headers, body:ufBody
     }).then(r=>r.json()).then(d=>{
       if(d.uf_recorded) showToast('💧 UF บันทึกลง DB สำเร็จ','info');
+      if(d.watch) showUfWatch(d.watch);
+      if(d.idh_alert_sent) showToast('🚨 แจ้งหัวหน้าเวรแล้ว: อัตรา UF ที่ต้องใช้เกินเพดาน + เสี่ยง IDH สูง','danger');
     }).catch(e=>{
       console.warn('UF API:', e);
       _pushOffline('/hd/api/v1/sessions/'+sessionData.session_id+'/uf', 'POST', ufBody);

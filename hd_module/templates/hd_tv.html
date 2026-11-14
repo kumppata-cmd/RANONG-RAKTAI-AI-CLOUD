@@ -136,6 +136,7 @@ function render(d){
     const bpCls = v.sbp ? (v.sbp < 90 ? 'low' : (v.sbp < 100 ? 'mid' : '')) : '';
     const uf = b.uf_goal ? Math.min(100, Math.round((b.uf_removed||0)/b.uf_goal*100)) : null;
     const idh = b.idh_risk && b.idh_risk.level !== 'low' ? `<span class="tag ${b.idh_risk.level==='high'?'c':'w'}">IDH ${b.idh_risk.score}</span>` : '';
+    const uw = b.uf_watch && b.uf_watch.flag && !['ok','no_goal'].includes(b.uf_watch.flag) ? `<span class="tag ${b.uf_watch.flag==='high_rate'?'c':'w'}">${b.uf_watch.flag_th}${b.uf_watch.behind_ml>100?' −'+b.uf_watch.behind_ml:''}</span>` : '';
     const al = (b.alerts||[]).filter(a=>!a.physician_order && a.severity!=='info')[0];
     return `<div class="bed ${st}">
       <div class="n">เตียง ${b.bed_number}</div>
@@ -143,7 +144,7 @@ function render(d){
       <div class="sub">${esc(b.vascular_access||'')}${b.esa_given?' · 💉ESA':''} ${idh}</div>
       <div class="row"><div class="bp ${bpCls}">${v.sbp?`${v.sbp}/${v.dbp||'-'}<small>HR ${v.hr||'-'}</small>`:'<span style="color:var(--muted);font-size:1rem">ยังไม่วัด BP</span>'}</div><span style="flex:1"></span>${spark(b.sbp_trend)}</div>
       <div class="row"><span class="${mAgo!=null&&mAgo>45?'stale':''}">${mAgo!=null?`วัดล่าสุด ${mAgo} นาที`:''}</span><span style="flex:1"></span><span>${e.txt}</span></div>
-      <div class="row">${uf!=null?`UF <div class="bar"><i class="${e.over?'over':''}" style="width:${uf}%"></i></div> ${uf}%`:`<div class="bar"><i style="width:${e.pct}%"></i></div>`}</div>
+      <div class="row">${uf!=null?`UF <div class="bar"><i class="${e.over?'over':''}" style="width:${uf}%"></i></div> ${uf}%`:`<div class="bar"><i style="width:${e.pct}%"></i></div>`} ${uw}</div>
       ${al?`<div class="al">🚨 ${esc(al.title)}${al.message?' — '+esc(al.message):''}</div>`:''}
     </div>`;
   }).join('');

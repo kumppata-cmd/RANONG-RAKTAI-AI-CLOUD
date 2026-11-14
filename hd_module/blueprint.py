@@ -3734,6 +3734,57 @@ def list_vitals(session_id):
 
 # ── UF Records ────────────────────────────────────────────
 
+def _uf_watch_limits():
+    from .uf_watch import DEFAULTS
+    out = dict(DEFAULTS)
+    try:
+        lim = _dw_limits()
+        out["uf_max"] = float(lim.get("uf_rate_max", out["uf_max"]))
+        out["uf_caution"] = float(lim.get("uf_rate_caution", out["uf_caution"]))
+        v = get_setting_value("uf_record_every_min", "")
+        if v:
+            out["record_every_min"] = int(v)
+    except Exception:
+        pass
+    return out
+
+
+def _uf_idh_alert(cur, session_id, uf):
+    """ข้อ 3: อัตรา UF ที่ต้องใช้เกินเพดาน + ผู้ป่วยเสี่ยง IDH สูง → clinical alert (critical) + LINE หัวหน้าเวร/กลุ่ม
+    ครั้งเดียวต่อรอบ. คืน True เมื่อส่ง."""
+    if not uf or uf.get("flag") != "high_rate":
+        return False
+    try:
+        from .idh_predictor import features_for, score as idh_score
+        feats = features_for(cur, session_id)
+        risk = idh_score(feats) if feats else None
+    except Exception as e:
+        logger.debug("uf idh alert features: %s", e)
+        risk = None
+    if not risk or risk.get("level") != "high":
+        return False
+    title_prefix = "UF เกินเพดาน + เสี่ยง IDH สูง"
+    cur.execute("SELECT 1 FROM hd_clinical_alerts WHERE session_id = %s AND title LIKE %s LIMIT 1", (session_id, title_prefix + "%"))
+    if cur.fetchone():
+        return False
+    cur.execute("""SELECT p.patient_name, p.hn, s.bed_number FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                   WHERE s.id = %s""", (session_id,))
+    r = cur.fetchone()
+    name, hn, bed = (r[0], r[1], r[2]) if r else ("", "", None)
+    msg = (f"{uf['text']} · คะแนนเสี่ยง IDH {risk['score']} (สูง) — พิจารณายืดเวลา/ลดเป้า UF ก่อนเร่งอัตรา "
+           f"และวัด BP ทุก 15 นาที (ข้อเสนอจากระบบ แพทย์ตัดสินใจ)")
+    cur.execute("""INSERT INTO hd_clinical_alerts (session_id, severity, title, message, acknowledged)
+                   VALUES (%s, 'critical', %s, %s, FALSE)""", (session_id, f"{title_prefix} — {name} (HN {hn}) เตียง {bed}", msg))
+    try:
+        from . import ops_status as ops
+        line = f"🚨 เตียง {bed} {name} (HN {hn})\n{title_prefix}\n{msg}"
+        with ops.critical():
+            push_nurse_group(line)
+    except Exception as e:
+        logger.warning("uf idh alert push: %s", e)
+    return True
+
+
 @hd_bp.route("/sessions/<int:session_id>/uf", methods=["GET", "POST"])
 @require_role("physician", "nurse")
 def record_uf(session_id):
@@ -3800,6 +3851,14 @@ def record_uf(session_id):
             cur.execute("""
                 UPDATE hd_sessions SET actual_uf = %s WHERE id = %s
             """, (uf_removed, session_id))
+            # UF Watch + ข้อ 3: เชื่อม IDH Predictor
+            watch, alerted = None, False
+            try:
+                from .uf_watch import for_session as _ufw
+                watch = _ufw(cur, session_id, _uf_watch_limits())
+                alerted = _uf_idh_alert(cur, session_id, watch)
+            except Exception as we:
+                logger.warning("uf watch: %s", we)
         conn.commit()
         conn.close()
 
@@ -3817,6 +3876,8 @@ def record_uf(session_id):
             "uf_removed": uf_removed,
             "uf_rate": uf_rate,
             "uf_recorded": True,
+            "watch": watch,
+            "idh_alert_sent": alerted,
         }), 201
     except Exception as e:
         logger.error("record_uf error: %s", e)
@@ -4464,6 +4525,10 @@ def bed_dashboard():
                         cur.execute("""SELECT MAX(uf_removed) FROM hd_uf_records WHERE session_id = %s""", (sid,))
                         urow = cur.fetchone()
                         b["uf_removed"] = float(urow[0]) if urow and urow[0] is not None else None
+                        # UF Watch (14 พ.ย. 2569): ตามแผน / ช้า / ยังไม่บันทึก / อัตราเกินเพดาน — แสดงบนการ์ดเตียงและ TV
+                        if b.get("status") in ("active", "warning", "critical"):
+                            from .uf_watch import for_session as _ufw
+                            b["uf_watch"] = _ufw(cur, sid, _uf_watch_limits())
                     except Exception:
                         try:
                             conn.rollback()
