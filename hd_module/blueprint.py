@@ -882,7 +882,7 @@ def session_idh_risk(session_id):
 @require_role("physician", "admin")
 def run_monthly_summary():
     """Manual trigger for monthly lab summary push."""
-    import psycopg2
+    import os, psycopg2
     from .monthly_summary import run_monthly_push
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not db_url:
