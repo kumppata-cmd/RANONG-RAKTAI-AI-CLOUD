@@ -7925,6 +7925,22 @@ def handle_search_command(
             "💡 รหัสใช้ได้ครั้งเดียว ภายใน 48 ชั่วโมง"
         )
 
+    # ── "ผลเลือด" — ลิงก์เปิดหน้า HD Labs (LIFF) สำหรับผู้ป่วย/แพทย์ ──
+    if text_stripped in ("ผลเลือด", "ผลเลือดของฉัน", "ดูผลเลือด", "hd labs", "ผลhd", "ผล hd"):
+        _liff_id = os.environ.get("LIFF_ID", "")
+        _hd_url = (f"https://liff.line.me/{_liff_id}/hd-labs" if _liff_id
+                   else f"{_RENDER_BASE}/liff/hd-labs")
+        return (
+            "\U0001fa78 ผลเลือดและผลฟอกของคุณ\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "\n"
+            "ดู Hb · Hct · Kt/V · สารน้ำ (BCM)\n"
+            "พร้อมกราฟแนวโน้มและคำแนะนำ:\n"
+            f"{_hd_url}\n"
+            "\n"
+            "\U0001f4a1 ถ้ายังไม่ได้ผูกบัญชี พิมพ์ 'ลงทะเบียน'"
+        )
+
     # ── Admin: Deploy Rich Menu (Staff/Patient/Sub) ─────────
     if text_stripped in ("ตั้งค่าเมนู", "deploy richmenu", "อัปเดตเมนู"):
         if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
@@ -22544,6 +22560,228 @@ def api_richmenu_deploy():
     except Exception as e:
         logger.warning("Rich Menu deploy failed: %s", type(e).__name__)
         return jsonify({"error": type(e).__name__}), 500
+
+
+# ═══════════════════════════════════════════════════════════
+# LIFF HD Labs — ผลเลือดจาก HD Smart Monitoring ใน LINE OA
+# (ว้าว #3 LINE Patient Portal — ไม่แตะ liff_app.py ที่ LOCKED)
+# ═══════════════════════════════════════════════════════════
+
+
+@app.route("/liff/api/my-hd-labs", methods=["POST", "OPTIONS"])
+def liff_api_my_hd_labs():
+    """Structured HD lab data for the LIFF patient portal.
+
+    Uses the same LIFF token verification as my-labs, then queries
+    hd_lab_results + hd_fluid_assessments via the patient_portal module.
+    Returns Hb, Hct, Kt/V, Ferritin trends + friendly Thai interpretations.
+    """
+    if request.method == "OPTIONS":
+        return "", 204, _liff_cors_headers()
+
+    body = request.get_json(silent=True) or {}
+    id_token = body.get("id_token", "")
+    if not id_token:
+        return jsonify({"error": "id_token required"}), 400, _liff_cors_headers()
+
+    try:
+        line_user_id = verify_liff_id_token(id_token)
+    except Exception:
+        return jsonify({"error": "unauthorized"}), 401, _liff_cors_headers()
+
+    owner_hash_full = hash_user_id(line_user_id)
+    _is_physician = (owner_hash_full in PHYSICIAN_USERS or owner_hash_full in ADMIN_USERS)
+
+    # Resolve HN: physician may pass search_hn, patient uses their linked HN
+    patient_hn = ""
+    if _is_physician:
+        patient_hn = str(body.get("search_hn", "")).upper().replace("HN", "").replace(" ", "").strip()[:20]
+        if not patient_hn:
+            return jsonify({"error": "physician: ระบุ HN", "is_physician": True}), 400, _liff_cors_headers()
+    else:
+        entry = hn_registry.get_by_owner(owner_hash_full)
+        if entry and entry.clinic_hn:
+            patient_hn = entry.clinic_hn
+        else:
+            return jsonify({"error": "ยังไม่ได้ผูกบัญชี กรุณาขอรหัสจากเจ้าหน้าที่", "need_link": True}), 403, _liff_cors_headers()
+
+    # Use the patient_portal module for data
+    try:
+        import psycopg2
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        if not db_url:
+            return jsonify({"error": "ระบบไม่พร้อม"}), 503, _liff_cors_headers()
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        from hd_module.patient_portal import portal_data
+        data = portal_data(conn, patient_hn)
+        conn.close()
+        if not data:
+            return jsonify({"error": "ไม่พบข้อมูลผู้ป่วย"}), 404, _liff_cors_headers()
+        data["is_physician"] = _is_physician
+        return jsonify(data), 200, _liff_cors_headers()
+    except Exception as e:
+        logger.error("liff_api_my_hd_labs: %s", e)
+        return jsonify({"error": "internal error"}), 500, _liff_cors_headers()
+
+
+@app.route("/liff/hd-labs", methods=["GET"])
+def liff_hd_labs_page():
+    """Standalone LIFF page for HD lab results — opened from Rich Menu or LIFF link.
+
+    This is a separate page (not inside the locked LIFF HTML) that uses LIFF SDK
+    to verify identity and then renders the patient portal with HD lab data.
+    """
+    liff_id = os.environ.get("LIFF_ID", "")
+    render_base = (os.environ.get("RENDER_EXTERNAL_URL") or request.host_url).rstrip("/")
+    forwarded = request.headers.get("X-Forwarded-Proto", "")
+    if forwarded == "https" and render_base.startswith("http://"):
+        render_base = "https://" + render_base[len("http://"):]
+
+    return f"""<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>ผลเลือด HD — รักษ์ไต</title>
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>
+  :root{{--bg:#f5f7fa;--card:#fff;--accent:#2980b9;--danger:#e74c3c;--success:#27ae60;--warn:#f39c12;--text:#2c3e50;--muted:#7f8c8d;--border:#eaecf0}}
+  @media(prefers-color-scheme:dark){{:root{{--bg:#0d1117;--card:#161b22;--accent:#58a6ff;--danger:#f85149;--success:#3fb950;--warn:#d29922;--text:#e6edf3;--muted:#8b949e;--border:#30363d}}}}
+  *{{box-sizing:border-box;margin:0;padding:0}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);padding:0 0 60px;max-width:480px;margin:0 auto;line-height:1.5}}
+  .hero{{background:linear-gradient(135deg,#2980b9,#3498db);color:#fff;padding:28px 20px 24px;text-align:center;border-radius:0 0 24px 24px}}
+  .hero h1{{font-size:1.1rem;opacity:.9;font-weight:400}}.hero .name{{font-size:1.6rem;font-weight:800;margin-top:4px}}
+  .hero .next{{margin-top:12px;background:rgba(255,255,255,.18);border-radius:14px;padding:10px 16px;font-size:.95rem;font-weight:600}}
+  .hero .next .big{{font-size:1.5rem;display:block;margin-top:2px}}
+  .card{{background:var(--card);border-radius:16px;padding:16px;margin:12px 16px;box-shadow:0 1px 3px rgba(0,0,0,.06)}}
+  .card h2{{font-size:.95rem;font-weight:700;margin-bottom:8px;display:flex;align-items:center;gap:6px}}
+  .info-row{{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid var(--border);font-size:.88rem}}
+  .info-row:last-child{{border:none}}.label{{color:var(--muted)}}.value{{font-weight:600}}
+  .interp{{padding:10px 12px;border-radius:12px;margin:6px 0;font-size:.88rem;font-weight:600;display:flex;align-items:center;gap:8px}}
+  .interp.ok{{background:rgba(39,174,96,.1);color:var(--success)}}.interp.low{{background:rgba(243,156,18,.1);color:var(--warn)}}
+  .interp.critical{{background:rgba(231,76,60,.1);color:var(--danger)}}.interp.high{{background:rgba(243,156,18,.1);color:var(--warn)}}
+  table{{width:100%;border-collapse:collapse;font-size:.78rem}}
+  th{{background:var(--accent);color:#fff;padding:8px 6px;text-align:left;font-weight:600;font-size:.72rem;white-space:nowrap}}
+  td{{padding:8px 6px;border-bottom:1px solid var(--border);white-space:nowrap}}
+  .tip{{padding:10px 12px;border-radius:12px;margin:6px 0;font-size:.85rem;background:rgba(41,128,185,.06);border-left:3px solid var(--accent)}}
+  .fluid-gauge{{display:flex;align-items:center;gap:12px;padding:8px 0}}
+  .fluid-bar{{flex:1;height:12px;background:var(--border);border-radius:6px;overflow:hidden}}
+  .fluid-fill{{height:100%;border-radius:6px}}
+  .footer{{text-align:center;font-size:.72rem;color:var(--muted);margin-top:20px;padding:12px}}
+  #loading{{text-align:center;padding:60px 20px;color:var(--muted)}}
+  #loading .spin{{display:inline-block;width:40px;height:40px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:sp .8s linear infinite}}
+  @keyframes sp{{to{{transform:rotate(360deg)}}}}
+  @media(min-width:481px){{body{{padding-top:12px}}.hero{{margin:0 16px;border-radius:24px}}}}
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="loading"><div class="spin"></div><p style="margin-top:12px">กำลังเชื่อมต่อ LINE...</p></div>
+</div>
+<script>
+const API = '{render_base}';
+const LIFF_ID = '{liff_id}';
+function esc(s){{ const d=document.createElement('div'); d.textContent=String(s==null?'':s); return d.innerHTML; }}
+
+async function init(){{
+  if(!LIFF_ID){{ document.getElementById('app').innerHTML='<div style="padding:40px;text-align:center;color:var(--danger)">ระบบยังไม่ได้ตั้งค่า LIFF_ID</div>'; return; }}
+  try{{
+    await liff.init({{ liffId: LIFF_ID }});
+    if(!liff.isLoggedIn()){{ liff.login(); return; }}
+    const token = liff.getIDToken();
+    const r = await fetch(API+'/liff/api/my-hd-labs', {{
+      method:'POST', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{ id_token: token }})
+    }});
+    const D = await r.json();
+    if(!r.ok){{
+      if(D.need_link){{ document.getElementById('app').innerHTML=`<div style="padding:40px 20px;text-align:center"><div style="font-size:3rem">🔗</div><h2 style="margin:12px 0">ยังไม่ได้ผูกบัญชี</h2><p style="color:var(--muted)">กรุณาขอรหัสผูกบัญชี 6 หลักจากเจ้าหน้าที่คลินิก<br>แล้วพิมพ์ "ผูกบัญชี XXXXXX" ในแชทนี้</p></div>`; return; }}
+      throw new Error(D.error||'เกิดข้อผิดพลาด');
+    }}
+    render(D);
+  }}catch(e){{ document.getElementById('app').innerHTML=`<div style="padding:40px;text-align:center;color:var(--danger)">${{esc(e.message||'เชื่อมต่อไม่ได้')}}</div>`; }}
+}}
+
+function render(D){{
+  const p=D.profile, nd=p.next_dialysis;
+  let h=`<div class="hero"><h1>🏥 คลินิกระนอง รักษ์ไต</h1><div class="name">${{esc(p.name)}}</div>
+    ${{nd?`<div class="next">นัดฟอกครั้งถัดไป<span class="big">${{nd.in_days===0?'🟢 วันนี้':(nd.in_days===1?'📅 พรุ่งนี้':'📅 '+nd.text)}}</span>${{p.shift?' · '+p.shift:''}}</div>`:''}}
+  </div>`;
+  h+=`<div class="card"><h2>👤 ข้อมูลของฉัน</h2>
+    <div class="info-row"><span class="label">HN</span><span class="value">${{esc(p.hn)}}</span></div>
+    <div class="info-row"><span class="label">ตารางฟอก</span><span class="value">${{esc(p.schedule||'-')}} ${{p.shift?'('+p.shift+')':''}}</span></div>
+    <div class="info-row"><span class="label">เส้นฟอกเลือด</span><span class="value">${{esc(p.va||'-')}}</span></div>
+    <div class="info-row"><span class="label">น้ำหนักแห้ง</span><span class="value">${{p.dry_weight?p.dry_weight.toFixed(1)+' kg':'-'}}</span></div>
+    <div class="info-row"><span class="label">ยากระตุ้นเม็ดเลือด</span><span class="value">${{esc(p.esa_drug||'-')}} ${{esc(p.esa_dose||'')}}</span></div>
+  </div>`;
+  const it=D.interpretations||{{}};
+  if(Object.keys(it).length){{
+    h+=`<div class="card"><h2>🩺 สรุปผลแล็บล่าสุด</h2>`;
+    for(const [k,v] of Object.entries(it)) h+=`<div class="interp ${{v.status}}">${{v.emoji}} ${{esc(v.text)}}</div>`;
+    h+=`</div>`;
+  }}
+  const fl=D.fluid;
+  if(fl){{
+    const pct=Math.min(100,Math.max(0,50+fl.oh*15));
+    const col=fl.oh>2?'var(--danger)':(fl.oh>1?'var(--warn)':(fl.oh<-1?'var(--accent)':'var(--success)'));
+    h+=`<div class="card"><h2>💧 สารน้ำในร่างกาย</h2>
+      <div class="fluid-gauge"><span style="font-size:.75rem;color:var(--muted)">น้อย</span><div class="fluid-bar"><div class="fluid-fill" style="width:${{pct}}%;background:${{col}}"></div></div><span style="font-size:.75rem;color:var(--muted)">มาก</span></div>
+      <div style="text-align:center;font-weight:700;color:${{col}};font-size:1rem">OH ${{fl.oh>0?'+':''}}${{fl.oh.toFixed(1)}} L</div>
+      <div style="text-align:center;font-size:.85rem;margin-top:4px">${{esc(fl.text)}}</div>
+    </div>`;
+  }}
+  const labs=(D.labs||[]).slice().reverse();
+  if(labs.length>=2){{
+    const hbs=labs.filter(l=>l.hb!=null);
+    if(hbs.length>=2) h+=`<div class="card"><h2>📈 แนวโน้ม Hb</h2><div style="overflow-x:auto">${{svgC(hbs.map(l=>({{x:l.date,y:l.hb}})),8,15,10,12,'Hb g/dL')}}</div><div style="font-size:.72rem;color:var(--muted)">แถบเขียว = เป้า 10-12</div></div>`;
+    const ktvs=labs.filter(l=>l.ktv!=null);
+    if(ktvs.length>=2) h+=`<div class="card"><h2>📈 แนวโน้ม Kt/V</h2><div style="overflow-x:auto">${{svgC(ktvs.map(l=>({{x:l.date,y:l.ktv}})),0.5,2.5,1.2,999,'Kt/V')}}</div><div style="font-size:.72rem;color:var(--muted)">เส้นเขียว = เป้า ≥1.2</div></div>`;
+  }}
+  const ss=D.sessions||[];
+  if(ss.length){{
+    h+=`<div class="card"><h2>📋 ผลฟอก ${{ss.length}} รอบล่าสุด</h2><div style="overflow-x:auto"><table>
+      <tr><th>วันที่</th><th>น้ำหนัก</th><th>UF</th><th>Hb</th><th>ESA</th></tr>`;
+    ss.forEach(s=>{{
+      const dt=new Date(s.date+'T00:00:00').toLocaleDateString('th-TH',{{day:'numeric',month:'short'}});
+      h+=`<tr><td>${{dt}}</td><td>${{s.pre_weight?s.pre_weight.toFixed(1):'−'}}→${{s.post_weight?s.post_weight.toFixed(1):'−'}}</td><td>${{s.uf?Math.round(s.uf)+' mL':'−'}}</td><td>${{s.hb?s.hb.toFixed(1):'−'}}</td><td>${{s.esa?'💉':'−'}}</td></tr>`;
+    }});
+    h+=`</table></div></div>`;
+  }}
+  const tips=D.tips||[];
+  if(tips.length){{ h+=`<div class="card"><h2>💡 คำแนะนำสำหรับคุณ</h2>`; tips.forEach(t=>{{ h+=`<div class="tip">${{t.icon}} ${{esc(t.text)}}</div>`; }}); h+=`</div>`; }}
+  h+=`<div class="footer">HD Smart Monitoring — คลินิกระนอง รักษ์ไต<br>ข้อมูลนี้เป็นข้อมูลส่วนบุคคล กรุณาไม่เผยแพร่</div>`;
+  document.getElementById('app').innerHTML=h;
+}}
+
+function svgC(pts,minY,maxY,tLo,tHi,label){{
+  const W=320,H=140,ml=36,mr=10,mt=15,mb=28,pw=W-ml-mr,ph=H-mt-mb;
+  const lo=Math.min(minY,...pts.map(p=>p.y)),hi=Math.max(maxY,...pts.map(p=>p.y));
+  const sx=i=>ml+i/(pts.length-1)*pw, sy=v=>mt+ph-(v-lo)/(hi-lo)*ph;
+  const tl=Math.max(lo,tLo),th=Math.min(hi,tHi);
+  let s=`<svg viewBox="0 0 ${{W}} ${{H}}" style="width:100%;max-width:${{W}}px">`;
+  if(tl<th) s+=`<rect x="${{ml}}" y="${{sy(th)}}" width="${{pw}}" height="${{sy(tl)-sy(th)}}" fill="rgba(39,174,96,.1)" rx="4"/>`;
+  for(let v=Math.ceil(lo);v<=hi;v+=Math.max(1,Math.round((hi-lo)/5))){{
+    const y=sy(v); s+=`<line x1="${{ml}}" y1="${{y}}" x2="${{W-mr}}" y2="${{y}}" stroke="var(--border)" stroke-width="0.5"/>`;
+    s+=`<text x="${{ml-4}}" y="${{y+3}}" text-anchor="end" fill="var(--muted)" font-size="9">${{v%1?v.toFixed(1):v}}</text>`;
+  }}
+  const path=pts.map((p,i)=>`${{i?'L':'M'}}${{sx(i).toFixed(1)}},${{sy(p.y).toFixed(1)}}`).join(' ');
+  s+=`<path d="${{path}}" fill="none" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`;
+  pts.forEach((p,i)=>{{
+    const c=p.y>=tLo&&p.y<=tHi?'var(--success)':(p.y<tLo?'var(--danger)':'var(--warn)');
+    s+=`<circle cx="${{sx(i)}}" cy="${{sy(p.y)}}" r="4" fill="${{c}}" stroke="var(--card)" stroke-width="2"/>`;
+    if(i%Math.max(1,Math.floor(pts.length/6))===0||i===pts.length-1){{
+      const d=new Date(p.x+'T00:00:00'); s+=`<text x="${{sx(i)}}" y="${{H-4}}" text-anchor="middle" fill="var(--muted)" font-size="8">${{d.getDate()}}/${{d.getMonth()+1}}</text>`;
+    }}
+  }});
+  if(tLo<999) s+=`<line x1="${{ml}}" y1="${{sy(tLo)}}" x2="${{W-mr}}" y2="${{sy(tLo)}}" stroke="var(--success)" stroke-width="1" stroke-dasharray="4,3"/>`;
+  s+=`<text x="${{ml+2}}" y="${{mt-4}}" fill="var(--muted)" font-size="8">${{label}}</text></svg>`;
+  return s;
+}}
+
+init();
+</script>
+</body>
+</html>""", 200, {{"Content-Type": "text/html; charset=utf-8"}}
 
 
 # ═══════════════════════════════════════════════════════════
