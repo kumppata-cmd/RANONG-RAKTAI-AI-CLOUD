@@ -22711,7 +22711,7 @@ def liff_hd_labs_page():
     if forwarded == "https" and render_base.startswith("http://"):
         render_base = "https://" + render_base[len("http://"):]
 
-    return f"""<!DOCTYPE html>
+    page = f"""<!DOCTYPE html>
 <html lang="th">
 <head>
 <meta charset="utf-8">
@@ -22884,7 +22884,8 @@ function svgC(pts,minY,maxY,tLo,tHi,label){{
 init();
 </script>
 </body>
-</html>""", 200, {{"Content-Type": "text/html; charset=utf-8"}}
+</html>"""
+    return page, 200, {"Content-Type": "text/html; charset=utf-8"}
 
 
 # ═══════════════════════════════════════════════════════════
