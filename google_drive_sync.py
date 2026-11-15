@@ -259,7 +259,10 @@ def upload_path(file_content: bytes, rel_path: str, mime_type: str = "applicatio
         folder, _, name = rel_path.rpartition("/")
         root = _root_folder_id(service)
         parent_id = _ensure_path(service, folder, root) if folder else root
-        media = MediaInMemoryUpload(file_content, mimetype=mime_type)
+        # Simple (multipart) upload is capped at 5 MB by Google — the nightly DB backup
+        # (~15 MB) failed there. Use resumable upload for anything over 4 MB.
+        media = MediaInMemoryUpload(file_content, mimetype=mime_type,
+                                    resumable=len(file_content or b"") > 4 * 1024 * 1024)
         existing = []
         if replace:
             q = (f"name='{name.replace(chr(39), chr(92) + chr(39))}' and '{parent_id}' in parents and trashed=false")

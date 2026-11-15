@@ -119,6 +119,16 @@ def dump(conn, app_version=""):
 def verify(archive_bytes):
     """Read the archive back: every table in the manifest has a CSV whose row count matches. → (ok, problems)"""
     problems = []
+    # Default csv field limit is 128 KB; tables holding images/JSON in one cell exceed it
+    # ("field larger than field limit (131072)" — 15 Nov 2026), which failed verification
+    # although the archive was fine.
+    _lim = 1 << 30
+    while True:
+        try:
+            csv.field_size_limit(_lim)
+            break
+        except OverflowError:
+            _lim //= 2
     try:
         with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
             names = tar.getnames()

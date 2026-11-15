@@ -2007,15 +2007,19 @@ def run_db_backup(trigger="scheduled", restore_test=False, send_line=True):
         logger.error("db backup gcs: %s", e)
         gcs_path = ""
     drive_ok = False
+    drive_err = ""
     try:
         from .daily_records import drive_upload_fn
         up = drive_upload_fn()
         if up:
             up(f"{dbb.DRIVE_DIR}/{now.year}/{now.month:02d}/{name}", blob, "application/gzip")
             drive_ok = True
+        else:
+            drive_err = "ไม่ได้เปิดใช้ Google Drive"
     except Exception as e:
-        logger.warning("db backup drive: %s", str(e)[:80])
-    status = {"name": name, "gcs": gcs_path, "drive": drive_ok, "verify": verify_ok, "problems": problems,
+        drive_err = str(e)[:120]
+        logger.warning("db backup drive: %s", drive_err)
+    status = {"name": name, "gcs": gcs_path, "drive": drive_ok, "drive_error": drive_err, "verify": verify_ok, "problems": problems,
               "tables": man.get("table_count"), "rows": man.get("row_total"), "bytes": man.get("archive_bytes"),
               "restore": {k: v for k, v in (restore or {}).items() if k != "restored"} if restore else None,
               "at": man["created_at"], "trigger": trigger}
@@ -2028,6 +2032,8 @@ def run_db_backup(trigger="scheduled", restore_test=False, send_line=True):
     if send_line:
         ok_all = bool(gcs_path) and verify_ok and (restore is None or restore.get("ok"))
         msg = dbb.line_text(man, gcs_path, drive_ok, verify_ok, problems, restore)
+        if drive_err:
+            msg += f"\nℹ️ Drive: {drive_err}"
         if not ok_all:
             msg = "🚨 สำรองฐานข้อมูลมีปัญหา\n" + msg
         push_fn = current_app.config.get("LINE_PUSH_FN")
