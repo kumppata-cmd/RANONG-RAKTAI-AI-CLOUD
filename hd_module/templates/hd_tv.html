@@ -48,6 +48,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:
 .tick .inner{white-space:nowrap;padding-left:100%;animation:scroll 40s linear infinite;will-change:transform}
 .tick .inner.still{animation:none;padding-left:16px}
 @keyframes scroll{to{transform:translateX(-100%)}}
+@keyframes blinker{50%{opacity:0.3}}
 .btn{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:.8rem}
 .off{position:fixed;inset:0;background:rgba(11,18,32,.92);display:none;align-items:center;justify-content:center;font-size:1.3rem;color:var(--warn);z-index:9}
 @media (max-width:700px){.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));padding:8px;gap:6px;height:calc(100vh - 100px - 44px)}.bed{min-height:84px;padding:8px 10px;gap:2px}.bed .bp{font-size:1.2rem}.bed .nm{font-size:.95rem}.bed .row{font-size:.72rem}.top{padding:8px 10px;gap:8px;flex-wrap:wrap}.top .ttl{font-size:1rem}.kp{display:none}.top .clock{font-size:1.2rem}}
@@ -98,7 +99,34 @@ function mergeShifts(payloads){
   return {beds: list, completed_sessions: done, completed_in_shift: done.length, today_patients: today};
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function tick(){ const t = thaiNow(); document.getElementById('clock').textContent = t.toTimeString().slice(0,5); }
+function tick(){
+  const t = thaiNow();
+  document.getElementById('clock').textContent = t.toTimeString().slice(0,5);
+  // Live countdown — update every second for active beds
+  document.querySelectorAll('[data-start][data-dur]').forEach(el => {
+    const st = new Date(el.dataset.start);
+    const total = parseFloat(el.dataset.dur) * 60; // minutes
+    const mins = Math.max(0, (Date.now() - st.getTime()) / 60000);
+    const left = Math.max(0, total - mins);
+    const lm = Math.round(left);
+    const h = Math.floor(lm / 60), m = lm % 60;
+    const over = mins > total;
+    if (left <= 0) {
+      el.textContent = '✅ ครบเวลา';
+      el.style.color = '#2ecc71';
+      el.style.fontWeight = '900';
+    } else if (left <= 30) {
+      el.textContent = `⏱ ${h}:${String(m).padStart(2,'0')} ใกล้ครบ!`;
+      el.style.color = '#f39c12';
+      el.style.fontWeight = '800';
+      el.style.animation = left <= 10 ? 'blinker 1s step-start infinite' : '';
+    } else {
+      el.textContent = `เหลือ ${h}:${String(m).padStart(2,'0')} ชม.`;
+      el.style.color = '';
+      el.style.fontWeight = '';
+    }
+  });
+}
 setInterval(tick, 1000); tick();
 function toggleFs(){ try { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); } catch(e){} }
 
@@ -143,7 +171,7 @@ function render(d){
       <div class="nm">${esc(b.patient_name||'')}${b.serology&&(b.serology.hbsag==='positive'||b.serology.antihcv==='positive')?` <span style="color:#ff5c5c;font-weight:900;border:2px solid #ff5c5c;border-radius:6px;padding:0 6px;font-size:.8em;white-space:nowrap">🩸 ${[b.serology.hbsag==='positive'?'HBsAg+':'',b.serology.antihcv==='positive'?'Anti-HCV+':''].filter(Boolean).join(' ')}</span>`:''}</div>
       <div class="sub">${esc(b.vascular_access||'')}${b.esa_given?' · 💉ESA':''} ${idh}${b.shift_mismatch&&b.usual_shift?` <span class="tag w">⇄ ปกติ${({morning:'เช้า',afternoon:'บ่าย',evening:'ค่ำ'})[b.usual_shift]}</span>`:''}</div>
       <div class="row"><div class="bp ${bpCls}">${v.sbp?`${v.sbp}/${v.dbp||'-'}<small>HR ${v.hr||'-'}</small>`:'<span style="color:var(--muted);font-size:1rem">ยังไม่วัด BP</span>'}</div><span style="flex:1"></span>${spark(b.sbp_trend)}</div>
-      <div class="row"><span class="${mAgo!=null&&mAgo>45?'stale':''}">${mAgo!=null?`วัดล่าสุด ${mAgo} นาที`:''}</span><span style="flex:1"></span><span>${e.txt}</span></div>
+      <div class="row"><span class="${mAgo!=null&&mAgo>45?'stale':''}">${mAgo!=null?`วัดล่าสุด ${mAgo} นาที`:''}</span><span style="flex:1"></span><span data-start="${b.start_time||''}" data-dur="${b.duration_hours||4}">${e.txt}</span></div>
       <div class="row">${uf!=null?`UF <div class="bar"><i class="${e.over?'over':''}" style="width:${uf}%"></i></div> ${uf}%`:`<div class="bar"><i style="width:${e.pct}%"></i></div>`} ${uw}</div>
       ${al?`<div class="al">🚨 ${esc(al.title)}${al.message?' — '+esc(al.message):''}</div>`:''}
     </div>`;

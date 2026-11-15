@@ -159,10 +159,12 @@ jobs:
           "
 
   # ---------------------------------------------------------------------------
-  # Job 3: Security — ตรวจสอบความปลอดภัย
+  # Job 3: Security + Dependency — ตรวจสอบความปลอดภัย + packages
+  # (รวม security + dependency-check เป็น 1 job เพื่อประหยัด Actions minutes
+  #  — แต่ละ job ใช้ VM ใหม่ + setup ~1 นาที)
   # ---------------------------------------------------------------------------
   security:
-    name: "Security Checks"
+    name: "Security & Dependency Checks"
     runs-on: ubuntu-24.04
 
     steps:
@@ -285,41 +287,15 @@ jobs:
 
           exit $AUDIT_RC
 
-  # ---------------------------------------------------------------------------
-  # Job 4: Dependency Check — ตรวจสอบ packages
-  # ---------------------------------------------------------------------------
-  dependency-check:
-    name: "Dependency Check"
-    runs-on: ubuntu-24.04
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: "ตรวจสอบ outdated packages"
-        run: |
-          echo "=== ตรวจสอบ packages ที่ล้าสมัย ==="
-          pip list --outdated --format=columns || true
-
+      # (รวมจาก dependency-check job เดิม — ประหยัด 1 VM)
       - name: "ตรวจสอบ requirements.txt consistency"
         run: |
           echo "=== ตรวจสอบ requirements.txt ==="
-          # ตรวจว่าทุก package ใน requirements.txt ติดตั้งได้
           pip check || echo "WARNING: พบปัญหา dependency compatibility"
           echo "OK: requirements.txt consistent"
 
   # ---------------------------------------------------------------------------
-  # Job 5: Docker Boot — ด่านที่สะท้อน production จริง
+  # Job 4: Docker Boot — ด่านที่สะท้อน production จริง
   #
   # ทำไมต้องมีใน ci.yml ไม่ใช่แค่ deploy-check.yml
   # ─────────────────────────────────────────────
@@ -427,7 +403,7 @@ jobs:
   notify-failure:
     name: "แจ้ง LINE เมื่อ CI ล้ม"
     runs-on: ubuntu-24.04
-    needs: [lint, test, security, dependency-check, docker-boot]
+    needs: [lint, test, security, docker-boot]
     if: always() && contains(join(needs.*.result, ','), 'failure')
     steps:
       - name: "POST /hd/api/v1/ops/ci-status"

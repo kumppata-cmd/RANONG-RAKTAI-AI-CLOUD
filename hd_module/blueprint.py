@@ -5326,6 +5326,7 @@ def update_settings():
         "esa_target_low", "esa_target_high", "esa_hold_above",   # ESA Autopilot protocol
         "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
         "monthly_lab_summary",       # push สรุปผลเลือดรายเดือนให้ผู้ป่วย (on/off)
+        "weekly_health_tips",        # push tip สุขภาพไตรายสัปดาห์ให้ผู้ป่วย (on/off)
     ]
     if key not in allowed_keys:
         return jsonify({"error": f"Invalid setting key: {key}"}), 400

@@ -21890,6 +21890,25 @@ def _reminder_scheduler_worker():
                 _last_run_day = _now.date()
                 _res = job_manager.run("daily_reminders")
                 logger.info("daily_reminders (scheduler): success=%s", _res.success)
+            # ── Weekly health tips (วันจันทร์ เวลา 10:00 BKK) ──
+            if (_now.weekday() == 0 and _now.hour == 10
+                    and _last_run_day != _now.date()):  # reuse _last_run_day guard
+                try:
+                    _wk = _now.isocalendar()[1]
+                    if _claim_daily_once(f"weekly_tips_{_now.year}_{_wk:02d}"):
+                        import psycopg2 as _pg2wt
+                        from hd_module.patient_education import run_weekly_tips
+                        _db_wt = os.getenv("HD_DATABASE_URL", "") or os.getenv("DATABASE_URL", "")
+                        if _db_wt and LINE_CHANNEL_ACCESS_TOKEN:
+                            _wc = _pg2wt.connect(_db_wt, connect_timeout=10)
+                            try:
+                                from hd_module import get_setting_value as _gsv_wt
+                                _wr = run_weekly_tips(_wc, push_message, _gsv_wt)
+                                logger.info("weekly_tips: %s", _wr)
+                            finally:
+                                _wc.close()
+                except Exception as _we:
+                    logger.warning("weekly_tips scheduler: %s", _we)
             # ── Monthly lab summary (วันที่ 1 เวลา 09:00 BKK) ──
             if (_now.day == 1 and _now.hour == 9
                     and _last_monthly_month != (_now.year, _now.month)):
