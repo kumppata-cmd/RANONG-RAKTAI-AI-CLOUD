@@ -4222,6 +4222,29 @@ def patients_weekly_grid():
                     "generated_at": (datetime.now(timezone.utc) + timedelta(hours=7)).isoformat(timespec="minutes")})
 
 
+@hd_bp.route("/patients/<hn>/portal-link", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patient_portal_link(hn):
+    """Signed Patient-Portal link for one patient (staff hands it to the patient / prints QR)."""
+    import os
+    base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+    url = f"{base}/hd/my/{portal_token(hn)}"
+    qr = None
+    try:
+        import io as _io
+
+        import segno
+        buf = _io.BytesIO()
+        segno.make(url).save(buf, kind="png", scale=5)
+        import base64 as _b64
+        qr = "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        pass
+    log_action(user_id=g.get("hd_user_id"), action="patient.portal_link", resource_type="patient", resource_id=hn,
+               ip_address=request.remote_addr or "")
+    return jsonify({"hn": hn, "url": url, "qr": qr})
+
+
 @hd_bp.route("/labs/serology/import", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def serology_import():
@@ -7300,13 +7323,43 @@ def _format_qi_line(qi):
 # F14: Patient Self-View (ผลฟอก + Hb trend)
 # ══════════════════════════════════════════════════════════
 
+def _portal_sign(hn):
+    """HMAC signature binding a portal link to one HN (no expiry — revoke by rotating JWT_SECRET)."""
+    import hashlib
+    import hmac as _hmac
+    key = (HdConfig.JWT_SECRET or "hd-portal").encode()
+    return _hmac.new(key, ("portal:" + str(hn).upper()).encode(), hashlib.sha256).hexdigest()[:16]
+
+
+def portal_token(hn):
+    """Signed portal token for one patient: '<HN>.<sig>'."""
+    return f"{hn}.{_portal_sign(hn)}"
+
+
+def _portal_hn_from_token(token):
+    """'<HN>.<sig>' → HN when the signature matches, else None. A bare HN is rejected."""
+    import hmac as _hmac
+    if "." not in (token or ""):
+        return None
+    hn, sig = token.rsplit(".", 1)
+    if hn and sig and _hmac.compare_digest(sig, _portal_sign(hn)):
+        return hn
+    return None
+
+
 @hd_bp.route("/my/<token>", methods=["GET"])
 def patient_portal_api(token):
-    """Patient Portal JSON API — full data for the patient-facing web page."""
+    """Patient Portal JSON API — full data for the patient-facing web page.
+
+    token is the HMAC-signed '<HN>.<sig>' from portal_token(); a bare HN 404s,
+    so the link staff hand out is the only way in (same data as the LIFF flow,
+    which authenticates with LINE instead)."""
     import os
     import psycopg2
     from .patient_portal import portal_data
-    hn = token  # simple token for now
+    hn = _portal_hn_from_token(token)
+    if not hn:
+        return jsonify({"error": "ลิงก์ไม่ถูกต้อง — ขอลิงก์ใหม่จากเจ้าหน้าที่คลินิก"}), 404
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not db_url:
         return jsonify({"error": "ระบบไม่พร้อม"}), 503

@@ -22696,12 +22696,35 @@ async function init(){{
     const D = await r.json();
     if(!r.ok){{
       if(D.need_link){{ document.getElementById('app').innerHTML=`<div style="padding:40px 20px;text-align:center"><div style="font-size:3rem">🔗</div><h2 style="margin:12px 0">ยังไม่ได้ผูกบัญชี</h2><p style="color:var(--muted)">กรุณาขอรหัสผูกบัญชี 6 หลักจากเจ้าหน้าที่คลินิก<br>แล้วพิมพ์ "ผูกบัญชี XXXXXX" ในแชทนี้</p></div>`; return; }}
+      if(D.is_physician){{ physSearch(token); return; }}
       throw new Error(D.error||'เกิดข้อผิดพลาด');
     }}
     render(D);
   }}catch(e){{ document.getElementById('app').innerHTML=`<div style="padding:40px;text-align:center;color:var(--danger)">${{esc(e.message||'เชื่อมต่อไม่ได้')}}</div>`; }}
 }}
 
+function physSearch(token, msg){{
+  document.getElementById('app').innerHTML = `<div style="padding:32px 20px;text-align:center">
+    <div style="font-size:2.6rem">🩺</div><h2 style="margin:10px 0">โหมดแพทย์ — ดูรายคน</h2>
+    <p style="color:var(--muted);font-size:.9rem">ใส่ HN คลินิกของผู้ป่วยที่ต้องการดู</p>
+    <input id="physHn" inputmode="numeric" placeholder="เช่น 56001" style="margin-top:12px;padding:12px;font-size:1.1rem;text-align:center;border:1.5px solid var(--border);border-radius:12px;background:var(--card);color:var(--text);width:200px">
+    <br><button onclick="physGo()" style="margin-top:12px;padding:12px 28px;font-size:1rem;border:0;border-radius:12px;background:var(--accent);color:#fff;font-weight:700">ดูผลเลือด</button>
+    ${{msg?`<p style="color:var(--danger);margin-top:10px">${{esc(msg)}}</p>`:''}}
+  </div>`;
+  window._physToken = token;
+  document.getElementById('physHn').addEventListener('keydown', e=>{{ if(e.key==='Enter') physGo(); }});
+}}
+async function physGo(){{
+  const hn = (document.getElementById('physHn')||{{}}).value||'';
+  if(!hn.trim()) return;
+  try{{
+    const r = await fetch(API+'/liff/api/my-hd-labs', {{ method:'POST', headers:{{'Content-Type':'application/json'}},
+      body: JSON.stringify({{ id_token: window._physToken, search_hn: hn.trim() }}) }});
+    const D = await r.json();
+    if(!r.ok) throw new Error(D.error||'ไม่พบข้อมูล');
+    render(D);
+  }}catch(e){{ physSearch(window._physToken, e.message||'ไม่พบข้อมูล'); }}
+}}
 function render(D){{
   const p=D.profile, nd=p.next_dialysis;
   let h=`<div class="hero"><h1>🏥 คลินิกระนอง รักษ์ไต</h1><div class="name">${{esc(p.name)}}</div>

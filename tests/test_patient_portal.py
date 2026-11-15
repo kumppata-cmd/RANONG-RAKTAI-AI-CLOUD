@@ -38,3 +38,28 @@ class InterpretTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PortalTokenTests(unittest.TestCase):
+    """Signed portal link: bare HN must no longer open the portal."""
+
+    def setUp(self):
+        import hd_module.blueprint as bp
+        self.bp = bp
+
+    def test_sign_roundtrip(self):
+        tok = self.bp.portal_token("56001")
+        self.assertTrue(tok.startswith("56001."))
+        self.assertEqual(self.bp._portal_hn_from_token(tok), "56001")
+
+    def test_bare_hn_rejected(self):
+        self.assertIsNone(self.bp._portal_hn_from_token("56001"))
+        self.assertIsNone(self.bp._portal_hn_from_token(""))
+        self.assertIsNone(self.bp._portal_hn_from_token(None))
+
+    def test_tampered_sig_rejected(self):
+        tok = self.bp.portal_token("56001")
+        self.assertIsNone(self.bp._portal_hn_from_token(tok[:-1] + ("0" if tok[-1] != "0" else "1")))
+        # signature of another HN must not unlock this HN
+        other = self.bp.portal_token("57051").split(".")[1]
+        self.assertIsNone(self.bp._portal_hn_from_token("56001." + other))

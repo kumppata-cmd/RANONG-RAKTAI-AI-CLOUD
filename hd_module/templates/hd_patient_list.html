@@ -187,6 +187,12 @@
       </select>
     </div>
     <div class="edit-field"><label>ESA Dose</label><input type="text" id="editESADose" placeholder="เช่น 4000 IU/wk"></div>
+    <button class="btn" onclick="showPortalLink()" style="width:100%;margin-top:4px;padding:10px;border:1.5px solid var(--accent);color:var(--accent);font-weight:700">🔗 ลิงก์ผลเลือดสำหรับผู้ป่วย (QR)</button>
+    <div id="portalLinkBox" style="display:none;text-align:center;margin:8px 0;padding:10px;border:1px dashed var(--border);border-radius:10px">
+      <img id="portalQr" alt="QR" style="width:160px;height:160px;display:none">
+      <div id="portalUrl" style="font-size:.68rem;word-break:break-all;color:var(--fg-muted);margin-top:6px"></div>
+      <button class="btn" onclick="copyPortalLink()" style="margin-top:6px;font-size:.78rem;padding:4px 12px">📋 คัดลอกลิงก์</button>
+    </div>
     <button class="btn btn-success" onclick="savePatientEdit()" style="width:100%;padding:14px;font-size:1rem;margin-top:4px;">💾 บันทึก</button>
     <button class="btn" onclick="closeEditModal()" style="width:100%;margin-top:8px;padding:10px;">ยกเลิก</button>
   </div>
@@ -388,7 +394,28 @@ function openEditModal(hn){
   document.getElementById('editESADose').value = p.esa_dose||'';
   document.getElementById('editOverlay').classList.add('open');
 }
+let _portalUrl = '';
+function showPortalLink(){
+  if(!_editHN) return;
+  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(_editHN)+'/portal-link').then(r=>r.json()).then(d=>{
+    if(d.error){ showToast(d.error,'danger'); return; }
+    _portalUrl = d.url || '';
+    const box = document.getElementById('portalLinkBox');
+    box.style.display = 'block';
+    document.getElementById('portalUrl').textContent = _portalUrl;
+    const img = document.getElementById('portalQr');
+    if(d.qr){ img.src = d.qr; img.style.display = 'inline'; } else { img.style.display = 'none'; }
+  }).catch(()=>showToast('สร้างลิงก์ไม่สำเร็จ','danger'));
+}
+function copyPortalLink(){
+  if(!_portalUrl) return;
+  (navigator.clipboard ? navigator.clipboard.writeText(_portalUrl) : Promise.reject())
+    .then(()=>showToast('คัดลอกลิงก์แล้ว — ส่งให้ผู้ป่วยได้เลย','success'))
+    .catch(()=>showToast(_portalUrl,'info'));
+}
 function closeEditModal(){
+  document.getElementById('portalLinkBox').style.display='none';
+  _portalUrl='';
   document.getElementById('editOverlay').classList.remove('open');
   _editHN = null;
 }
