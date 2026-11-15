@@ -2807,6 +2807,28 @@ def create_session():
             shift = data.get("shift", "morning")
             if shift not in ("morning", "afternoon", "evening"):
                 shift = "morning"
+            # จองล่วงหน้า: ระบุวันที่ได้ (เฉพาะการจอง ไม่ใช่การเริ่มฟอก) — วันนี้ถึง 60 วันข้างหน้า
+            sess_day = _thai_today()
+            if is_schedule and data.get("session_date"):
+                try:
+                    from datetime import date as _date
+                    sess_day = _date.fromisoformat(str(data["session_date"])[:10])
+                except ValueError:
+                    conn.close()
+                    return jsonify({"error": "รูปแบบวันที่ไม่ถูกต้อง"}), 400
+                if sess_day < _thai_today() or sess_day > _thai_today() + timedelta(days=60):
+                    conn.close()
+                    return jsonify({"error": "จองได้ตั้งแต่วันนี้ถึง 60 วันข้างหน้า"}), 400
+            if is_schedule:
+                cur.execute("""SELECT bed_number, COALESCE(shift,'morning') FROM hd_sessions
+                               WHERE patient_id = %s AND session_date = %s
+                                 AND status IN ('scheduled', 'in_progress') LIMIT 1""",
+                            (patient_id, sess_day.isoformat()))
+                dup = cur.fetchone()
+                if dup:
+                    conn.close()
+                    sn = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}.get(dup[1], dup[1])
+                    return jsonify({"error": f"ผู้ป่วยมีรอบวันที่ {sess_day.strftime('%d/%m')} แล้ว (เตียง {dup[0]} รอบ{sn})"}), 409
             cur.execute("""
                 SELECT id, status FROM hd_sessions
                 WHERE bed_number = %s
@@ -2814,7 +2836,7 @@ def create_session():
                   AND (shift = %s OR (shift IS NULL AND %s = 'morning'))
                   AND status IN ('scheduled', 'in_progress')
                 ORDER BY status
-            """, (bed, _thai_today().isoformat(), shift, shift))
+            """, (bed, sess_day.isoformat(), shift, shift))
             existing = cur.fetchall()
             for ex_id, ex_status in existing:
                 if init_status == "in_progress" and ex_status == "in_progress":
@@ -2822,7 +2844,7 @@ def create_session():
                     return jsonify({"error": f"เตียง {bed} มีคนไข้กำลังฟอกอยู่"}), 409
                 if init_status == "scheduled" and ex_status == "scheduled":
                     conn.close()
-                    return jsonify({"error": f"เตียง {bed} มีการจองรอบถัดไปแล้ว"}), 409
+                    return jsonify({"error": f"เตียง {bed} วันที่ {sess_day.strftime('%d/%m')} รอบนี้มีคนจองแล้ว"}), 409
 
             # Insert session with shift
             started = "NULL" if is_schedule else "NOW()"
@@ -2854,7 +2876,7 @@ def create_session():
                 RETURNING id
             """, (
                 patient_id, bed,
-                _thai_today().isoformat(),
+                sess_day.isoformat(),
                 pre_w,
                 uf_goal,
                 g.get("hd_user_id"),
@@ -4362,6 +4384,57 @@ def patient_goal(hn):
         conn.close()
 
 
+@hd_bp.route("/patients/<hn>/bookings", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patient_bookings(hn):
+    """รอบที่จองไว้ล่วงหน้าของผู้ป่วย (วันนี้เป็นต้นไป) — ใช้ในหน้าต่างจองรอบ."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"items": []})
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT s.id, s.session_date, COALESCE(s.shift,'morning'), s.bed_number
+                           FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                           WHERE p.hn = %s AND s.status = 'scheduled' AND s.session_date >= %s
+                           ORDER BY s.session_date, s.shift LIMIT 20""", (hn, _thai_today().isoformat()))
+            items = [{"session_id": r[0], "date": r[1].isoformat(), "shift": r[2], "bed": r[3]} for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return jsonify({"items": items})
+
+
+@hd_bp.route("/schedule/bed-availability", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def bed_availability():
+    """เตียงที่ถูกใช้/จองแล้วในวัน+รอบที่ระบุ — ?date=YYYY-MM-DD&shift=morning."""
+    import os, psycopg2
+    from datetime import date as _date
+    try:
+        day = _date.fromisoformat((request.args.get("date") or _thai_today().isoformat())[:10])
+    except ValueError:
+        return jsonify({"error": "รูปแบบวันที่ไม่ถูกต้อง"}), 400
+    shift = request.args.get("shift", "morning")
+    if shift not in ("morning", "afternoon", "evening"):
+        shift = "morning"
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    taken = {}
+    if db_url:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT s.bed_number, p.patient_name FROM hd_sessions s
+                               JOIN hd_patient_mapping p ON p.id = s.patient_id
+                               WHERE s.session_date = %s AND COALESCE(s.shift,'morning') = %s
+                                 AND s.status IN ('scheduled', 'in_progress')""", (day.isoformat(), shift))
+                taken = {int(r[0]): r[1] for r in cur.fetchall() if r[0]}
+        finally:
+            conn.close()
+    return jsonify({"date": day.isoformat(), "shift": shift, "total_beds": HdConfig.TOTAL_BEDS,
+                    "taken": [{"bed": b, "name": n} for b, n in sorted(taken.items())]})
+
+
 @hd_bp.route("/patients/<hn>/portal-link", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def patient_portal_link(hn):
@@ -5612,7 +5685,7 @@ def auto_assign_beds():
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT bed_number FROM hd_sessions
-                WHERE status IN ('scheduled', 'in_progress')
+                WHERE status IN ('scheduled', 'in_progress') AND session_date = CURRENT_DATE
             """)
             used_beds = {r[0] for r in cur.fetchall()}
 
@@ -5627,6 +5700,7 @@ def auto_assign_beds():
                 cur.execute("""
                     SELECT id FROM hd_sessions
                     WHERE patient_id = %s AND status IN ('scheduled', 'in_progress')
+                      AND session_date = CURRENT_DATE
                 """, (pid,))
                 if cur.fetchone():
                     skipped.append({"hn": hn, "name": name, "reason": "มี session อยู่แล้ว"})

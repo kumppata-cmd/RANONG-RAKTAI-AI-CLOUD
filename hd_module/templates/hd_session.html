@@ -258,7 +258,7 @@
 
   <div class="grid-2">
     <button class="btn btn-success btn-lg" onclick="startSession()">▶️ เริ่มฟอกเลือด</button>
-    <button class="btn btn-outline btn-lg" onclick="scheduleSession()" style="color:var(--info);border-color:var(--info);">📅 จองรอบถัดไป</button>
+    <button class="btn btn-outline btn-lg" onclick="openBooking()" style="color:var(--info);border-color:var(--info);">📅 จองรอบฟอก (เลือกวัน/รอบ)</button>
   </div>
 </div>
 
@@ -510,6 +510,45 @@
 </div>
 
 <!-- ═══ MODALS ═══ -->
+
+<!-- Booking Modal: จองรอบฟอก เลือกวัน + รอบ + เตียง -->
+<style>
+.bk-sec{margin-top:14px}
+.bk-lbl{font-size:.8rem;font-weight:700;color:var(--fg-muted);margin-bottom:6px}
+.bk-chips{display:flex;flex-wrap:wrap;gap:6px}
+.bk-chip{border:1.5px solid var(--border);background:var(--bg-card);color:var(--fg);border-radius:10px;padding:8px 10px;min-width:64px;text-align:center;cursor:pointer;font:inherit;line-height:1.25}
+.bk-chip small{display:block;font-size:.68rem;color:var(--fg-muted)}
+.bk-chip.reg{border-color:var(--success)}
+.bk-chip.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.bk-chip.on small{color:#fff}
+.bk-beds{display:grid;grid-template-columns:repeat(auto-fill,minmax(44px,1fr));gap:6px}
+.bk-bed{border:1.5px solid var(--border);background:var(--bg-card);color:var(--fg);border-radius:8px;padding:8px 0;font:inherit;font-weight:700;cursor:pointer}
+.bk-bed.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.bk-bed:disabled{opacity:.35;cursor:not-allowed;text-decoration:line-through}
+.bk-sum{margin-top:16px;padding:12px;border-radius:10px;background:var(--bg);font-weight:700;line-height:1.5}
+.bk-list div{display:flex;align-items:center;gap:8px;font-size:.85rem;padding:4px 0;border-bottom:1px solid var(--border)}
+.bk-list button{margin-left:auto;background:none;border:0;color:var(--danger);cursor:pointer;font:inherit}
+</style>
+<div class="modal-overlay" id="bookModal" onclick="if(event.target===this)closeBooking()">
+  <div class="modal">
+    <div class="modal-title">📅 จองรอบฟอก</div>
+    <div id="bkPatient" style="font-weight:700"></div>
+    <div id="bkSched" style="font-size:.8rem;color:var(--fg-muted)"></div>
+    <div class="bk-sec"><div class="bk-lbl">1. วันที่ฟอก <span style="font-weight:400">(กรอบเขียว = วันฟอกประจำ)</span></div>
+      <div class="bk-chips" id="bkDays"></div>
+      <div style="margin-top:6px;font-size:.8rem">หรือเลือกวันอื่น <input type="date" id="bkDateOther" class="form-control" style="display:inline-block;width:auto;padding:4px 8px" onchange="bkPickDate(this.value)"></div>
+    </div>
+    <div class="bk-sec"><div class="bk-lbl">2. รอบ</div><div class="bk-chips" id="bkShifts"></div></div>
+    <div class="bk-sec"><div class="bk-lbl">3. เตียง <span id="bkBedNote" style="font-weight:400"></span></div><div class="bk-beds" id="bkBeds"></div></div>
+    <div class="bk-sum" id="bkSum"></div>
+    <div class="bk-sec" id="bkUpcomingWrap" hidden><div class="bk-lbl">รอบที่จองไว้แล้ว</div><div class="bk-list" id="bkUpcoming"></div></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeBooking()">ปิด</button>
+      <button class="btn btn-success" id="bkConfirm" onclick="confirmBooking()">✅ ยืนยันการจอง</button>
+    </div>
+  </div>
+</div>
+
 
 <!-- Vital Signs Modal -->
 <div class="modal-overlay" id="vitalModal">
@@ -961,6 +1000,103 @@ function startSession(){
       sheetLink.style.display = 'block';
     })
     .catch(()=>showToast('ไม่สามารถเริ่มรอบฟอกได้','danger'));
+}
+
+
+/* ═══ จองรอบฟอก: เลือกวัน + รอบ + เตียง ═══ */
+const BK = {hn:'', name:'', sched:'', date:'', shift:'', bed:0};
+const BK_DOW = ['อา','จ','อ','พ','พฤ','ศ','ส'];
+const BK_SHIFT = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
+function bkToday(){ const d=new Date(Date.now()+7*3600e3); return new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())); }
+function bkIso(d){ return d.toISOString().slice(0,10); }
+function bkFromIso(s){ const [y,m,dd]=s.split('-').map(Number); return new Date(Date.UTC(y,m-1,dd)); }
+function bkThai(d, long){ const m=['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'][d.getUTCMonth()];
+  return BK_DOW[d.getUTCDay()]+'. '+d.getUTCDate()+' '+m+(long?' '+(d.getUTCFullYear()+543):''); }
+function bkRegDays(sched){ const set=new Set(); String(sched||'').split(/[,\/\s]+/).map(x=>x.replace('.','').trim()).forEach(x=>{ const i=BK_DOW.indexOf(x); if(i>=0) set.add(i); }); return set; }
+
+function openBooking(){
+  const hn=document.getElementById('patientSelect').value;
+  if(!hn){ showToast('กรุณาเลือกผู้ป่วยก่อน','warning'); return; }
+  BK.hn=hn; BK.bed=parseInt(document.getElementById('bedSelect').value)||0;
+  document.getElementById('bkPatient').textContent='HN '+hn;
+  document.getElementById('bookModal').classList.add('show');
+  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(hn)).then(r=>r.json()).then(p=>{
+    BK.name=p.patient_name||''; BK.sched=p.schedule_days||'';
+    document.getElementById('bkPatient').textContent=(BK.name||'')+'  ·  HN '+hn;
+    document.getElementById('bkSched').textContent='วันฟอกประจำ: '+(BK.sched||'-')+(p.default_shift?' · รอบ'+(BK_SHIFT[p.default_shift]||''):'');
+    BK.shift=p.default_shift||_currentShift||'morning';
+    bkRenderDays(); bkRenderShifts(); bkLoadBeds(); bkLoadUpcoming();
+  }).catch(()=>{ BK.shift=_currentShift||'morning'; bkRenderDays(); bkRenderShifts(); bkLoadBeds(); bkLoadUpcoming(); });
+}
+function closeBooking(){ document.getElementById('bookModal').classList.remove('show'); }
+
+function bkRenderDays(){
+  const reg=bkRegDays(BK.sched), t=bkToday(), box=document.getElementById('bkDays'); let html='', def='';
+  for(let i=0;i<8;i++){
+    const d=new Date(t.getTime()+i*864e5), iso=bkIso(d), r=reg.has(d.getUTCDay());
+    if(!def && r && i>=1) def=iso;
+    const lab=i===0?'วันนี้':(i===1?'พรุ่งนี้':BK_DOW[d.getUTCDay()]+'.');
+    html+=`<button type="button" class="bk-chip${r?' reg':''}" data-d="${iso}" onclick="bkPickDate('${iso}')">${lab}<small>${d.getUTCDate()}/${d.getUTCMonth()+1}${r?' ⭐':''}</small></button>`;
+  }
+  box.innerHTML=html;
+  const inp=document.getElementById('bkDateOther'); inp.min=bkIso(t); inp.max=bkIso(new Date(t.getTime()+60*864e5));
+  bkPickDate(BK.date && BK.date>=bkIso(t) ? BK.date : (def||bkIso(new Date(t.getTime()+864e5))), true);
+}
+function bkPickDate(iso, silent){
+  if(!iso) return; BK.date=iso;
+  document.querySelectorAll('#bkDays .bk-chip').forEach(b=>b.classList.toggle('on', b.dataset.d===iso));
+  const other=!document.querySelector('#bkDays .bk-chip.on'); document.getElementById('bkDateOther').value=other?iso:'';
+  if(!silent){ bkLoadBeds(); }
+  bkSummary();
+}
+function bkRenderShifts(){
+  document.getElementById('bkShifts').innerHTML=Object.entries(BK_SHIFT).map(([k,v])=>
+    `<button type="button" class="bk-chip${k===BK.shift?' on':''}" onclick="bkPickShift('${k}')">รอบ${v}</button>`).join('');
+}
+function bkPickShift(k){ BK.shift=k; bkRenderShifts(); bkLoadBeds(); }
+function bkLoadBeds(){
+  const box=document.getElementById('bkBeds'); box.innerHTML='<span style="font-size:.8rem;color:var(--fg-muted)">กำลังโหลด…</span>';
+  hdFetch('/hd/api/v1/schedule/bed-availability?date='+BK.date+'&shift='+BK.shift).then(r=>r.json()).then(d=>{
+    const taken=new Map((d.taken||[]).map(x=>[x.bed,x.name])), n=d.total_beds||25;
+    if(BK.bed && taken.has(BK.bed)) BK.bed=0;
+    if(!BK.bed){ for(let b=1;b<=n;b++){ if(!taken.has(b)){ BK.bed=b; break; } } }
+    let h=''; for(let b=1;b<=n;b++){ const t=taken.get(b);
+      h+=`<button type="button" class="bk-bed${b===BK.bed?' on':''}" ${t?`disabled title="${String(t).replace(/"/g,'')}"`:''} onclick="bkPickBed(${b})">${b}</button>`; }
+    box.innerHTML=h;
+    document.getElementById('bkBedNote').textContent=`(ว่าง ${n-taken.size} จาก ${n} เตียง · ขีดฆ่า = จองแล้ว)`;
+    bkSummary();
+  }).catch(()=>{ box.innerHTML='<span style="color:var(--danger);font-size:.8rem">โหลดเตียงไม่สำเร็จ</span>'; });
+}
+function bkPickBed(b){ BK.bed=b; document.querySelectorAll('#bkBeds .bk-bed').forEach(x=>x.classList.toggle('on', +x.textContent===b)); bkSummary(); }
+function bkSummary(){
+  const ok=BK.date&&BK.shift&&BK.bed;
+  document.getElementById('bkSum').innerHTML = ok
+    ? `${BK.name||'HN '+BK.hn}<br>📅 ${bkThai(bkFromIso(BK.date),true)} · รอบ${BK_SHIFT[BK.shift]} · 🛏 เตียง ${BK.bed}`
+    : '<span style="color:var(--fg-muted)">เลือกวัน รอบ และเตียงให้ครบ</span>';
+  document.getElementById('bkConfirm').disabled=!ok;
+}
+function bkLoadUpcoming(){
+  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(BK.hn)+'/bookings').then(r=>r.json()).then(d=>{
+    const it=d.items||[], w=document.getElementById('bkUpcomingWrap'); w.hidden=!it.length;
+    document.getElementById('bkUpcoming').innerHTML=it.map(x=>`<div>📅 ${bkThai(bkFromIso(x.date))} · รอบ${BK_SHIFT[x.shift]||x.shift} · เตียง ${x.bed}<button type="button" onclick="bkCancel(${x.session_id},this)">✕ ยกเลิก</button></div>`).join('');
+  }).catch(()=>{});
+}
+function bkCancel(sid, btn){
+  if(btn.dataset.sure!=='1'){ btn.dataset.sure='1'; btn.textContent='กดอีกครั้งเพื่อยืนยัน'; return; }
+  hdFetch('/hd/api/v1/sessions/'+sid,{method:'PUT',body:JSON.stringify({status:'cancelled'})}).then(r=>r.json()).then(d=>{
+    if(d.error){ showToast(d.error,'danger'); return; }
+    showToast('ยกเลิกการจองแล้ว','success'); bkLoadUpcoming(); bkLoadBeds();
+  }).catch(()=>showToast('ยกเลิกไม่สำเร็จ','danger'));
+}
+function confirmBooking(){
+  const btn=document.getElementById('bkConfirm'); btn.disabled=true;
+  const data={patient_hn:BK.hn, bed_number:BK.bed, schedule_only:true, shift:BK.shift, session_date:BK.date};
+  hdFetch('/hd/api/v1/sessions',{method:'POST',body:JSON.stringify(data)}).then(r=>r.json()).then(d=>{
+    btn.disabled=false;
+    if(d.error){ showToast(d.error,'danger'); bkLoadBeds(); return; }
+    showToast(`จองแล้ว: ${bkThai(bkFromIso(BK.date))} รอบ${BK_SHIFT[BK.shift]} เตียง ${BK.bed}`,'success');
+    bkLoadUpcoming(); bkLoadBeds();
+  }).catch(()=>{ btn.disabled=false; showToast('จองไม่สำเร็จ','danger'); });
 }
 
 function scheduleSession(){
