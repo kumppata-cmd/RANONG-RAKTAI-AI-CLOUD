@@ -304,6 +304,12 @@ def _no_cache_sw(resp):
     return resp
 
 
+@hd_web.route("/patient-card/<hn>")
+def patient_card_page(hn):
+    """Printable patient card (name + schedule + portal QR) — staff page."""
+    return render_template("hd_patient_card.html", patient_hn=hn)
+
+
 @hd_web.route("/my/<token>")
 def patient_portal_page(token):
     """Patient Portal — mobile-friendly page for the patient to view their own HD results."""
@@ -2394,7 +2400,9 @@ def labs_import_commit():
     log_action(user_id=g.get("hd_user_id"), action="labs.import", resource_type="hd_lab_results", resource_id=None,
                new_values={"source": source, **res, "fields": body.get("fields")}, ip_address=request.remote_addr or "")
     # ผล Hb ใหม่ → ESA Autopilot จะเสนอในรอบถัดไปเอง (ทุกชั่วโมง 06–20 น.)
-    return jsonify({"ok": True, **res, "source": source})
+    # แจ้งผู้ป่วยที่ผูก LINE ว่ามีผลใหม่ (เฉพาะแถวที่บันทึกจริง ไม่ใช่แถวซ้ำ)
+    notified = notify_patients_new_results([r.get("hn") for r in rows if r.get("hn") and not r.get("duplicate")])
+    return jsonify({"ok": True, **res, "source": source, "patient_notify": notified})
 
 
 @hd_bp.route("/labs/sync", methods=["POST"])
@@ -4222,6 +4230,108 @@ def patients_weekly_grid():
                     "generated_at": (datetime.now(timezone.utc) + timedelta(hours=7)).isoformat(timespec="minutes")})
 
 
+def notify_patients_new_results(hns, kind="ผลเลือด"):
+    """ว้าว: push "ผลใหม่มาแล้ว" to LINE-linked patients after a confirmed import.
+
+    Quota-guarded by LINE_PUSH_FN (monthly-quota check lives inside push_message),
+    PDPA-aware (withdrawn always blocks; required consent per ⚙️), never raises.
+    → {"notified": n, "no_line": n, "blocked": n, "off": bool}"""
+    import os
+    out = {"notified": 0, "no_line": 0, "blocked": 0, "off": False}
+    try:
+        if (get_setting_value("patient_lab_notify", "on") or "on").lower() in ("off", "0", "false"):
+            out["off"] = True
+            return out
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+        if not push_fn:
+            return out
+        require_consent = (get_setting_value("patient_push_requires_consent", "off") or "off").lower() == "on"
+        consent = {}
+        try:
+            import psycopg2
+            from .pdpa import status_for
+            _c = psycopg2.connect(os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", ""), connect_timeout=5)
+            try:
+                with _c.cursor() as cur:
+                    for hn in set(hns):
+                        consent[hn] = (status_for(cur, hn).get("line_messaging") or {}).get("status")
+            finally:
+                _c.close()
+        except Exception as e:
+            logger.warning("notify consent lookup: %s", e)
+        liff_id = os.environ.get("LIFF_ID", "")
+        base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+        url = f"https://liff.line.me/{liff_id}/hd-labs" if liff_id else f"{base}/liff/hd-labs"
+        msg = ("🩸 " + kind + "ใหม่ของคุณมาแล้ว\n"
+               "━━━━━━━━━━━━\n"
+               "แตะดูค่าเลือด กราฟแนวโน้ม และคำแนะนำ:\n" + url +
+               "\n\n(ข้อความอัตโนมัติจากคลินิกระนอง รักษ์ไต)")
+        for hn in sorted(set(hns)):
+            st = consent.get(hn)
+            if st == "withdrawn" or (require_consent and st != "given"):
+                out["blocked"] += 1
+                continue
+            lid = _resolve_patient_line_id(hn)
+            if not lid:
+                out["no_line"] += 1
+                continue
+            try:
+                if push_fn(lid, msg) is not False:
+                    out["notified"] += 1
+            except Exception as e:
+                logger.warning("notify patient %s: %s", hn, e)
+        if out["notified"]:
+            log_action(user_id=g.get("hd_user_id"), action="labs.patient_notify", resource_type="labs",
+                       new_values={"kind": kind, **out}, ip_address=(request.remote_addr or "") if request else "")
+    except Exception as e:
+        logger.warning("notify_patients_new_results: %s", e)
+    return out
+
+
+@hd_bp.route("/patients/<hn>/goal", methods=["GET", "POST"])
+@require_role("physician", "nurse", "admin")
+def patient_goal(hn):
+    """🎯 เป้าหมายจากแพทย์ รายคน — shown on the patient's own portal.
+
+    GET → current goal. POST {goal} (physician only) sets it; empty goal clears.
+    Setting a goal pushes one LINE message to the linked patient (quota/PDPA-guarded)."""
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        if request.method == "GET":
+            with conn.cursor() as cur:
+                cur.execute("SELECT patient_goal, goal_set_by, goal_set_at FROM hd_patient_mapping WHERE hn = %s", (hn,))
+                r = cur.fetchone()
+            if not r:
+                return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+            return jsonify({"hn": hn, "goal": r[0] or "", "set_by": r[1],
+                            "set_at": r[2].isoformat() if r[2] else None})
+        if g.get("hd_role") != "physician" and g.get("hd_role") != "admin":
+            return jsonify({"error": "เฉพาะแพทย์เท่านั้นที่ตั้งเป้าหมายได้"}), 403
+        data = request.get_json(silent=True) or {}
+        goal = (data.get("goal") or "").strip()[:300]
+        who = g.get("hd_username") or str(g.get("hd_user_id") or "")
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE hd_patient_mapping SET patient_goal = %s,
+                           goal_set_by = CASE WHEN %s <> '' THEN %s ELSE NULL END,
+                           goal_set_at = CASE WHEN %s <> '' THEN NOW() ELSE NULL END,
+                           updated_at = NOW() WHERE hn = %s RETURNING id""",
+                        (goal or None, goal, who, goal, hn))
+            if not cur.fetchone():
+                return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+        conn.commit()
+        log_action(user_id=g.get("hd_user_id"), action="patient.goal_set", resource_type="patient", resource_id=hn,
+                   new_values={"goal": goal}, ip_address=request.remote_addr or "")
+        pushed = {}
+        if goal:
+            pushed = notify_patients_new_results([hn], kind="🎯 เป้าหมายจากแพทย์")
+        return jsonify({"ok": True, "goal": goal, "pushed": pushed.get("notified", 0)})
+    finally:
+        conn.close()
+
+
 @hd_bp.route("/patients/<hn>/portal-link", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def patient_portal_link(hn):
@@ -4282,6 +4392,9 @@ def serology_import():
         log_action(user_id=g.get("hd_user_id"), action="labs.import_serology", resource_type="labs",
                    new_values={"written": res["written"], "pos_hbsag": res["pos_hbsag"], "pos_antihcv": res["pos_antihcv"],
                                "file": (f.filename or "")[:80]}, ip_address=request.remote_addr or "")
+        if res.get("written"):
+            res["patient_notify"] = notify_patients_new_results(
+                [m["hn"] for m in res.get("matched", []) if not m.get("duplicate")])
     return jsonify(res)
 
 
@@ -4339,6 +4452,9 @@ def import_patient_roster():
         logger.info("roster import by %s: matched=%d written=%d unmatched=%d",
                     g.get("hd_username"), summary["matched"], summary["written"],
                     len(summary["unmatched"]))
+        if summary.get("labs_written"):
+            summary["patient_notify"] = notify_patients_new_results(
+                [d["hn"] for d in summary.get("details", []) if d.get("labs")])
     return jsonify(summary)
 
 
@@ -4365,12 +4481,13 @@ def get_patient(hn):
             # Get va_location separately (column may not exist yet)
             va_loc = None
             sero = None
+            dshift = None
             if row:
                 try:
-                    cur.execute("SELECT va_location FROM hd_patient_mapping WHERE hn = %s", (hn,))
+                    cur.execute("SELECT va_location, default_shift FROM hd_patient_mapping WHERE hn = %s", (hn,))
                     vr = cur.fetchone()
                     if vr:
-                        va_loc = vr[0]
+                        va_loc, dshift = vr[0], vr[1]
                 except Exception:
                     pass  # column doesn't exist yet
                 try:
@@ -4393,6 +4510,7 @@ def get_patient(hn):
             "primary_diagnosis": row[13], "is_active": row[14],
             "created_at": row[15].isoformat() if row[15] else None,
             "serology": sero,
+            "default_shift": dshift,
         })
     except Exception as e:
         logger.error("get_patient error: %s", e)
@@ -5168,6 +5286,7 @@ def update_settings():
         "alert_sbp_drop",          # IDH SBP drop threshold
         "alert_severe_sbp",        # severe IDH threshold
         "patient_summary_auto",    # ว้าว #7: on/off auto LINE summary to patient
+        "patient_lab_notify",      # push "ผลเลือดใหม่" to linked patients after an import (on/off)
         "water_total_cl_max", "water_free_cl_max", "water_hardness_max",   # RO water daily check limits
         "water_interval_days", "water_sample_point",
         "uf_rate_max", "uf_rate_caution", "dw_review_every", "dw_step_kg", "dw_min_interval_days",   # DW Autopilot

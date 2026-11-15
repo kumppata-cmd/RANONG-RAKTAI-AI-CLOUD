@@ -90,13 +90,37 @@ def _interpret_ferritin(v):
     return {"emoji": "🟠", "text": f"Ferritin {v:.0f} — สูง แพทย์จะพิจารณาหยุดเสริมเหล็กชั่วคราว", "status": "high"}
 
 
+def compute_idwg(sessions_desc, dw):
+    """IDWG per session = pre(today) − post(previous session), % of DW.
+    sessions_desc: newest-first dicts with date/pre_weight/post_weight. → oldest-first list."""
+    idwg = []
+    chron = list(reversed(sessions_desc))         # oldest → newest
+    for prev, curs in zip(chron, chron[1:]):
+        if curs.get("pre_weight") and prev.get("post_weight"):
+            kg = round(curs["pre_weight"] - prev["post_weight"], 1)
+            if -3 <= kg <= 8:                     # ignore obvious data errors
+                idwg.append({"date": curs["date"], "kg": kg,
+                             "pct": round(kg / dw * 100, 1) if dw else None})
+    return idwg
+
+
 def portal_data(conn, hn):
     """Full patient portal data for one HN → dict or None."""
     with conn.cursor() as cur:
-        cur.execute("""SELECT id, patient_name, vascular_access, schedule_days, dry_weight,
-                              esa_drug, esa_dose, default_shift, date_of_birth
-                       FROM hd_patient_mapping WHERE hn = %s AND is_active = TRUE""", (hn,))
-        p = cur.fetchone()
+        goal = None
+        try:
+            cur.execute("""SELECT id, patient_name, vascular_access, schedule_days, dry_weight,
+                                  esa_drug, esa_dose, default_shift, date_of_birth, patient_goal, goal_set_at
+                           FROM hd_patient_mapping WHERE hn = %s AND is_active = TRUE""", (hn,))
+            p = cur.fetchone()
+            if p and p[9]:
+                goal = {"text": p[9], "set_at": p[10].isoformat()[:10] if p[10] else None}
+        except Exception:
+            conn.rollback()
+            cur.execute("""SELECT id, patient_name, vascular_access, schedule_days, dry_weight,
+                                  esa_drug, esa_dose, default_shift, date_of_birth
+                           FROM hd_patient_mapping WHERE hn = %s AND is_active = TRUE""", (hn,))
+            p = cur.fetchone()
         if not p:
             return None
         pid = p[0]
@@ -150,12 +174,12 @@ def portal_data(conn, hn):
             except Exception:
                 pass
 
-        # Last 10 sessions
+        # Last sessions (20 fetched → 10 shown, all 20 feed the IDWG chart)
         sessions = []
         cur.execute("""SELECT session_date, pre_weight, post_weight, actual_uf, hb_value,
                               started_at, ended_at, esa_given, shift, bed_number
                        FROM hd_sessions WHERE patient_id = %s AND status = 'completed'
-                       ORDER BY session_date DESC, started_at DESC LIMIT 10""", (pid,))
+                       ORDER BY session_date DESC, started_at DESC LIMIT 20""", (pid,))
         for r in cur.fetchall():
             duration_h = None
             if r[5] and r[6]:
@@ -163,6 +187,9 @@ def portal_data(conn, hn):
             sessions.append({"date": r[0].isoformat(), "pre_weight": _f(r[1]), "post_weight": _f(r[2]),
                              "uf": _f(r[3]), "hb": _f(r[4]), "duration": duration_h,
                              "esa": r[7], "shift": SHIFT_TH.get(r[8], ""), "bed": r[9]})
+
+        idwg = compute_idwg(sessions, profile.get("dry_weight"))
+        sessions = sessions[:10]
 
         # Health tips based on current status
         tips = []
@@ -174,10 +201,12 @@ def portal_data(conn, hn):
             tips.append({"icon": "💊", "text": "เหล็กต่ำ: แพทย์อาจให้เหล็กทางเส้นเลือดในรอบฟอกถัดไป"})
         if fluid and fluid["oh"] > 2:
             tips.append({"icon": "🧂", "text": "น้ำเกิน: ลดเกลือ, จำกัดน้ำ, ชั่งน้ำหนักทุกวันเช้าหลังตื่นนอน"})
+        if idwg and idwg[-1].get("pct") is not None and idwg[-1]["pct"] > 5:
+            tips.append({"icon": "⚖️", "text": f"น้ำหนักขึ้นระหว่างรอบล่าสุด {idwg[-1]['kg']:.1f} kg ({idwg[-1]['pct']:.0f}% ของ DW) — เกินเป้า 5% ควรจำกัดน้ำ/เกลือเข้มขึ้น"})
         if not tips:
             tips.append({"icon": "💪", "text": "ออกกำลังกายเบา ๆ เช่น เดิน 30 นาทีในวันที่ไม่ฟอก ช่วยให้ร่างกายแข็งแรงขึ้น"})
             tips.append({"icon": "📝", "text": "จดน้ำหนักก่อนฟอกทุกครั้ง ถ้าเพิ่มเกิน 3% ของ DW ให้ลดน้ำก่อนรอบถัดไป"})
 
     return {"profile": profile, "labs": labs, "latest": latest, "interpretations": interpretations,
-            "fluid": fluid, "sessions": sessions, "tips": tips,
+            "fluid": fluid, "sessions": sessions, "tips": tips, "goal": goal, "idwg": idwg,
             "generated_at": (datetime.now(timezone.utc) + timedelta(hours=7)).isoformat(timespec="minutes")}

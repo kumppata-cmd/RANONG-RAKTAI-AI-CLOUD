@@ -9089,9 +9089,9 @@ def handle_search_command(
                     "body": {"type": "box", "layout": "vertical", "spacing": "xs",
                              "paddingAll": "10px", "contents": body}}
         _qr_items = [{"type": "action", "action": {"type": "message", "label": l[:20], "text": t}}
-                     for l, t in [("🔬 ผลแล็บ", "ผลแล็บ"), ("🩺 รอบฟอก", "รอบฟอก"),
-                                  ("📅 ดูนัด", "ดูนัด"), ("📊 สถิติ", "สถิติเดือนนี้"),
-                                  ("🔍 ค้นหา", "ค้นหา")]]
+                     for l, t in [("🩸 ผลเลือดของฉัน", "ผลเลือด"), ("🔬 ผลแล็บ", "ผลแล็บ"),
+                                  ("🩺 รอบฟอก", "รอบฟอก"), ("📅 ดูนัด", "ดูนัด"),
+                                  ("📊 สถิติ", "สถิติเดือนนี้")]]
         return {
             "type": "flex", "altText": "📋 คำสั่งทั้งหมด — เลื่อนดูแต่ละหมวด",
             "quickReply": {"items": _qr_items},
@@ -9104,8 +9104,8 @@ def handle_search_command(
                     "คำสั่งการรักษา [HN]", "ประวัติการรักษา [HN]", "ติดตามผลการรักษา", "ตรวจยา [HN]"]),
                 _hb("เอกสาร", "📂", "#E65100", ["ค้นหา [คำ]", "ขอไฟล์ [รหัส]",
                     "รายการล่าสุด", "ส่งเอกสาร — ส่งรูป/PDF"]),
-                _hb("ผู้ป่วย", "👤", "#C62828", ["สรุป HN [เลข]", "HN ของฉัน",
-                    "ลงทะเบียน", "ดูนัด / นัดหมาย"]),
+                _hb("ผู้ป่วย", "👤", "#C62828", ["ผลเลือด — ค่าเลือด+กราฟของฉัน", "สรุป HN [เลข]",
+                    "HN ของฉัน", "ลงทะเบียน", "ดูนัด / นัดหมาย"]),
                 _hb("ระบบ", "📊", "#00796B", ["สถิติเดือนนี้", "ตรวจสอบระบบ",
                     "KPI / KPIไต", "สรุปค่าใช้จ่าย", "สถานะgoogle"]),
             ]},
@@ -22737,6 +22737,10 @@ function render(D){{
     <div class="info-row"><span class="label">น้ำหนักแห้ง</span><span class="value">${{p.dry_weight?p.dry_weight.toFixed(1)+' kg':'-'}}</span></div>
     <div class="info-row"><span class="label">ยากระตุ้นเม็ดเลือด</span><span class="value">${{esc(p.esa_drug||'-')}} ${{esc(p.esa_dose||'')}}</span></div>
   </div>`;
+  if(D.goal && D.goal.text){{
+    h+=`<div class="card" style="border:2px solid var(--accent)"><h2>🎯 เป้าหมายจากแพทย์ของฉัน</h2>
+      <div style="font-size:1rem;font-weight:600;line-height:1.6">${{esc(D.goal.text)}}</div></div>`;
+  }}
   const it=D.interpretations||{{}};
   if(Object.keys(it).length){{
     h+=`<div class="card"><h2>🩺 สรุปผลแล็บล่าสุด</h2>`;
@@ -22760,6 +22764,8 @@ function render(D){{
     const ktvs=labs.filter(l=>l.ktv!=null);
     if(ktvs.length>=2) h+=`<div class="card"><h2>📈 แนวโน้ม Kt/V</h2><div style="overflow-x:auto">${{svgC(ktvs.map(l=>({{x:l.date,y:l.ktv}})),0.5,2.5,1.2,999,'Kt/V')}}</div><div style="font-size:.72rem;color:var(--muted)">เส้นเขียว = เป้า ≥1.2</div></div>`;
   }}
+  const idwg=(D.idwg||[]).filter(x=>x.pct!=null);
+  if(idwg.length>=2) h+=`<div class="card"><h2>⚖️ น้ำหนักขึ้นระหว่างรอบฟอก</h2><div style="overflow-x:auto">${{svgC(idwg.map(x=>({{x:x.date,y:x.pct}})),0,7,0,5,'IDWG % ของ DW')}}</div><div style="font-size:.72rem;color:var(--muted)">แถบเขียว = ไม่เกิน 5% ของ DW (เป้าที่ดี < 3%)</div></div>`;
   const ss=D.sessions||[];
   if(ss.length){{
     h+=`<div class="card"><h2>📋 ผลฟอก ${{ss.length}} รอบล่าสุด</h2><div style="overflow-x:auto"><table>

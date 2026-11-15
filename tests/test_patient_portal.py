@@ -63,3 +63,27 @@ class PortalTokenTests(unittest.TestCase):
         # signature of another HN must not unlock this HN
         other = self.bp.portal_token("57051").split(".")[1]
         self.assertIsNone(self.bp._portal_hn_from_token("56001." + other))
+
+
+class IdwgTests(unittest.TestCase):
+    def test_compute(self):
+        from hd_module.patient_portal import compute_idwg
+        sessions = [  # newest first
+            {"date": "2026-11-14", "pre_weight": 76.0, "post_weight": 73.5},
+            {"date": "2026-11-12", "pre_weight": 75.5, "post_weight": 73.0},
+            {"date": "2026-11-10", "pre_weight": 75.0, "post_weight": 72.9},
+        ]
+        out = compute_idwg(sessions, 73.0)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0], {"date": "2026-11-12", "kg": 2.6, "pct": 3.6})
+        self.assertEqual(out[1], {"date": "2026-11-14", "kg": 3.0, "pct": 4.1})
+
+    def test_skips_gaps_and_errors(self):
+        from hd_module.patient_portal import compute_idwg
+        sessions = [
+            {"date": "2026-11-14", "pre_weight": 90.0, "post_weight": 73.5},  # +17 kg → data error, skipped
+            {"date": "2026-11-12", "pre_weight": None, "post_weight": 73.0},
+            {"date": "2026-11-10", "pre_weight": 75.0, "post_weight": None},
+        ]
+        self.assertEqual(compute_idwg(sessions, 73.0), [])
+        self.assertEqual(compute_idwg([], 73.0), [])

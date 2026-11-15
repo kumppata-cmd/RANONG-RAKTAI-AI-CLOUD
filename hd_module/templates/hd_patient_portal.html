@@ -70,6 +70,14 @@ function render(D){
     <div class="info-row"><span class="label">ยากระตุ้นเม็ดเลือด</span><span class="value">${esc(p.esa_drug||'-')} ${esc(p.esa_dose||'')}</span></div>
   </div>`;
 
+  /* Physician goal */
+  if(D.goal && D.goal.text){
+    h += `<div class="card" style="border:2px solid var(--accent)"><h2>🎯 เป้าหมายจากแพทย์ของฉัน</h2>
+      <div style="font-size:1rem;font-weight:600;line-height:1.6">${esc(D.goal.text)}</div>
+      ${D.goal.set_at?`<div style="font-size:.72rem;color:var(--muted);margin-top:6px">ตั้งเมื่อ ${new Date(D.goal.set_at+'T00:00:00').toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'})}</div>`:''}
+    </div>`;
+  }
+
   /* Interpretations */
   const it = D.interpretations || {};
   if(Object.keys(it).length){
@@ -114,6 +122,15 @@ function render(D){
         <div style="font-size:.72rem;color:var(--muted)">เส้นเขียว = เป้า ≥ 1.2</div>
       </div>`;
     }
+  }
+
+  /* IDWG chart */
+  const idwg = (D.idwg||[]).filter(x=>x.pct!=null);
+  if(idwg.length >= 2){
+    h += `<div class="card"><h2>⚖️ น้ำหนักขึ้นระหว่างรอบฟอก (IDWG)</h2>
+      <div class="chart-wrap">${svgChart(idwg.map(x=>({x:x.date,y:x.pct})), 0, 7, 0, 5, 'IDWG % ของ DW')}</div>
+      <div style="font-size:.72rem;color:var(--muted)">แถบเขียว = ไม่เกิน 5% ของน้ำหนักแห้ง (ยิ่งน้อยยิ่งดี เป้าที่ดี &lt; 3%)</div>
+    </div>`;
   }
 
   /* Sessions */

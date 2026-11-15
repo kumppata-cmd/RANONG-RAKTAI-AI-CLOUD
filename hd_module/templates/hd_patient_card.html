@@ -1,0 +1,80 @@
+{% extends "hd_base.html" %}
+{% block title %}บัตรผู้ป่วย — {{ patient_hn }}{% endblock %}
+{% block page_title %}🖨 บัตรผู้ป่วย + QR ผลเลือด{% endblock %}
+
+{% block extra_css %}
+<style>
+.pc-wrap{display:flex;flex-direction:column;align-items:center;gap:14px}
+.pc-card{width:105mm;min-height:66mm;background:#fff;color:#1a2b3c;border:1.5px solid #9fb2c4;border-radius:12px;padding:8mm;box-shadow:0 2px 8px rgba(0,0,0,.12);display:flex;gap:6mm;align-items:center}
+.pc-left{flex:1;min-width:0}
+.pc-clinic{font-size:.72rem;color:#2980b9;font-weight:700;letter-spacing:.02em}
+.pc-name{font-size:1.05rem;font-weight:800;margin:2mm 0 1mm;line-height:1.3}
+.pc-row{font-size:.78rem;margin-top:1mm;color:#34495e}
+.pc-row b{color:#1a2b3c}
+.pc-note{font-size:.6rem;color:#7f8c8d;margin-top:2.5mm;line-height:1.35}
+.pc-qr{width:30mm;height:30mm;flex:0 0 auto}
+.pc-qr img{width:100%;height:100%}
+.pc-qr-cap{font-size:.56rem;text-align:center;color:#7f8c8d;margin-top:1mm}
+@media print{
+  .sidebar,.topbar,.pc-actions,.no-print{display:none!important}
+  .main{margin:0!important;width:auto!important;padding:0!important}
+  body{background:#fff!important}
+  .pc-card{box-shadow:none;page-break-inside:avoid}
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="pc-wrap">
+  <div class="pc-card" id="card">
+    <div class="pc-left">
+      <div class="pc-clinic">🏥 คลินิกระนอง รักษ์ไต · HD Smart Monitoring</div>
+      <div class="pc-name" id="cName">กำลังโหลด…</div>
+      <div class="pc-row">HN <b>{{ patient_hn }}</b> <span id="cHosp"></span></div>
+      <div class="pc-row" id="cSched"></div>
+      <div class="pc-row" id="cVa"></div>
+      <div class="pc-note">สแกน QR เพื่อดูผลเลือด กราฟแนวโน้ม และนัดฟอกของตนเอง<br>ลิงก์นี้เป็นข้อมูลส่วนบุคคล — กรุณาไม่ส่งต่อให้ผู้อื่น</div>
+    </div>
+    <div>
+      <div class="pc-qr" id="cQr"></div>
+      <div class="pc-qr-cap">ผลเลือดของฉัน</div>
+    </div>
+  </div>
+  <div class="pc-actions" style="display:flex;gap:8px">
+    <button class="btn btn-primary" onclick="window.print()">🖨 พิมพ์</button>
+    <button class="btn btn-secondary" onclick="window.close()">ปิด</button>
+  </div>
+  <div class="no-print" style="font-size:.74rem;color:var(--fg-muted);max-width:420px;text-align:center">
+    ขนาดบัตร ≈ A6 แนวนอน — พิมพ์แล้วตัดตามขอบ เคลือบหรือสอดซองพลาสติกติดกับบัตรนัดได้
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const HN = {{ patient_hn|tojson }};
+async function load(){
+  try{
+    const [pr, lr] = await Promise.all([
+      hdFetch('/hd/api/v1/patients/'+encodeURIComponent(HN)).then(r=>r.json()),
+      hdFetch('/hd/api/v1/patients/'+encodeURIComponent(HN)+'/portal-link').then(r=>r.json()),
+    ]);
+    if(pr && !pr.error){
+      document.getElementById('cName').textContent = pr.patient_name || '-';
+      if(pr.hospital_hn) document.getElementById('cHosp').textContent = '· HN รพ. ' + pr.hospital_hn;
+      const SH = {morning:'รอบเช้า',afternoon:'รอบบ่าย',evening:'รอบค่ำ'};
+      document.getElementById('cSched').innerHTML = 'วันฟอก <b>'+(pr.schedule_days||'-')+'</b>' + (pr.default_shift&&SH[pr.default_shift]?' · <b>'+SH[pr.default_shift]+'</b>':'');
+      document.getElementById('cVa').innerHTML = 'เส้นฟอก <b>'+(pr.vascular_access||'-')+'</b>' + (pr.dry_weight?' · DW <b>'+Number(pr.dry_weight).toFixed(1)+' kg</b>':'');
+    }
+    if(lr && lr.qr){
+      document.getElementById('cQr').innerHTML = '<img src="'+lr.qr+'" alt="QR">';
+    } else if(lr && lr.url){
+      document.getElementById('cQr').innerHTML = '<div style="font-size:.5rem;word-break:break-all">'+lr.url+'</div>';
+    }
+  }catch(e){
+    document.getElementById('cName').textContent = 'โหลดไม่สำเร็จ — ลองล็อกอินใหม่';
+  }
+}
+load();
+</script>
+{% endblock %}
