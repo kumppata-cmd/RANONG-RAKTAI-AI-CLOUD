@@ -8048,12 +8048,16 @@ def handle_search_command(
             _log.append(f"👨‍⚕️ Staff: ✅ {_staff_id[:12]}...")
 
             # === Step 2: Patient Menu ===
+            # ลิงก์ผลเลือด HD (LIFF path /hd-labs) — ผู้ป่วยกดแล้วเปิดผลเลือดทันที
+            _hd_labs_url = (f"https://liff.line.me/{_liff_id}/hd-labs" if _liff_id
+                            else f"{_RENDER_BASE}/liff/hd-labs")
             _patient_areas = [
                 {"bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
-                 "action": {"type": "uri", "label": "ดูผลแล็บ",
-                            "uri": _liff_url or f"{_RENDER_BASE}/liff"}},
+                 "action": {"type": "uri", "label": "🩸 ผลเลือด HD",
+                            "uri": _hd_labs_url}},
                 {"bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
-                 "action": {"type": "message", "label": "ส่งเอกสาร", "text": "ส่งเอกสาร"}},
+                 "action": {"type": "uri", "label": "ดูผลแล็บ/เอกสาร",
+                            "uri": _liff_url or f"{_RENDER_BASE}/liff"}},
                 {"bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
                  "action": {"type": "message", "label": "ลงทะเบียน", "text": "ลงทะเบียน"}},
                 {"bounds": {"x": 0, "y": _row_h, "width": _col_w, "height": _row_h + 1},
@@ -8063,7 +8067,7 @@ def handle_search_command(
                 {"bounds": {"x": _col_w * 2 + 1, "y": _row_h, "width": _col_w, "height": _row_h + 1},
                  "action": {"type": "message", "label": "ช่วยเหลือ", "text": "ช่วยเหลือ"}},
             ]
-            _patient_id, _err = _rm_create("Patient Menu v4", _patient_areas)
+            _patient_id, _err = _rm_create("Patient Menu v5", _patient_areas)
             if _err:
                 return f"❌ {_err}"
             _rm_upload_img(_patient_id, "rich_menu_patient.png")
