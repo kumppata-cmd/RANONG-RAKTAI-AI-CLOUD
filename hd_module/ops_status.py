@@ -199,10 +199,26 @@ def run_guarded(name, fn, *args, timeout=None, **kwargs):
             logger.error("job %s failed: %s", name, e)
             return None
     box = {}
+    # The helper thread does not inherit Flask's app context (it is thread-local),
+    # so jobs that use current_app / settings / LINE failed with "Working outside of
+    # application context" (14–15 Nov 2026). Carry the caller's app into the thread.
+    app = None
+    try:
+        from flask import current_app, has_app_context
+        if has_app_context():
+            app = current_app._get_current_object()
+    except Exception:
+        app = None
+
+    def _call():
+        if app is not None:
+            with app.app_context():
+                return fn(*args, **kwargs)
+        return fn(*args, **kwargs)
 
     def _runner():
         try:
-            box["r"] = fn(*args, **kwargs)
+            box["r"] = _call()
             job_done(name, True, _summ(box["r"]), started)
         except Exception as e:
             box["e"] = e
