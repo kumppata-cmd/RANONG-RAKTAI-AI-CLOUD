@@ -14187,6 +14187,25 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "_ocr_text": content,
         }
 
+    # ── Pre-check: ใบตรวจรักษาผู้ป่วย รพ. (OPD visit sheet = ใบยา) ──
+    # *** ต้องอยู่ก่อน lab pre-check ***
+    # 15 พ.ย. 2026 (HN 00139): ใบนี้มีช่อง "ผลการตรวจทางห้องปฏิบัติการ" และรายการยา
+    # SODIUM BICARBONATE / Calcium Carbonate → lab pre-check นับ sodium+calcium เป็นผลแล็บ
+    # แล้วจัดเป็นใบแล็บผิดแฟ้ม หัวฟอร์ม/ช่องเฉพาะของใบ OPD ชี้ชัดว่าเป็นใบยา
+    _opd_strong = ["ใบตรวจรักษา", "diag text", "visit note", "pe text", "mh/pe", "ผู้ตรวจรักษา"]
+    _opd_support = ["สิทธิการรักษา", "สิทธิ์การรักษา", "ประวัติการแพ้ยา", "อาการสำคัญ",
+                    "ประวัติการเจ็บป่วย", "การตรวจร่างกาย", "cc :", "cc:", "hpi", "pmh", "รายการยา"]
+    _opd_s = [k for k in _opd_strong if k in content_lower]
+    _opd_t = len(_opd_s) + sum(1 for k in _opd_support if k in content_lower)
+    if len(_opd_s) >= 2 or (len(_opd_s) >= 1 and _opd_t >= 3):
+        logger.info("  pre-check: OPD visit sheet (%d strong, %d total) → rx", len(_opd_s), _opd_t)
+        return {
+            "category": "rx",
+            "reason": f"OPD visit sheet pre-check ({len(_opd_s)} strong, {_opd_t} total)",
+            "confidence": min(_opd_t / 6.0, 1.0),
+            "_ocr_text": content,
+        }
+
     # ── Pre-check: ใบรายงานผลตรวจทางห้องปฏิบัติการ (Lab Report) ──
     # *** ต้องอยู่ก่อน rx pre-check ***
     # ถ้าพบชื่อฟอร์มแล็บ + ผลตรวจ lab ≥2 รายการ → บังคับ lab
@@ -14208,7 +14227,14 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
         "CBC", "result", "abnormal",
     ]
     _lab_form_hits = [k for k in _lab_form_kws if k.lower() in content_lower]
-    _lab_result_hits = [k for k in _lab_result_kws if k.lower() in content_lower]
+    # ชื่อยาที่มีชื่อสารแล็บอยู่ในตัว (Sodium bicarbonate, Calcium carbonate …)
+    # ไม่นับเป็นผลแล็บ — ตัดออกก่อนนับ
+    _lab_text = content_lower
+    for _dn in ("sodium bicarbonate", "calcium carbonate", "calcium acetate",
+                "calcium carbon", "calcium gluconate", "potassium chloride",
+                "sodium chloride", "albumin 20%", "albumin 25%"):
+        _lab_text = _lab_text.replace(_dn, " ")
+    _lab_result_hits = [k for k in _lab_result_kws if k.lower() in _lab_text]
     if len(_lab_form_hits) >= 1 and len(_lab_result_hits) >= 2:
         logger.info(
             "  pre-check: lab report detected "
