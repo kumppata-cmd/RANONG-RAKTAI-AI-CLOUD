@@ -289,6 +289,14 @@
     </div>
     <button class="save-btn" onclick="saveSelfAssessment()">💾 บันทึกผลประเมิน</button>
   </div>
+
+  <!-- เอกสารประเมินตนเอง -->
+  <div class="cp-card" style="margin-top:12px">
+    <h3>📎 เอกสารแบบประเมินตนเอง</h3>
+    <div style="font-size:.75rem;color:var(--fg-muted);margin-bottom:8px">อัปโหลดแบบประเมินตนเองที่กรอกแล้ว ผลตรวจ ศ.ร.ต. หรือเอกสารเกี่ยวข้อง — PDF/รูปภาพ สูงสุด 10 MB ต่อไฟล์</div>
+    <div id="assessDocs" style="display:flex;flex-direction:column;gap:10px"></div>
+    <input type="file" id="assessFileInput" accept=".pdf,.png,.jpg,.jpeg,.heic" style="display:none" onchange="uploadAssessFile()">
+  </div>
 </div>
 
 <!-- Add Staff Modal -->
@@ -431,7 +439,7 @@ function switchCpTab(tab){
   else if(tab==='ic') loadIncidents();
   else if(tab==='sop') loadSops();
   else if(tab==='license') loadLicDocs();
-  else if(tab==='assess') loadSelfAssessment();
+  else if(tab==='assess'){ loadSelfAssessment(); loadAssessDocs(); }
   /* Save to localStorage */
   try{localStorage.setItem('cp_tab',tab)}catch(e){}
 }
@@ -570,6 +578,61 @@ function deleteWaterFile(id,name){
   if(!confirm('ลบไฟล์ "'+name+'" ?'))return;
   hdFetch('/hd/api/v1/clinic-profile/sop-files/'+id,{method:'DELETE'}).then(r=>r.json()).then(d=>{
     if(d.error){showToast(d.error,'danger');return}showToast('ลบแล้ว','success');loadWaterDocs();})
+    .catch(()=>showToast('ลบไม่สำเร็จ','danger'));
+}
+/* ── เอกสารแบบประเมินตนเอง: เก็บใน hd_sop_files ด้วย sop_key = assess_<kind> ── */
+const ASSESS_DOCS=[
+  {key:'assess_self_form',title:'📝 แบบประเมินตนเอง (กรอกแล้ว)'},
+  {key:'assess_srt_result',title:'🏅 ผลตรวจประเมิน ศ.ร.ต./ตรต.'},
+  {key:'assess_corrective',title:'📋 แผนแก้ไข/ปรับปรุง (CAP)'},
+  {key:'assess_other',title:'📂 อื่น ๆ (รายงานผลตรวจ, เอกสารเพิ่มเติม)'},
+];
+let _assessUploadKey='';
+function loadAssessDocs(){
+  const box=document.getElementById('assessDocs'); if(!box)return;
+  hdFetch('/hd/api/v1/clinic-profile/sop-files').then(r=>r.json()).then(d=>{
+    const files=(d.files||[]).filter(f=>(f.sop_key||'').startsWith('assess_'));
+    box.innerHTML=ASSESS_DOCS.map(doc=>{
+      const mine=files.filter(f=>f.sop_key===doc.key);
+      let html='<div style="border:1px solid var(--border);border-radius:8px;padding:10px">';
+      html+='<div style="display:flex;align-items:center;gap:6px;font-weight:600;font-size:.82rem">'+doc.title;
+      html+='<button class="add-btn" style="margin-left:auto;font-size:.72rem" onclick="pickAssessFile(\''+doc.key+'\')">📎 อัปโหลด</button></div>';
+      if(mine.length){
+        html+='<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">';
+        mine.forEach(f=>{
+          const isImg=/\.(png|jpg|jpeg|heic)$/i.test(f.filename);
+          html+='<div style="display:flex;align-items:center;gap:6px;font-size:.75rem">';
+          html+='<a href="/hd/api/v1/clinic-profile/sop-files/'+f.id+'/download" target="_blank" style="color:var(--accent)">'+(isImg?'🖼':'📄')+' '+f.filename+'</a>';
+          html+='<span style="color:var(--fg-muted)">'+new Date(f.uploaded_at).toLocaleDateString('th-TH')+'</span>';
+          html+='<button onclick="deleteAssessFile('+f.id+',\''+f.filename.replace(/'/g,"\\'")+'\')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:.72rem">🗑</button>';
+          html+='</div>';
+          if(isImg) html+='<img src="/hd/api/v1/clinic-profile/sop-files/'+f.id+'/download" style="max-width:280px;max-height:200px;border-radius:6px;margin-top:2px;cursor:pointer" onclick="window.open(this.src)" alt="'+f.filename+'">';
+        });
+        html+='</div>';
+      }else{
+        html+='<div style="font-size:.72rem;color:var(--fg-muted);margin-top:4px">ยังไม่มีไฟล์</div>';
+      }
+      html+='</div>';
+      return html;
+    }).join('');
+  }).catch(()=>{box.innerHTML='<span style="font-size:.75rem;color:var(--danger)">โหลดไฟล์ไม่สำเร็จ</span>';});
+}
+function pickAssessFile(key){_assessUploadKey=key;document.getElementById('assessFileInput').click();}
+function uploadAssessFile(){
+  const input=document.getElementById('assessFileInput');const file=input.files[0];if(!file||!_assessUploadKey)return;
+  if(file.size>10*1024*1024){showToast('ไฟล์ใหญ่เกิน 10 MB','danger');input.value='';return}
+  const fd=new FormData();fd.append('file',file);fd.append('sop_key',_assessUploadKey);fd.append('uploaded_by','');
+  showToast('กำลังอัปโหลด...','info');
+  const token=getHdToken();
+  fetch('/hd/api/v1/clinic-profile/sop-files',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd})
+    .then(r=>r.json()).then(d=>{input.value='';if(d.error){showToast(d.error,'danger');return}
+      showToast('เก็บเอกสาร "'+d.filename+'" แล้ว','success');loadAssessDocs();})
+    .catch(()=>{input.value='';showToast('อัปโหลดไม่สำเร็จ','danger');});
+}
+function deleteAssessFile(id,name){
+  if(!confirm('ลบเอกสาร "'+name+'" ?'))return;
+  hdFetch('/hd/api/v1/clinic-profile/sop-files/'+id,{method:'DELETE'}).then(r=>r.json()).then(d=>{
+    if(d.error){showToast(d.error,'danger');return}showToast('ลบแล้ว','success');loadAssessDocs();})
     .catch(()=>showToast('ลบไม่สำเร็จ','danger'));
 }
 /* ── สำเนาใบอนุญาต/ใบรับรอง: เก็บใน hd_sop_files ด้วย sop_key = license_<kind> ── */
