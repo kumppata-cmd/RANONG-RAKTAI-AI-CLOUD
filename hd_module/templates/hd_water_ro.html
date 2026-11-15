@@ -35,6 +35,17 @@
 .w-form input,.w-form select{width:100%;padding:7px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg);color:var(--fg)}
 .w-empty{padding:22px;text-align:center;color:var(--fg-muted);background:var(--bg-card);border:1px dashed var(--border);border-radius:var(--radius-sm)}
 .w-note{font-size:.72rem;color:var(--fg-muted);margin-top:12px}
+.w-due{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:10px 12px;border-radius:var(--radius-sm);margin-bottom:12px;font-weight:600;border:1px solid var(--border);background:var(--bg-card)}
+.w-due.ok{border-left:5px solid var(--success)}.w-due.soon{border-left:5px solid #e67e22}.w-due.late{border-left:5px solid var(--danger);color:var(--danger)}
+.w-mon{grid-column:1/-1;font-size:.72rem;font-weight:700;color:var(--fg-muted);margin-top:4px}
+.w-legend{display:flex;gap:12px;flex-wrap:wrap;font-size:.72rem;color:var(--fg-muted);margin:-8px 0 12px}
+.w-legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:4px;vertical-align:-1px;border:1px solid var(--border)}
+.w-qk{display:flex;gap:4px;flex-wrap:wrap;margin-top:4px}
+.w-qk button{border:1px solid var(--border);background:var(--bg);color:var(--fg);border-radius:12px;padding:3px 9px;font:inherit;font-size:.74rem;cursor:pointer}
+.w-qk button.on{background:var(--accent);border-color:var(--accent);color:#fff}
+.w-verdict{margin-top:8px;padding:8px 10px;border-radius:var(--radius-sm);font-size:.82rem;font-weight:700;background:var(--bg)}
+.w-verdict.pass{color:var(--success)}.w-verdict.fail{color:var(--danger)}
+.w-pbtns{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .w-zoom{position:fixed;inset:0;background:rgba(0,0,0,.85);display:none;align-items:center;justify-content:center;z-index:99;cursor:zoom-out}
 .w-zoom img{max-width:96vw;max-height:94vh;border-radius:8px}
 </style>
@@ -43,34 +54,41 @@
 {% block content %}
 <div class="w-bar">
   <select id="days" class="form-control" style="width:auto" onchange="load()">
-    <option value="60">60 วัน</option><option value="120" selected>120 วัน</option><option value="365">1 ปี</option>
+    <option value="60" selected>60 วัน</option><option value="120">120 วัน</option><option value="365">1 ปี</option>
   </select>
   <button class="btn btn-secondary" onclick="load()">🔄</button>
   <span style="flex:1"></span>
   <a class="btn btn-secondary" href="/hd/settings" style="text-decoration:none;">⚙️ เกณฑ์</a>
   <a class="btn btn-secondary" href="/hd/clinic-profile" style="text-decoration:none;">🧫 ผลแล็บน้ำรายเดือน</a>
 </div>
+<div class="w-due" id="due" hidden></div>
 <div class="w-lim" id="lim"></div>
 <div class="w-cal" id="cal"></div>
+<div class="w-legend"><span><i style="background:rgba(39,174,96,.25);border-color:var(--success)"></i>ผ่าน</span><span><i style="background:rgba(231,76,60,.3);border-color:var(--danger)"></i>ไม่ผ่าน</span><span><i style="background:rgba(230,126,34,.25);border-color:#e67e22"></i>ตรวจไม่ครบ</span><span><i></i>ไม่ได้ตรวจ</span></div>
 <div class="w-grid">
   <div class="w-list" id="list"><div class="w-empty">กำลังโหลด…</div></div>
   <div class="w-form">
-    <h4>📷 บันทึกจากมือถือ — ถ่าย/เลือกรูปขวดทดสอบ แล้วกรอกค่า (เก็บ Cloud + Google Drive + แจ้งกลุ่ม LINE)</h4>
+    <h4>📷 บันทึกผลตรวจ — ถ่ายรูปหรืออัปโหลดรูปขวดทดสอบ (สูงสุด 8 รูป) แล้วกรอกค่า · เก็บ Cloud + Google Drive + แจ้งกลุ่ม LINE</h4>
     <div style="margin-bottom:8px">
-      <input type="file" id="fPhotos" accept="image/*" capture="environment" multiple style="display:none" onchange="pickPhotos(this.files)">
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <button type="button" class="btn btn-secondary" onclick="document.getElementById('fPhotos').click()">📷 ถ่ายรูป / เลือกรูป (สูงสุด 4)</button>
+      <input type="file" id="fCam" accept="image/*" capture="environment" style="display:none" onchange="pickPhotos(this.files);this.value=''">
+      <input type="file" id="fPhotos" accept="image/*" multiple style="display:none" onchange="pickPhotos(this.files);this.value=''">
+      <div class="w-pbtns">
+        <button type="button" class="btn btn-secondary" onclick="document.getElementById('fCam').click()">📷 ถ่ายรูป</button>
+        <button type="button" class="btn btn-secondary" onclick="document.getElementById('fPhotos').click()">🖼 อัปโหลดรูปจากเครื่อง</button>
         <span id="fPhotoInfo" style="font-size:.78rem;color:var(--fg-muted)">ยังไม่มีรูป</span>
       </div>
       <div id="fPreview" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
     </div>
     <div class="row"><div><label>วันที่ตรวจ</label><input type="date" id="fDate"></div>
       <div><label>เวร</label><select id="fShift"><option value="morning">เช้า</option><option value="afternoon">บ่าย</option><option value="evening">ค่ำ</option></select></div></div>
-    <div class="row"><div><label>Hardness (ppm จากแถบสี)</label><select id="fH"><option value="">— ไม่ได้ตรวจ —</option><option value="0">0</option><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="gt50">&gt;50</option></select></div>
+    <div class="row"><div><label>Hardness (ppm จากแถบสี)</label><select id="fH" onchange="verdict()"><option value="">— ไม่ได้ตรวจ —</option><option value="0">0</option><option value="10">10</option><option value="25">25</option><option value="50">50</option><option value="gt50">&gt;50</option></select></div>
       <div><label>จุดเก็บ</label><input id="fPoint" placeholder="หลังถังคาร์บอน"></div></div>
-    <div class="row"><div><label>Free Cl (ppm)</label><input type="number" step="0.05" min="0" id="fF" placeholder="0.1"></div>
-      <div><label>Total Cl (ppm)</label><input type="number" step="0.05" min="0" id="fT" placeholder="0"></div></div>
+    <div class="row"><div><label>Free Cl (ppm)</label><input type="number" step="0.05" min="0" id="fF" placeholder="0.1" oninput="verdict()">
+        <div class="w-qk" data-for="fF"></div></div>
+      <div><label>Total Cl (ppm)</label><input type="number" step="0.05" min="0" id="fT" placeholder="0" oninput="verdict()">
+        <div class="w-qk" data-for="fT"></div></div></div>
     <div><label>หมายเหตุ</label><input id="fNote" placeholder="เช่น เปลี่ยนเกลือแล้ว"></div>
+    <div class="w-verdict" id="fVerdict">กรอกค่าแล้วระบบจะบอกผลเบื้องต้นตรงนี้</div>
     <div style="margin-top:10px;display:flex;gap:8px;align-items:center"><button class="btn btn-primary" onclick="submitForm()">💾 บันทึก</button><span id="fStatus" style="font-size:.8rem;color:var(--fg-muted)"></span></div>
   </div>
 </div>
@@ -84,6 +102,38 @@ const SH = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function dTH(iso){ const d=new Date(iso+'T00:00:00'); return d.toLocaleDateString('th-TH',{day:'numeric',month:'short',year:'2-digit'}); }
 function fmt(v){ return v==null?'—':Number(v).toString(); }
+let LIM = {};
+function isoLocal(dt){ return `${dt.getFullYear()}-${String(dt.getMonth()+1).padStart(2,'0')}-${String(dt.getDate()).padStart(2,'0')}`; }
+function renderDue(last, every, today){
+  const el = document.getElementById('due'); el.hidden = false;
+  if(!last){ el.className='w-due late'; el.textContent='⚠️ ยังไม่มีบันทึกการตรวจ — ควรตรวจวันนี้'; return; }
+  const ld = new Date(last+'T00:00:00'), due = new Date(ld); due.setDate(ld.getDate()+every);
+  const left = Math.round((due - today)/864e5);
+  el.className = 'w-due ' + (left < 0 ? 'late' : (left <= 1 ? 'soon' : 'ok'));
+  el.textContent = `ตรวจล่าสุด ${dTH(last)} · ครั้งถัดไป ${dTH(isoLocal(due))} ` +
+    (left < 0 ? `— ⚠️ เลยกำหนด ${-left} วัน` : (left === 0 ? '— ⏰ ครบกำหนดวันนี้' : `(อีก ${left} วัน)`));
+}
+function quickChips(){
+  const V = [0, 0.05, 0.1, 0.2, 0.3, 0.5];
+  document.querySelectorAll('.w-qk').forEach(box => { const id = box.dataset.for;
+    box.innerHTML = V.map(v=>`<button type="button" onclick="setQ('${id}',${v})">${v}</button>`).join(''); });
+}
+function setQ(id, v){ document.getElementById(id).value = v; verdict(); }
+function verdict(){
+  const el = document.getElementById('fVerdict'); if(!el) return;
+  document.querySelectorAll('.w-qk').forEach(box => { const cur = document.getElementById(box.dataset.for).value;
+    box.querySelectorAll('button').forEach(b => b.classList.toggle('on', cur !== '' && Number(b.textContent) === Number(cur))); });
+  const h = document.getElementById('fH').value, f = document.getElementById('fF').value, t = document.getElementById('fT').value;
+  if(h==='' && f==='' && t===''){ el.className='w-verdict'; el.textContent='กรอกค่าแล้วระบบจะบอกผลเบื้องต้นตรงนี้'; return; }
+  const fails = [], miss = [];
+  const hm = Number(LIM.water_hardness_max ?? 0), fm = Number(LIM.water_free_cl_max ?? 0.5), tm = Number(LIM.water_total_cl_max ?? 0.1);
+  if(h==='') miss.push('Hardness'); else if(h==='gt50' || Number(h) > hm) fails.push('Hardness');
+  if(f==='') miss.push('Free Cl'); else if(Number(f) >= fm) fails.push('Free Cl');
+  if(t==='') miss.push('Total Cl'); else if(Number(t) >= tm) fails.push('Total Cl');
+  if(fails.length){ el.className='w-verdict fail'; el.textContent='❌ ไม่ผ่าน: ' + fails.join(', ') + ' — บันทึกแล้วระบบจะแจ้งแพทย์อัตโนมัติ'; }
+  else if(miss.length){ el.className='w-verdict'; el.textContent='⚠️ ค่าที่กรอกผ่าน · ยังไม่ได้ตรวจ ' + miss.join(', '); }
+  else { el.className='w-verdict pass'; el.textContent='✅ ผ่านเกณฑ์ทุกค่า'; }
+}
 let TOKEN_Q = '';
 try { TOKEN_Q = '?token=' + encodeURIComponent(getHdToken()||''); } catch(e){}
 
@@ -98,10 +148,15 @@ async function load(){
     document.getElementById('fPoint').placeholder = L.water_sample_point || '';
     // calendar: last N days, worst status per day
     const by = {}; (d.items||[]).forEach(it=>{ const cur=by[it.date]; const rank={fail:3,partial:2,pass:1}; if(!cur || rank[it.status]>rank[cur]) by[it.date]=it.status; });
+    LIM = L;
     const today = new Date(); today.setHours(0,0,0,0);
-    const n = Math.min(Number(days), 120); let cal='';
-    for(let i=n-1;i>=0;i--){ const dt=new Date(today); dt.setDate(today.getDate()-i); const iso=dt.toISOString().slice(0,10); const st=by[iso]||''; cal += `<div class="w-day ${st} ${i===0?'today':''}" title="${dTH(iso)} ${st||'ไม่ได้ตรวจ'}">${dt.getDate()}</div>`; }
+    const n = Math.min(Number(days), 120); let cal='', lastMon=-1;
+    for(let i=n-1;i>=0;i--){ const dt=new Date(today); dt.setDate(today.getDate()-i); const iso=isoLocal(dt); const st=by[iso]||'';
+      if(dt.getMonth()!==lastMon){ lastMon=dt.getMonth(); cal += `<div class="w-mon">${dt.toLocaleDateString('th-TH',{month:'long',year:'numeric'})}</div>`; }
+      cal += `<div class="w-day ${st} ${i===0?'today':''}" title="${dTH(iso)} ${st||'ไม่ได้ตรวจ'}">${dt.getDate()}</div>`; }
     document.getElementById('cal').innerHTML = cal;
+    renderDue((d.items||[]).map(it=>it.date).sort().pop(), Number(L.water_interval_days)||7, today);
+    verdict();
     const items = d.items||[];
     if(!items.length){ list.innerHTML = '<div class="w-empty">ยังไม่มีบันทึกในช่วงที่เลือก</div>'; return; }
     list.innerHTML = items.map(it => `<div class="w-item ${it.status}">
@@ -110,7 +165,8 @@ async function load(){
       ${it.fails?`<div class="m" style="color:var(--danger)">${esc(it.fails)}</div>`:''}
       <div class="m">ผู้ตรวจ ${esc(it.tester||'-')} · ${it.source==='web'?'หน้าเว็บ':'LINE กลุ่ม'}${it.note?' · '+esc(it.note):''}${(it.drive||[]).length?' · ☁️ Drive':''}</div>
       <div class="ph">${(it.photos||[]).filter(p=>p.endsWith('.jpg')).map((p,i)=>`<div style="position:relative"><img loading="lazy" src="/hd/api/v1/water-ro/${it.id}/photo/${i}${TOKEN_Q}" onclick="zoom(this.src)" alt="รูป ${i+1}"><button type="button" class="w-x" title="เอารูปนี้ออก" onclick="removePhoto(${it.id},${i},this)">✕</button></div>`).join('')}
-        <label class="w-add" title="เพิ่มรูป">📷<input type="file" accept="image/*" capture="environment" multiple style="display:none" onchange="addPhotos(${it.id}, this.files, this)"></label>
+        <label class="w-add" title="ถ่ายรูปเพิ่ม">📷<input type="file" accept="image/*" capture="environment" style="display:none" onchange="addPhotos(${it.id}, this.files, this)"></label>
+        <label class="w-add" title="อัปโหลดรูปจากเครื่อง">🖼<input type="file" accept="image/*" multiple style="display:none" onchange="addPhotos(${it.id}, this.files, this)"></label>
       </div>
       <div class="w-act"><button type="button" class="btn btn-secondary" style="font-size:.72rem;padding:3px 8px" onclick="delRecord(${it.id}, this)">🗑 ลบรายการ</button><span class="w-actmsg"></span></div>
     </div>`).join('');
@@ -125,7 +181,7 @@ function shrink(file){ return new Promise(res => { const img = new Image(); cons
 async function addPhotos(id, files, inp){
   const msg = inp.closest('.w-item').querySelector('.w-actmsg'); msg.textContent = 'กำลังอัปโหลดรูป…';
   const fd = new FormData();
-  for (const f of Array.from(files||[]).slice(0,4)) { const b = await shrink(f); if(b) fd.append('photos', b, 'photo.jpg'); }
+  for (const f of Array.from(files||[]).slice(0,8)) { const b = await shrink(f); if(b) fd.append('photos', b, 'photo.jpg'); }
   try{ const r = await hdFetch(`/hd/api/v1/water-ro/${id}/photos`, {method:'POST', body: fd}); const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
     msg.textContent = `✅ เพิ่มรูปแล้ว (รวม ${d.photos})`; load(); }catch(e){ msg.textContent = '❌ ' + (e.message||e); }
   inp.value = '';
@@ -147,13 +203,13 @@ function zoom(src){ document.getElementById('zoomImg').src = src; document.getEl
 /* photos: resize on the phone (max 1600px, JPEG 0.85) so uploads stay small */
 let PHOTOS = [];
 function pickPhotos(files){
-  const list = Array.from(files||[]).slice(0, 4 - PHOTOS.length);
+  const list = Array.from(files||[]).slice(0, 8 - PHOTOS.length);
+  if(!list.length && (files||[]).length){ document.getElementById('fPhotoInfo').textContent = 'ครบ 8 รูปแล้ว'; }
   list.forEach(f => { const img = new Image(); const url = URL.createObjectURL(f);
     img.onload = () => { const s = Math.min(1, 1600 / Math.max(img.width, img.height)); const c = document.createElement('canvas');
       c.width = Math.round(img.width*s); c.height = Math.round(img.height*s); c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
       c.toBlob(b => { PHOTOS.push({blob:b, url:c.toDataURL('image/jpeg', .6)}); URL.revokeObjectURL(url); renderPhotos(); }, 'image/jpeg', .85); };
     img.src = url; });
-  document.getElementById('fPhotos').value = '';
 }
 function renderPhotos(){
   document.getElementById('fPreview').innerHTML = PHOTOS.map((p,i)=>`<div style="position:relative"><img src="${p.url}" style="height:72px;border-radius:6px;border:1px solid var(--border)"><button type="button" onclick="PHOTOS.splice(${i},1);renderPhotos()" style="position:absolute;top:-6px;right:-6px;border:none;background:var(--danger);color:#fff;border-radius:50%;width:20px;height:20px;font-size:.7rem;cursor:pointer">✕</button></div>`).join('');
@@ -173,12 +229,13 @@ async function submitForm(){
     const r = await hdFetch('/hd/api/v1/water-ro', {method:'POST', body: fd});
     const d = await r.json(); if(!r.ok) throw new Error(d.error||r.status);
     st.textContent = (d.status==='pass'?'✅ ผ่าน':(d.status==='fail'?'❌ ไม่ผ่าน — '+d.fails.join('; '):'⚠️ บันทึกบางค่า')) + ` · รูป ${d.photos||0}` + (d.drive?' · ☁️ Drive แล้ว':'') + ' · แจ้งกลุ่ม LINE แล้ว';
-    ['fF','fT','fNote'].forEach(id=>document.getElementById(id).value=''); document.getElementById('fH').value=''; PHOTOS = []; renderPhotos();
+    ['fF','fT','fNote'].forEach(id=>document.getElementById(id).value=''); document.getElementById('fH').value=''; PHOTOS = []; renderPhotos(); verdict();
     load();
   }catch(e){ st.textContent = '❌ ' + (e.message||e); }
   btn.disabled = false;
 }
 (function(){ const n = new Date(); n.setMinutes(n.getMinutes()-n.getTimezoneOffset()); document.getElementById('fDate').value = n.toISOString().slice(0,10); const h=new Date().getHours(); document.getElementById('fShift').value = h<13?'morning':(h<17?'afternoon':'evening'); })();
+quickChips();
 load();
 </script>
 {% endblock %}

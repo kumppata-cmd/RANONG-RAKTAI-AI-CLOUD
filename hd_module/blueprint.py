@@ -939,7 +939,7 @@ def water_ro_list():
 @hd_bp.route("/water-ro", methods=["POST"])
 @require_role("physician", "nurse")
 def water_ro_add():
-    """Entry from the web page: JSON, or multipart with up to 4 photos (phone camera/gallery).
+    """Entry from the web page: JSON, or multipart with up to 8 photos (phone camera/gallery).
     Photos go to GCS + Drive like the LINE flow; the result is pushed to the nurse group."""
     import os
     import psycopg2
@@ -950,7 +950,7 @@ def water_ro_add():
     if request.content_type and request.content_type.startswith("multipart/"):
         data = {k: request.form.get(k) for k in request.form}
         data["hardness_gt"] = (request.form.get("hardness_gt") or "").lower() in ("1", "true", "on")
-        for f in request.files.getlist("photos")[:4]:
+        for f in request.files.getlist("photos")[:8]:
             blob = f.read()
             if blob and len(blob) <= 8 * 1024 * 1024 and (f.mimetype or "").startswith("image/"):
                 photos.append(blob)
@@ -1014,13 +1014,13 @@ def water_ro_add():
 @hd_bp.route("/water-ro/<int:rid>/photos", methods=["POST"])
 @require_role("physician", "nurse")
 def water_ro_add_photos(rid):
-    """Add up to 4 more photos to an existing record (multipart 'photos')."""
+    """Add up to 8 more photos to an existing record (multipart 'photos')."""
     from flask import current_app
     from .water_check import add_photos
     import os
     import psycopg2
     blobs = []
-    for f in request.files.getlist("photos")[:4]:
+    for f in request.files.getlist("photos")[:8]:
         b = f.read()
         if b and len(b) <= 8 * 1024 * 1024 and (f.mimetype or "").startswith("image/"):
             blobs.append(b)
