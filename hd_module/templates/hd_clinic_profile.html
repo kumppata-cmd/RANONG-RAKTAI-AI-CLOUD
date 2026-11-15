@@ -137,6 +137,15 @@
     </div>
     <button class="save-btn" onclick="saveWaterTab()">💾 บันทึก</button>
   </div>
+
+  <!-- แผงผังระบบน้ำ / รูประบบน้ำ RO -->
+  <div class="cp-card" style="margin-top:12px">
+    <h3>📐 แผงผัง & รูประบบน้ำ RO</h3>
+    <div style="font-size:.75rem;color:var(--fg-muted);margin-bottom:8px">อัปโหลดแผงผังระบบน้ำ (Diagram) และรูปถ่ายระบบ RO/DI เก็บไว้ในระบบ — PDF/รูปภาพ สูงสุด 10 MB ต่อไฟล์ เก็บได้หลายไฟล์</div>
+    <div id="waterDocs" style="display:flex;flex-direction:column;gap:10px"></div>
+    <input type="file" id="waterFileInput" accept=".pdf,.png,.jpg,.jpeg,.heic" style="display:none" onchange="uploadWaterFile()">
+  </div>
+
   <div class="cp-card">
     <h3>🧪 ผลตรวจคุณภาพน้ำ <button class="add-btn" onclick="openWaterLogModal()" style="margin-left:auto">➕ เพิ่มผล</button></h3>
     <div id="waterLogs"><div class="cp-empty">กำลังโหลด...</div></div>
@@ -418,7 +427,7 @@ function switchCpTab(tab){
   /* Load tab data */
   if(tab==='staff') loadStaff();
   else if(tab==='equipment') loadEquipment();
-  else if(tab==='water') loadWaterLogs();
+  else if(tab==='water'){ loadWaterLogs(); loadWaterDocs(); }
   else if(tab==='ic') loadIncidents();
   else if(tab==='sop') loadSops();
   else if(tab==='license') loadLicDocs();
@@ -506,6 +515,62 @@ function saveFacilityTab(){
 }
 function saveWaterTab(){
   saveSection('water',[['f_ro_brand','ro_brand'],['f_ro_capacity','ro_capacity'],['f_water_vendor','vendor'],['f_water_phone','vendor_phone']]);
+}
+/* ── แผงผัง & รูประบบน้ำ RO: เก็บใน hd_sop_files ด้วย sop_key = water_<kind> ── */
+const WATER_DOCS=[
+  {key:'water_diagram',title:'📐 แผงผังระบบน้ำ (Water System Diagram)'},
+  {key:'water_ro_photo',title:'📷 รูประบบน้ำ RO'},
+  {key:'water_pretreatment',title:'🔧 รูป Pre-treatment / Filter'},
+  {key:'water_piping',title:'🔵 รูปท่อ Distribution Loop'},
+  {key:'water_other',title:'📂 อื่น ๆ (ใบ PM, ใบรับรองเครื่อง ฯลฯ)'},
+];
+let _waterUploadKey='';
+function loadWaterDocs(){
+  const box=document.getElementById('waterDocs'); if(!box)return;
+  hdFetch('/hd/api/v1/clinic-profile/sop-files').then(r=>r.json()).then(d=>{
+    const files=(d.files||[]).filter(f=>(f.sop_key||'').startsWith('water_'));
+    box.innerHTML=WATER_DOCS.map(doc=>{
+      const mine=files.filter(f=>f.sop_key===doc.key);
+      let html='<div style="border:1px solid var(--border);border-radius:8px;padding:10px">';
+      html+='<div style="display:flex;align-items:center;gap:6px;font-weight:600;font-size:.82rem">'+doc.title;
+      html+='<button class="add-btn" style="margin-left:auto;font-size:.72rem" onclick="pickWaterFile(\''+doc.key+'\')">📎 อัปโหลด</button></div>';
+      if(mine.length){
+        html+='<div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">';
+        mine.forEach(f=>{
+          const isImg=/\.(png|jpg|jpeg|heic)$/i.test(f.filename);
+          html+='<div style="display:flex;align-items:center;gap:6px;font-size:.75rem">';
+          html+='<a href="/hd/api/v1/clinic-profile/sop-files/'+f.id+'/download" target="_blank" style="color:var(--accent)">'+(isImg?'🖼':'📄')+' '+f.filename+'</a>';
+          html+='<span style="color:var(--fg-muted)">'+new Date(f.uploaded_at).toLocaleDateString('th-TH')+'</span>';
+          html+='<button onclick="deleteWaterFile('+f.id+',\''+f.filename.replace(/'/g,"\\'")+'\')" style="background:none;border:none;color:var(--danger);cursor:pointer;font-size:.72rem">🗑</button>';
+          html+='</div>';
+          if(isImg) html+='<img src="/hd/api/v1/clinic-profile/sop-files/'+f.id+'/download" style="max-width:280px;max-height:200px;border-radius:6px;margin-top:2px;cursor:pointer" onclick="window.open(this.src)" alt="'+f.filename+'">';
+        });
+        html+='</div>';
+      }else{
+        html+='<div style="font-size:.72rem;color:var(--fg-muted);margin-top:4px">ยังไม่มีไฟล์</div>';
+      }
+      html+='</div>';
+      return html;
+    }).join('');
+  }).catch(()=>{box.innerHTML='<span style="font-size:.75rem;color:var(--danger)">โหลดไฟล์ไม่สำเร็จ</span>';});
+}
+function pickWaterFile(key){_waterUploadKey=key;document.getElementById('waterFileInput').click();}
+function uploadWaterFile(){
+  const input=document.getElementById('waterFileInput');const file=input.files[0];if(!file||!_waterUploadKey)return;
+  if(file.size>10*1024*1024){showToast('ไฟล์ใหญ่เกิน 10 MB','danger');input.value='';return}
+  const fd=new FormData();fd.append('file',file);fd.append('sop_key',_waterUploadKey);fd.append('uploaded_by','');
+  showToast('กำลังอัปโหลด...','info');
+  const token=getHdToken();
+  fetch('/hd/api/v1/clinic-profile/sop-files',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd})
+    .then(r=>r.json()).then(d=>{input.value='';if(d.error){showToast(d.error,'danger');return}
+      showToast('เก็บไฟล์ "'+d.filename+'" แล้ว','success');loadWaterDocs();})
+    .catch(()=>{input.value='';showToast('อัปโหลดไม่สำเร็จ','danger');});
+}
+function deleteWaterFile(id,name){
+  if(!confirm('ลบไฟล์ "'+name+'" ?'))return;
+  hdFetch('/hd/api/v1/clinic-profile/sop-files/'+id,{method:'DELETE'}).then(r=>r.json()).then(d=>{
+    if(d.error){showToast(d.error,'danger');return}showToast('ลบแล้ว','success');loadWaterDocs();})
+    .catch(()=>showToast('ลบไม่สำเร็จ','danger'));
 }
 /* ── สำเนาใบอนุญาต/ใบรับรอง: เก็บใน hd_sop_files ด้วย sop_key = license_<kind> ── */
 const LIC_DOCS=[
