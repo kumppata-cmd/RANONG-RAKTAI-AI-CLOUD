@@ -20,10 +20,10 @@ name: Production Health Monitor
 
 on:
   schedule:
-    # GitHub รัน cron แบบ best-effort (บางวันได้แค่ไม่กี่ครั้ง) — ตั้งถี่ไว้ให้ได้มากที่สุด
-    # และใช้ UptimeRobot (ฟรี, ทุก 5 นาที จริง) ยิง /health เป็นตัวหลัก ดู GO-LIVE-CHECKLIST
-    - cron: "*/5 * * * *"
-    - cron: "7,37 * * * *"
+    # ชั่วโมงละครั้งพอ — ตอนตั้งทุก 5 นาที เผาโควต้า GitHub Actions ฟรี (2,000 นาที/เดือน
+    # สำหรับ private repo) หมดภายในครึ่งเดือน ทำให้ CI ทุกตัวสตาร์ทไม่ได้ (15 พ.ย. 2026)
+    # การเฝ้าระบบแบบเรียลไทม์ใช้ UptimeRobot (ฟรี, ทุก 5 นาทีจริง) ยิง /health เป็นตัวหลัก
+    - cron: "7 * * * *"
   workflow_dispatch:
 
 permissions:
