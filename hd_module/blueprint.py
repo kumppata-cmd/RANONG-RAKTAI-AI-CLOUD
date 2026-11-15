@@ -4385,6 +4385,37 @@ def patient_portal_link(hn):
     return jsonify({"hn": hn, "url": url, "qr": qr})
 
 
+@hd_bp.route("/patients/<hn>/card.pdf", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patient_card_pdf(hn):
+    """บัตรผู้ป่วย + QR เป็น PDF — พิมพ์ได้จากมือถือทุกเครื่อง (window.print ใช้ไม่ได้บนมือถือหลายรุ่น)."""
+    import os, psycopg2
+    from flask import Response
+    from .patient_card_pdf import card_pdf
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no database"}), 503
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT patient_name, hospital_hn, schedule_days, default_shift, vascular_access, dry_weight
+                           FROM hd_patient_mapping WHERE hn = %s""", (hn,))
+            r = cur.fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+    p = {"hn": hn, "name": r[0], "hospital_hn": r[1], "schedule_days": r[2], "default_shift": r[3],
+         "vascular_access": r[4], "dry_weight": r[5]}
+    base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+    pdf = card_pdf(p, f"{base}/hd/my/{portal_token(hn)}")
+    log_action(user_id=g.get("hd_user_id"), action="patient.card_pdf", resource_type="patient", resource_id=hn,
+               ip_address=request.remote_addr or "")
+    return Response(pdf, mimetype="application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="patient-card-{hn}.pdf"',
+                             "Cache-Control": "no-store"})
+
+
 @hd_bp.route("/labs/serology/import", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def serology_import():
