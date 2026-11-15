@@ -876,6 +876,36 @@ def session_idh_risk(session_id):
     return jsonify(out)
 
 
+# ── สรุปผลเลือดรายเดือน (Monthly Lab Summary Push) ──────────────
+
+@hd_bp.route("/monthly-summary/run", methods=["POST"])
+@require_role("physician", "admin")
+def run_monthly_summary():
+    """Manual trigger for monthly lab summary push."""
+    import psycopg2
+    from .monthly_summary import run_monthly_push
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no database"}), 500
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    if not push_fn:
+        return jsonify({"error": "LINE_PUSH_FN not configured"}), 500
+
+    def _resolve(hn):
+        return _resolve_patient_line_id(hn)
+
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=10)
+        try:
+            result = run_monthly_push(conn, push_fn, _resolve, get_setting_value, log_action)
+        finally:
+            conn.close()
+        return jsonify(result)
+    except Exception as e:
+        logger.warning("monthly_summary run: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ── ตรวจระบบน้ำ RO ประจำวัน (Hardness / Free Cl / Total Cl) ──
 
 @hd_bp.route("/water-ro", methods=["GET"])
@@ -5295,6 +5325,7 @@ def update_settings():
         "patient_push_requires_consent", "clinic_phone",   # PDPA
         "esa_target_low", "esa_target_high", "esa_hold_above",   # ESA Autopilot protocol
         "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
+        "monthly_lab_summary",       # push สรุปผลเลือดรายเดือนให้ผู้ป่วย (on/off)
     ]
     if key not in allowed_keys:
         return jsonify({"error": f"Invalid setting key: {key}"}), 400

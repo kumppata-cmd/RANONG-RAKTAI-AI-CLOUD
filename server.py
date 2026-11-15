@@ -8959,6 +8959,33 @@ def handle_search_command(
             f"นัดวันนี้: {_ap.get('today_count', 0)} · แจ้งเจ้าหน้าที่: {_ap.get('staff_notified', 0)}"
         )
 
+    if text_stripped in ("สรุปผลเลือดเดือน", "monthly summary", "ส่งสรุปเดือน"):
+        if not is_admin_user(user_hash):
+            return None
+        try:
+            import psycopg2 as _pg2ms
+            from hd_module.monthly_summary import run_monthly_push
+            from hd_module import get_setting_value as _gsv_ms
+            _db_ms = os.getenv("HD_DATABASE_URL", "") or os.getenv("DATABASE_URL", "")
+            _conn_ms = _pg2ms.connect(_db_ms, connect_timeout=10)
+            try:
+                _ms_res = run_monthly_push(
+                    _conn_ms, push_message,
+                    lambda hn: _hd_patient_line_id(hn),
+                    _gsv_ms)
+            finally:
+                _conn_ms.close()
+            return (
+                f"📊 ส่งสรุปผลเลือดรายเดือนแล้ว\n"
+                f"เดือน: {_ms_res.get('month', '?')}\n"
+                f"ผู้ป่วยที่มีผลเลือด: {_ms_res.get('eligible', 0)}\n"
+                f"ส่งสำเร็จ: {_ms_res.get('sent', 0)}\n"
+                f"ยังไม่ผูก LINE: {_ms_res.get('skipped_no_line', 0)}\n"
+                f"ผิดพลาด: {_ms_res.get('errors', 0)}"
+            )
+        except Exception as _ms_e:
+            return f"❌ สรุปเดือน: {type(_ms_e).__name__}: {_ms_e}"
+
     _issue_hn = parse_issue_command(text_stripped)
     if _issue_hn is not None:
         if not (is_admin_user(user_hash) or is_physician_user(user_hash)):
@@ -21854,13 +21881,37 @@ def _reminder_scheduler_worker():
     from datetime import timezone as _tz, timedelta as _td
     _bkk = _tz(_td(hours=7))
     _last_run_day = None
+    _last_monthly_month = None
     while True:
         try:
             _now = datetime.now(_bkk)
+            # ── Daily reminders (08:00 BKK) ──
             if _now.hour == _REMINDER_HOUR and _last_run_day != _now.date():
                 _last_run_day = _now.date()
                 _res = job_manager.run("daily_reminders")
                 logger.info("daily_reminders (scheduler): success=%s", _res.success)
+            # ── Monthly lab summary (วันที่ 1 เวลา 09:00 BKK) ──
+            if (_now.day == 1 and _now.hour == 9
+                    and _last_monthly_month != (_now.year, _now.month)):
+                _last_monthly_month = (_now.year, _now.month)
+                try:
+                    if _claim_daily_once(f"monthly_summary_{_now.year}_{_now.month:02d}"):
+                        import psycopg2 as _pg2
+                        from hd_module.monthly_summary import run_monthly_push
+                        _db = os.getenv("HD_DATABASE_URL", "") or os.getenv("DATABASE_URL", "")
+                        if _db and LINE_CHANNEL_ACCESS_TOKEN:
+                            _mc = _pg2.connect(_db, connect_timeout=10)
+                            try:
+                                from hd_module import get_setting_value as _gsv
+                                _mr = run_monthly_push(
+                                    _mc, push_message,
+                                    lambda hn: _hd_patient_line_id(hn),
+                                    _gsv)
+                                logger.info("monthly_summary: %s", _mr)
+                            finally:
+                                _mc.close()
+                except Exception as _me:
+                    logger.warning("monthly_summary scheduler: %s", _me)
         except Exception as _e:
             logger.warning("reminder scheduler: %s", type(_e).__name__)
         _t.sleep(60)
