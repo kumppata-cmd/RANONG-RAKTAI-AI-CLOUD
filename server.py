@@ -8016,8 +8016,10 @@ def handle_search_command(
             return r.status_code == 200
 
         try:
+            # แถบหัว 110px บอกชนิดเมนู (ไม่มีปุ่ม) — ตรงกับ scripts/make_rich_menus.py
             _col_w = 833
-            _row_h = 421
+            _top = 110
+            _row_h = 366
 
             # === Step 0: Cleanup ===
             _rm_cleanup()
@@ -8025,76 +8027,76 @@ def handle_search_command(
 
             # === Step 1: Staff Menu ===
             _staff_areas = [
-                {"bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
+                {"bounds": {"x": 0, "y": _top, "width": _col_w, "height": _row_h},
                  "action": {"type": "uri", "label": "ดูผลแล็บ",
                             "uri": _liff_url or f"{_RENDER_BASE}/liff"}},
-                {"bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
+                {"bounds": {"x": _col_w, "y": _top, "width": _col_w + 1, "height": _row_h},
                  "action": {"type": "message", "label": "ส่งเอกสาร", "text": "ส่งเอกสาร"}},
-                {"bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
+                {"bounds": {"x": _col_w * 2 + 1, "y": _top, "width": _col_w, "height": _row_h},
                  "action": {"type": "message", "label": "รอบฟอก", "text": "รอบฟอกวันนี้"}},
-                {"bounds": {"x": 0, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                {"bounds": {"x": 0, "y": _top + _row_h, "width": _col_w, "height": _row_h + 1},
                  "action": {"type": "message", "label": "วิเคราะห์", "text": "วิเคราะห์"}},
-                {"bounds": {"x": _col_w, "y": _row_h, "width": _col_w + 1, "height": _row_h + 1},
+                {"bounds": {"x": _col_w, "y": _top + _row_h, "width": _col_w + 1, "height": _row_h + 1},
                  "action": {"type": "message", "label": "ดูนัด", "text": "นัดหมาย"}},
-                {"bounds": {"x": _col_w * 2 + 1, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                {"bounds": {"x": _col_w * 2 + 1, "y": _top + _row_h, "width": _col_w, "height": _row_h + 1},
                  "action": {"type": "richmenuswitch",
                             "richMenuAliasId": "richmenu-alias-sub",
                             "data": "switch-to-sub"}},
             ]
-            _staff_id, _err = _rm_create("Staff Menu v4", _staff_areas)
+            _staff_id, _err = _rm_create("Staff Menu v6", _staff_areas)
             if _err:
                 return f"❌ {_err}"
-            _rm_upload_img(_staff_id, "rich_menu_staff.png")
-            _log.append(f"👨‍⚕️ Staff: ✅ {_staff_id[:12]}...")
+            _img_ok = _rm_upload_img(_staff_id, "rich_menu_staff.png")
+            _log.append(f"👨‍⚕️ Staff: ✅ {_staff_id[:12]}..." + ("" if _img_ok else " (⚠️ อัปโหลดรูปไม่สำเร็จ)"))
 
             # === Step 2: Patient Menu ===
             # ลิงก์ผลเลือด HD (LIFF path /hd-labs) — ผู้ป่วยกดแล้วเปิดผลเลือดทันที
             _hd_labs_url = (f"https://liff.line.me/{_liff_id}/hd-labs" if _liff_id
                             else f"{_RENDER_BASE}/liff/hd-labs")
             _patient_areas = [
-                {"bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
+                {"bounds": {"x": 0, "y": _top, "width": _col_w, "height": _row_h},
                  "action": {"type": "uri", "label": "🩸 ผลเลือด HD",
                             "uri": _hd_labs_url}},
-                {"bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
+                {"bounds": {"x": _col_w, "y": _top, "width": _col_w + 1, "height": _row_h},
                  "action": {"type": "uri", "label": "ดูผลแล็บ/เอกสาร",
                             "uri": _liff_url or f"{_RENDER_BASE}/liff"}},
-                {"bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
+                {"bounds": {"x": _col_w * 2 + 1, "y": _top, "width": _col_w, "height": _row_h},
                  "action": {"type": "message", "label": "ลงทะเบียน", "text": "ลงทะเบียน"}},
-                {"bounds": {"x": 0, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                {"bounds": {"x": 0, "y": _top + _row_h, "width": _col_w, "height": _row_h + 1},
                  "action": {"type": "message", "label": "นัดหมาย", "text": "นัดหมาย"}},
-                {"bounds": {"x": _col_w, "y": _row_h, "width": _col_w + 1, "height": _row_h + 1},
+                {"bounds": {"x": _col_w, "y": _top + _row_h, "width": _col_w + 1, "height": _row_h + 1},
                  "action": {"type": "message", "label": "ติดต่อ", "text": "ติดต่อเจ้าหน้าที่"}},
-                {"bounds": {"x": _col_w * 2 + 1, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                {"bounds": {"x": _col_w * 2 + 1, "y": _top + _row_h, "width": _col_w, "height": _row_h + 1},
                  "action": {"type": "message", "label": "ช่วยเหลือ", "text": "ช่วยเหลือ"}},
             ]
-            _patient_id, _err = _rm_create("Patient Menu v5", _patient_areas)
+            _patient_id, _err = _rm_create("Patient Menu v6", _patient_areas)
             if _err:
                 return f"❌ {_err}"
-            _rm_upload_img(_patient_id, "rich_menu_patient.png")
-            _log.append(f"🧑‍🤝‍🧑 Patient: ✅ {_patient_id[:12]}...")
+            _img_ok = _rm_upload_img(_patient_id, "rich_menu_patient.png")
+            _log.append(f"🧑‍🤝‍🧑 Patient: ✅ {_patient_id[:12]}..." + ("" if _img_ok else " (⚠️ อัปโหลดรูปไม่สำเร็จ)"))
 
             # === Step 3: Sub Menu ===
             _sub_areas = [
-                {"bounds": {"x": 0, "y": 0, "width": _col_w, "height": _row_h},
+                {"bounds": {"x": 0, "y": _top, "width": _col_w, "height": _row_h},
                  "action": {"type": "richmenuswitch",
                             "richMenuAliasId": "richmenu-alias-staff",
                             "data": "switch-to-staff"}},
-                {"bounds": {"x": _col_w, "y": 0, "width": _col_w + 1, "height": _row_h},
+                {"bounds": {"x": _col_w, "y": _top, "width": _col_w + 1, "height": _row_h},
                  "action": {"type": "message", "label": "คำสั่ง", "text": "ช่วยเหลือ"}},
-                {"bounds": {"x": _col_w * 2 + 1, "y": 0, "width": _col_w, "height": _row_h},
+                {"bounds": {"x": _col_w * 2 + 1, "y": _top, "width": _col_w, "height": _row_h},
                  "action": {"type": "message", "label": "ลงทะเบียน", "text": "ลงทะเบียน"}},
-                {"bounds": {"x": 0, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                {"bounds": {"x": 0, "y": _top + _row_h, "width": _col_w, "height": _row_h + 1},
                  "action": {"type": "message", "label": "ค้นหา", "text": "ค้นหา"}},
-                {"bounds": {"x": _col_w, "y": _row_h, "width": _col_w + 1, "height": _row_h + 1},
+                {"bounds": {"x": _col_w, "y": _top + _row_h, "width": _col_w + 1, "height": _row_h + 1},
                  "action": {"type": "message", "label": "KPI", "text": "KPI"}},
-                {"bounds": {"x": _col_w * 2 + 1, "y": _row_h, "width": _col_w, "height": _row_h + 1},
+                {"bounds": {"x": _col_w * 2 + 1, "y": _top + _row_h, "width": _col_w, "height": _row_h + 1},
                  "action": {"type": "message", "label": "ระบบ", "text": "ตรวจสอบระบบ"}},
             ]
-            _sub_id, _err = _rm_create("Sub Menu v4", _sub_areas)
+            _sub_id, _err = _rm_create("Sub Menu v6", _sub_areas)
             if _err:
                 return f"❌ {_err}"
-            _rm_upload_img(_sub_id, "rich_menu_sub.png")
-            _log.append(f"📋 Sub: ✅ {_sub_id[:12]}...")
+            _img_ok = _rm_upload_img(_sub_id, "rich_menu_sub.png")
+            _log.append(f"📋 Sub: ✅ {_sub_id[:12]}..." + ("" if _img_ok else " (⚠️ อัปโหลดรูปไม่สำเร็จ)"))
 
             # === Step 4: Create Aliases ===
             _a1 = _rm_create_alias("richmenu-alias-staff", _staff_id)
