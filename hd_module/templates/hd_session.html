@@ -1502,8 +1502,43 @@ function toggleLabHistory(){
     + _labRows.map(r=>'<tr><td style="padding:3px 6px;white-space:nowrap">'+(r.date?hdDate(r.date):'-')+(r.status!=='approved'?' ⏳':'')+'</td>'+cols.map(c=>'<td style="padding:3px 6px;text-align:center">'+labVal(r[c[0]])+'</td>').join('')+'</tr>').join('')+'</table>';
 }
 
+/* คำสั่งแพทย์: เก็บข้อความที่กำลังพิมพ์ไว้ ไม่ให้หายตอนรายการแจ้งเตือนรีเฟรช (ทุก 60 วิ / หลังบันทึก BP) */
+const _orderDrafts = {};
+let _alertsPending = false;
+const ORDER_QUICK = {
+  idh: ['Stop UF 15 นาที แล้ววัด BP ซ้ำ', 'Load NSS 100 mL แล้ววัด BP ซ้ำ', 'Load NSS 200 mL', 'จัดท่า Trendelenburg', 'ลด UF rate 50%', 'ลด BFR เหลือ 200', 'Cool dialysate 35.5°C', 'วัด BP ทุก 15 นาที'],
+  htn: ['วัด BP ซ้ำใน 15 นาที', 'วัด BP ทุก 15 นาที', 'ให้ยาลดความดันตามแผนเดิม', 'แจ้งแพทย์ถ้า SBP > 200'],
+  o2: ['ให้ O2 cannula 3 LPM', 'ให้ O2 cannula 5 LPM', 'ให้ O2 mask with bag 10 LPM', 'วัด SpO2 ซ้ำใน 15 นาที', 'ลด UF / หยุด UF ชั่วคราว'],
+  hr: ['ตรวจ EKG 12 leads', 'วัด HR ซ้ำใน 15 นาที', 'เจาะ K+ stat'],
+  temp: ['เจาะ H/C 2 ขวด', 'ให้ Paracetamol 500 mg', 'วัดไข้ซ้ำใน 30 นาที'],
+  any: ['ติดตามอาการใกล้ชิด', 'หยุดฟอก แจ้งแพทย์ด่วน'],
+};
+function _orderChips(a){
+  const t = ((a.title||'')+' '+(a.message||'')).toLowerCase();
+  let k = 'any';
+  if(/idh|ความดันตก|ความดันต่ำ|sbp ลด|hypotension/.test(t)) k = 'idh';
+  else if(/spo2|ออกซิเจน|o2/.test(t)) k = 'o2';
+  else if(/ความดันสูง|hypertension/.test(t)) k = 'htn';
+  else if(/hr|ชีพจร|หัวใจ/.test(t)) k = 'hr';
+  else if(/ไข้|temp|อุณหภูมิ/.test(t)) k = 'temp';
+  const list = ORDER_QUICK[k].concat(k==='any'?[]:ORDER_QUICK.any);
+  return list.map(o=>`<button type="button" class="btn" onclick="addOrderChip(${a.id}, this.dataset.t)" data-t="${o.replace(/"/g,'&quot;')}"
+     style="font-size:.72rem;font-weight:500;padding:4px 10px;min-height:0;border-radius:14px;border:1px solid var(--border);background:var(--bg)">＋ ${o}</button>`).join('');
+}
+function addOrderChip(id, txt){
+  const el = document.getElementById('order_'+id); if(!el) return;
+  const cur = (el.value||'').trim();
+  el.value = cur ? (cur.includes(txt) ? cur : cur+' · '+txt) : txt;
+  _orderDrafts[id] = el.value; el.focus();
+}
+function _orderTyping(){
+  const a = document.activeElement;
+  return a && a.id && a.id.startsWith('order_') && (a.value||'').length > 0;
+}
 function loadSessionAlerts(){
   if(!sessionData.session_id) return;
+  /* กำลังพิมพ์คำสั่งอยู่ → เลื่อนการรีเฟรช ไม่วาดทับ */
+  if(_orderTyping()){ if(!_alertsPending){ _alertsPending = true; setTimeout(()=>{ _alertsPending = false; loadSessionAlerts(); }, 15000); } return; }
   hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/alerts').then(r=>r.json()).then(d=>{
     const list=d.alerts||[]; const panel=document.getElementById('alertsPanel');
     if(!list.length){ panel.style.display='none'; _openAlertCount = 0; return; }
@@ -1519,8 +1554,13 @@ function loadSessionAlerts(){
         ? `<div style="margin-top:6px;padding:8px;background:rgba(39,174,96,.08);border-left:3px solid var(--success);border-radius:6px;font-size:.8rem">
              <b>✍️ คำสั่งแพทย์</b> <span style="color:var(--fg-muted);font-size:.7rem">(${a.order_by||'-'} · ${a.order_at?hdTime(a.order_at):''})</span><br>${a.physician_order}</div>`
         : (isDoc ? `<div style="margin-top:6px;display:flex;gap:6px">
-             <input id="order_${a.id}" class="form-control" placeholder="พิมพ์คำสั่งการรักษา เช่น ลด UF, ให้ NSS 200 mL, Trendelenburg..." style="flex:1;font-size:.85rem">
-             <button class="btn btn-success" onclick="sendOrder(${a.id})" style="white-space:nowrap">✍️ สั่ง</button></div>`
+             <textarea id="order_${a.id}" class="form-control" rows="2" autocomplete="off" spellcheck="false"
+               placeholder="เลือกคำสั่งด้านล่าง หรือพิมพ์เอง เช่น ลด UF, ให้ NSS 200 mL, Trendelenburg..."
+               oninput="_orderDrafts[${a.id}]=this.value"
+               onkeydown="if(event.key==='Enter' && (event.ctrlKey||event.metaKey)){event.preventDefault();sendOrder(${a.id});}"
+               style="flex:1;font-size:.9rem;font-family:inherit;resize:vertical;min-height:44px"></textarea>
+             <button class="btn btn-success" onclick="sendOrder(${a.id})" style="white-space:nowrap;align-self:stretch">✍️ สั่ง</button></div>
+             <div style="display:flex;flex-wrap:wrap;gap:4px;margin-top:6px">${_orderChips(a)}</div>`
            : `<div style="margin-top:4px;font-size:.72rem;color:var(--fg-muted)">รอคำสั่งแพทย์</div>`);
       const ackBtn = a.acknowledged ? '' : `<button class="btn" onclick="ackAlert(${a.id})" style="font-size:.7rem;padding:3px 8px">✔ รับทราบ</button>`;
       return `<div style="border:1px solid ${sev[1]};border-radius:8px;padding:10px;${a.acknowledged?'opacity:.6':''}">
@@ -1530,6 +1570,8 @@ function loadSessionAlerts(){
         <div style="font-size:.7rem;color:var(--fg-muted)">👤 ${a.patient_name||''} · HN ${a.hn||'-'} · เตียง ${a.bed_number||'-'} · ${when} น.</div>
         ${orderBlock}</div>`;
     }).join('');
+    /* คืนข้อความที่พิมพ์ค้างไว้หลังวาดใหม่ */
+    Object.keys(_orderDrafts).forEach(id=>{ const el = document.getElementById('order_'+id); if(el && _orderDrafts[id]) el.value = _orderDrafts[id]; });
   }).catch(()=>{});
 }
 function sendOrder(alertId){
@@ -1539,6 +1581,8 @@ function sendOrder(alertId){
     .then(r=>r.json()).then(d=>{
       if(d.error){ showToast(d.error,'danger'); return; }
       showToast(d.relayed_to_nurses ? '✅ บันทึกคำสั่ง + ส่ง LINE พยาบาลแล้ว' : '✅ บันทึกคำสั่งแพทย์แล้ว','success');
+      delete _orderDrafts[alertId];
+      if(document.activeElement) document.activeElement.blur();
       loadSessionAlerts();
     }).catch(()=>showToast('บันทึกคำสั่งไม่สำเร็จ','danger'));
 }
