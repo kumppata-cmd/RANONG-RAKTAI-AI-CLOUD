@@ -12700,13 +12700,33 @@ def _ocr_with_google_vision_pdf(filepath: str) -> str:
         return ""
 
 
+def _ocr_upright(gray, timeout_sec: int = 20):
+    """หมุนรูปให้ตั้งตรงก่อน OCR (Tesseract OSD).
+    16 พ.ย. 2026: ใบตรวจรักษา รพ. ถ่ายแนวนอน → OCR ได้ตัวอักษรขยะ หา HN/ประเภทไม่ได้
+    หมุนเฉพาะเมื่อ OSD มั่นใจ (confidence ≥ 2) — ไม่มั่นใจ = ใช้รูปเดิม"""
+    try:
+        osd = pytesseract.image_to_osd(gray, config="--psm 0", timeout=min(timeout_sec, 20))
+        m_rot = re.search(r"Rotate:\s*(\d+)", osd)
+        m_conf = re.search(r"Orientation confidence:\s*([\d.]+)", osd)
+        rot = int(m_rot.group(1)) if m_rot else 0
+        conf = float(m_conf.group(1)) if m_conf else 0.0
+        if rot in (90, 180, 270) and conf >= 2.0:
+            logger.info("[Tesseract] rotate %d° (osd confidence %.1f)", rot, conf)
+            return gray.rotate(-rot, expand=True)
+    except Exception as e:
+        logger.info("[Tesseract] osd skipped: %s", type(e).__name__)
+    return gray
+
+
 def _ocr_with_tesseract(filepath: str, timeout_sec: int = 45) -> str:
     """Fallback OCR ด้วย Tesseract (v3)."""
     if not HAS_TESSERACT or not HAS_PIL:
         return ""
 
     ext = os.path.splitext(filepath)[1].lower()
-    MAX_OCR_WIDTH = 1200
+    # 1200 → 1600 px (16 พ.ย. 2026): รูปใบ A4 จากมือถือย่อเหลือ 1200 px ตัวพิมพ์เล็ก
+    # อ่านเลข HN ผิด (67398 → 67308)
+    MAX_OCR_WIDTH = 1600
     ocr_per_page_timeout = min(timeout_sec, 40)
 
     with _ocr_semaphore:
@@ -12715,8 +12735,13 @@ def _ocr_with_tesseract(filepath: str, timeout_sec: int = 45) -> str:
                 gray = None
                 try:
                     img = Image.open(filepath, formats=SAFE_IMAGE_FORMATS)
+                    try:
+                        img = ImageOps.exif_transpose(img)
+                    except Exception:
+                        pass
                     gray = img.convert("L")
                     img.close()
+                    gray = _ocr_upright(gray, ocr_per_page_timeout)
 
                     w, h = gray.size
                     if w > MAX_OCR_WIDTH:
@@ -12755,6 +12780,20 @@ def _ocr_with_tesseract(filepath: str, timeout_sec: int = 45) -> str:
                             ).strip()
                             if len(text_eng) > len(text):
                                 text = text_eng
+                        except Exception:
+                            pass
+
+                    # รอบที่ 2 แบบอ่านเป็นคอลัมน์ (psm 4) — ฟอร์ม/ตารางที่ psm 6
+                    # อ่านหัวกระดาษ (ชื่อ/HN) เพี้ยน มักอ่านถูกในรอบนี้
+                    if len(text) >= 10:
+                        try:
+                            text_col = pytesseract.image_to_string(
+                                processed, lang="tha+eng",
+                                timeout=ocr_per_page_timeout,
+                                config="--psm 4 --oem 1",
+                            ).strip()
+                            if text_col:
+                                text = text + "\n" + text_col
                         except Exception:
                             pass
 
@@ -14206,6 +14245,19 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "_ocr_text": content,
         }
 
+    # ── Pre-check: Medication Record ของคลินิก (= ใบยา) ──
+    # 16 พ.ย. 2026 (HN 67398): หัวฟอร์ม "Medication Record หน่วยไตเทียมระนอง รักษ์ไต"
+    # มีคำว่า "ไตเทียม" → HD pre-check จัดเป็นฟอกเลือด เมื่อ OCR อ่านชื่อยาได้ไม่ถึง 3 ตัว
+    _mr_cols = [c for c in ("dose", "frequency", "route", "regimen") if _kw_in_text(c, content_lower)]
+    if "medication record" in content_lower or ("medication" in content_lower and len(_mr_cols) >= 3):
+        logger.info("  pre-check: Medication Record form (%d columns) → rx", len(_mr_cols))
+        return {
+            "category": "rx",
+            "reason": f"Medication Record pre-check ({len(_mr_cols)} columns)",
+            "confidence": 0.9,
+            "_ocr_text": content,
+        }
+
     # ── Pre-check: ใบรายงานผลตรวจทางห้องปฏิบัติการ (Lab Report) ──
     # *** ต้องอยู่ก่อน rx pre-check ***
     # ถ้าพบชื่อฟอร์มแล็บ + ผลตรวจ lab ≥2 รายการ → บังคับ lab
@@ -14686,23 +14738,27 @@ def process_file_async(
                             _reg_count, len(found_hns),
                         )
                         _matched_registry = False
-                        for hn_candidate in found_hns:
-                            patient_folder = master_registry.get_folder_for_hn(
-                                hn_candidate
+                        try:
+                            _early_name = extract_patient_name_from_document(extracted_text)
+                        except Exception:
+                            _early_name = ""
+                        _pp, _how, _warn = _pick_patient_for_doc(found_hns, _early_name)
+                        if _pp:
+                            metadata["patient_hn_folder"] = _pp.folder_name
+                            _matched_registry = True
+                            if _how == "ocr_name":
+                                metadata["matched_by"] = "ocr_name"
+                            if _warn:
+                                metadata["hn_name_warning"] = _warn
+                            logger.info(
+                                "Auto HN route: matched by %s%s (category=%s)",
+                                _how, f" [{_warn}]" if _warn else "", category,
                             )
-                            if patient_folder:
-                                metadata["patient_hn_folder"] = patient_folder
-                                _matched_registry = True
-                                logger.info(
-                                    "Auto HN route: matched HN → patient folder "
-                                    "(category=%s)", category
-                                )
-                                break
-                            else:
-                                logger.info(
-                                    "Auto HN route: no match for HN candidate "
-                                    "(category=%s)", category
-                                )
+                        elif _how == "ambiguous":
+                            # HN หลายตัวชี้คนละผู้ป่วย ไม่มีชื่อยืนยัน → ไม่เดา ไม่ลงทะเบียนใหม่
+                            metadata["hn_name_warning"] = "multi_hn"
+                            found_hns = []
+                            logger.info("Auto HN route: ambiguous HN candidates — not filed (category=%s)", category)
                         # ── ชุดเดียวกัน: หน้าอื่นจับคู่ทะเบียนได้รายเดียว ──
                         # (2026-11-02: ใบฟอกเลือด 2 หน้าของผู้ป่วยคนเดียว
                         # หน้า 2 OCR อ่าน HN เพี้ยนเป็น "162" → เข้าแฟ้ม HN162
@@ -15661,7 +15717,13 @@ def process_file_async(
                     _reply_lines.append(
                         f"👤 แฟ้มผู้ป่วย: {metadata['patient_hn_folder']}"
                     )
-                    if metadata.get("matched_by") == "ocr_name":
+                    if metadata.get("hn_name_warning") in ("hn_name_mismatch", "name_mismatch"):
+                        _reply_lines.append(
+                            "⚠️ HN ที่อ่านได้ไม่ตรงกับชื่อในเอกสาร — "
+                            + ("จัดเข้าแฟ้มตามชื่อ" if metadata.get("matched_by") == "ocr_name" else "จัดตาม HN")
+                            + " กรุณาตรวจสอบ ถ้าผิดพิมพ์ 'ย้ายเอกสาร <รหัส> <HN>'"
+                        )
+                    elif metadata.get("matched_by") == "ocr_name":
                         _reply_lines.append(
                             "🔍 จับคู่จากชื่อในเอกสาร (ตรวจสอบว่าถูกคนหรือไม่)"
                         )
@@ -15670,7 +15732,9 @@ def process_file_async(
                 else:
                     _reply_lines.append(
                         "👤 ยังไม่ระบุผู้ป่วย — เก็บไว้ที่ระดับไตรมาส/เดือน\n"
-                        "พิมพ์ 'ผู้ป่วย <HN>' ก่อนส่ง เพื่อเข้าแฟ้มรายคน"
+                        + ("⚠️ พบ HN หลายตัวที่ชี้คนละผู้ป่วย ระบบไม่เดา\n"
+                           if metadata.get("hn_name_warning") == "multi_hn" else "")
+                        + f"พิมพ์ 'ย้ายเอกสาร {_doc_id[:8]} <HN>' เพื่อเข้าแฟ้มรายคน"
                     )
                 # แสดงชื่อคนไข้ที่อ่านได้จากเอกสาร (ถ้ามี)
                 if metadata.get("ocr_patient_name"):
@@ -17647,6 +17711,71 @@ def _build_doc_flex_bubble(
     }
 
 
+_NAME_TITLES = ("นางสาว", "น.ส.", "นาย", "นาง", "ด.ช.", "ด.ญ.", "เด็กชาย", "เด็กหญิง",
+                "พระ", "mr.", "mrs.", "ms.", "miss", "mr", "mrs", "ms")
+
+
+def _name_core(name: str) -> str:
+    n = (name or "").strip().lower()
+    for t in _NAME_TITLES:
+        if n.startswith(t):
+            n = n[len(t):].strip()
+            break
+    return re.sub(r"[\s.\-_]+", "", n)
+
+
+def _names_agree(registry_name: str, ocr_name: str) -> bool:
+    """ชื่อในทะเบียนกับชื่อที่ OCR อ่านได้เป็นคนเดียวกันไหม (ทน OCR เพี้ยน 1–2 ตัวอักษร)"""
+    a, b = _name_core(registry_name), _name_core(ocr_name)
+    if len(a) < 3 or len(b) < 3:
+        return False
+    if a in b or b in a:
+        return True
+    import difflib
+    return difflib.SequenceMatcher(None, a, b).ratio() >= 0.75
+
+
+def _pick_patient_for_doc(found_hns, ocr_name: str = ""):
+    """เลือกผู้ป่วยของเอกสาร 1 ฉบับ — HN ต้องสอดคล้องกับชื่อบนเอกสาร
+    → (MasterPatient | None, method, warning)
+
+    16 พ.ย. 2026: OCR อ่านเลข HN ผิด 1 หลัก (67398 → 57398/67308) — HN คลินิก
+    เป็นเลข 5 หลักช่วงเดียวกัน จึงอาจตรงกับผู้ป่วย "คนอื่น" ที่มีอยู่จริง
+    กฎ: (1) HN ที่ชื่อตรงกัน ชนะ (2) ถ้าชื่อบนเอกสารตรงผู้ป่วยรายเดียวในทะเบียน
+    แต่ HN ชี้คนอื่น → ใช้ตามชื่อ + เตือนให้ตรวจ (3) HN หลายคนแต่ไม่มีชื่อยืนยัน
+    → ไม่เดา"""
+    if not master_registry:
+        return None, "", ""
+    matches = []
+    for hn in found_hns or []:
+        try:
+            p = master_registry.match_hn(hn)
+        except Exception:
+            p = None
+        if p and all(p.folder_name != m.folder_name for m in matches):
+            matches.append(p)
+    name_p = None
+    if ocr_name:
+        try:
+            name_p = master_registry.search_by_name(ocr_name)
+        except Exception:
+            name_p = None
+        agree = [m for m in matches if _names_agree(m.patient_name, ocr_name)]
+        if len(agree) == 1:
+            return agree[0], "hn+name", ""
+        if name_p and all(name_p.folder_name != m.folder_name for m in matches):
+            return name_p, "ocr_name", ("hn_name_mismatch" if matches else "")
+    if len(matches) == 1:
+        warn = ("name_mismatch" if ocr_name and matches[0].patient_name
+                and not _names_agree(matches[0].patient_name, ocr_name) else "")
+        return matches[0], "hn", warn
+    if len(matches) > 1:
+        return None, "ambiguous", "multi_hn"
+    if name_p:
+        return name_p, "ocr_name", ""
+    return None, "", ""
+
+
 def _batch_patient_folder(page_texts: list[str]) -> str:
     """หาแฟ้มผู้ป่วย (จากทะเบียน) ที่ทุกหน้าในชุดชี้ตรงกัน
 
@@ -17661,10 +17790,13 @@ def _batch_patient_folder(page_texts: list[str]) -> str:
         for text in page_texts:
             if not text:
                 continue
-            for hn in extract_hn_from_document(text):
-                folder = master_registry.get_folder_for_hn(hn)
-                if folder:
-                    folders.add(folder)
+            try:
+                _nm = extract_patient_name_from_document(text)
+            except Exception:
+                _nm = ""
+            _p, _how, _w = _pick_patient_for_doc(extract_hn_from_document(text), _nm)
+            if _p:
+                folders.add(_p.folder_name)
     except Exception as e:
         logger.warning("batch patient folder: %s", type(e).__name__)
         return ""
