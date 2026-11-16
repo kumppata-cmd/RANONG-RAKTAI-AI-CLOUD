@@ -351,7 +351,7 @@ function sparkline(b){
 function ufWatchLine(b){
   const u = b.uf_watch; if(!u || !u.flag || u.flag==='ok' || u.flag==='no_goal') return '';
   const col = u.flag==='high_rate' ? 'var(--danger)' : 'var(--warning)';
-  return `<div class="bed-chk" style="margin-top:3px;color:${col};font-weight:700" title="${(u.text||'').replace(/"/g,'')}">${u.flag_th}${u.behind_ml>100?' −'+u.behind_ml+' mL':''}${u.need_rate_kg!=null&&(u.flag==='high_rate'||u.flag==='caution')?' · ต้องใช้ '+u.need_rate_kg+' mL/kg/ชม.':''}</div>`;
+  return `<div class="bed-chk" style="margin-top:3px;color:${col};font-weight:700" title="${(u.text||'').replace(/"/g,'')}">${u.flag_th}${u.flag==='target_reduced'?' −'+u.reduced_ml+' mL':(u.behind_ml>100&&!u.reduced_ml&&!u.extend_min?' −'+u.behind_ml+' mL':'')}${u.need_rate_kg!=null&&(u.flag==='high_rate'||u.flag==='caution')?' · ต้องใช้ '+u.need_rate_kg+' mL/kg/ชม.':''}</div>`;
 }
 function idhLine(b){
   const r = b.idh_risk; if(!r || r.level==='low') return '';

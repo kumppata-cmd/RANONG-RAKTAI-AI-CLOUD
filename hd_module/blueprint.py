@@ -3900,6 +3900,13 @@ def record_uf(session_id):
                 # Also get session's uf_goal
                 cur.execute("SELECT uf_goal FROM hd_sessions WHERE id = %s", (session_id,))
                 srow = cur.fetchone()
+                # 16 พ.ย. 2569: สถานะ UF Watch + เป้า/เวลาที่ปรับบนเครื่อง ตั้งแต่เปิดหน้า (ไม่ต้องรอบันทึกใหม่)
+                watch = None
+                try:
+                    from .uf_watch import for_session as _ufw
+                    watch = _ufw(cur, session_id, _uf_watch_limits())
+                except Exception as we:
+                    logger.debug("uf watch (GET): %s", we)
             conn.close()
             records = [{
                 "id": r[0],
@@ -3911,6 +3918,7 @@ def record_uf(session_id):
             return jsonify({
                 "records": records,
                 "uf_goal": int(srow[0]) if srow and srow[0] else 2000,
+                "watch": watch,
             })
         except Exception as e:
             logger.error("get UF records error: %s", e)
@@ -3922,7 +3930,18 @@ def record_uf(session_id):
     uf_rate = data.get("uf_rate", 0)
     uf_remaining = data.get("uf_remaining", 0)
     slot_time = data.get("slot_time", "")
-    notes = data.get("notes", "")
+    notes = (data.get("notes") or "")[:120]
+    # เป้า/เวลาที่พยาบาลตั้งบนเครื่องหลังปรึกษาแพทย์ (ปุ่ม "คงอัตราปลอดภัย" / "ยืดเวลา") — บันทึกไว้ให้
+    # UF Watch ประเมินตามจริง ระบบไม่ปรับเครื่องหรือแก้ใบสั่งเอง
+    try:
+        _mt = int(float(data.get("machine_target") or 0))
+        _ex = int(float(data.get("extend_min") or 0))
+    except (TypeError, ValueError):
+        _mt, _ex = 0, 0
+    _adj = ";".join(x for x in (f"target={_mt}" if 0 < _mt <= 10000 else "",
+                                f"extend={_ex}" if 0 < _ex <= 240 else "") if x)
+    if _adj:
+        notes = f"{_adj};{notes}" if notes else _adj
 
     try:
         import psycopg2
@@ -6220,18 +6239,33 @@ def save_flowsheet_row(session_id):
                     alert = {"severity": worst["severity"], "title": worst["title"]}
 
             # Mirror UF to hd_uf_records so the session page UF progress updates
-            if params["total_uf"] or params["ufr"]:
+            # 16 พ.ย. 2569: ใช้ค่ารวมของแถวช่องเวลานั้น (ไม่ใช่เฉพาะช่องที่เพิ่งพิมพ์) และ 1 ช่องเวลา = 1 record
+            # เดิมบันทึกแค่ UFR → แทรก UF removed = 0, แก้ช่องเดิมซ้ำ → แทรกเพิ่ม → กราฟขึ้นลง + เตือนอัตราเกินผิด
+            if params["total_uf"] is not None or params["ufr"] is not None:
                 cur.execute("SAVEPOINT sp_sheet_uf")
                 try:
-                    cur.execute("SELECT uf_goal FROM hd_sessions WHERE id = %s", (session_id,))
-                    gr = cur.fetchone()
-                    goal = int(gr[0]) if gr and gr[0] else 0
-                    removed = int(params["total_uf"] or 0)
-                    cur.execute("""
-                        INSERT INTO hd_uf_records (session_id, slot_time, uf_removed, uf_rate, uf_remaining, recorded_at)
-                        VALUES (%s, %s, %s, %s, %s, NOW())
-                    """, (session_id, slot_time, removed, int(params["ufr"] or 0),
-                          max(goal - removed, 0) if goal else 0))
+                    cur.execute("SELECT total_uf, ufr FROM hd_flowsheet WHERE id = %s", (row_id,))
+                    fr = cur.fetchone()
+                    tot = fr[0] if fr else None
+                    if tot is not None and float(tot) > 0:
+                        removed = int(float(tot))
+                        rate = int(float(fr[1])) if fr[1] is not None else 0
+                        cur.execute("SELECT uf_goal FROM hd_sessions WHERE id = %s", (session_id,))
+                        gr = cur.fetchone()
+                        goal = int(gr[0]) if gr and gr[0] else 0
+                        rem_ml = max(goal - removed, 0) if goal else 0
+                        cur.execute("""SELECT id FROM hd_uf_records WHERE session_id = %s AND slot_time = %s
+                                       AND notes = 'sheet' ORDER BY id DESC LIMIT 1""", (session_id, slot_time))
+                        ex = cur.fetchone()
+                        if ex:
+                            cur.execute("""UPDATE hd_uf_records SET uf_removed = %s, uf_rate = %s, uf_remaining = %s,
+                                           recorded_at = NOW() WHERE id = %s""", (removed, rate, rem_ml, ex[0]))
+                        else:
+                            cur.execute("""
+                                INSERT INTO hd_uf_records (session_id, slot_time, uf_removed, uf_rate, uf_remaining,
+                                                           notes, recorded_at)
+                                VALUES (%s, %s, %s, %s, %s, 'sheet', NOW())
+                            """, (session_id, slot_time, removed, rate, rem_ml))
                     cur.execute("RELEASE SAVEPOINT sp_sheet_uf")
                 except Exception as ue:
                     cur.execute("ROLLBACK TO SAVEPOINT sp_sheet_uf")

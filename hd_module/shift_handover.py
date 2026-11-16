@@ -68,9 +68,10 @@ def generate_handover_summary(db_url: str, shift: str = "morning") -> dict:
                 }
                 # UF Watch (สรุปเวรบอกว่าเตียงไหน UF ช้า/ยังไม่บันทึก/อัตราเกิน)
                 try:
-                    from .uf_watch import evaluate, latest_record
+                    from .uf_watch import evaluate, latest_record, latest_adjustment
                     rem, at = latest_record(cur, r[6])
-                    item["uf"] = evaluate(r[5], rem, r[4], 4.0, r[9], at)
+                    tgt, ext = latest_adjustment(cur, r[6])
+                    item["uf"] = evaluate(r[5], rem, r[4], 4.0, r[9], at, target=tgt, extend_min=ext)
                 except Exception:
                     item["uf"] = None
                 result["active_beds"].append(item)

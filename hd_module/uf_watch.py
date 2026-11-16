@@ -9,6 +9,7 @@ Flags, by priority:
     no_record   session running > record_every min and no UF recorded yet
     overdue     last UF record older than record_every min (default 65)
     behind      removed < expected − max(150 mL, 10 % of goal)
+    target_reduced  nurse set a lower UF target on the machine (after asking the physician)
     caution     needed rate 10–13 mL/kg/h
     ok
     no_goal     nothing to compare against
@@ -18,8 +19,9 @@ from datetime import datetime, timedelta, timezone
 
 DEFAULTS = {"uf_max": 13.0, "uf_caution": 10.0, "record_every_min": 65, "behind_min_ml": 150, "behind_pct": 10}
 FLAG_TH = {"high_rate": "⛔ UF ต้องใช้อัตราเกินเพดาน", "no_record": "⏰ ยังไม่บันทึก UF", "overdue": "⏰ ไม่ได้บันทึก UF เกิน 1 ชม.",
-           "behind": "🐢 UF ช้ากว่าแผน", "caution": "⚠️ อัตรา UF ที่ต้องใช้สูง", "ok": "✅ UF ตามแผน", "no_goal": ""}
-PRIORITY = {"high_rate": 3, "no_record": 2, "overdue": 2, "behind": 2, "caution": 1, "ok": 0, "no_goal": 0}
+           "behind": "🐢 UF ช้ากว่าแผน",
+           "target_reduced": "🎯 เป้าบนเครื่องต่ำกว่าที่แพทย์สั่ง", "caution": "⚠️ อัตรา UF ที่ต้องใช้สูง", "ok": "✅ UF ตามแผน", "no_goal": ""}
+PRIORITY = {"high_rate": 3, "no_record": 2, "overdue": 2, "behind": 2, "target_reduced": 2, "caution": 1, "ok": 0, "no_goal": 0}
 
 
 def _utc(dt):
@@ -28,7 +30,8 @@ def _utc(dt):
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def evaluate(goal, removed, started_at, duration_h, dry_weight=None, last_record_at=None, now=None, limits=None):
+def evaluate(goal, removed, started_at, duration_h, dry_weight=None, last_record_at=None, now=None, limits=None,
+             target=None, extend_min=0):
     """→ dict(flag, flag_th, pct, expected, behind_ml, elapsed_min, left_min, need_rate, need_rate_kg,
               avg_rate, since_record_min, text). Never raises on missing data."""
     lim = dict(DEFAULTS, **(limits or {}))
@@ -38,6 +41,9 @@ def evaluate(goal, removed, started_at, duration_h, dry_weight=None, last_record
     try:
         goal = float(goal) if goal else 0.0
         dur = float(duration_h) if duration_h else 4.0
+        ext = max(0, int(extend_min or 0))
+        dur += ext / 60.0
+        tgt = float(target) if target else None
         dw = float(dry_weight) if dry_weight else None
         rem = float(removed) if removed is not None else None
     except (TypeError, ValueError):
@@ -53,9 +59,17 @@ def evaluate(goal, removed, started_at, duration_h, dry_weight=None, last_record
         out["since_record_min"] = int(round((now - _utc(last_record_at)).total_seconds() / 60))
     if goal <= 0 or elapsed is None:
         return dict(out, flag_th="")
+    # 16 พ.ย. 2569: พยาบาลเลือก "คงอัตราปลอดภัย" (ลดเป้าบนเครื่อง) หรือ "ยืดเวลา" หลังปรึกษาแพทย์
+    # → ประเมินตามเป้า/เวลาที่ตั้งจริงบนเครื่อง ไม่เตือนเกินเพดานซ้ำทุกครั้ง แต่ยังแจ้งว่าเป้าต่ำกว่าสั่งเท่าไร
+    reduced = 0
+    plan_goal = goal
+    if tgt and 0 < tgt < goal:
+        plan_goal, reduced = tgt, int(round(goal - tgt))
+    out["prescribed_goal"], out["target"], out["reduced_ml"], out["extend_min"] = int(goal), int(plan_goal), reduced, ext
+    adjusted = bool(reduced or ext)
     el = min(elapsed, dur)
     left = max(0.0, dur - elapsed)
-    out["expected"] = int(round(goal * el / dur))
+    out["expected"] = int(round(plan_goal * el / dur))
     flag = "ok"
     if rem is None:
         if elapsed * 60 > lim["record_every_min"]:
@@ -68,7 +82,7 @@ def evaluate(goal, removed, started_at, duration_h, dry_weight=None, last_record
     out["behind_ml"] = int(round(out["expected"] - rem))
     if el > 0.1:
         out["avg_rate"] = int(round(rem / el))
-    remaining = max(0.0, goal - rem)
+    remaining = max(0.0, plan_goal - rem)
     if left > 0.05:
         out["need_rate"] = int(round(remaining / left))
         if dw:
@@ -78,19 +92,27 @@ def evaluate(goal, removed, started_at, duration_h, dry_weight=None, last_record
         flag = "high_rate"
     elif out["since_record_min"] is not None and out["since_record_min"] > lim["record_every_min"] and left > 0.05:
         flag = "overdue"
-    elif out["behind_ml"] > max(lim["behind_min_ml"], goal * lim["behind_pct"] / 100.0):
+    elif not adjusted and out["behind_ml"] > max(lim["behind_min_ml"], plan_goal * lim["behind_pct"] / 100.0):
         flag = "behind"
+    elif reduced > 0:
+        flag = "target_reduced"
     elif nrk is not None and nrk > lim["uf_caution"] and remaining > 0:
         flag = "caution"
     out["flag"] = flag
     out["flag_th"] = FLAG_TH[flag]
     parts = [f"UF {int(rem)}/{int(goal)} mL ({out['pct']}%)"]
-    if out["behind_ml"] > 100:
+    if adjusted:
+        pass  # วางแผนใหม่แล้ว — ดูอัตราที่ต้องใช้ต่อจากนี้แทนการเทียบเส้นแผนเดิม
+    elif out["behind_ml"] > 100:
         parts.append(f"ช้ากว่าแผน {out['behind_ml']} mL")
     elif out["behind_ml"] < -100:
         parts.append(f"เร็วกว่าแผน {-out['behind_ml']} mL")
     if out["need_rate"] is not None and remaining > 0:
         parts.append(f"ต้องใช้ {out['need_rate']} mL/ชม." + (f" = {nrk} mL/kg/ชม." if nrk is not None else ""))
+    if reduced > 0:
+        parts.append(f"เป้าบนเครื่อง {int(plan_goal)} mL (ต่ำกว่าสั่ง {reduced} mL → หลังฟอกสูงกว่า DW ≈ {reduced / 1000:.1f} kg)")
+    if ext:
+        parts.append(f"ยืดเวลา +{ext} นาที")
     if flag == "overdue":
         parts.append(f"บันทึกล่าสุด {out['since_record_min']} นาทีก่อน")
     out["text"] = " · ".join(parts)
@@ -98,11 +120,42 @@ def evaluate(goal, removed, started_at, duration_h, dry_weight=None, last_record
 
 
 def latest_record(cur, session_id):
-    """(uf_removed, recorded_at) of the latest UF record, or (None, None)."""
-    cur.execute("""SELECT uf_removed, recorded_at FROM hd_uf_records WHERE session_id = %s
+    """(UF removed so far, time of the latest record) or (None, None).
+
+    UF ที่เครื่องดึงเป็นค่าสะสม ไม่ลดลง — ใช้ค่าสูงสุดที่บันทึก (16 พ.ย. 2569: แถว 0 ที่เกิดจาก
+    Sheet บันทึกแค่ UFR เคยทำให้ระบบคิดว่าเพิ่งดึงได้ 0 แล้วเตือนอัตราเกินเพดานผิด)"""
+    cur.execute("""SELECT MAX(uf_removed), MAX(recorded_at) FROM hd_uf_records
+                   WHERE session_id = %s AND uf_removed > 0""", (session_id,))
+    r = cur.fetchone()
+    if r and r[0] is not None:
+        return float(r[0]), r[1]
+    cur.execute("SELECT MAX(recorded_at) FROM hd_uf_records WHERE session_id = %s", (session_id,))
+    r = cur.fetchone()
+    return None, (r[0] if r else None)
+
+
+def parse_adjust(notes):
+    """notes 'target=1777;extend=75' → (target or None, extend_min)"""
+    t, e = None, 0
+    for part in (notes or "").split(";"):
+        k, _, v = part.partition("=")
+        try:
+            if k.strip() == "target":
+                t = int(float(v))
+            elif k.strip() == "extend":
+                e = int(float(v))
+        except ValueError:
+            pass
+    return t, e
+
+
+def latest_adjustment(cur, session_id):
+    """เป้า/เวลาที่พยาบาลตั้งบนเครื่องล่าสุด (จาก UF record ที่มี target=/extend=) → (target, extend_min)"""
+    cur.execute("""SELECT notes FROM hd_uf_records WHERE session_id = %s
+                   AND (notes LIKE '%%target=%%' OR notes LIKE '%%extend=%%')
                    ORDER BY recorded_at DESC, id DESC LIMIT 1""", (session_id,))
     r = cur.fetchone()
-    return (float(r[0]), r[1]) if r and r[0] is not None else (None, (r[1] if r else None))
+    return parse_adjust(r[0]) if r else (None, 0)
 
 
 def for_session(cur, session_id, limits=None, now=None):
@@ -115,7 +168,8 @@ def for_session(cur, session_id, limits=None, now=None):
     if not r:
         return None
     removed, at = latest_record(cur, session_id)
-    return evaluate(r[0], removed, r[1], r[3], r[2], at, now=now, limits=limits)
+    tgt, ext = latest_adjustment(cur, session_id)
+    return evaluate(r[0], removed, r[1], r[3], r[2], at, now=now, limits=limits, target=tgt, extend_min=ext)
 
 
 def handover_lines(items):

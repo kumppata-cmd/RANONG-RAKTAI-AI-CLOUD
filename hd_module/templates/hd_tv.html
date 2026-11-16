@@ -164,7 +164,7 @@ function render(d){
     const bpCls = v.sbp ? (v.sbp < 90 ? 'low' : (v.sbp < 100 ? 'mid' : '')) : '';
     const uf = b.uf_goal ? Math.min(100, Math.round((b.uf_removed||0)/b.uf_goal*100)) : null;
     const idh = b.idh_risk && b.idh_risk.level !== 'low' ? `<span class="tag ${b.idh_risk.level==='high'?'c':'w'}">IDH ${b.idh_risk.score}</span>` : '';
-    const uw = b.uf_watch && b.uf_watch.flag && !['ok','no_goal'].includes(b.uf_watch.flag) ? `<span class="tag ${b.uf_watch.flag==='high_rate'?'c':'w'}">${b.uf_watch.flag_th}${b.uf_watch.behind_ml>100?' −'+b.uf_watch.behind_ml:''}</span>` : '';
+    const uw = b.uf_watch && b.uf_watch.flag && !['ok','no_goal'].includes(b.uf_watch.flag) ? `<span class="tag ${b.uf_watch.flag==='high_rate'?'c':'w'}">${b.uf_watch.flag_th}${b.uf_watch.flag==='target_reduced'?' −'+b.uf_watch.reduced_ml:(b.uf_watch.behind_ml>100&&!b.uf_watch.reduced_ml&&!b.uf_watch.extend_min?' −'+b.uf_watch.behind_ml:'')}</span>` : '';
     const al = (b.alerts||[]).filter(a=>!a.physician_order && a.severity!=='info')[0];
     return `<div class="bed ${st}">
       <div class="n">เตียง ${b.bed_number}</div>
