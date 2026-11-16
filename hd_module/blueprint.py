@@ -5035,7 +5035,7 @@ def bed_dashboard():
                            s.shift as saved_shift,
                            s.ended_at, s.pre_weight, s.post_weight, s.actual_uf,
                            (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id) AS n_alerts,
-                           p.default_shift, p.schedule_days
+                           p.default_shift, p.schedule_days, p.esa_dose
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.status IN ('scheduled', 'in_progress', 'completed')
@@ -5095,6 +5095,7 @@ def bed_dashboard():
                                 "vascular_access": row[5],
                                 "dry_weight": float(row[6]) if row[6] else None,
                                 "esa_drug": row[7],
+                                "esa_dose": row[20] if len(row) > 20 else None,
                             },
                             "start_time": (row[8].isoformat() + "Z") if row[8] else None,
                             "duration_hours": float(row[9]) if row[9] else 4,
@@ -5266,8 +5267,7 @@ def bed_dashboard():
                 for sid, bnum in session_ids:
                     if not (1 <= bnum <= len(beds)):
                         continue
-                    cur.execute("SAVEPOINT sp_bed_hep")
-                    try:
+                    try:   # conn เป็น autocommit — ห้ามใช้ SAVEPOINT (ล้มทั้ง loop เมื่อ 16 พ.ย. 2569)
                         cur.execute("""
                             SELECT protocol, loading_dose, maintenance_dose
                             FROM hd_anticoagulation
@@ -5284,10 +5284,8 @@ def bed_dashboard():
                             hrow = cur.fetchone()
                             if hrow and hrow[0]:
                                 beds[bnum - 1]["anticoag_text"] = hrow[0]
-                        cur.execute("RELEASE SAVEPOINT sp_bed_hep")
                     except Exception as he:
-                        cur.execute("ROLLBACK TO SAVEPOINT sp_bed_hep")
-                        logger.debug("bed heparin fetch: %s", he)
+                        logger.warning("bed heparin fetch: %s", he)
 
             conn.close()
         except Exception as e:

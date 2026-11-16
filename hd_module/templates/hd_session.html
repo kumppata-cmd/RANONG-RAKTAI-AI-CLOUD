@@ -1269,7 +1269,7 @@ function loadSessionRecords(sid, headers, live){
         if(u.uf_rate) lastRate = u.uf_rate;
         if(u.uf_remaining) lastRemaining = u.uf_remaining;
         if(!(u.uf_removed > 0)) return;   /* แถว 0 จาก Sheet รุ่นเก่า (บันทึกแค่ UFR) */
-        timeline.push({ time: u.slot_time || hdTime(u.recorded_at), ts:_tsOf(u.recorded_at),
+        timeline.push({ time: hdTime(u.recorded_at), slot: u.slot_time, ts:_tsOf(u.recorded_at),
                         type:'uf', removed:u.uf_removed, rate:u.uf_rate, remaining:u.uf_remaining });
       });
       if(lastUf > 0){
@@ -1791,18 +1791,28 @@ function saveUfRecord(){
   showToast('บันทึก UF สำเร็จ','success');
 }
 
+/* บันทึกระหว่างฟอก — แยก 2 กลุ่ม: ❤️ Vital Signs และ 💧 UF (ใหม่ → เก่า) */
 function renderTimeline(){
   const el = document.getElementById('intraTimeline');
-  if(!timeline.length){ el.innerHTML='<p style="color:var(--fg-muted);text-align:center;padding:20px;">ยังไม่มีข้อมูล</p>'; return; }
-  const ord = timeline.map((e,i)=>({e,i})).sort((a,b)=>((a.e.ts||9e15)-(b.e.ts||9e15)) || (a.i-b.i)).map(x=>x.e);
+  if(!timeline.length){ el.innerHTML='<p style="color:var(--fg-muted);text-align:center;padding:20px;">ยังไม่มีข้อมูล — กดปุ่มด้านบนเพื่อบันทึก</p>'; return; }
+  const ord = timeline.map((e,i)=>({e,i})).sort((a,b)=>((b.e.ts||9e15)-(a.e.ts||9e15)) || (b.i-a.i)).map(x=>x.e);
   const PH = {pre:'ก่อนฟอก', post:'หลังฟอก'};
-  el.innerHTML = ord.slice().reverse().map(e=>{
-    if(e.type==='vital')
-      return `<div class="timeline-entry"><span class="timeline-time">${e.time}</span><span class="timeline-content">❤️ ${PH[e.phase]?'<b>'+PH[e.phase]+'</b> ':''}BP ${e.sbp??'-'}/${e.dbp??'-'} mmHg, HR ${e.hr??'-'} bpm${e.spo2?', SpO2 '+e.spo2+'%':''}${e.temp?', T '+e.temp+'°C':''}</span><span class="timeline-badge badge-info">Vital</span></div>`;
-    if(e.type==='uf')
-      return `<div class="timeline-entry"><span class="timeline-time">${e.time}</span><span class="timeline-content">💧 UF removed ${e.removed} mL, remaining ${e.remaining} mL, rate ${e.rate} mL/hr</span><span class="timeline-badge badge-warning">UF</span></div>`;
-    return '';
-  }).join('');
+  const vit = ord.filter(e=>e.type==='vital'), uf = ord.filter(e=>e.type==='uf');
+  const c = (v, bad, warn) => v==null||v==='' ? '-' : (bad ? `<b style="color:var(--danger)">${v}</b>` : warn ? `<b style="color:#e67e22">${v}</b>` : v);
+  const th = 'style="text-align:left;text-transform:none;letter-spacing:0;padding:6px 8px;font-size:.72rem;color:var(--fg-muted);border-bottom:1px solid var(--border);white-space:nowrap"';
+  const td = 'style="padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap"';
+  const vRows = vit.map(e=>`<tr><td ${td}>${e.time}${PH[e.phase]?' <span style="font-size:.68rem;padding:1px 6px;border-radius:8px;background:rgba(52,152,219,.12)">'+PH[e.phase]+'</span>':''}</td>
+      <td ${td}>${c(e.sbp, e.sbp!=null&&e.sbp<90, e.sbp!=null&&e.sbp<100)}/${e.dbp??'-'}</td><td ${td}>${c(e.hr, e.hr!=null&&(e.hr>120||e.hr<50))}</td>
+      <td ${td}>${c(e.spo2, e.spo2!=null&&e.spo2<92)}</td><td ${td}>${c(e.temp, e.temp!=null&&e.temp>=37.8)}</td></tr>`).join('');
+  const uRows = uf.map(e=>`<tr><td ${td}>${e.time}${e.slot&&e.slot!==e.time?' <span style="font-size:.66rem;color:var(--fg-muted)">(ช่อง '+e.slot+')</span>':''}</td>
+      <td ${td}><b>${e.removed!=null?Math.round(e.removed):'-'}</b></td><td ${td}>${e.remaining!=null?Math.round(e.remaining):'-'}</td><td ${td}>${e.rate!=null?Math.round(e.rate):'-'}</td></tr>`).join('');
+  const box = (title, n, head, rows, empty) => `<div style="margin-bottom:14px">
+      <div style="font-weight:800;font-size:.9rem;margin:2px 0 6px">${title} <span style="font-weight:500;font-size:.75rem;color:var(--fg-muted)">${n} ครั้ง</span></div>
+      ${n ? `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:.85rem"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`
+          : `<div style="font-size:.8rem;color:var(--fg-muted);padding:6px 0">${empty}</div>`}</div>`;
+  el.innerHTML =
+    box('❤️ Vital Signs', vit.length, `<th ${th}>เวลา</th><th ${th}>BP (mmHg)</th><th ${th}>HR</th><th ${th}>SpO2 %</th><th ${th}>Temp °C</th>`, vRows, 'ยังไม่มีการบันทึก Vital Signs')
+    + box('💧 UF', uf.length, `<th ${th}>เวลา</th><th ${th}>UF removed (mL)</th><th ${th}>Remaining (mL)</th><th ${th}>Rate (mL/hr)</th>`, uRows, 'ยังไม่มีการบันทึก UF');
 }
 
 let _sessionSummary = null;

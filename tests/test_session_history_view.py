@@ -104,3 +104,13 @@ class DialyzerReuseTests(unittest.TestCase):
         self.assertEqual(bp._next_dialyzer_reuse(None, "FX80", (1, "HF80", 2, 20)), 1)
         self.assertEqual(bp._next_dialyzer_reuse(0, "HF80", (1, "HF80", 20, 20)), 1)
         self.assertEqual(bp._next_dialyzer_reuse(None, "HF80", None), 1)
+
+
+class BedDashboardGuardTests(unittest.TestCase):
+    def test_no_savepoint_in_autocommit_dashboard(self):
+        """bed_dashboard ใช้ autocommit — SAVEPOINT จะ error และทำให้ Heparin ไม่ขึ้นทุกเตียง (16 พ.ย. 2569)"""
+        import inspect
+        src = inspect.getsource(bp.bed_dashboard)
+        self.assertIn("autocommit = True", src)
+        self.assertNotIn('execute("SAVEPOINT', src)
+        self.assertIn("anticoag_maintenance", src)

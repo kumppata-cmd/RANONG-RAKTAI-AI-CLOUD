@@ -530,7 +530,7 @@ function renderBeds(beds){
       esaBadge = `<span class="bed-esa given">✓ ${b.esa_drug_given||'ESA'}</span>`;
     } else if(b.status !== 'available' && b.patient){
       const esaDrug = b.patient.esa_drug;
-      if(esaDrug) esaBadge = `<span class="bed-esa not-given">⏳ ${esaDrug}</span>`;
+      if(esaDrug) esaBadge = `<span class="bed-esa not-given">⏳ ${esaDrug}${b.patient.esa_dose?' '+b.patient.esa_dose:''} — ยังไม่บันทึกการให้</span>`;
     }
 
     /* Alert reason line (why the card is red/yellow) */
@@ -556,10 +556,10 @@ function renderBeds(beds){
         filterContent = dialyzerBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มี dialyzer</span>';
         break;
       case 'hep':
-        filterContent = anticoagBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มีข้อมูล</span>';
+        filterContent = anticoagBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่ได้บันทึก Heparin ตอนเริ่มฟอก</span>';
         break;
       case 'epo':
-        filterContent = esaBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มี ESA</span>';
+        filterContent = esaBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มีคำสั่ง ESA ในทะเบียนผู้ป่วย</span>';
         break;
       case 'lab':
         filterContent = labLine(b) || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มีผลแล็บในระบบ</span>';
@@ -570,6 +570,7 @@ function renderBeds(beds){
       default:
         filterContent = `${dialyzerBadge}${anticoagBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${ufWatchLine(b)}${idhLine(b)}${checklist(b)}${labLine(b)}`;
     }
+    if(b.status === 'available') filterContent = '';   /* เตียงว่าง: ไม่ต้องขึ้น "ไม่มีข้อมูล" */
     if(vitalAgeMin(b) !== null && vitalAgeMin(b) >= VITAL_DUE_MIN && (b.status==='active')) card.classList.add('vital-overdue');
 
     card.innerHTML = `
@@ -969,17 +970,19 @@ function fetchAllRounds(){
           if(b.anticoag_drug || b.anticoag_text) aBadge = hepBadge(b);
           let eBadge = '';
           if(b.esa_given) eBadge = `<span class="bed-esa given">✓ ${b.esa_drug_given||'ESA'}</span>`;
-          else if(b.patient && b.patient.esa_drug) eBadge = `<span class="bed-esa not-given">⏳ ${b.patient.esa_drug}</span>`;
+          else if(b.patient && b.patient.esa_drug) eBadge = `<span class="bed-esa not-given">⏳ ${b.patient.esa_drug}${b.patient.esa_dose?' '+b.patient.esa_dose:''}</span>`;
           function vaC(v){
             if(!v)return'';const u=v.toUpperCase();
             if(u.includes('AVF'))return'bed-access-avf';if(u.includes('AVG'))return'bed-access-avg';
             if(u.includes('DLC')||u.includes('CVC'))return'bed-access-dlc';return'bed-access-avf';
           }
           /* Filter-aware extra line */
-          let extraLine = dBadge;
+          const vit = b.current_vitals ? `<div style="font-size:.66rem;margin-top:2px">❤️ ${b.current_vitals.sbp??'-'}/${b.current_vitals.dbp??'-'} HR ${b.current_vitals.hr??'-'}</div>` : '';
+          let extraLine = `${dBadge}${aBadge?'<div>'+aBadge+'</div>':''}${eBadge?'<div>'+eBadge+'</div>':''}${vit}`;
           if(_activeFilter==='dialyzer') extraLine = dBadge||'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
           else if(_activeFilter==='hep') extraLine = aBadge||'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
-          else if(_activeFilter==='epo') extraLine = eBadge||'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
+          else if(_activeFilter==='epo') extraLine = eBadge||'<span style="font-size:.6rem;color:var(--fg-dim)">ไม่มีคำสั่ง ESA</span>';
+          else if(_activeFilter==='lab') extraLine = labLine(b)||'<span style="font-size:.6rem;color:var(--fg-dim)">ไม่มีผลแล็บในระบบ</span>';
           else if(_activeFilter==='va') extraLine = va?'<span class="bed-access '+vaC(va)+'" style="font-size:.7rem;padding:3px 8px;">'+va+'</span>':'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
 
           const seroB = seroBadge(b.serology,'.62rem');
