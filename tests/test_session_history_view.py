@@ -91,3 +91,16 @@ class ExtrasTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class DialyzerReuseTests(unittest.TestCase):
+    def test_counts_on_from_last_session(self):
+        self.assertEqual(bp._next_dialyzer_reuse(None, "HF80", (1, "HF80", 2, 20)), 3)
+
+    def test_nurse_value_wins(self):
+        self.assertEqual(bp._next_dialyzer_reuse(5, "HF80", (1, "HF80", 2, 20)), 5)
+
+    def test_new_type_or_max_starts_at_one(self):
+        self.assertEqual(bp._next_dialyzer_reuse(None, "FX80", (1, "HF80", 2, 20)), 1)
+        self.assertEqual(bp._next_dialyzer_reuse(0, "HF80", (1, "HF80", 20, 20)), 1)
+        self.assertEqual(bp._next_dialyzer_reuse(None, "HF80", None), 1)

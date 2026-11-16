@@ -2772,6 +2772,17 @@ def list_sessions():
 
 
 
+def _next_dialyzer_reuse(entered, d_type, existing):
+    """reuse ครั้งที่ของรอบนี้: ใช้ค่าที่พยาบาลกรอก ถ้าไม่กรอก → นับต่อจากรอบก่อนเมื่อเป็นตัวกรองชนิดเดิม
+    (ครบ max แล้ว หรือเปลี่ยนชนิด → เริ่ม 1). existing = (id, type, reuse_count, max_reuse) | None"""
+    if entered and entered > 0:
+        return entered
+    if existing and existing[1] == d_type:
+        last, mx = (existing[2] or 0), (existing[3] or 20)
+        return 1 if last >= mx else last + 1
+    return 1
+
+
 def _vital_int(v, lo, hi):
     try:
         x = int(float(v))
@@ -2952,27 +2963,23 @@ def create_session():
             ))
             session_id = cur.fetchone()[0]
 
-            # 16 พ.ย. 2569: เก็บข้อมูล Pre-HD ทั้งหมดไว้กับรอบนี้ (เดิม pre BP/HR/อาการ/ตัวกรอง ไม่ถูกบันทึก
-            # → เปิดดูย้อนหลังแล้วว่าง). แต่ละส่วนอยู่ใน SAVEPOINT — ล้มแล้วไม่กระทบการเริ่มรอบ
-            if not is_schedule:
-                _save_pre_hd(cur, session_id, data)
-
             # Save Dialyzer tracking (upsert active dialyzer).
             # Each optional save runs inside a SAVEPOINT: in PostgreSQL a failed
             # statement aborts the whole transaction, which previously made the
             # session INSERT itself roll back whenever these failed.
             d_type = data.get("dialyzer_type")
             if d_type:
-                d_reuse = _safe_int(data.get("dialyzer_reuse")) or 1
                 d_max = _safe_int(data.get("dialyzer_max")) or 20
                 cur.execute("SAVEPOINT sp_dialyzer")
                 try:
                     cur.execute("""
-                        SELECT id FROM hd_dialyzer_tracking
+                        SELECT id, dialyzer_type, reuse_count, max_reuse FROM hd_dialyzer_tracking
                         WHERE patient_id = %s AND status = 'active'
                         ORDER BY id DESC LIMIT 1
                     """, (patient_id,))
                     existing = cur.fetchone()
+                    d_reuse = _next_dialyzer_reuse(_safe_int(data.get("dialyzer_reuse")), d_type, existing)
+                    data["dialyzer_reuse"] = d_reuse
                     if existing:
                         cur.execute("""
                             UPDATE hd_dialyzer_tracking
@@ -3010,6 +3017,11 @@ def create_session():
                 except Exception as e:
                     cur.execute("ROLLBACK TO SAVEPOINT sp_heparin")
                     logger.warning("heparin save error: %s", e)
+
+            # 16 พ.ย. 2569: เก็บข้อมูล Pre-HD ทั้งหมดไว้กับรอบนี้ (เดิม pre BP/HR/อาการ/ตัวกรอง ไม่ถูกบันทึก
+            # → เปิดดูย้อนหลังแล้วว่าง). แต่ละส่วนอยู่ใน SAVEPOINT — ล้มแล้วไม่กระทบการเริ่มรอบ
+            if not is_schedule:
+                _save_pre_hd(cur, session_id, data)
 
             # Update VA + VA Location on patient record if provided
             va = data.get("vascular_access")
@@ -4876,6 +4888,24 @@ def get_patient_last_clinical(hn):
                 result["hep_drug"] = h[0]
                 result["hep_bolus"] = h[1]
                 result["hep_maintenance"] = h[2]
+
+            # VA + ตำแหน่ง: ค่าจากทะเบียนผู้ป่วย (อัปเดตทุกครั้งที่เริ่มฟอก) + วันที่ของรอบล่าสุด
+            cur.execute("SAVEPOINT sp_lc_va")
+            try:
+                cur.execute("SELECT vascular_access, va_location FROM hd_patient_mapping WHERE id = %s", (pid,))
+                v = cur.fetchone()
+                if v:
+                    result["access_type"], result["va_location"] = v[0], v[1]
+                cur.execute("""SELECT session_date FROM hd_sessions WHERE patient_id = %s
+                               AND status IN ('completed', 'in_progress') ORDER BY session_date DESC, id DESC LIMIT 1""",
+                            (pid,))
+                ld = cur.fetchone()
+                if ld and ld[0]:
+                    result["last_date"] = ld[0].isoformat()
+                cur.execute("RELEASE SAVEPOINT sp_lc_va")
+            except Exception as e:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_lc_va")
+                logger.debug("last-clinical va: %s", e)
 
         conn.close()
     except Exception as e:

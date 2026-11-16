@@ -168,7 +168,7 @@
     <div class="grid-2">
       <div class="vital-input">
         <label>🔧 Dialyzer Type</label>
-        <select class="form-control" id="dialyzerType" style="padding:10px;">
+        <select class="form-control" id="dialyzerType" style="padding:10px;" onchange="onDialyzerChange()">
           <option value="">-- เลือก --</option>
           <option value="HF21">HF21</option>
           <option value="HF80">HF80</option>
@@ -185,11 +185,12 @@
       </div>
       <div class="vital-input">
         <label>🔄 Reuse ครั้งที่</label>
-        <div style="display:flex;gap:4px;align-items:center;">
-          <input type="number" class="form-control" id="dialyzerReuse" inputmode="numeric" min="0" max="30" placeholder="0" style="flex:1;text-align:center;">
-          <span style="color:var(--fg-muted);font-size:.8rem;">/ </span>
-          <input type="number" class="form-control" id="dialyzerMax" inputmode="numeric" min="1" max="30" value="20" style="width:50px;text-align:center;">
+        <div style="display:flex;gap:6px;align-items:center;min-width:0;">
+          <input type="number" class="form-control" id="dialyzerReuse" inputmode="numeric" min="1" max="30" placeholder="1" style="flex:1 1 auto;min-width:0;text-align:center;">
+          <span style="color:var(--fg-muted);font-size:.9rem;flex:0 0 auto;">/</span>
+          <input type="number" class="form-control" id="dialyzerMax" inputmode="numeric" min="1" max="30" value="20" style="flex:0 0 76px;width:76px;min-width:76px;text-align:center;padding-left:4px;padding-right:4px;">
         </div>
+        <div id="reuseHint" style="font-size:.7rem;color:var(--fg-muted);margin-top:3px;"></div>
       </div>
     </div>
     <div class="grid-2" style="margin-top:8px;">
@@ -835,27 +836,54 @@ function onPatientSelect(){
     }
   }).catch(()=>{});
 
-  /* Load last session's dialyzer + heparin for this patient */
-  fetch('/hd/api/v1/patients/'+hn+'/last-clinical', {headers})
+  fillLastClinical(hn);
+}
+
+/* ═══ จำค่าจากรอบก่อน: ตัวกรอง (นับ reuse ต่ออัตโนมัติ) · VA · ตำแหน่ง · Heparin/Bolus/Maintenance ═══ */
+let _lastDz = null;
+function _selectVal(id, v){
+  const el = document.getElementById(id); if(!el || v===null || v===undefined || v==='') return false;
+  const m = [...el.options].find(o=>o.value===String(v)) || [...el.options].find(o=>o.value.toLowerCase()===String(v).toLowerCase());
+  if(m){ el.value = m.value; return true; }
+  const o = document.createElement('option'); o.value = v; o.textContent = v; el.appendChild(o); el.value = v; return true;
+}
+function _nextReuse(d){
+  const max = d.dialyzer_max || 20, last = d.dialyzer_reuse || 0;
+  return last >= max ? {n:1, note:`ตัวกรองเดิมใช้ครบ ${max} ครั้งแล้ว → เริ่มตัวใหม่ (ครั้งที่ 1)`} : {n:last+1, note:`นับต่อจากรอบก่อน (ครั้งที่ ${last} → ${last+1})`};
+}
+function onDialyzerChange(){
+  const t = document.getElementById('dialyzerType').value, hint = document.getElementById('reuseHint');
+  if(!t){ hint.textContent = ''; return; }
+  if(_lastDz && _lastDz.dialyzer_type === t){ const r = _nextReuse(_lastDz); document.getElementById('dialyzerReuse').value = r.n; hint.textContent = r.note; }
+  else { document.getElementById('dialyzerReuse').value = 1; hint.textContent = 'ตัวกรองใหม่ — เริ่มนับครั้งที่ 1'; }
+}
+function fillLastClinical(hn){
+  if(!hn) return;
+  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(hn)+'/last-clinical')
     .then(r=>r.ok?r.json():Promise.reject())
     .then(d=>{
       let autoFilled = false;
-      /* Dialyzer */
       if(d.dialyzer_type){
-        document.getElementById('dialyzerType').value = d.dialyzer_type;
-        document.getElementById('dialyzerReuse').value = (d.dialyzer_reuse||0) + 1; /* next use */
+        _lastDz = d;
+        _selectVal('dialyzerType', d.dialyzer_type);
+        const r = _nextReuse(d);
+        document.getElementById('dialyzerReuse').value = r.n;
         document.getElementById('dialyzerMax').value = d.dialyzer_max || 20;
+        document.getElementById('reuseHint').textContent = r.note;
         autoFilled = true;
       }
-      /* Heparin */
+      if(d.access_type && !document.getElementById('vaSelect').value){ _selectVal('vaSelect', d.access_type); autoFilled = true; }
+      if(d.va_location && !document.getElementById('vaLocation').value){ _selectVal('vaLocation', d.va_location); autoFilled = true; }
       if(d.hep_drug){
-        document.getElementById('hepProtocol').value = d.hep_drug;
-        if(d.hep_bolus) document.getElementById('hepBolus').value = d.hep_bolus;
-        if(d.hep_maintenance) document.getElementById('hepMaintenance').value = d.hep_maintenance;
+        _selectVal('hepProtocol', d.hep_drug);
+        if(d.hep_bolus != null) document.getElementById('hepBolus').value = d.hep_bolus;
+        if(d.hep_maintenance != null) document.getElementById('hepMaintenance').value = d.hep_maintenance;
         autoFilled = true;
       }
       if(autoFilled){
-        document.getElementById('clinicalAutoFill').style.display = 'block';
+        const el = document.getElementById('clinicalAutoFill');
+        el.innerHTML = 'ℹ️ ใช้ค่าจากรอบก่อน' + (d.last_date ? ' ('+hdDate(d.last_date)+')' : '') + ' — ตัวกรอง/VA/Heparin ตรวจสอบแล้วกดเริ่มฟอกได้เลย แก้ได้ถ้าเปลี่ยน';
+        el.style.display = 'block';
       }
     }).catch(()=>{ /* No previous data — nurse fills manually */ });
 }
@@ -1203,6 +1231,8 @@ function loadExistingSession(sid){
         document.getElementById('sessionStatus').textContent = 'จองไว้ — รอเริ่ม';
         document.getElementById('sessionStatus').className = 'badge badge-info';
         document.getElementById('cancelBtn').style.display = 'inline-flex';
+        if(d.vascular_access) _selectVal('vaSelect', String(d.vascular_access).toUpperCase().includes('AVF') ? 'AVF' : d.vascular_access);
+        fillLastClinical(d.patient_hn);
       } else if(d.status==='completed' || d.status==='cancelled'){
         showSessionHistory(d, sid, headers);
       }

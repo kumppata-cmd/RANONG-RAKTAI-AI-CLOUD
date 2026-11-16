@@ -348,6 +348,13 @@ function sparkline(b){
   const last = t[t.length-1], col = last < 90 ? 'var(--danger)' : (t[0]-last >= 20 ? 'var(--warning)' : 'var(--fg-muted)');
   return `<svg class="bed-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" aria-label="SBP trend"><polyline fill="none" stroke="${col}" stroke-width="1.5" points="${pts}"/><circle cx="${w}" cy="${h - ((last-mn)/(mx-mn||1))*(h-2) - 1}" r="2" fill="${col}"/></svg>`;
 }
+/* Heparin: ชนิด + Bolus + Maintenance (16 พ.ย. 2569) */
+function hepBadge(b){
+  const parts = [];
+  if(b.anticoag_bolus != null && b.anticoag_bolus !== '') parts.push('Bolus '+b.anticoag_bolus+' IU');
+  if(b.anticoag_maintenance != null && b.anticoag_maintenance !== '') parts.push('Maint '+b.anticoag_maintenance+' IU/hr');
+  return `<span class="bed-anticoag" style="white-space:normal;line-height:1.35">💉 ${b.anticoag_drug}${parts.length?'<br>'+parts.join(' · '):''}</span>`;
+}
 function ufWatchLine(b){
   const u = b.uf_watch; if(!u || !u.flag || u.flag==='ok' || u.flag==='no_goal') return '';
   const col = u.flag==='high_rate' ? 'var(--danger)' : 'var(--warning)';
@@ -514,10 +521,7 @@ function renderBeds(beds){
 
     /* Anticoag badge */
     let anticoagBadge = '';
-    if(b.anticoag_drug){
-      const bolus = b.anticoag_bolus ? b.anticoag_bolus+'IU' : '';
-      anticoagBadge = `<span class="bed-anticoag">${b.anticoag_drug} ${bolus}</span>`;
-    }
+    if(b.anticoag_drug) anticoagBadge = hepBadge(b);
 
     /* ESA badge */
     let esaBadge = '';
@@ -961,7 +965,7 @@ function fetchAllRounds(){
             dBadge = `<span class="${dCls}">${b.dialyzer_type} ${reuse}/${maxR}</span>`;
           }
           let aBadge = '';
-          if(b.anticoag_drug) aBadge = `<span class="bed-anticoag">${b.anticoag_drug} ${b.anticoag_bolus||''}IU</span>`;
+          if(b.anticoag_drug) aBadge = hepBadge(b);
           let eBadge = '';
           if(b.esa_given) eBadge = `<span class="bed-esa given">✓ ${b.esa_drug_given||'ESA'}</span>`;
           else if(b.patient && b.patient.esa_drug) eBadge = `<span class="bed-esa not-given">⏳ ${b.patient.esa_drug}</span>`;
