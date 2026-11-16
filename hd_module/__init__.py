@@ -133,6 +133,10 @@ def _run_hd_migrations():
                 # hd_uf_records is defined twice in migrations (v1.0.0 shape won):
                 # make it match what the UF endpoints insert
                 "ALTER TABLE hd_uf_records ADD COLUMN IF NOT EXISTS slot_time VARCHAR(5)",
+                # 16 พ.ย. 2569: ดูรอบฟอกย้อนหลังให้ครบ — อาการก่อน/หลังฟอก + reuse ของรอบนั้น
+                "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS pre_symptoms TEXT",
+                "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS post_symptoms TEXT",
+                "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS dialyzer_reuse INTEGER",
                 "ALTER TABLE hd_uf_records ADD COLUMN IF NOT EXISTS notes VARCHAR(200)",
                 "ALTER TABLE hd_uf_records ALTER COLUMN recorded_at SET DEFAULT NOW()",
                 "ALTER TABLE hd_uf_records ALTER COLUMN recorded_at DROP NOT NULL",

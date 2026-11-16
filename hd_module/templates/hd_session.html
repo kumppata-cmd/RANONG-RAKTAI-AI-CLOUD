@@ -61,6 +61,9 @@
   </div>
 </div>
 
+<!-- ดูรอบฟอกย้อนหลัง (16 พ.ย. 2569) -->
+<div id="historyBanner" class="card" style="display:none;margin-bottom:12px;border-left:4px solid var(--success);"></div>
+
 <!-- Tabs -->
 <div class="tabs" data-tab-group="session">
   <button class="tab active" data-tab="pre" onclick="switchTab('session','pre')">📋 Pre-HD</button>
@@ -969,6 +972,9 @@ function startSession(){
     pre_sbp: parseInt(document.getElementById('preSbp').value),
     pre_dbp: parseInt(document.getElementById('preDbp').value),
     pre_hr: parseInt(document.getElementById('preHr').value),
+    pre_temp: parseFloat(document.getElementById('preTemp').value) || null,
+    pre_spo2: parseInt(document.getElementById('preSpo2').value) || null,
+    pre_symptoms: Array.from(document.querySelectorAll('input[name="pre_symptom"]:checked')).map(el=>el.value),
     pre_weight: sessionData.pre_weight,
     dry_weight: sessionData.dry_weight,
     uf_goal: calcUfGoal,
@@ -1192,56 +1198,138 @@ function loadExistingSession(sid){
         const sl = document.getElementById('hdSheetLink');
         sl.href = '/hd/sheet/'+sid;
         sl.style.display = 'block';
-        /* Load existing vitals from DB */
-        fetch('/hd/api/v1/sessions/'+sid+'/vitals', {headers})
-          .then(r=>r.ok?r.json():Promise.reject())
-          .then(vd=>{
-            (vd.vitals||[]).forEach(v=>{
-              timeline.push({
-                time: hdTime(v.recorded_at),
-                type:'vital', sbp:v.sbp, dbp:v.dbp, hr:v.hr||v.heart_rate
-              });
-            });
-            if(timeline.length) renderTimeline();
-          }).catch(()=>{});
-        /* Load existing UF from DB */
-        fetch('/hd/api/v1/sessions/'+sid+'/uf', {headers})
-          .then(r=>r.ok?r.json():Promise.reject())
-          .then(ud=>{
-            if(ud.uf_goal) document.getElementById('ufGoal').textContent = ud.uf_goal;
-            if(ud.watch){ _ufAdj = {target: ud.watch.reduced_ml ? ud.watch.target : null, extend: ud.watch.extend_min || 0}; showUfWatch(ud.watch); }
-            let lastUf = 0, lastRate = 0, lastRemaining = 0;
-            _ufRecords = (ud.records||[]).map(u=>({t:u.recorded_at, removed:u.uf_removed})).filter(x=>x.t && x.removed!=null);
-            drawUfChart();
-            (ud.records||[]).forEach(u=>{
-              if(u.uf_removed > lastUf) lastUf = u.uf_removed;
-              if(u.uf_removed > _lastUfRemoved) _lastUfRemoved = u.uf_removed;
-              if(u.uf_rate) lastRate = u.uf_rate;
-              if(u.uf_remaining) lastRemaining = u.uf_remaining;
-              timeline.push({
-                time: u.slot_time || hdTime(u.recorded_at),
-                type:'uf', removed:u.uf_removed, rate:u.uf_rate, remaining:u.uf_remaining
-              });
-            });
-            if(lastUf > 0){
-              document.getElementById('ufRemoved').textContent = lastUf;
-              document.getElementById('ufRate').textContent = lastRate || '-';
-              document.getElementById('ufRemaining').textContent = lastRemaining || '-';
-              const goal = ud.uf_goal || 2000;
-              const pct = Math.min(100, Math.round(lastUf/goal*100));
-              const bar = document.getElementById('ufProgressBar');
-              bar.style.width = pct+'%'; bar.textContent = pct+'%';
-              bar.style.background = pct > 90 ? 'var(--warning)' : 'var(--success)';
-            }
-            if(timeline.length) renderTimeline();
-          }).catch(()=>{});
+        loadSessionRecords(sid, headers, true);
       } else if(d.status==='scheduled'){
         document.getElementById('sessionStatus').textContent = 'จองไว้ — รอเริ่ม';
         document.getElementById('sessionStatus').className = 'badge badge-info';
         document.getElementById('cancelBtn').style.display = 'inline-flex';
+      } else if(d.status==='completed' || d.status==='cancelled'){
+        showSessionHistory(d, sid, headers);
       }
     })
     .catch(e=>console.warn('loadExistingSession:', e));
+}
+
+
+/* ═══ โหลดบันทึกของรอบ (ใช้ทั้งรอบที่กำลังฟอกและรอบย้อนหลัง) ═══ */
+function _tsOf(iso){ const t = iso ? (hdParseUtc(iso) || new Date(iso)) : null; return t && !isNaN(t) ? t.getTime() : 0; }
+function loadSessionRecords(sid, headers, live){
+  fetch('/hd/api/v1/sessions/'+sid+'/vitals', {headers})
+    .then(r=>r.ok?r.json():Promise.reject())
+    .then(vd=>{
+      (vd.vitals||[]).forEach(v=>{
+        timeline.push({ time: hdTime(v.recorded_at), ts:_tsOf(v.recorded_at), phase:v.phase,
+                        type:'vital', sbp:v.sbp, dbp:v.dbp, hr:v.hr||v.heart_rate, spo2:v.spo2, temp:v.temp });
+      });
+      renderTimeline();
+    }).catch(()=>{});
+  fetch('/hd/api/v1/sessions/'+sid+'/uf', {headers})
+    .then(r=>r.ok?r.json():Promise.reject())
+    .then(ud=>{
+      if(ud.uf_goal) document.getElementById('ufGoal').textContent = ud.uf_goal;
+      if(live && ud.watch){ _ufAdj = {target: ud.watch.reduced_ml ? ud.watch.target : null, extend: ud.watch.extend_min || 0}; showUfWatch(ud.watch); }
+      let lastUf = 0, lastRate = 0, lastRemaining = 0;
+      _ufRecords = (ud.records||[]).map(u=>({t:u.recorded_at, removed:u.uf_removed})).filter(x=>x.t && x.removed!=null);
+      drawUfChart();
+      (ud.records||[]).forEach(u=>{
+        if(u.uf_removed > lastUf) lastUf = u.uf_removed;
+        if(u.uf_removed > _lastUfRemoved) _lastUfRemoved = u.uf_removed;
+        if(u.uf_rate) lastRate = u.uf_rate;
+        if(u.uf_remaining) lastRemaining = u.uf_remaining;
+        if(!(u.uf_removed > 0)) return;   /* แถว 0 จาก Sheet รุ่นเก่า (บันทึกแค่ UFR) */
+        timeline.push({ time: u.slot_time || hdTime(u.recorded_at), ts:_tsOf(u.recorded_at),
+                        type:'uf', removed:u.uf_removed, rate:u.uf_rate, remaining:u.uf_remaining });
+      });
+      if(lastUf > 0){
+        document.getElementById('ufRemoved').textContent = lastUf;
+        document.getElementById('ufRate').textContent = lastRate || '-';
+        document.getElementById('ufRemaining').textContent = lastRemaining || '-';
+        const goal = ud.uf_goal || 2000;
+        const pct = Math.min(100, Math.round(lastUf/goal*100));
+        const bar = document.getElementById('ufProgressBar');
+        bar.style.width = pct+'%'; bar.textContent = pct+'%';
+        bar.style.background = pct > 90 ? 'var(--warning)' : 'var(--success)';
+      }
+      renderTimeline();
+    }).catch(()=>{});
+}
+
+/* ═══ ดูรอบฟอกย้อนหลัง: เติมข้อมูลทุกแท็บ + อ่านอย่างเดียว ═══ */
+function _setVal(id, v){ const el = document.getElementById(id); if(el && v !== null && v !== undefined && v !== '') el.value = v; }
+function _setSelect(id, v){
+  const el = document.getElementById(id); if(!el || !v) return;
+  if(![...el.options].some(o=>o.value===String(v))){ const o = document.createElement('option'); o.value = v; o.textContent = v; el.appendChild(o); }
+  el.value = v;
+}
+function _checkSymptoms(name, txt){
+  if(!txt) return;
+  const vals = String(txt).split(/\s*,\s*/);
+  document.querySelectorAll(`input[name="${name}"]`).forEach(el=>{ if(vals.includes(el.value)){ el.checked = true; try{ toggleCheck(el); }catch(e){} } });
+}
+function showSessionHistory(d, sid, headers){
+  const done = d.status === 'completed';
+  const st = document.getElementById('sessionStatus');
+  st.textContent = done ? '✅ ฟอกเสร็จแล้ว' : '❌ ยกเลิกแล้ว';
+  st.className = 'badge ' + (done ? 'badge-success' : 'badge-danger');
+  const t0 = d.started_at ? (hdParseUtc(d.started_at) || new Date(d.started_at)) : null;
+  const t1 = d.ended_at ? (hdParseUtc(d.ended_at) || new Date(d.ended_at)) : null;
+  const tt = x => x ? x.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}) : '-';
+  const day = d.session_date ? new Date(d.session_date+'T00:00:00').toLocaleDateString('th-TH',{weekday:'short', day:'numeric', month:'short', year:'numeric'}) : '';
+  const mins = (t0 && t1) ? Math.round((t1-t0)/60000) : null;
+  const SH = {morning:'รอบเช้า', afternoon:'รอบบ่าย', evening:'รอบค่ำ'};
+  const preW = d.pre_weight, postW = d.post_weight;
+  const b = document.getElementById('historyBanner');
+  b.innerHTML = `<div style="font-weight:800;margin-bottom:4px">📜 ดูย้อนหลัง — ${done?'รอบนี้ฟอกเสร็จแล้ว':'รอบนี้ถูกยกเลิก'}</div>
+    <div style="font-size:.85rem;line-height:1.7">${day} · ${SH[d.shift]||''} · เตียง ${d.bed_number||'-'}<br>
+    ⏱ ${tt(t0)} – ${tt(t1)}${mins!=null?' ('+Math.floor(mins/60)+' ชม. '+(mins%60)+' นาที)':''}
+    ${preW?'<br>⚖️ '+preW+' → '+(postW||'-')+' kg'+(d.dry_weight?' (DW '+d.dry_weight+')':''):''}
+    ${d.actual_uf?' · 💧 UF '+Math.round(d.actual_uf)+' mL':''}${d.nurse_name?'<br>👩‍⚕️ '+d.nurse_name:''}</div>
+    <div style="font-size:.72rem;color:var(--fg-muted);margin-top:4px">อ่านอย่างเดียว — ดูได้ครบ 3 แท็บ: Pre-HD · Intra-HD (บันทึกระหว่างฟอก/UF/การแจ้งเตือน) · Post-HD</div>`;
+  b.style.display = 'block';
+
+  /* Pre-HD */
+  const pv = d.pre_vitals || {};
+  _setVal('preSbp', pv.sbp); _setVal('preDbp', pv.dbp); _setVal('preHr', pv.hr); _setVal('preTemp', pv.temp); _setVal('preSpo2', pv.spo2);
+  _checkSymptoms('pre_symptom', d.pre_symptoms || pv.symptoms);
+  _setSelect('dialyzerType', d.dialyzer_type); _setVal('dialyzerReuse', d.dialyzer_reuse); _setVal('dialyzerMax', d.dialyzer_max);
+  _setSelect('vaSelect', d.access_type || d.vascular_access); _setSelect('vaLocation', d.va_location);
+  if(d.heparin){ _setSelect('hepProtocol', d.heparin.protocol); _setVal('hepBolus', d.heparin.bolus); _setVal('hepMaintenance', d.heparin.maintenance); }
+  /* Post-HD */
+  const qv = d.post_vitals || {};
+  _setVal('postSbp', qv.sbp); _setVal('postDbp', qv.dbp); _setVal('postHr', qv.hr);
+  _setVal('postWeight', d.post_weight); _setVal('actualUf', d.actual_uf != null ? Math.round(d.actual_uf) : null);
+  _checkSymptoms('post_symptom', d.post_symptoms || qv.symptoms);
+  _setVal('postNotes', d.notes);
+  _setVal('hbValue', d.hb_value); _setVal('hctValue', d.hct_value);
+  const ps = document.getElementById('patientSelect');
+  if(ps && d.patient_hn && ps.value !== d.patient_hn){
+    const o = document.createElement('option'); o.value = d.patient_hn; o.textContent = d.patient_hn+' — '+(d.patient_name||''); ps.appendChild(o); ps.value = d.patient_hn;
+  }
+  if(d.esa_given === true){ try{ setEsaGiven(true); }catch(e){} _setSelect('esaDrug', d.esa_drug_given); _setVal('esaDose', d.esa_dose_given);
+    if(d.esa_route){ const r = document.querySelector(`input[name="esaRoute"][value="${d.esa_route}"]`); if(r) r.checked = true; } }
+  else if(d.esa_given === false){ try{ setEsaGiven(false); }catch(e){} _setSelect('esaSkipReason', d.esa_skip_reason); }
+
+  /* Intra-HD: timer → สรุปเวลา, บันทึก, UF, Sheet */
+  if(t0){
+    document.getElementById('sessionTimer').style.display = 'block';
+    document.getElementById('timerDisplay').textContent = mins!=null ? Math.floor(mins/60)+':'+String(mins%60).padStart(2,'0')+' ชม.' : '-';
+    document.getElementById('timerBarFill').style.width = '100%';
+    document.getElementById('timerStartTime').textContent = tt(t0);
+    document.getElementById('timerEndTime').textContent = tt(t1) + ' (จบจริง)';
+  }
+  const sl = document.getElementById('hdSheetLink'); sl.href = '/hd/sheet/'+sid; sl.style.display = 'block';
+  sl.textContent = '📋 เปิด HD Monitoring Sheet ของรอบนี้';
+  loadSessionRecords(sid, headers, false);
+
+  /* อ่านอย่างเดียว: ปิดช่องกรอก + ซ่อนปุ่มที่บันทึกข้อมูล */
+  document.querySelectorAll('[data-tab-content-group="session"] input, [data-tab-content-group="session"] select, [data-tab-content-group="session"] textarea')
+    .forEach(el=>{ el.disabled = true; });
+  ['startSession','openBooking','endSessionGate','openUfModal','openModal(\'vitalModal\')'].forEach(fn=>{
+    document.querySelectorAll(`[data-tab-content-group="session"] button[onclick^="${fn}"]`).forEach(btn=>{ btn.style.display = 'none'; });
+  });
+  document.querySelectorAll('button[onclick^="setEsaGiven"]').forEach(btn=>{ btn.disabled = true; });
+  document.getElementById('cancelBtn').style.display = 'none';
+  switchTab('session', 'intra');
 }
 
 /* Check URL for existing session — from URL param, URL path, or Jinja */
@@ -1613,9 +1701,11 @@ function saveUfRecord(){
 function renderTimeline(){
   const el = document.getElementById('intraTimeline');
   if(!timeline.length){ el.innerHTML='<p style="color:var(--fg-muted);text-align:center;padding:20px;">ยังไม่มีข้อมูล</p>'; return; }
-  el.innerHTML = timeline.slice().reverse().map(e=>{
+  const ord = timeline.map((e,i)=>({e,i})).sort((a,b)=>((a.e.ts||9e15)-(b.e.ts||9e15)) || (a.i-b.i)).map(x=>x.e);
+  const PH = {pre:'ก่อนฟอก', post:'หลังฟอก'};
+  el.innerHTML = ord.slice().reverse().map(e=>{
     if(e.type==='vital')
-      return `<div class="timeline-entry"><span class="timeline-time">${e.time}</span><span class="timeline-content">❤️ BP ${e.sbp}/${e.dbp} mmHg, HR ${e.hr} bpm</span><span class="timeline-badge badge-info">Vital</span></div>`;
+      return `<div class="timeline-entry"><span class="timeline-time">${e.time}</span><span class="timeline-content">❤️ ${PH[e.phase]?'<b>'+PH[e.phase]+'</b> ':''}BP ${e.sbp??'-'}/${e.dbp??'-'} mmHg, HR ${e.hr??'-'} bpm${e.spo2?', SpO2 '+e.spo2+'%':''}${e.temp?', T '+e.temp+'°C':''}</span><span class="timeline-badge badge-info">Vital</span></div>`;
     if(e.type==='uf')
       return `<div class="timeline-entry"><span class="timeline-time">${e.time}</span><span class="timeline-content">💧 UF removed ${e.removed} mL, remaining ${e.remaining} mL, rate ${e.rate} mL/hr</span><span class="timeline-badge badge-warning">UF</span></div>`;
     return '';

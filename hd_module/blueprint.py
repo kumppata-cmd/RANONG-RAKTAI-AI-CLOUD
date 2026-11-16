@@ -2771,6 +2771,68 @@ def list_sessions():
     })
 
 
+
+def _vital_int(v, lo, hi):
+    try:
+        x = int(float(v))
+    except (TypeError, ValueError):
+        return None
+    return x if lo <= x <= hi else None
+
+
+def _vital_float(v, lo, hi):
+    try:
+        x = round(float(v), 1)
+    except (TypeError, ValueError):
+        return None
+    return x if lo <= x <= hi else None
+
+
+def _save_pre_hd(cur, session_id, data):
+    """Pre-HD vitals → hd_vital_signs(phase='pre'); symptoms/dialyzer/heparin/access → hd_sessions."""
+    sbp, dbp = _vital_int(data.get("pre_sbp"), 30, 300), _vital_int(data.get("pre_dbp"), 20, 200)
+    hr = _vital_int(data.get("pre_hr"), 20, 250)
+    temp, spo2 = _vital_float(data.get("pre_temp"), 30, 45), _vital_int(data.get("pre_spo2"), 50, 100)
+    sym = data.get("pre_symptoms")
+    sym_txt = ", ".join(str(x)[:40] for x in sym)[:500] if isinstance(sym, list) else (str(sym)[:500] if sym else None)
+    if any(v is not None for v in (sbp, dbp, hr, temp, spo2)):
+        cur.execute("SAVEPOINT sp_pre_vital")
+        try:
+            cur.execute("""
+                INSERT INTO hd_vital_signs (session_id, phase, sbp, dbp, heart_rate, temperature, spo2,
+                                            symptoms, nurse_id, recorded_at)
+                VALUES (%s, 'pre', %s, %s, %s, %s, %s, %s, %s, NOW())
+            """, (session_id, sbp, dbp, hr, temp, spo2, sym_txt, _safe_int(g.get("hd_user_id"))))
+            cur.execute("RELEASE SAVEPOINT sp_pre_vital")
+        except Exception as e:
+            cur.execute("ROLLBACK TO SAVEPOINT sp_pre_vital")
+            logger.warning("pre vital save error: %s", e)
+    hep = None
+    if data.get("hep_drug"):
+        hep = str(data.get("hep_drug"))[:20]
+        if data.get("hep_bolus"):
+            hep += f" {_safe_int(data.get('hep_bolus'))}"
+        if data.get("hep_maintenance"):
+            hep += f"+{_safe_int(data.get('hep_maintenance'))}/h"
+    cur.execute("SAVEPOINT sp_pre_sess")
+    try:
+        cur.execute("""
+            UPDATE hd_sessions SET pre_symptoms = COALESCE(%s, pre_symptoms),
+                   dialyzer_type = COALESCE(%s, dialyzer_type),
+                   dialyzer_reuse = COALESCE(%s, dialyzer_reuse),
+                   access_type = COALESCE(%s, access_type),
+                   heparin_dose = COALESCE(%s, heparin_dose)
+            WHERE id = %s
+        """, (sym_txt, (str(data["dialyzer_type"])[:50] if data.get("dialyzer_type") else None),
+              _safe_int(data.get("dialyzer_reuse")) or None,
+              (str(data["vascular_access"])[:30] if data.get("vascular_access") else None),
+              (hep[:50] if hep else None), session_id))
+        cur.execute("RELEASE SAVEPOINT sp_pre_sess")
+    except Exception as e:
+        cur.execute("ROLLBACK TO SAVEPOINT sp_pre_sess")
+        logger.warning("pre session fields save error: %s", e)
+
+
 @hd_bp.route("/sessions", methods=["POST"])
 @require_role("physician", "nurse")
 def create_session():
@@ -2890,6 +2952,11 @@ def create_session():
             ))
             session_id = cur.fetchone()[0]
 
+            # 16 พ.ย. 2569: เก็บข้อมูล Pre-HD ทั้งหมดไว้กับรอบนี้ (เดิม pre BP/HR/อาการ/ตัวกรอง ไม่ถูกบันทึก
+            # → เปิดดูย้อนหลังแล้วว่าง). แต่ละส่วนอยู่ใน SAVEPOINT — ล้มแล้วไม่กระทบการเริ่มรอบ
+            if not is_schedule:
+                _save_pre_hd(cur, session_id, data)
+
             # Save Dialyzer tracking (upsert active dialyzer).
             # Each optional save runs inside a SAVEPOINT: in PostgreSQL a failed
             # statement aborts the whole transaction, which previously made the
@@ -2989,6 +3056,79 @@ def create_session():
         return jsonify({"error": str(e)}), 500
 
 
+def _session_record_extras(cur, session_id, patient_id):
+    """ข้อมูลประกอบการดูรอบฟอกย้อนหลัง (16 พ.ย. 2569) — แต่ละส่วนล้มได้โดยไม่กระทบส่วนอื่น"""
+    out = {}
+
+    def q(name, sql, args, fn):
+        cur.execute(f"SAVEPOINT sp_x_{name}")
+        try:
+            cur.execute(sql, args)
+            fn(cur)
+            cur.execute(f"RELEASE SAVEPOINT sp_x_{name}")
+        except Exception as e:
+            cur.execute(f"ROLLBACK TO SAVEPOINT sp_x_{name}")
+            logger.debug("session extras %s: %s", name, e)
+
+    def _sess(c):
+        r = c.fetchone()
+        if r:
+            out.update({"shift": r[0], "dialyzer_type": r[1], "dialyzer_reuse": r[2], "access_type": r[3],
+                        "heparin_dose": r[4], "pre_symptoms": r[5], "post_symptoms": r[6],
+                        "esa_given": r[7], "esa_drug_given": r[8], "esa_dose_given": r[9], "esa_route": r[10],
+                        "esa_skip_reason": r[11], "hb_value": float(r[12]) if r[12] is not None else None,
+                        "hct_value": float(r[13]) if r[13] is not None else None,
+                        "kt_v": float(r[14]) if r[14] is not None else None,
+                        "urr": float(r[15]) if r[15] is not None else None})
+    q("sess", """SELECT shift, dialyzer_type, dialyzer_reuse, access_type, heparin_dose, pre_symptoms,
+                        post_symptoms, esa_given, esa_drug_given, esa_dose_given, esa_route, esa_skip_reason,
+                        hb_value, hct_value, kt_v, urr
+                 FROM hd_sessions WHERE id = %s""", (session_id,), _sess)
+
+    def _ph(c):
+        for r in c.fetchall():
+            out.setdefault(f"{r[0]}_vitals", {
+                "sbp": r[1], "dbp": r[2], "hr": r[3], "temp": float(r[4]) if r[4] is not None else None,
+                "spo2": r[5], "symptoms": r[6], "recorded_at": (r[7].isoformat() + "Z") if r[7] else None})
+    # pre = แถวแรกของ phase pre, post = แถวล่าสุดของ phase post
+    q("pre", """SELECT phase, sbp, dbp, heart_rate, temperature, spo2, symptoms, recorded_at FROM hd_vital_signs
+                WHERE session_id = %s AND phase = 'pre' ORDER BY recorded_at ASC LIMIT 1""", (session_id,), _ph)
+    q("post", """SELECT phase, sbp, dbp, heart_rate, temperature, spo2, symptoms, recorded_at FROM hd_vital_signs
+                 WHERE session_id = %s AND phase = 'post' ORDER BY recorded_at DESC LIMIT 1""", (session_id,), _ph)
+
+    def _hep(c):
+        r = c.fetchone()
+        if r:
+            out["heparin"] = {"protocol": r[0], "bolus": r[1], "maintenance": r[2]}
+    q("hep", """SELECT protocol, loading_dose, maintenance_dose FROM hd_anticoagulation
+                WHERE session_id = %s ORDER BY id DESC LIMIT 1""", (session_id,), _hep)
+
+    def _dz(c):
+        r = c.fetchone()
+        if r:
+            if not out.get("dialyzer_type"):
+                out["dialyzer_type"] = r[0]
+            if not out.get("dialyzer_reuse"):
+                out["dialyzer_reuse"] = r[1]
+            out["dialyzer_max"] = r[2]
+    q("dz", """SELECT dialyzer_type, reuse_count, max_reuse FROM hd_dialyzer_tracking
+               WHERE last_used_session = %s ORDER BY id DESC LIMIT 1""", (session_id,), _dz)
+
+    def _va(c):
+        r = c.fetchone()
+        if r:
+            out["va_location"] = r[0]
+    q("va", "SELECT va_location FROM hd_patient_mapping WHERE id = %s", (patient_id,), _va)
+
+    def _nurse(c):
+        r = c.fetchone()
+        if r:
+            out["nurse_name"] = r[0]
+    q("nurse", """SELECT COALESCE(u.full_name, u.username) FROM hd_sessions s JOIN hd_users u ON u.id = s.nurse_id
+                  WHERE s.id = %s""", (session_id,), _nurse)
+    return out
+
+
 @hd_bp.route("/sessions/<int:session_id>", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def get_session(session_id):
@@ -3012,10 +3152,12 @@ def get_session(session_id):
                 WHERE s.id = %s
             """, (session_id,))
             row = cur.fetchone()
+            extra = _session_record_extras(cur, session_id, row[17]) if row else {}
         conn.close()
         if not row:
             return jsonify({"session_id": session_id, "status": "not_found"}), 404
         return jsonify({
+            **extra,
             "session_id": row[0], "bed_number": row[1],
             "session_date": row[2].isoformat() if row[2] else None,
             "status": row[3], "pre_weight": float(row[4]) if row[4] else None,
@@ -3107,6 +3249,16 @@ def update_session(session_id):
                         f"UPDATE hd_sessions SET {', '.join(updates)} WHERE id = %s",
                         params
                     )
+                # อาการหลังฟอก — แยก SAVEPOINT ไม่ให้กระทบการปิดรอบ
+                if isinstance(data.get("post_symptoms"), list):
+                    cur.execute("SAVEPOINT sp_post_sym")
+                    try:
+                        cur.execute("UPDATE hd_sessions SET post_symptoms = %s WHERE id = %s",
+                                    (", ".join(str(x)[:40] for x in data["post_symptoms"])[:500] or None, session_id))
+                        cur.execute("RELEASE SAVEPOINT sp_post_sym")
+                    except Exception as e:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_post_sym")
+                        logger.warning("post symptoms save error: %s", e)
             conn.commit()
             conn.close()
         except Exception as e:
