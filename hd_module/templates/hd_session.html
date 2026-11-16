@@ -1227,6 +1227,8 @@ function loadExistingSession(sid){
         sl.href = '/hd/sheet/'+sid;
         sl.style.display = 'block';
         loadSessionRecords(sid, headers, true);
+        fillPreHd(d);
+        lockPreHd('✅ ข้อมูลก่อนฟอกบันทึกแล้วตอนเริ่มฟอก (ดูอย่างเดียว)');
       } else if(d.status==='scheduled'){
         document.getElementById('sessionStatus').textContent = 'จองไว้ — รอเริ่ม';
         document.getElementById('sessionStatus').className = 'badge badge-info';
@@ -1296,6 +1298,29 @@ function _checkSymptoms(name, txt){
   const vals = String(txt).split(/\s*,\s*/);
   document.querySelectorAll(`input[name="${name}"]`).forEach(el=>{ if(vals.includes(el.value)){ el.checked = true; try{ toggleCheck(el); }catch(e){} } });
 }
+/* ข้อมูล Pre-HD ที่บันทึกตอนเริ่มฟอก → เติมกลับในแท็บ Pre-HD (ทั้งรอบที่กำลังฟอกและรอบย้อนหลัง) */
+function fillPreHd(d){
+  const pv = d.pre_vitals || {};
+  _setVal('preSbp', pv.sbp); _setVal('preDbp', pv.dbp); _setVal('preHr', pv.hr); _setVal('preTemp', pv.temp); _setVal('preSpo2', pv.spo2);
+  _checkSymptoms('pre_symptom', d.pre_symptoms || pv.symptoms);
+  _setSelect('dialyzerType', d.dialyzer_type); _setVal('dialyzerReuse', d.dialyzer_reuse); _setVal('dialyzerMax', d.dialyzer_max);
+  _setSelect('vaSelect', d.access_type || d.vascular_access); _setSelect('vaLocation', d.va_location);
+  if(d.heparin){ _setSelect('hepProtocol', d.heparin.protocol); _setVal('hepBolus', d.heparin.bolus); _setVal('hepMaintenance', d.heparin.maintenance); }
+  if(d.pre_weight) _setVal('preWeight', d.pre_weight);
+  if(d.dry_weight) _setVal('dryWeight', d.dry_weight);
+  try{ calcIDWG(); }catch(e){}
+}
+/* รอบที่เริ่มแล้ว: แท็บ Pre-HD เป็นข้อมูลที่บันทึกไปแล้ว → อ่านอย่างเดียว + ซ่อนปุ่มเริ่มฟอก/จอง (กันเริ่มซ้ำ) */
+function lockPreHd(note){
+  const pre = document.querySelector('[data-tab-content="pre"]'); if(!pre) return;
+  pre.querySelectorAll('input, select, textarea').forEach(el=>{ el.disabled = true; });
+  pre.querySelectorAll('button[onclick^="startSession"], button[onclick^="openBooking"]').forEach(b=>{ b.style.display = 'none'; });
+  if(note && !document.getElementById('preLockNote')){
+    const n = document.createElement('div'); n.id = 'preLockNote';
+    n.style.cssText = 'margin-bottom:12px;padding:8px 12px;border-radius:8px;background:rgba(39,174,96,.08);font-size:.8rem;font-weight:600;color:var(--success)';
+    n.textContent = note; pre.prepend(n);
+  }
+}
 function showSessionHistory(d, sid, headers){
   const done = d.status === 'completed';
   const st = document.getElementById('sessionStatus');
@@ -1317,13 +1342,7 @@ function showSessionHistory(d, sid, headers){
     <div style="font-size:.72rem;color:var(--fg-muted);margin-top:4px">อ่านอย่างเดียว — ดูได้ครบ 3 แท็บ: Pre-HD · Intra-HD (บันทึกระหว่างฟอก/UF/การแจ้งเตือน) · Post-HD</div>`;
   b.style.display = 'block';
 
-  /* Pre-HD */
-  const pv = d.pre_vitals || {};
-  _setVal('preSbp', pv.sbp); _setVal('preDbp', pv.dbp); _setVal('preHr', pv.hr); _setVal('preTemp', pv.temp); _setVal('preSpo2', pv.spo2);
-  _checkSymptoms('pre_symptom', d.pre_symptoms || pv.symptoms);
-  _setSelect('dialyzerType', d.dialyzer_type); _setVal('dialyzerReuse', d.dialyzer_reuse); _setVal('dialyzerMax', d.dialyzer_max);
-  _setSelect('vaSelect', d.access_type || d.vascular_access); _setSelect('vaLocation', d.va_location);
-  if(d.heparin){ _setSelect('hepProtocol', d.heparin.protocol); _setVal('hepBolus', d.heparin.bolus); _setVal('hepMaintenance', d.heparin.maintenance); }
+  fillPreHd(d);
   /* Post-HD */
   const qv = d.post_vitals || {};
   _setVal('postSbp', qv.sbp); _setVal('postDbp', qv.dbp); _setVal('postHr', qv.hr);

@@ -350,6 +350,7 @@ function sparkline(b){
 }
 /* Heparin: ชนิด + Bolus + Maintenance (16 พ.ย. 2569) */
 function hepBadge(b){
+  if(!b.anticoag_drug) return `<span class="bed-anticoag" style="white-space:normal;line-height:1.35">💉 ${b.anticoag_text}</span>`;
   const parts = [];
   if(b.anticoag_bolus != null && b.anticoag_bolus !== '') parts.push('Bolus '+b.anticoag_bolus+' IU');
   if(b.anticoag_maintenance != null && b.anticoag_maintenance !== '') parts.push('Maint '+b.anticoag_maintenance+' IU/hr');
@@ -521,7 +522,7 @@ function renderBeds(beds){
 
     /* Anticoag badge */
     let anticoagBadge = '';
-    if(b.anticoag_drug) anticoagBadge = hepBadge(b);
+    if(b.anticoag_drug || b.anticoag_text) anticoagBadge = hepBadge(b);
 
     /* ESA badge */
     let esaBadge = '';
@@ -567,7 +568,7 @@ function renderBeds(beds){
         filterContent = va ? `<span class="bed-access ${vaClass(va)}" style="font-size:.75rem;padding:3px 10px;">${va}</span>` : '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่ระบุ VA</span>';
         break;
       default:
-        filterContent = `${dialyzerBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${ufWatchLine(b)}${idhLine(b)}${checklist(b)}${labLine(b)}`;
+        filterContent = `${dialyzerBadge}${anticoagBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${ufWatchLine(b)}${idhLine(b)}${checklist(b)}${labLine(b)}`;
     }
     if(vitalAgeMin(b) !== null && vitalAgeMin(b) >= VITAL_DUE_MIN && (b.status==='active')) card.classList.add('vital-overdue');
 
@@ -965,7 +966,7 @@ function fetchAllRounds(){
             dBadge = `<span class="${dCls}">${b.dialyzer_type} ${reuse}/${maxR}</span>`;
           }
           let aBadge = '';
-          if(b.anticoag_drug) aBadge = hepBadge(b);
+          if(b.anticoag_drug || b.anticoag_text) aBadge = hepBadge(b);
           let eBadge = '';
           if(b.esa_given) eBadge = `<span class="bed-esa given">✓ ${b.esa_drug_given||'ESA'}</span>`;
           else if(b.patient && b.patient.esa_drug) eBadge = `<span class="bed-esa not-given">⏳ ${b.patient.esa_drug}</span>`;

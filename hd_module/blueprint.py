@@ -5228,6 +5228,11 @@ def bed_dashboard():
                         logger.warning("bed alerts fetch: %s", ae)
 
                 # Fetch dialyzer info for each patient on a bed
+                try:
+                    if conn.get_transaction_status() == 3:  # INERROR → เคลียร์ก่อน (GET อ่านอย่างเดียว)
+                        conn.rollback()
+                except Exception:
+                    pass
                 for sid, bnum in session_ids:
                     try:
                         patient_id_q = """
@@ -5251,21 +5256,38 @@ def bed_dashboard():
                         pass
 
                 # Fetch anticoagulation protocol for active sessions
+                # 16 พ.ย. 2569: SAVEPOINT ต่อเตียง (เดิม query ก่อนหน้าล้ม → transaction ค้าง → Heparin ไม่ขึ้นทุกเตียง)
+                # + สำรองจาก hd_sessions.heparin_dose เมื่อไม่มีแถวใน hd_anticoagulation
+                try:
+                    if conn.get_transaction_status() == 3:  # INERROR (query ตัวกรองล้ม)
+                        conn.rollback()
+                except Exception:
+                    pass
                 for sid, bnum in session_ids:
+                    if not (1 <= bnum <= len(beds)):
+                        continue
+                    cur.execute("SAVEPOINT sp_bed_hep")
                     try:
                         cur.execute("""
                             SELECT protocol, loading_dose, maintenance_dose
                             FROM hd_anticoagulation
                             WHERE session_id = %s
-                            ORDER BY recorded_at DESC LIMIT 1
+                            ORDER BY recorded_at DESC, id DESC LIMIT 1
                         """, (sid,))
                         arow = cur.fetchone()
-                        if arow and 1 <= bnum <= len(beds):
+                        if arow:
                             beds[bnum - 1]["anticoag_drug"] = arow[0]
                             beds[bnum - 1]["anticoag_bolus"] = arow[1]
                             beds[bnum - 1]["anticoag_maintenance"] = arow[2]
-                    except Exception:
-                        pass
+                        else:
+                            cur.execute("SELECT heparin_dose FROM hd_sessions WHERE id = %s", (sid,))
+                            hrow = cur.fetchone()
+                            if hrow and hrow[0]:
+                                beds[bnum - 1]["anticoag_text"] = hrow[0]
+                        cur.execute("RELEASE SAVEPOINT sp_bed_hep")
+                    except Exception as he:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_bed_hep")
+                        logger.debug("bed heparin fetch: %s", he)
 
             conn.close()
         except Exception as e:
