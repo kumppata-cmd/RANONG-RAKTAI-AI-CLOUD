@@ -3898,11 +3898,13 @@ def record_uf(session_id):
                 """, (session_id,))
                 rows = cur.fetchall()
                 # Also get session's uf_goal
-                cur.execute("SELECT uf_goal FROM hd_sessions WHERE id = %s", (session_id,))
+                cur.execute("SELECT uf_goal, status FROM hd_sessions WHERE id = %s", (session_id,))
                 srow = cur.fetchone()
                 # 16 พ.ย. 2569: สถานะ UF Watch + เป้า/เวลาที่ปรับบนเครื่อง ตั้งแต่เปิดหน้า (ไม่ต้องรอบันทึกใหม่)
                 watch = None
                 try:
+                    if not srow or srow[1] != "in_progress":
+                        raise LookupError("not running")  # รอบย้อนหลัง/จบแล้ว — ไม่ประเมินเทียบเวลาปัจจุบัน
                     from .uf_watch import for_session as _ufw
                     watch = _ufw(cur, session_id, _uf_watch_limits())
                 except Exception as we:
