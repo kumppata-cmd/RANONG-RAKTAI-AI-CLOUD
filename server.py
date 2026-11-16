@@ -17749,7 +17749,11 @@ def _pick_patient_for_doc(found_hns, ocr_name: str = ""):
     matches = []
     for hn in found_hns or []:
         try:
-            p = master_registry.match_hn(hn)
+            if hasattr(master_registry, "match_hn"):
+                p = master_registry.match_hn(hn)
+            else:  # ทะเบียนรุ่นที่มีแค่ get_folder_for_hn
+                _f = master_registry.get_folder_for_hn(hn)
+                p = type("P", (), {"folder_name": _f, "patient_name": ""})() if _f else None
         except Exception:
             p = None
         if p and all(p.folder_name != m.folder_name for m in matches):
