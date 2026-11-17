@@ -1178,7 +1178,12 @@ function loadExistingSession(sid){
   const token = getHdToken();
   const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
   fetch('/hd/api/v1/sessions/'+sid+'/detail', {headers})
-    .then(r=>r.ok?r.json():Promise.reject())
+    .then(r=>{
+      /* 17 พ.ย. 2569: เปิดจากลิงก์ใน LINE (เบราว์เซอร์ใน LINE ไม่มี/หมดอายุ token) เดิมเงียบ → หน้าว่าง */
+      if(r.status===401){ try{ localStorage.removeItem('hd_token'); sessionStorage.removeItem('hd_token'); }catch(e){} hdGoLogin(); return Promise.reject('auth'); }
+      if(!r.ok) return Promise.reject(r.status);
+      return r.json();
+    })
     .then(d=>{
       sessionData.session_id = d.session_id || sid;
       sessionData.patient_id = d.patient_id || null;
@@ -1238,8 +1243,20 @@ function loadExistingSession(sid){
       } else if(d.status==='completed' || d.status==='cancelled'){
         showSessionHistory(d, sid, headers);
       }
+      /* ลิงก์ '#alerts' จาก LINE → เปิดแท็บ Intra-HD แล้วเลื่อนไปที่การแจ้งเตือน & คำสั่งแพทย์ */
+      if(window.location.hash === '#alerts'){
+        try{ switchTab('session', 'intra'); }catch(e){}
+        setTimeout(()=>{ const el = document.getElementById('alertsList'); if(el) (el.closest('.card')||el).scrollIntoView({behavior:'smooth', block:'start'}); }, 600);
+      }
     })
-    .catch(e=>console.warn('loadExistingSession:', e));
+    .catch(e=>{
+      console.warn('loadExistingSession:', e);
+      if(e === 'auth') return;
+      document.getElementById('patientName').textContent = 'เปิดรอบฟอก #' + sid + ' ไม่สำเร็จ';
+      document.getElementById('patientInfo').textContent = e === 404 ? 'ไม่พบรอบฟอกนี้ — อาจถูกยกเลิก/ลบไปแล้ว' : 'เชื่อมต่อระบบไม่ได้ ลองรีเฟรชอีกครั้ง';
+      document.getElementById('sessionStatus').textContent = '⚠️ ' + (e === 404 ? 'ไม่พบ' : 'ผิดพลาด');
+      document.getElementById('sessionStatus').className = 'badge badge-danger';
+    });
 }
 
 

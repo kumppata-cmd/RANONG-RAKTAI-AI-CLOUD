@@ -72,7 +72,7 @@ html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font-family:
 <div class="off" id="off">⚠️ ขาดการเชื่อมต่อ — กำลังลองใหม่…</div>
 <script>
 const TOKEN = (new URLSearchParams(location.search).get('token')) || (function(){ try { return sessionStorage.getItem('hd_token') || localStorage.getItem('hd_token') || ''; } catch(e){ return ''; } })();
-if(!TOKEN) location.href = '/hd/login';
+if(!TOKEN) location.href = '/hd/login?next=' + encodeURIComponent(location.pathname + location.search);
 const REFRESH = 20000;
 function thaiNow(){ const n = new Date(); return new Date(n.getTime() + (n.getTimezoneOffset() + 420) * 60000); }
 function detectShift(){ const h = thaiNow().getHours(); if(h >= 7 && h < 13) return 'morning'; if(h >= 13 && h < 17) return 'afternoon'; return 'evening'; }
@@ -192,7 +192,7 @@ function render(d){
 
 async function fetchShift(sh){
   const r = await fetch('/hd/api/v1/dashboard/beds?shift=' + sh, {headers:{'Authorization':'Bearer ' + TOKEN}});
-  if(r.status === 401){ location.href = '/hd/login'; throw new Error('401'); }
+  if(r.status === 401){ location.href = '/hd/login?next=' + encodeURIComponent(location.pathname + location.search); throw new Error('401'); }
   if(!r.ok) throw new Error(r.status);
   return r.json();
 }

@@ -320,11 +320,17 @@ function hdTime(ts){ const d = hdParseUtc(ts); return d ? d.toLocaleTimeString('
 function getHdToken(){
   try { return sessionStorage.getItem('hd_token') || localStorage.getItem('hd_token') || ''; } catch(e){ return ''; }
 }
+/* ไปหน้า login แล้วกลับมาหน้าเดิม (ลิงก์จาก LINE เช่น /hd/session/90#alerts) */
+function hdGoLogin(){
+  let nx = '';
+  try{ nx = window.location.pathname + window.location.search + window.location.hash; }catch(e){}
+  window.location.href = '/hd/login' + (nx && nx.indexOf('/hd/login') !== 0 && nx !== '/hd/' ? '?next=' + encodeURIComponent(nx) : '');
+}
 function hdFetch(url, opts={}){
   const token = getHdToken();
   if(!token && !url.includes('/auth/')){
-    /* No token — redirect to login */
-    window.location.href='/hd/login';
+    /* No token — redirect to login (แล้วกลับมาหน้าเดิม) */
+    hdGoLogin();
     return Promise.reject(new Error('no_token'));
   }
   const _isForm = (typeof FormData !== 'undefined') && (opts.body instanceof FormData);
@@ -333,7 +339,7 @@ function hdFetch(url, opts={}){
     if(r.status===401){
       /* Token expired — redirect to login */
       try{ sessionStorage.removeItem('hd_token'); localStorage.removeItem('hd_token'); }catch(e){}
-      window.location.href='/hd/login';
+      hdGoLogin();
       return Promise.reject(new Error('unauthorized'));
     }
     return r;
@@ -385,7 +391,7 @@ if('serviceWorker' in navigator){
 (function(){
   const isLoginPage = window.location.pathname==='/hd/login' || window.location.pathname==='/hd/';
   if(!isLoginPage && !getHdToken()){
-    window.location.href='/hd/login';
+    hdGoLogin();
   }
 })();
 </script>

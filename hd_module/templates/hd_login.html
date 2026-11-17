@@ -122,7 +122,13 @@ function doLogin(data){
   .then(({status,data})=>{
     if(status===200 && data.token){
       try{ sessionStorage.setItem('hd_token', data.token); localStorage.setItem('hd_token', data.token); }catch(e){}
-      window.location.href = '/hd/dashboard';
+      /* กลับไปหน้าที่เปิดจากลิงก์ (เฉพาะ path ภายใน /hd/ เท่านั้น — กัน open redirect) */
+      let nx = '/hd/dashboard';
+      try{
+        const q = new URLSearchParams(window.location.search).get('next') || '';
+        if(/^\/hd\/[A-Za-z0-9_\-\/]*(\?[^#\s]*)?(#[A-Za-z0-9_\-]*)?$/.test(q) && q.indexOf('//') < 0 && q.indexOf('/hd/login') !== 0) nx = q;
+      }catch(e){}
+      window.location.href = nx;
     } else {
       showError(data.error || 'เข้าสู่ระบบไม่สำเร็จ');
       clearPin();
