@@ -4124,8 +4124,11 @@ def record_uf(session_id):
                 "id": r[0],
                 "recorded_at": (r[1].isoformat() + "Z") if r[1] else None,
                 "slot_time": r[2],
-                "uf_removed": r[3], "uf_rate": r[4],
-                "uf_remaining": r[5], "notes": r[6],
+                # 17 พ.ย. 2569: NUMERIC → Decimal → JSON เป็น string ("800.0") ทำให้หน้าเว็บเทียบแบบตัวอักษร
+                # ('800.0' > '2400.0') → UF Progress แสดง 800 แทน 2400 → ส่งเป็นตัวเลขเสมอ
+                "uf_removed": float(r[3]) if r[3] is not None else None,
+                "uf_rate": float(r[4]) if r[4] is not None else None,
+                "uf_remaining": float(r[5]) if r[5] is not None else None, "notes": r[6],
             } for r in rows]
             return jsonify({
                 "records": records,

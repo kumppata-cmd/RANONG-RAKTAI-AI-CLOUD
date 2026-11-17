@@ -1296,6 +1296,10 @@ function loadSessionRecords(sid, headers, live){
       if(ud.uf_goal) document.getElementById('ufGoal').textContent = ud.uf_goal;
       if(live && ud.watch){ _ufAdj = {target: ud.watch.reduced_ml ? ud.watch.target : null, extend: ud.watch.extend_min || 0}; showUfWatch(ud.watch); }
       let lastUf = 0, lastRate = 0, lastRemaining = 0;
+      /* ตัวเลขอาจมาเป็นข้อความ ("800.0") → แปลงก่อนเทียบ ไม่งั้น '800.0' > '2400.0' (เทียบตัวอักษร) */
+      const _n = v => (v === null || v === undefined || v === '') ? null : parseFloat(v);
+      (ud.records||[]).forEach(u=>{ u.uf_removed = _n(u.uf_removed); u.uf_rate = _n(u.uf_rate); u.uf_remaining = _n(u.uf_remaining); });
+      ud.records = (ud.records||[]).slice().sort((a,b)=>_tsOf(a.recorded_at)-_tsOf(b.recorded_at));
       _ufRecords = (ud.records||[]).map(u=>({t:u.recorded_at, removed:u.uf_removed})).filter(x=>x.t && x.removed!=null);
       drawUfChart();
       (ud.records||[]).forEach(u=>{
@@ -1307,10 +1311,12 @@ function loadSessionRecords(sid, headers, live){
         timeline.push({ time: hdTime(u.recorded_at), slot: u.slot_time, ts:_tsOf(u.recorded_at),
                         type:'uf', removed:u.uf_removed, rate:u.uf_rate, remaining:u.uf_remaining });
       });
+      /* รอบที่จบแล้ว: ใช้ Actual UF ที่บันทึกตอนปิดรอบ ถ้ามากกว่าค่าสะสมล่าสุด */
+      if(!live && sessionData.actual_uf && parseFloat(sessionData.actual_uf) > lastUf) lastUf = parseFloat(sessionData.actual_uf);
       if(lastUf > 0){
-        document.getElementById('ufRemoved').textContent = lastUf;
-        document.getElementById('ufRate').textContent = lastRate || '-';
-        document.getElementById('ufRemaining').textContent = lastRemaining || '-';
+        document.getElementById('ufRemoved').textContent = Math.round(lastUf);
+        document.getElementById('ufRate').textContent = lastRate ? Math.round(lastRate) : '-';
+        document.getElementById('ufRemaining').textContent = lastRemaining ? Math.round(lastRemaining) : (lastRemaining === 0 ? 0 : '-');
         const goal = ud.uf_goal || 2000;
         const pct = Math.min(100, Math.round(lastUf/goal*100));
         const bar = document.getElementById('ufProgressBar');
@@ -1404,6 +1410,7 @@ function showSessionHistory(d, sid, headers){
   }
   const sl = document.getElementById('hdSheetLink'); sl.href = '/hd/sheet/'+sid; sl.style.display = 'block';
   sl.textContent = '📋 เปิด HD Monitoring Sheet ของรอบนี้';
+  sessionData.actual_uf = d.actual_uf;
   loadSessionRecords(sid, headers, false);
 
   /* อ่านอย่างเดียว: ปิดช่องกรอก + ซ่อนปุ่มที่บันทึกข้อมูล */
