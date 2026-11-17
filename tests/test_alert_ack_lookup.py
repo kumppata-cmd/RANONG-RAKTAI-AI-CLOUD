@@ -78,3 +78,45 @@ class OcrRefTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FlakyGCS(FakeGCS):
+    """GCS 429: เขียน object เดิมซ้ำเร็วเกิน → ล้มครั้งแรก"""
+    def __init__(self):
+        super().__init__()
+        self.fail_next = 0
+
+    def put(self, path, data, content_type="application/json", create_only=False):
+        if self.fail_next > 0:
+            self.fail_next -= 1
+            raise RuntimeError("429 rateLimitExceeded")
+        return super().put(path, data, content_type, create_only)
+
+
+class StuckQueuedTests(unittest.TestCase):
+    def test_sent_state_saved_after_rate_limit(self):
+        import alert_delivery as ad
+        st = FlakyGCS()
+        svc = AlertDeliveryService(st, Audit(), clinician_recipients={"physician": ["Udoc"]})
+        a = svc.create_alert("bbbb2222", "own", "Potassium", 6.9, "mmol/L", "critical")
+        st.fail_next = 1
+        orig = ad.time if hasattr(ad, "time") else None
+        import time as _t
+        real_sleep = _t.sleep
+        _t.sleep = lambda s: None
+        try:
+            svc.attempt_delivery(a.alert_id, send_push_fn=lambda u, m: True)
+        finally:
+            _t.sleep = real_sleep
+        self.assertEqual(json.loads(st.get(f"_alerts/{a.alert_id}.json"))["state"], AlertState.SENT.value)
+        del orig
+
+    def test_queued_alert_can_be_acknowledged(self):
+        st = FakeGCS()
+        svc = AlertDeliveryService(st, Audit(), clinician_recipients={"physician": ["Udoc"]})
+        a = svc.create_alert("cccc3333", "own", "eGFR", 2.0, "mL/min", "critical")   # ค้าง queued
+        self.assertEqual(svc.find_alerts_by_ref("cccc3333"), [a.alert_id])
+        r = svc.acknowledge_alert(a.alert_id, "doctorhash")
+        self.assertFalse(r.get("error"), r)
+        again = svc.acknowledge_alert(a.alert_id, "doctorhash")
+        self.assertIn("รับทราบไปแล้ว", again.get("error", ""))

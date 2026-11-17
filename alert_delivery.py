@@ -265,16 +265,30 @@ class AlertDeliveryService:
         return f"{ALERTS_PREFIX}{alert_id}.json"
 
     def _save_alert(self, alert: CriticalAlert) -> bool:
-        try:
-            self._storage.put(
-                self._alert_path(alert.alert_id),
-                alert.to_json().encode("utf-8"),
-                content_type="application/json",
-            )
-            return True
-        except Exception as e:
-            logger.error(f"Alert save failed: {type(e).__name__}")
-            return False
+        """บันทึก alert — ลองซ้ำเมื่อล้ม
+
+        17 พ.ย. 2569: GCS จำกัดการเขียน object เดียวกันได้ ~1 ครั้ง/วินาที
+        create_alert (QUEUED) แล้ว attempt_delivery (SENT) เขียนไฟล์เดิมติดกันภายในเสี้ยววินาที
+        → ครั้งที่สองโดน 429 → สถานะค้าง queued ทั้งที่ส่ง LINE ถึงแพทย์แล้ว → 'รับทราบ' ไม่ได้"""
+        import time as _t
+        data = alert.to_json().encode("utf-8")
+        last = None
+        for i, wait in enumerate((0, 1.2, 2.5)):
+            if wait:
+                _t.sleep(wait)
+            try:
+                self._storage.put(
+                    self._alert_path(alert.alert_id),
+                    data,
+                    content_type="application/json",
+                )
+                if i:
+                    logger.info("Alert save succeeded on retry %d", i)
+                return True
+            except Exception as e:
+                last = e
+        logger.error(f"Alert save failed: {type(last).__name__}")
+        return False
 
     def _load_alert(self, alert_id: str) -> CriticalAlert | None:
         data = self._storage.get(self._alert_path(alert_id))
@@ -549,7 +563,8 @@ class AlertDeliveryService:
                 if not d.get("alert_id") or not d.get("state"):
                     continue   # ไฟล์สรุปเอกสารรุ่นเก่า (_alerts/<doc_id>.json) ไม่ใช่ alert
                 if str(d.get("doc_id", "")).lower().startswith(ref[:8]) and d["state"] in (
-                        AlertState.SENT.value, AlertState.ESCALATED.value):
+                        AlertState.SENT.value, AlertState.ESCALATED.value,
+                        AlertState.QUEUED.value, AlertState.DELIVERY_FAILED.value):
                     out.append(d["alert_id"])
             except Exception:
                 continue
@@ -602,21 +617,33 @@ class AlertDeliveryService:
         if alert is None:
             return {"error": "ไม่พบ alert"}
 
+        # queued / delivery_failed: แพทย์พิมพ์รหัสจากข้อความที่ได้รับ = เห็นแล้วจริง
+        # (สถานะค้าง queued เกิดจากบันทึกสถานะ SENT ไม่สำเร็จ — ดู _save_alert)
         if alert.state not in (AlertState.SENT.value,
-                                AlertState.ESCALATED.value):
+                                AlertState.ESCALATED.value,
+                                AlertState.QUEUED.value,
+                                AlertState.DELIVERY_FAILED.value):
+            if alert.state == AlertState.ACKNOWLEDGED.value:
+                return {"error": f"แจ้งเตือน {alert.analyte} รับทราบไปแล้ว"}
             return {"error": f"ไม่สามารถรับทราบ alert สถานะ {alert.state}"}
+        if alert.state in (AlertState.QUEUED.value, AlertState.DELIVERY_FAILED.value):
+            alert.add_event("ack_from_state", details={"from": alert.state})
 
         alert.state = AlertState.ACKNOWLEDGED.value
         alert.acknowledged_at = datetime.now().isoformat(timespec="seconds")
         alert.acknowledged_by = physician_hash[:8]
         alert.add_event("acknowledged", actor=physician_hash[:8])
 
-        self._save_alert(alert)
-        self._audit.log("alert_acknowledged", physician_hash, {
-            "alert_id": alert.alert_id[:8],
-            "analyte": alert.analyte,
-            "response_time_sec": self._calc_response_time(alert),
-        })
+        if not self._save_alert(alert):
+            return {"error": "บันทึกการรับทราบไม่สำเร็จ กรุณาลองใหม่อีกครั้ง"}
+        try:
+            self._audit.log("alert_acknowledged", physician_hash, {
+                "alert_id": alert.alert_id[:8],
+                "analyte": alert.analyte,
+                "response_time_sec": self._calc_response_time(alert),
+            })
+        except Exception as e:
+            logger.warning(f"audit alert_acknowledged: {type(e).__name__}")
 
         return {
             "status": "acknowledged",
