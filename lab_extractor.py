@@ -36,6 +36,18 @@ from lab_models import (
 )
 from lab_rules import validate_result, get_reference_range, ANALYTE_SPECS
 
+
+def _clean_ocr_ref(ocr_ref, canonical):
+    """ค่าปกติที่ OCR อ่านได้ใช้เฉพาะเมื่อเป็นช่วงจริง เช่น '9-23', '<5.0', '>90'
+
+    17 พ.ย. 2569: ตารางผลแล็บ รพ. คอลัมน์ Reference ถูกอ่านเหลื่อมแถว → ได้เลขเดี่ยวของแถวอื่น
+    (BUN 'ค่าปกติ: 145' = ค่าของ Sodium) → แสดงค่าปกติมาตรฐานของระบบแทน"""
+    import re as _re
+    r = (ocr_ref or "").strip()
+    if r and (_re.search(r"\d\s*[-–]\s*\d", r) or _re.match(r"^[<>≤≥]\s*\d", r)):
+        return r
+    return get_reference_range(canonical)
+
 logger = logging.getLogger(__name__)
 
 
@@ -782,7 +794,7 @@ def extract_lab_results_from_text(
                     continue
 
                 unit = _normalize_unit(_clean_unit_token(match.group("unit") or ""))
-                ref_range = match.group("ref") or get_reference_range(canonical)
+                ref_range = _clean_ocr_ref(match.group("ref"), canonical)
 
                 flags = validate_result(canonical, value_f, unit)
                 confidence = 0.85
@@ -819,7 +831,7 @@ def extract_lab_results_from_text(
                     continue
 
                 unit = _normalize_unit(_clean_unit_token(match.group("unit") or ""))
-                ref_range = match.group("ref") or get_reference_range(canonical)
+                ref_range = _clean_ocr_ref(match.group("ref"), canonical)
 
                 flags = validate_result(canonical, value_f, unit)
                 confidence = 0.80  # slightly lower for Thai OCR

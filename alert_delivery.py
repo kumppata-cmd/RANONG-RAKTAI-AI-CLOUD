@@ -506,6 +506,55 @@ class AlertDeliveryService:
             "success": delivery_success,
         }
 
+    def _alert_paths(self) -> list[str]:
+        """path เต็มของไฟล์ alert ทุกไฟล์ใน _alerts/
+
+        17 พ.ย. 2569: เดิมเรียก storage.list_files(ALERTS_PREFIX) ซึ่งรับเฉพาะชื่อหมวด
+        (inbox/lab/...) → ได้รายชื่อไฟล์ในโฟลเดอร์ 06_AI_REVIEW แทน → 'รับทราบ <รหัส>'
+        หาไม่เจอทุกครั้ง และรายการแจ้งเตือนค้างว่างเสมอ"""
+        lp = getattr(self._storage, "list_prefix", None)
+        if callable(lp):
+            try:
+                return [p for p in lp(ALERTS_PREFIX) if p.endswith(".json")]
+            except Exception as e:
+                logger.warning(f"list alerts failed: {type(e).__name__}")
+                return []
+        try:
+            return [f if f.startswith(ALERTS_PREFIX) else ALERTS_PREFIX + f.rsplit("/", 1)[-1]
+                    for f in self._storage.list_files(ALERTS_PREFIX) if f.endswith(".json")]
+        except Exception as e:
+            logger.warning(f"list alerts failed: {type(e).__name__}")
+            return []
+
+    def find_alerts_by_ref(self, ref: str) -> list[str]:
+        """รหัสที่แพทย์พิมพ์หลัง 'รับทราบ' → alert_id ที่ต้องรับทราบ
+
+        - ตรงกับ alert_id (8 ตัวแรก) รายการเดียว → [alert_id]
+        - ไม่ตรง alert_id แต่ตรงกับรหัสเอกสาร (8 ตัว) → ทุก alert ของเอกสารนั้นที่ยังรอรับทราบ
+          (ข้อความสรุปผลแล็บแสดง 'เอกสาร: <รหัส>' แพทย์จึงพิมพ์รหัสเอกสารได้)
+        - กำกวม/ไม่พบ → []"""
+        ref = (ref or "").strip().lower()
+        if len(ref) < 6:
+            return []
+        aid = self.find_alert_id_by_prefix(ref)
+        if aid:
+            return [aid]
+        out = []
+        for path in self._alert_paths():
+            try:
+                data = self._storage.get(path)
+                if not data:
+                    continue
+                d = json.loads(data)
+                if not d.get("alert_id") or not d.get("state"):
+                    continue   # ไฟล์สรุปเอกสารรุ่นเก่า (_alerts/<doc_id>.json) ไม่ใช่ alert
+                if str(d.get("doc_id", "")).lower().startswith(ref[:8]) and d["state"] in (
+                        AlertState.SENT.value, AlertState.ESCALATED.value):
+                    out.append(d["alert_id"])
+            except Exception:
+                continue
+        return out
+
     def find_alert_id_by_prefix(self, prefix: str) -> str | None:
         """หา alert_id เต็มจากคำนำหน้า 8 ตัวที่แสดงในข้อความแจ้งเตือน
 
@@ -518,11 +567,7 @@ class AlertDeliveryService:
         prefix = (prefix or "").strip().lower()
         if len(prefix) < 6:
             return None
-        try:
-            files = self._storage.list_files(ALERTS_PREFIX)
-        except Exception as e:
-            logger.warning(f"find_alert_id_by_prefix failed: {type(e).__name__}")
-            return None
+        files = self._alert_paths()
 
         matches = []
         for f in files:
@@ -530,6 +575,12 @@ class AlertDeliveryService:
             if name.endswith(".json"):
                 aid = name[:-5]
                 if aid.lower().startswith(prefix):
+                    try:   # ข้ามไฟล์สรุปเอกสารรุ่นเก่า (_alerts/<doc_id>.json) ที่ไม่ใช่ alert
+                        d = json.loads(self._storage.get(f) or b"{}")
+                        if not d.get("alert_id"):
+                            continue
+                    except Exception:
+                        continue
                     matches.append(aid)
         if len(matches) == 1:
             return matches[0]
@@ -608,7 +659,7 @@ class AlertDeliveryService:
 
         # 1. ดึงจาก GCS storage (persistent)
         try:
-            alert_files = self._storage.list_files(ALERTS_PREFIX)
+            alert_files = self._alert_paths()
             for f in alert_files:
                 try:
                     data = self._storage.get(f)
@@ -1299,7 +1350,7 @@ def rebuild_dedup_cache(service: AlertDeliveryService) -> int:
     """
     count = 0
     try:
-        files = service._storage.list_files(ALERTS_PREFIX)
+        files = service._alert_paths()
         for f in files:
             try:
                 data = service._storage.get(f)

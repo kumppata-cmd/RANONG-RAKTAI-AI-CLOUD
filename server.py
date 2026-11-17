@@ -740,6 +740,17 @@ class StorageLocal:
             return []
         return os.listdir(folder)
 
+    def list_prefix(self, prefix: str) -> list[str]:
+        """path เต็มของไฟล์ทุกไฟล์ใต้ prefix (เช่น '_alerts/') — ใช้กับ get(path) ได้ทันที
+        list_files() รับเฉพาะชื่อหมวด (inbox/lab/...) ถ้าส่ง prefix จะได้โฟลเดอร์ 06_AI_REVIEW แทน"""
+        base = os.path.join(BASE_DIR, prefix)
+        out = []
+        if os.path.isdir(base):
+            for root, _dirs, files in os.walk(base):
+                for fn in files:
+                    out.append(os.path.relpath(os.path.join(root, fn), BASE_DIR).replace(os.sep, "/"))
+        return sorted(out)
+
 
 class StorageS3:
     """เก็บไฟล์บน Amazon S3 — ยังไม่เชื่อมต่อจริง (placeholder)."""
@@ -782,6 +793,9 @@ class StorageS3:
 
     def list_files(self, category: str) -> list[str]:
         logger.warning("S3 Storage ยังไม่เชื่อมต่อ")
+        return []
+
+    def list_prefix(self, prefix: str) -> list[str]:
         return []
 
 
@@ -1258,6 +1272,17 @@ class StorageGCS:
             return [blob.name.split("/")[-1] for blob in blobs if blob.name != prefix]
         except Exception as e:
             logger.error(f"GCS list_files ล้มเหลว: {type(e).__name__}")
+            return []
+
+    def list_prefix(self, prefix: str) -> list[str]:
+        """ชื่อ blob เต็มทุกตัวใต้ prefix (เช่น '_alerts/') — ใช้กับ get(path) ได้ทันที"""
+        if not self.is_ready:
+            return []
+        try:
+            return [b.name for b in self._client.list_blobs(self.bucket_name, prefix=prefix)
+                    if b.name != prefix and not b.name.endswith("/")]
+        except Exception as e:
+            logger.error(f"GCS list_prefix ล้มเหลว: {type(e).__name__}")
             return []
 
     def check_connection(self) -> dict:
@@ -15318,11 +15343,26 @@ def process_file_async(
                             _alert_summary = check_lab_alerts(lab_report)
 
                             # แจ้งเตือนผู้ใช้ (critical + warning)
+                            # 17 พ.ย. 2569: ถ้าผู้ส่งเป็นแพทย์ผู้รับ alert วิกฤตด้วย → รวมเป็นข้อความเดียว
+                            # (เดิมได้ 2 ข้อความ: สรุปผล + "แจ้งเตือนผลตรวจ ... รับทราบ <รหัส>")
+                            _user_alert_text = ""
+                            _merge_ack = False
                             if _alert_summary.should_notify_user and line_user_id:
                                 _user_alert_text = format_user_alert_th(
                                     _alert_summary
                                 )
-                                if _user_alert_text:
+                                try:
+                                    _merge_ack = bool(
+                                        alert_service is not None
+                                        and _alert_summary.critical_count > 0
+                                        and line_push_fn is not None
+                                        and line_user_id in (
+                                            alert_service._recipients.get("physician", []) or []
+                                        )
+                                    )
+                                except Exception:
+                                    _merge_ack = False
+                                if _user_alert_text and not _merge_ack:
                                     push_message(line_user_id, _user_alert_text)
                                     logger.info(
                                         f"Lab alert sent to user: "
@@ -15368,9 +15408,21 @@ def process_file_async(
                                     )
 
                             # ── Phase 2A: Enhanced Alert Delivery ──
+                            _merged_sent = None   # None = ยังไม่ส่ง, True/False = ผลการส่งข้อความรวม
                             if (alert_service is not None
                                     and _alert_summary.critical_count > 0):
                                 try:
+                                    _new_alerts = []
+                                    # บริบทผู้ป่วย: ผู้ป่วยฟอกเลือดประจำ eGFR<15 เป็นเรื่องปกติของโรค
+                                    # → AlertDeliveryService ลดเป็น urgent (มีรองรับอยู่แล้วแต่ไม่เคยส่งบริบทเข้าไป)
+                                    _pctx = None
+                                    try:
+                                        _hf = metadata.get("patient_hn_folder", "")
+                                        _pp = master_registry.match_hn(_hf.split("_")[0]) if (_hf and master_registry) else None
+                                        if _pp and (getattr(_pp, "hd_per_week", 0) or getattr(_pp, "dialysis_schedule", "")):
+                                            _pctx = {"is_dialysis_patient": True}
+                                    except Exception:
+                                        _pctx = None
                                     # สร้าง alert สำหรับแต่ละ critical
                                     for _ca in getattr(
                                         _alert_summary, 'alerts', []
@@ -15394,20 +15446,39 @@ def process_file_async(
                                                         _ca, 'unit', ''
                                                     ),
                                                     alert_level='critical',
+                                                    patient_context=_pctx,
                                                 )
                                             )
-                                            # ส่ง LINE push ทันที
-                                            if (_new_alert is not None
-                                                    and line_push_fn
-                                                    is not None):
-                                                alert_service \
-                                                    .attempt_delivery(
-                                                        _new_alert
-                                                        .alert_id,
-                                                        send_push_fn=(
-                                                            line_push_fn
-                                                        ),
-                                                    )
+                                            if _new_alert is not None:
+                                                _new_alerts.append(_new_alert)
+                                    # ข้อความรวมถึงผู้ส่ง (ถ้าเป็นแพทย์ผู้รับ alert): สรุปผล + รหัสรับทราบ
+                                    if _merge_ack and _user_alert_text:
+                                        _codes = [a.alert_id[:8] for a in _new_alerts]
+                                        _merged = _user_alert_text
+                                        if _codes:
+                                            _merged += (
+                                                "\n\n✅ รับทราบผลวิกฤต: พิมพ์ "
+                                                + f"'รับทราบ {_doc_id[:8]}'"
+                                                + (f"\n(หรือรายการ: {', '.join(_codes)})" if len(_codes) > 1 else "")
+                                            )
+                                        try:
+                                            _merged_sent = bool(line_push_fn(line_user_id, _merged))
+                                        except Exception:
+                                            _merged_sent = False
+                                        if not _merged_sent:
+                                            # ส่งข้อความรวมไม่สำเร็จ → ใช้ข้อความสรุปเดิม และไม่ข้ามการแจ้งรายรายการ
+                                            push_message(line_user_id, _user_alert_text)
+                                    # ส่ง LINE push ทันที — ผู้ส่งที่ได้รับข้อความรวมแล้วไม่ต้องได้ซ้ำ
+                                    if line_push_fn is not None:
+                                        def _push_skip_uploader(_uid, _msg, _orig=line_push_fn):
+                                            if _merged_sent and _uid == line_user_id:
+                                                return True   # ได้รับแล้วในข้อความรวม
+                                            return _orig(_uid, _msg)
+                                        for _na in _new_alerts:
+                                            alert_service.attempt_delivery(
+                                                _na.alert_id,
+                                                send_push_fn=_push_skip_uploader,
+                                            )
                                     logger.info(
                                         f"Phase 2A alerts created: "
                                         f"doc={_doc_id[:8]}"
@@ -15418,6 +15489,9 @@ def process_file_async(
                                         f"error: "
                                         f"{type(_adel_err).__name__}"
                                     )
+                            # กันตกหล่น: เลือกรวมข้อความไว้แต่ยังไม่ได้ส่งอะไรเลย → ส่งสรุปเดิม
+                            if _merge_ack and _user_alert_text and _merged_sent is None:
+                                push_message(line_user_id, _user_alert_text)
 
                         except Exception as alert_err:
                             # Alert ล้มเหลวไม่ทำให้ upload ล้มเหลว
@@ -18822,33 +18896,41 @@ def webhook():
                             "ที่รับทราบการแจ้งเตือนได้",
                         )
                     else:
-                        _full_id = alert_service.find_alert_id_by_prefix(
-                            _ack_ref
-                        )
-                        if not _full_id:
+                        # 17 พ.ย. 2569: รับทั้งรหัสแจ้งเตือนและรหัสเอกสาร (ข้อความสรุปผลแล็บแสดงรหัสเอกสาร)
+                        try:
+                            _ids = alert_service.find_alerts_by_ref(_ack_ref)
+                        except Exception:
+                            _full_id = alert_service.find_alert_id_by_prefix(_ack_ref)
+                            _ids = [_full_id] if _full_id else []
+                        if not _ids:
                             reply_message(
                                 reply_token,
-                                f"❌ ไม่พบการแจ้งเตือน {_ack_ref}\n\n"
-                                "ตรวจรหัสอีกครั้ง หรือพิมพ์ "
-                                "'แจ้งเตือนค้าง' เพื่อดูรายการ",
+                                f"❌ ไม่พบการแจ้งเตือนที่รอรับทราบสำหรับ {_ack_ref}\n\n"
+                                "อาจรับทราบไปแล้ว หรือรหัสไม่ถูกต้อง\n"
+                                "พิมพ์ 'แจ้งเตือนค้าง' เพื่อดูรายการที่ยังค้าง",
                             )
                         else:
-                            if _ack_action == "resolve":
-                                _res = alert_service.resolve_alert(
-                                    _full_id, user_hash
-                                )
-                            else:
-                                _res = alert_service.acknowledge_alert(
-                                    _full_id, user_hash
-                                )
-                            if _res.get("error"):
-                                reply_message(
-                                    reply_token, f"❌ {_res['error']}"
-                                )
-                            else:
+                            _ok, _err = [], []
+                            for _full_id in _ids:
+                                if _ack_action == "resolve":
+                                    _res = alert_service.resolve_alert(_full_id, user_hash)
+                                else:
+                                    _res = alert_service.acknowledge_alert(_full_id, user_hash)
+                                (_err if _res.get("error") else _ok).append(_res)
+                            if len(_ids) == 1:
+                                _r0 = (_ok or _err)[0]
                                 reply_message(
                                     reply_token,
-                                    _res.get("message", "✅ บันทึกแล้ว"),
+                                    f"❌ {_r0['error']}" if _r0.get("error")
+                                    else _r0.get("message", "✅ บันทึกแล้ว"),
+                                )
+                            else:
+                                _lines = [r.get("message", "✅ บันทึกแล้ว") for r in _ok]
+                                _lines += [f"❌ {r['error']}" for r in _err]
+                                reply_message(
+                                    reply_token,
+                                    f"📋 เอกสาร {_ack_ref[:8]} — {len(_ok)}/{len(_ids)} รายการ\n"
+                                    + "\n".join(_lines),
                                 )
                 # ── ย้ายเอกสารที่เข้าแฟ้มผิดคน ──────────────────────
                 # workflow จริงใช้เจ้าหน้าที่เลือกผู้ป่วยก่อนส่ง ถ้าลืม
