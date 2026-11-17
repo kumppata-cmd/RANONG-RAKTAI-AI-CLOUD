@@ -2726,11 +2726,39 @@ def hd_set_pin():
         with conn.cursor() as cur:
             cur.execute("UPDATE hd_users SET pin_hash = %s WHERE id = %s",
                         (hash_password(new_pin), g.get("hd_user_id")))
+            updated = cur.rowcount
             conn.commit()
         conn.close()
+        if not updated:
+            # 17 พ.ย. 2569: เดิมตอบ "สำเร็จ" แม้ไม่มีแถวไหนถูกแก้ (เช่นเข้าระบบด้วยบัญชีที่ไม่มีในตาราง)
+            return jsonify({"error": "ไม่พบบัญชีผู้ใช้ของคุณ — ออกจากระบบแล้วเข้าใหม่ด้วย username/password ก่อนตั้ง PIN"}), 400
+        log_action(user_id=g.get("hd_user_id"), action="auth.set_pin", resource_type="user",
+                   resource_id=g.get("hd_user_id"), ip_address=request.remote_addr or "")
         return jsonify({"ok": True, "message": "ตั้ง PIN สำเร็จ"})
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.error("set pin error: %s", e)
+        return jsonify({"error": "ตั้ง PIN ไม่สำเร็จ กรุณาลองใหม่"}), 500
+
+
+@hd_bp.route("/auth/pin-status", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def hd_pin_status():
+    """ผู้ใช้คนนี้ตั้ง PIN ไว้หรือยัง (ไม่ส่งค่า PIN/hash กลับ)"""
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT username, pin_hash IS NOT NULL FROM hd_users WHERE id = %s", (g.get("hd_user_id"),))
+            r = cur.fetchone()
+        conn.close()
+        if not r:
+            return jsonify({"has_pin": False, "found": False})
+        return jsonify({"has_pin": bool(r[1]), "found": True, "username": r[0]})
+    except Exception as e:
+        logger.warning("pin status: %s", e)
+        return jsonify({"error": "ตรวจสถานะไม่ได้"}), 500
 
 
 @hd_bp.route("/auth/refresh", methods=["POST"])
