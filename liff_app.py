@@ -147,6 +147,28 @@ def verify_liff_id_token(
 # Patient Lab Data Retrieval (Read-Only)
 # ═══════════════════════════════════════════════════════════
 
+_TH_MONTHS = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."]
+
+
+def _thai_note_date(at: str) -> str:
+    """'20261117_141500' (UTC, ตามที่ save-note บันทึก) → '17 พ.ย. 2569 · 21:15 น.' (เวลาไทย)
+    เดิมตัด 10 ตัวอักษร → '20261117_1' (16–17 พ.ย. 2569)"""
+    from datetime import datetime, timedelta
+    s = (at or "").strip()
+    for fmt in ("%Y%m%d_%H%M%S", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d"):
+        try:
+            dt = datetime.strptime(s[:19], fmt)
+            break
+        except ValueError:
+            dt = None
+    if not dt:
+        return s[:10]
+    if fmt != "%Y-%m-%d":
+        dt = dt + timedelta(hours=7)
+        return f"{dt.day} {_TH_MONTHS[dt.month - 1]} {dt.year + 543} · {dt:%H:%M} น."
+    return f"{dt.day} {_TH_MONTHS[dt.month - 1]} {dt.year + 543}"
+
+
 def get_patient_labs_for_liff(
     storage: Any,
     owner_hash: str,
@@ -301,13 +323,14 @@ def get_patient_labs_for_liff(
                             nd = json.loads(nb.download_as_text())
                             notes_history.append({
                                 "note": nd.get("note", ""),
-                                "date": nd.get("at", "")[:10] if nd.get("at") else "",
+                                "date": _thai_note_date(nd.get("at", "")),
                                 "by": nd.get("by", ""),
                             })
                         except Exception:
                             continue
                     if notes_history:
                         doctor_note = notes_history[0].get("note", "")
+                        result["doctor_note_date"] = notes_history[0].get("date", "")
             except Exception:
                 pass
         result["notes_history"] = notes_history
@@ -608,7 +631,11 @@ body {
     <div style="background:#1a2332;border-radius:12px;padding:16px;border:1px solid #27ae60;">
         <div style="font-size:14px;font-weight:600;color:#27ae60;margin-bottom:8px;">
             👨‍⚕️ เขียนคำแนะนำสำหรับผู้ป่วย</div>
-        <textarea id="noteText" rows="4" placeholder="เขียนคำแนะนำ ผลการตรวจ หรือสิ่งที่ผู้ป่วยควรทราบ..."
+        <div id="noteDateLine" style="font-size:12px;color:#94a3b8;margin-bottom:8px;"></div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:6px;">แตะเพื่อเพิ่มคำแนะนำสำเร็จรูป (แก้ไขข้อความได้ก่อนบันทึก)</div>
+        <div id="adviceTabs" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px;"></div>
+        <div id="adviceChips" style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px;"></div>
+        <textarea id="noteText" rows="5" placeholder="เขียนคำแนะนำ ผลการตรวจ หรือสิ่งที่ผู้ป่วยควรทราบ..."
             style="width:100%;padding:10px;border-radius:8px;border:1px solid #444;
             background:#0f172a;color:#e2e8f0;font-size:14px;resize:vertical;
             box-sizing:border-box;"></textarea>
@@ -623,16 +650,29 @@ body {
 <div class="disclaimer">
     ⚠️ ข้อมูลนี้เป็นข้อมูลประกอบเท่านั้น — กรุณาปรึกษาแพทย์สำหรับการรักษา<br>
     ระบบ Read-Only — ไม่สามารถแก้ไขข้อมูลได้<br>
-    กดที่รูปเพื่อขยายเต็มจอ
+    แตะที่รูปเพื่อเปิดดูเต็มจอ แล้วถ่างสองนิ้วเพื่อขยาย
 </div>
 
 <!-- Full-screen image overlay -->
-<div id="imgOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.95);
-    z-index:1000;overflow:auto;-webkit-overflow-scrolling:touch;"
-    onclick="this.style.display='none'">
-    <div style="position:fixed;top:12px;right:16px;color:#fff;font-size:28px;z-index:1001;
-        cursor:pointer;">✕</div>
-    <img id="imgFull" src="" style="width:100%;min-height:100vh;object-fit:contain;">
+<div id="imgOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:1000;
+    overflow:hidden;touch-action:none;">
+    <img id="imgFull" src="" alt="เอกสาร" draggable="false"
+        style="position:absolute;left:0;top:0;width:100%;height:100%;object-fit:contain;
+        transform-origin:0 0;will-change:transform;user-select:none;-webkit-user-select:none;">
+    <div style="position:fixed;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;
+        padding:10px 12px;background:linear-gradient(rgba(0,0,0,.75),rgba(0,0,0,0));z-index:1001;">
+        <span id="zoomPct" style="color:#fff;font-size:14px;opacity:.85;">100%</span>
+        <button onclick="closeViewer()" aria-label="ปิด"
+            style="background:rgba(255,255,255,.18);color:#fff;border:none;border-radius:20px;
+            font-size:18px;padding:8px 16px;">✕ ปิด</button>
+    </div>
+    <div style="position:fixed;bottom:18px;left:0;right:0;display:flex;justify-content:center;gap:10px;z-index:1001;">
+        <button onclick="zoomBy(1/1.5)" style="background:rgba(255,255,255,.18);color:#fff;border:none;border-radius:24px;font-size:22px;width:52px;height:52px;">−</button>
+        <button onclick="zoomReset()" style="background:rgba(255,255,255,.18);color:#fff;border:none;border-radius:24px;font-size:14px;padding:0 16px;height:52px;">พอดีจอ</button>
+        <button onclick="zoomBy(1.5)" style="background:rgba(255,255,255,.18);color:#fff;border:none;border-radius:24px;font-size:22px;width:52px;height:52px;">＋</button>
+    </div>
+    <div id="zoomHint" style="position:fixed;bottom:84px;left:0;right:0;text-align:center;color:#cbd5e1;font-size:12px;z-index:1001;">
+        ถ่างสองนิ้วเพื่อขยาย · แตะสองครั้งเพื่อซูม · ลากเพื่อเลื่อนดู</div>
 </div>
 </div>
 
@@ -799,7 +839,7 @@ async function initApp() {
             var pp = document.getElementById('physicianPanel');
             if (pp) pp.style.display = 'block';
             var np = document.getElementById('notePanel');
-            if (np && labData.patient_hn) np.style.display = 'block';
+            if (np && labData.patient_hn) { np.style.display = 'block'; renderAdvice(); }
             // ถ้าไม่มี patient_hn → physician browse mode
             if (!labData.patient_hn && pi) {
                 pi.textContent = 'เอกสารผู้ป่วยทั้งหมด (' + (labData.documents||[]).length + ' รายการ)';
@@ -840,13 +880,164 @@ function renderCkdCard() {
 
 // ── Render Labs ──
 function toggleImg(el) {
-    // เปิด overlay เต็มจอ
+    // เปิดตัวดูรูปเต็มจอ — ซูมได้ (17 พ.ย. 2569: เดิมแตะตรงไหนก็ปิด และหน้า LIFF ห้ามถ่างนิ้ว → ขยายไม่ได้)
     var ov = document.getElementById('imgOverlay');
     var full = document.getElementById('imgFull');
-    if (ov && full) {
-        full.src = el.src;
-        ov.style.display = 'block';
+    if (!ov || !full) return;
+    _zv = {s: 1, x: 0, y: 0};
+    full.src = el.src;
+    ov.style.display = 'block';
+    document.body.style.overflow = 'hidden';
+    _zApply();
+    var h = document.getElementById('zoomHint');
+    if (h) { h.style.opacity = '1'; setTimeout(function(){ h.style.opacity = '0'; h.style.transition = 'opacity .6s'; }, 2500); }
+}
+var _zv = {s: 1, x: 0, y: 0}, _zPts = {}, _zStart = null, _zLastTap = 0;
+function _zApply() {
+    var img = document.getElementById('imgFull');
+    var ov = document.getElementById('imgOverlay');
+    var W = ov.clientWidth, H = ov.clientHeight;
+    _zv.s = Math.max(1, Math.min(6, _zv.s));
+    // ไม่ให้เลื่อนรูปหลุดจอ
+    _zv.x = Math.min(0, Math.max(W - W * _zv.s, _zv.x));
+    _zv.y = Math.min(0, Math.max(H - H * _zv.s, _zv.y));
+    if (_zv.s === 1) { _zv.x = 0; _zv.y = 0; }
+    img.style.transform = 'translate(' + _zv.x + 'px,' + _zv.y + 'px) scale(' + _zv.s + ')';
+    var p = document.getElementById('zoomPct'); if (p) p.textContent = Math.round(_zv.s * 100) + '%';
+}
+function _zAt(cx, cy, ns) {   // ซูมรอบจุด (cx,cy)
+    ns = Math.max(1, Math.min(6, ns));
+    _zv.x = cx - (cx - _zv.x) * ns / _zv.s;
+    _zv.y = cy - (cy - _zv.y) * ns / _zv.s;
+    _zv.s = ns; _zApply();
+}
+function zoomBy(f) { var ov = document.getElementById('imgOverlay'); _zAt(ov.clientWidth / 2, ov.clientHeight / 2, _zv.s * f); }
+function zoomReset() { _zv = {s: 1, x: 0, y: 0}; _zApply(); }
+function closeViewer() {
+    document.getElementById('imgOverlay').style.display = 'none';
+    document.getElementById('imgFull').src = '';
+    document.body.style.overflow = '';
+}
+(function initZoom() {
+    var ov = document.getElementById('imgOverlay');
+    if (!ov || typeof ov.addEventListener !== 'function') return;
+    ov.addEventListener('pointerdown', function(e) {
+        if (e.target.tagName === 'BUTTON') return;
+        ov.setPointerCapture && ov.setPointerCapture(e.pointerId);
+        _zPts[e.pointerId] = {x: e.clientX, y: e.clientY};
+        var ids = Object.keys(_zPts);
+        if (ids.length === 2) {
+            var a = _zPts[ids[0]], b = _zPts[ids[1]];
+            _zStart = {d: Math.hypot(a.x - b.x, a.y - b.y), s: _zv.s, mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, x: _zv.x, y: _zv.y};
+        } else if (ids.length === 1) {
+            var now = Date.now();
+            if (now - _zLastTap < 300) { _zAt(e.clientX, e.clientY, _zv.s > 1.2 ? 1 : 2.5); _zLastTap = 0; }
+            else _zLastTap = now;
+            _zStart = {px: e.clientX, py: e.clientY, x: _zv.x, y: _zv.y};
+        }
+    });
+    ov.addEventListener('pointermove', function(e) {
+        if (!_zPts[e.pointerId] || !_zStart) return;
+        _zPts[e.pointerId] = {x: e.clientX, y: e.clientY};
+        var ids = Object.keys(_zPts);
+        if (ids.length >= 2 && _zStart.d) {
+            var a = _zPts[ids[0]], b = _zPts[ids[1]];
+            var d = Math.hypot(a.x - b.x, a.y - b.y);
+            var ns = Math.max(1, Math.min(6, _zStart.s * d / _zStart.d));
+            var mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2;
+            _zv.s = ns;
+            _zv.x = mx - (_zStart.mx - _zStart.x) * ns / _zStart.s;
+            _zv.y = my - (_zStart.my - _zStart.y) * ns / _zStart.s;
+            _zApply();
+        } else if (ids.length === 1 && _zStart.px !== undefined && _zv.s > 1) {
+            _zv.x = _zStart.x + (e.clientX - _zStart.px);
+            _zv.y = _zStart.y + (e.clientY - _zStart.py);
+            _zApply();
+        }
+    });
+    function up(e) {
+        delete _zPts[e.pointerId];
+        var ids = Object.keys(_zPts);
+        if (ids.length === 1) { var p = _zPts[ids[0]]; _zStart = {px: p.x, py: p.y, x: _zv.x, y: _zv.y}; }
+        else if (!ids.length) _zStart = null;
     }
+    ov.addEventListener('pointerup', up);
+    ov.addEventListener('pointercancel', up);
+    ov.addEventListener('wheel', function(e) { e.preventDefault(); _zAt(e.clientX, e.clientY, _zv.s * (e.deltaY < 0 ? 1.2 : 1 / 1.2)); }, {passive: false});
+    if (typeof document.addEventListener === 'function') document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeViewer(); });
+})();
+
+// ── คำแนะนำสำเร็จรูปสำหรับแพทย์ (เพิ่มลงช่องคำแนะนำ แก้ไขได้ก่อนบันทึก) ──
+var ADVICE = {
+    'การฟอกเลือด': [
+        'มาฟอกเลือดตรงเวลาทุกครั้ง ไม่ขาดนัด ไม่ขอลดเวลาฟอก',
+        'ควบคุมน้ำหนักขึ้นระหว่างรอบฟอกไม่เกิน 2–2.5 กก. (ไม่เกิน 5% ของน้ำหนักแห้ง)',
+        'ถ้ามีหน้ามืด ตะคริว ระหว่างฟอก ให้แจ้งพยาบาลทันที',
+        'หลังฟอกลุกยืนช้าๆ ถ้าเวียนศีรษะให้นั่งพักก่อน',
+        'ชั่งน้ำหนักที่บ้านทุกเช้าและจดบันทึก นำมาให้ทีมดูทุกครั้ง',
+    ],
+    'เส้นฟอก': [
+        'คลำเส้นฟอกให้รู้สึกสั่น (thrill) ทุกเช้า ถ้าไม่สั่นหรือเงียบ ให้มาโรงพยาบาลทันที',
+        'บีบลูกบอลยาง 3 ชุด ชุดละ 20 ครั้งทุกวัน เพื่อให้เส้นฟอกแข็งแรง',
+        'ห้ามวัดความดัน เจาะเลือด ใส่นาฬิกาหรือรัดแน่นที่แขนข้างที่มีเส้นฟอก',
+        'ไม่นอนทับ ไม่ยกของหนักด้วยแขนข้างที่มีเส้นฟอก',
+        'ถ้าแผลเส้นฟอกบวม แดง ร้อน มีหนอง หรือเลือดออกไม่หยุด ให้มาโรงพยาบาลทันที',
+        'สายฟอกที่คอ/อก: ห้ามเปียกน้ำ ห้ามแกะผ้าปิดเอง ถ้ามีไข้หนาวสั่นให้มาโรงพยาบาล',
+    ],
+    'อาหาร': [
+        'จำกัดเกลือและน้ำปลา ลดอาหารหมักดอง อาหารสำเร็จรูป บะหมี่กึ่งสำเร็จรูป',
+        'จำกัดน้ำดื่มวันละไม่เกิน 500–750 มล. รวมน้ำแกง/น้ำซุป',
+        'โพแทสเซียมสูง: งดกล้วย ส้ม ทุเรียน มะขามหวาน ลำไย ผลไม้แห้ง น้ำผลไม้',
+        'ฟอสฟอรัสสูง: ลดนม ชีส ไข่แดง เครื่องในสัตว์ น้ำอัดลมสีเข้ม ถั่ว',
+        'กินโปรตีนคุณภาพดีให้พอ: ไข่ขาว ปลา เนื้อไก่ ทุกมื้อ',
+        'กินยาจับฟอสเฟต (Calcium carbonate) พร้อมอาหารคำแรกทุกมื้อ',
+        'ผู้ป่วยเบาหวาน: คุมน้ำตาล งดขนมหวาน น้ำหวาน',
+    ],
+    'การดูแลตัวเอง': [
+        'กินยาตามแพทย์สั่งสม่ำเสมอ ห้ามหยุดยาเอง',
+        'ห้ามซื้อยาแก้ปวดกลุ่ม NSAIDs/ยาชุด/สมุนไพรกินเอง ปรึกษาแพทย์ก่อนทุกครั้ง',
+        'วัดความดันที่บ้านและจดบันทึก นำมาให้แพทย์ดู',
+        'นอนพักผ่อนให้เพียงพอ ออกกำลังกายเบาๆ เช่น เดินวันละ 20–30 นาที',
+        'งดสูบบุหรี่และเครื่องดื่มแอลกอฮอล์',
+        'ถ้าเหนื่อยหอบ นอนราบไม่ได้ บวมมาก หรือแน่นหน้าอก ให้มาโรงพยาบาลทันที',
+    ],
+    'ผลเลือด': [
+        'ผลเลือดครั้งนี้อยู่ในเกณฑ์ดี ทำต่อแบบเดิมได้',
+        'ค่าโพแทสเซียมสูง ต้องงดผลไม้และผักที่โพแทสเซียมสูงอย่างเคร่งครัด',
+        'ค่าฟอสฟอรัสสูง ลดอาหารฟอสฟอรัสสูงและกินยาจับฟอสเฟตพร้อมอาหาร',
+        'ค่าฮีโมโกลบิน (Hb) ต่ำ จะปรับยากระตุ้นเม็ดเลือดแดง/ธาตุเหล็ก มาฉีดยาตามนัด',
+        'ค่าแอลบูมินต่ำ ต้องกินโปรตีนเพิ่ม เช่น ไข่ขาววันละ 2–3 ฟอง',
+        'ค่าของเสีย (BUN) สูง แสดงว่าฟอกไม่พอ ควรมาฟอกครบเวลาทุกครั้ง',
+    ],
+};
+var _adviceTab = 'การฟอกเลือด';
+function _esc(t) { return String(t == null ? '' : t).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); }
+function renderAdvice() {
+    var tabs = document.getElementById('adviceTabs'), chips = document.getElementById('adviceChips');
+    if (!tabs || !chips) return;
+    tabs.innerHTML = Object.keys(ADVICE).map(function(k) {
+        var on = k === _adviceTab;
+        return '<button type="button" onclick="_adviceTab=this.dataset.k;renderAdvice()" data-k="' + _esc(k) + '" style="padding:6px 12px;border-radius:16px;font-size:13px;border:1px solid ' +
+            (on ? '#27ae60;background:#27ae60;color:#fff' : '#444;background:transparent;color:#cbd5e1') + ';">' + _esc(k) + '</button>';
+    }).join('');
+    chips.innerHTML = ADVICE[_adviceTab].map(function(t, i) {
+        return '<button type="button" onclick="addAdvice(' + i + ')" style="text-align:left;padding:6px 10px;border-radius:10px;font-size:13px;line-height:1.35;' +
+            'border:1px dashed #27ae60;background:rgba(39,174,96,.08);color:#d1fae5;">＋ ' + _esc(t) + '</button>';
+    }).join('');
+    var dl = document.getElementById('noteDateLine');
+    if (dl) {
+        var d = new Date();
+        dl.textContent = '📅 วันที่ให้คำแนะนำ: ' + d.toLocaleDateString('th-TH', {day: 'numeric', month: 'short', year: 'numeric'}) +
+            ' · ' + d.toLocaleTimeString('th-TH', {hour: '2-digit', minute: '2-digit'}) + ' น. (บันทึกอัตโนมัติ)';
+    }
+}
+function addAdvice(i) {
+    var t = ADVICE[_adviceTab][i], ta = document.getElementById('noteText');
+    if (!ta || !t) return;
+    var cur = ta.value.replace(/\\s+$/, '');
+    if (cur.indexOf(t) >= 0) return;
+    ta.value = (cur ? cur + '\\n' : '') + '• ' + t;
+    ta.focus();
 }
 
 function searchPatient() {
@@ -876,8 +1067,9 @@ async function saveNote() {
             body: JSON.stringify({id_token: tok, patient_hn: hn, note: note.trim()}),
         });
         if (resp.ok) {
-            status.innerHTML = '<span style="color:#27ae60;">✅ บันทึกสำเร็จ</span>';
+            status.innerHTML = '<span style="color:#27ae60;">✅ บันทึกสำเร็จ — ส่งแจ้งผู้ป่วยแล้ว (ถ้าผูก LINE ไว้)</span>';
             document.getElementById('noteText').value = '';
+            try { _currentSearchHN = hn; await initApp(); } catch (e) {}
         } else {
             status.innerHTML = '<span style="color:#ef4444;">❌ บันทึกไม่สำเร็จ</span>';
         }
@@ -932,8 +1124,8 @@ function renderDocuments() {
         html += '<div style="padding:12px 16px;font-weight:600;color:#27ae60;">📋 ประวัติคำแนะนำจากแพทย์</div>';
         for (const n of labData.notes_history) {
             html += '<div style="padding:8px 16px;border-top:1px solid rgba(255,255,255,0.05);">';
-            html += '<div style="font-size:12px;color:#64748b;">📅 ' + (n.date || '') + '</div>';
-            html += '<div style="font-size:14px;margin-top:4px;white-space:pre-wrap;">' + (n.note || '') + '</div>';
+            html += '<div style="font-size:12px;color:#94a3b8;">📅 ' + _esc(n.date || '') + '</div>';
+            html += '<div style="font-size:14px;margin-top:4px;white-space:pre-wrap;">' + _esc(n.note || '') + '</div>';
             html += '</div>';
         }
         html += '</div>';
@@ -972,9 +1164,9 @@ function renderDocuments() {
             html += '<div style="padding:12px 16px;background:rgba(39,174,96,0.08);'+
                 'border-top:1px solid rgba(39,174,96,0.2);">';
             html += '<div style="font-size:12px;color:#27ae60;font-weight:600;margin-bottom:4px;">'+
-                '👨‍⚕️ คำแนะนำจากแพทย์</div>';
+                '👨‍⚕️ คำแนะนำจากแพทย์' + (labData.doctor_note_date ? ' <span style="color:#94a3b8;font-weight:400;">· 📅 ' + _esc(labData.doctor_note_date) + '</span>' : '') + '</div>';
             html += '<div style="font-size:14px;white-space:pre-wrap;">' +
-                doc.doctor_note + '</div>';
+                _esc(doc.doctor_note) + '</div>';
             html += '</div>';
         }
 

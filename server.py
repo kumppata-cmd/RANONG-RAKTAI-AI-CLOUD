@@ -21688,11 +21688,17 @@ def liff_api_save_note():
                     pass
                 if _line_id:
                     import requests as _req
+                    try:
+                        from liff_app import _thai_note_date as _tnd
+                        _when = _tnd(ts)
+                    except Exception:
+                        _when = ""
                     _push_msg = (
                         "📋 แพทย์มีคำแนะนำใหม่\n"
-                        "━━━━━━━━━━━━━━━━━━━━\n"
-                        f"{note_text[:200]}\n\n"
-                        "💡 กดปุ่ม 'ดูผลแล็บ' เพื่อดูรายละเอียด"
+                        + (f"📅 {_when}\n" if _when else "")
+                        + "━━━━━━━━━━━━━━━━━━━━\n"
+                        + f"{note_text[:400]}\n\n"
+                        + "💡 กดปุ่ม 'ดูผลแล็บ' เพื่อดูรายละเอียด"
                     )
                     _req.post(
                         "https://api.line.me/v2/bot/message/push",
