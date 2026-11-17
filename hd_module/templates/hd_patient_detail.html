@@ -65,6 +65,23 @@
   </div>
 </div>
 
+<!-- 17 พ.ย. 2569: UF & น้ำหนัก เฉพาะราย (ข้อ 1, 9, 10) -->
+<div class="card" style="margin-bottom:20px;" id="ufCoachCard">
+  <div class="card-header">💧 UF &amp; น้ำหนัก — เฉพาะราย</div>
+  <div id="ufTol" style="font-size:.9rem;line-height:1.6">กำลังโหลด…</div>
+  <div id="ufBands" style="display:flex;gap:6px;flex-wrap:wrap;margin:8px 0"></div>
+  <hr style="border:0;border-top:1px solid var(--border);margin:10px 0">
+  <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+    <div><label style="font-size:.8rem;font-weight:700">เกณฑ์น้ำหนักขึ้นระหว่างรอบ (% ของ DW)</label>
+      <input type="number" step="0.5" min="1" max="10" id="idwgPct" class="form-control" style="width:120px" placeholder="ค่าเริ่มต้น"></div>
+    <button class="btn btn-primary" onclick="saveIdwgPct()">💾 บันทึก</button>
+    <span id="idwgInfo" style="font-size:.8rem;color:var(--fg-muted)"></span>
+  </div>
+  <div style="font-size:.72rem;color:var(--fg-muted);margin-top:4px">ว่าง = ใช้ค่าใน ⚙️ ตั้งค่า (เริ่มต้น 4%) · ใช้ในการ์ดสรุปหลังฟอก และข้อความตอบเมื่อผู้ป่วยส่ง "น้ำหนัก 62.4" ทาง LINE</div>
+  <div style="margin-top:10px;font-weight:700;font-size:.85rem">⚖️ น้ำหนักที่ผู้ป่วยส่งจากบ้าน (LINE)</div>
+  <div id="homeWeights" style="font-size:.85rem;margin-top:4px">-</div>
+</div>
+
 <!-- BP Trend Chart -->
 <div class="card" style="margin-bottom:20px;">
   <div class="card-header">📈 แนวโน้ม BP (ย้อนหลัง)</div>
@@ -99,6 +116,35 @@
 {% block extra_js %}
 <script>
 const HN = '{{ patient_hn }}';
+/* ── UF & น้ำหนัก เฉพาะราย ── */
+function loadUfCoachCard(){
+  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(HN)+'/uf-coach').then(r=>r.ok?r.json():Promise.reject()).then(d=>{
+    const t = d.tolerance || {};
+    const col = t.status==='personal' ? '#e67e22' : 'var(--fg-muted)';
+    document.getElementById('ufTol').innerHTML = '🧍 <b>เพดาน UF เฉพาะราย:</b> ' +
+      (t.status==='personal' ? `<b style="color:${col}">~${t.personal_ceiling} mL/kg/ชม.</b> (มาตรฐาน ${t.standard_ceiling})` : `ใช้มาตรฐาน ${t.standard_ceiling||13} mL/kg/ชม.`) +
+      `<br><span style="font-size:.8rem;color:var(--fg-muted)">${t.text||''}</span>` +
+      `<br><span style="font-size:.72rem;color:var(--fg-muted)">ความดันตก = SBP < 90 หรือลด ≥ 20 จากก่อนฟอก · UF rate = UF ทั้งรอบ ÷ ชั่วโมง ÷ DW · ข้อมูลประกอบ แพทย์เป็นผู้ตัดสินใจ</span>`;
+    document.getElementById('ufBands').innerHTML = (t.bands||[]).map(b=>`<span style="font-size:.75rem;padding:4px 8px;border-radius:12px;border:1px solid var(--border);background:${b.pct>=50?'rgba(231,76,60,.1)':b.pct>=25?'rgba(243,156,18,.12)':'var(--bg)'}">
+      ${b.range} mL/kg/ชม.: ความดันตก ${b.idh}/${b.n} รอบ (${b.pct}%)</span>`).join('');
+    document.getElementById('idwgPct').value = d.idwg_patient_pct != null ? d.idwg_patient_pct : '';
+    document.getElementById('idwgPct').placeholder = 'ค่าเริ่มต้น ' + d.idwg_default_pct + '%';
+    document.getElementById('idwgInfo').textContent = 'ใช้อยู่: ' + d.idwg_limit_pct + '%' + (d.idwg_limit_kg ? ` = ไม่เกิน ${d.idwg_limit_kg} กก. (DW ${d.dry_weight})` : ' (ยังไม่มี DW)');
+    const hw = d.home_weights || [];
+    document.getElementById('homeWeights').innerHTML = hw.length ? hw.map(w=>`<div>${w.at ? new Date(w.at).toLocaleString('th-TH',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}) : '-'} — <b>${w.weight.toFixed(1)}</b> กก.` +
+      (w.idwg_kg!=null ? ` (ขึ้น ${w.idwg_kg>0?'+':''}${w.idwg_kg.toFixed(1)})` : '') + (w.over ? ' <b style="color:#e67e22">เกินเกณฑ์</b>' : '') + '</div>').join('')
+      : '<span style="color:var(--fg-muted)">ยังไม่มี — ผู้ป่วยที่ผูก LINE พิมพ์ "น้ำหนัก 62.4" เพื่อส่งได้</span>';
+  }).catch(()=>{ document.getElementById('ufTol').textContent = 'โหลดข้อมูลไม่ได้'; });
+}
+function saveIdwgPct(){
+  const v = document.getElementById('idwgPct').value.trim();
+  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(HN), {method:'PUT', body: JSON.stringify({idwg_limit_pct: v === '' ? null : parseFloat(v)})})
+    .then(r=>r.json().then(d=>({ok:r.ok, d}))).then(({ok, d})=>{
+      if(!ok){ showToast(d.error || 'บันทึกไม่สำเร็จ', 'error'); return; }
+      showToast('บันทึกเกณฑ์น้ำหนักขึ้นแล้ว', 'success'); loadUfCoachCard();
+    }).catch(()=>showToast('บันทึกไม่สำเร็จ','error'));
+}
+document.addEventListener('DOMContentLoaded', loadUfCoachCard);
 
 /* Load patient info */
 (function(){

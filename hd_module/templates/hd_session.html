@@ -325,8 +325,10 @@
       </div>
       <p style="font-size:.8rem;color:var(--fg-muted);margin-top:6px;">UF Rate: <strong id="ufRate">-</strong> mL/hr | Remaining: <strong id="ufRemaining">-</strong> mL</p>
       <div id="ufWatchLine" style="font-size:.8rem;margin-top:4px;font-weight:700"></div>
-      <svg id="ufChart" viewBox="0 0 320 110" style="width:100%;max-width:520px;height:auto;margin-top:8px;display:none" aria-label="UF จริง vs แผน"></svg>
-      <div id="ufChartNote" style="font-size:.68rem;color:var(--fg-muted);display:none">เส้นประ = แผน (เส้นตรงถึงเป้า) · จุด = UF ที่บันทึก · สีส้ม = ช้ากว่าแผน</div>
+      <svg id="ufChart" viewBox="0 0 340 160" style="width:100%;max-width:520px;height:auto;margin-top:8px;display:none" aria-label="UF จริง vs แผน"></svg>
+      <div id="ufChartNote" style="font-size:.68rem;color:var(--fg-muted);display:none;line-height:1.6">
+        <span style="color:var(--success)">●</span> UF สะสม (แกนซ้าย, mL) · เส้นประเทา = แผน · <span style="color:#8e44ad">┈</span> คาดการณ์ถึงจบ ·
+        <span style="color:#e74c3c">●</span> SBP (แกนขวา, mmHg) · <span style="color:#e74c3c">▼</span>/<span style="color:#f39c12">▼</span> การแจ้งเตือน (แตะดูรายละเอียด)</div>
     </div>
   </div>
 
@@ -509,6 +511,13 @@
       <button class="btn btn-outline" onclick="exportPDF()" style="color:var(--accent);border-color:var(--accent);">📄 พิมพ์ / PDF</button>
       <a class="btn btn-outline" id="lnk360" href="#" style="display:none;text-decoration:none;">🧭 Patient 360</a>
     </div>
+    <!-- ข้อ 10: ส่งอัตโนมัติแล้วตอนจบรอบ — แพทย์แก้/เพิ่มข้อความแล้วส่งซ้ำได้ -->
+    <div style="margin-top:12px">
+      <label style="font-size:.8rem;font-weight:700">👨‍⚕️ ข้อความจากแพทย์ (แนบท้ายการ์ดที่ส่งผู้ป่วย)</label>
+      <textarea id="patientCardNote" class="form-control" rows="2" style="font-family:inherit;margin-top:4px"
+        placeholder="เช่น รอบหน้าลดน้ำดื่มลงอีกนิด น้ำหนักขึ้นเกินเกณฑ์ 2 ครั้งติด"></textarea>
+      <div style="font-size:.72rem;color:var(--fg-muted);margin-top:2px">การ์ดสรุปถูกส่งอัตโนมัติเมื่อจบรอบ · พิมพ์ข้อความแล้วกด "📱 ส่ง LINE ผู้ป่วย" เพื่อส่งการ์ดฉบับแก้ไขซ้ำ</div>
+    </div>
     <div id="lineSendStatus" style="margin-top:8px;font-size:.8rem;"></div>
   </div>
 </div>
@@ -592,6 +601,12 @@
   <div class="modal">
     <div class="modal-title">💧 บันทึก UF <span id="ufAutoBadge" style="font-size:.7rem;font-weight:600;color:var(--fg-muted);margin-left:6px">🧮 คำนวณอัตโนมัติ</span></div>
     <div id="ufPlanLine" style="font-size:.78rem;color:var(--fg-muted);margin-bottom:8px"></div>
+    <!-- ข้อ 8: ถ่ายรูปหน้าจอเครื่องฟอก → เติมค่าให้ (พยาบาลตรวจก่อนบันทึก) -->
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+      <label class="btn btn-outline" style="font-size:.85rem;padding:8px 12px;cursor:pointer;margin:0">📷 อ่านค่าจากหน้าจอเครื่อง
+        <input type="file" id="machineShot" accept="image/*" style="display:none" onchange="readMachineScreen(this)"></label>
+      <span id="machineReadStatus" style="font-size:.78rem;color:var(--fg-muted)">Nikkiso · Fresenius — ถ่ายให้เห็นตัวเลข UF ชัด ๆ</span>
+    </div>
     <div class="vital-grid">
       <div class="vital-input">
         <label>UF Removed (mL) <small style="color:var(--fg-muted)">อ่านจากเครื่อง</small></label>
@@ -812,6 +827,7 @@ function _showSero(sr){
 function onPatientSelect(){
   const hn = document.getElementById('patientSelect').value;
   if(!hn) return;
+  loadUfCoach(hn);
   const token = getHdToken();
   const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
   fetch('/hd/api/v1/patients/'+hn, {headers}).then(r=>r.ok?r.json():Promise.reject()).then(p=>{
@@ -1200,6 +1216,7 @@ function loadExistingSession(sid){
       if(d.patient_hn){
         document.getElementById('patientSelect').value = d.patient_hn;
         sessionData.hn = d.patient_hn;
+        loadUfCoach(d.patient_hn);
         try { const l = document.getElementById('lnk360'); if (l && d.patient_hn) { l.href = '/hd/patient/' + encodeURIComponent(d.patient_hn) + '/360'; l.style.display = ''; } } catch (e) {}
         loadEsaHistory();
       }
@@ -1271,6 +1288,7 @@ function loadSessionRecords(sid, headers, live){
                         type:'vital', sbp:v.sbp, dbp:v.dbp, hr:v.hr||v.heart_rate, spo2:v.spo2, temp:v.temp });
       });
       renderTimeline();
+      try{ drawUfChart(); }catch(e){}
     }).catch(()=>{});
   fetch('/hd/api/v1/sessions/'+sid+'/uf', {headers})
     .then(r=>r.ok?r.json():Promise.reject())
@@ -1300,6 +1318,7 @@ function loadSessionRecords(sid, headers, live){
         bar.style.background = pct > 90 ? 'var(--warning)' : 'var(--success)';
       }
       renderTimeline();
+      try{ drawUfChart(); }catch(e){}
     }).catch(()=>{});
 }
 
@@ -1394,6 +1413,12 @@ function showSessionHistory(d, sid, headers){
     document.querySelectorAll(`[data-tab-content-group="session"] button[onclick^="${fn}"]`).forEach(btn=>{ btn.style.display = 'none'; });
   });
   document.querySelectorAll('button[onclick^="setEsaGiven"]').forEach(btn=>{ btn.disabled = true; });
+  /* ข้อ 10: รอบที่จบแล้ว — ยังดู/แก้ข้อความ และส่งการ์ดสรุปให้ผู้ป่วยซ้ำได้ */
+  if(done){
+    const sc = document.getElementById('sessionSummaryCard');
+    if(sc){ sc.style.display = 'block'; sc.querySelectorAll('textarea,button').forEach(el=>{ el.disabled = false; el.style.display = ''; });
+      const sct = document.getElementById('summaryContent'); if(sct && !sct.innerHTML) sct.innerHTML = '<div style="font-size:.8rem;color:var(--fg-muted)">ดูข้อความที่ผู้ป่วยได้รับ: กด 👁</div>'; }
+  }
   document.getElementById('cancelBtn').style.display = 'none';
   switchTab('session', 'intra');
 }
@@ -1413,7 +1438,7 @@ function saveIntraVital(){
 
   const entry = {
     time: new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}),
-    type: 'vital', sbp, dbp, hr,
+    ts: Date.now(), type: 'vital', sbp, dbp, hr, spo2, temp,
   };
 
   /* Validate — ต้องมีอย่างน้อย SBP */
@@ -1422,6 +1447,7 @@ function saveIntraVital(){
   /* Push to timeline FIRST (always show locally) */
   timeline.push(entry);
   renderTimeline();
+  try{ drawUfChart(); }catch(e){}
   closeModal('vitalModal');
   showToast('บันทึก Vital Signs สำเร็จ','success');
   ['modalSbp','modalDbp','modalHr','modalTemp','modalSpo2'].forEach(id=>{document.getElementById(id).value='';});
@@ -1558,6 +1584,8 @@ function loadSessionAlerts(){
   if(_orderTyping()){ if(!_alertsPending){ _alertsPending = true; setTimeout(()=>{ _alertsPending = false; loadSessionAlerts(); }, 15000); } return; }
   hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/alerts').then(r=>r.json()).then(d=>{
     const list=d.alerts||[]; const panel=document.getElementById('alertsPanel');
+    _alertMarks = list.map(a=>({ts:_tsOf(a.created_at), sev:a.severity, title:a.title||'', order:a.physician_order||''})).filter(m=>m.ts);
+    try{ drawUfChart(); }catch(e){}
     if(!list.length){ panel.style.display='none'; _openAlertCount = 0; return; }
     panel.style.display='block';
     const open=list.filter(a=>!a.acknowledged).length;
@@ -1612,35 +1640,65 @@ setInterval(loadSessionAlerts, 60000);
 
 /* ── 📈 UF จริง vs แผน (ข้อ 2) ── */
 let _ufRecords = [];
+/* ข้อ 3 (17 พ.ย. 2569): UF + SBP + การแจ้งเตือน บนแกนเวลาเดียวกัน
+   ดูได้ทันทีว่าความดันเริ่มลงตอน UF เท่าไร และแพทย์สั่งอะไรเมื่อไร */
+let _alertMarks = [];
 function drawUfChart(){
   const svg = document.getElementById('ufChart'), note = document.getElementById('ufChartNote'); if(!svg) return;
   const goal = parseInt(document.getElementById('ufGoal').textContent) || sessionData.uf_goal || 0;
-  const dur = parseFloat(sessionData.duration_hours) || 4;
+  const dur = (parseFloat(sessionData.duration_hours) || 4) + ((typeof _ufAdj!=='undefined' && _ufAdj.extend) ? _ufAdj.extend/60 : 0);
   const st = sessionData.start_time ? new Date(sessionData.start_time).getTime() : null;
   if(!goal || !st){ svg.style.display='none'; note.style.display='none'; return; }
-  const W=320, H=110, L=34, R=8, T=8, B=22, pw=W-L-R, ph=H-T-B;
+  const W=340, H=160, L=36, R=34, T=14, B=22, pw=W-L-R, ph=H-T-B;
   const maxY = Math.max(goal, ...(_ufRecords.map(r=>r.removed))) * 1.05;
   const x = h => L + Math.min(1, Math.max(0, h/dur)) * pw, y = v => T + ph - (v/maxY)*ph;
+  const S0 = 60, S1 = 200, ys = v => T + ph - ((Math.min(S1, Math.max(S0, v)) - S0)/(S1-S0))*ph;
+  const hOf = ts => (ts - st)/3600000;
   const nowH = Math.min(dur, Math.max(0, (Date.now()-st)/3600000));
-  let g = `<line x1="${L}" y1="${y(0)}" x2="${W-R}" y2="${y(0)}" stroke="var(--border)"/><line x1="${L}" y1="${T}" x2="${L}" y2="${y(0)}" stroke="var(--border)"/>`;
+  let g = `<line x1="${L}" y1="${y(0)}" x2="${W-R}" y2="${y(0)}" stroke="var(--border)"/><line x1="${L}" y1="${T}" x2="${L}" y2="${y(0)}" stroke="var(--border)"/><line x1="${W-R}" y1="${T}" x2="${W-R}" y2="${y(0)}" stroke="var(--border)"/>`;
+  /* แถบ SBP < 90 */
+  g += `<rect x="${L}" y="${ys(90)}" width="${pw}" height="${ys(S0)-ys(90)}" fill="#e74c3c" opacity=".06"/>`;
+  g += `<line x1="${L}" y1="${ys(90)}" x2="${W-R}" y2="${ys(90)}" stroke="#e74c3c" stroke-dasharray="1 3" opacity=".6"/>`;
+  [90,120,160,200].forEach(v=>{ g += `<text x="${W-R+3}" y="${ys(v)+3}" font-size="8" fill="#e74c3c">${v}</text>`; });
   g += `<line x1="${x(0)}" y1="${y(0)}" x2="${x(dur)}" y2="${y(goal)}" stroke="var(--fg-muted)" stroke-dasharray="4 3" stroke-width="1.5"/>`;
-  g += `<text x="${W-R}" y="${y(goal)-3}" font-size="9" text-anchor="end" fill="var(--fg-muted)">เป้า ${goal} mL</text>`;
+  g += `<text x="${W-R-2}" y="${y(goal)-3}" font-size="9" text-anchor="end" fill="var(--fg-muted)">เป้า ${goal}</text>`;
   g += `<line x1="${x(nowH)}" y1="${T}" x2="${x(nowH)}" y2="${y(0)}" stroke="var(--accent)" stroke-width="1" opacity=".5"/>`;
-  for(let h=0; h<=dur; h+=1){ g += `<text x="${x(h)}" y="${H-6}" font-size="9" text-anchor="middle" fill="var(--fg-muted)">${h} ชม.</text>`; }
+  for(let h=0; h<=dur+0.01; h+=1){ g += `<text x="${x(h)}" y="${H-6}" font-size="9" text-anchor="middle" fill="var(--fg-muted)">${h} ชม.</text>`; }
   g += `<text x="${L-4}" y="${T+8}" font-size="9" text-anchor="end" fill="var(--fg-muted)">${Math.round(maxY)}</text>`;
-  /* UF เป็นค่าสะสมของเครื่อง ไม่ลดลง → แสดงค่าสูงสุดสะสม (ค่าที่ต่ำกว่าก่อนหน้า = พิมพ์ผิด/บันทึกแค่ UFR) */
+  g += `<text x="${L-4}" y="${y(0)}" font-size="9" text-anchor="end" fill="var(--fg-muted)">0</text>`;
+  /* UF เป็นค่าสะสมของเครื่อง ไม่ลดลง → แสดงค่าสูงสุดสะสม */
   let _mx = 0;
   const pts = _ufRecords.map(r=>({h:(new Date(r.t).getTime()-st)/3600000, v:r.removed})).filter(p=>p.h>=0 && p.v>0).sort((a,b)=>a.h-b.h)
     .map(p=>{ _mx = Math.max(_mx, p.v); return {h:p.h, v:_mx}; });
-  if(_ufAdj.target && _ufAdj.target < goal){
+  if(typeof _ufAdj!=='undefined' && _ufAdj.target && _ufAdj.target < goal){
     g += `<line x1="${x(0)}" y1="${y(_ufAdj.target)}" x2="${x(dur)}" y2="${y(_ufAdj.target)}" stroke="#e67e22" stroke-dasharray="2 3" stroke-width="1.2"/>`;
     g += `<text x="${L+4}" y="${y(_ufAdj.target)-3}" font-size="9" fill="#e67e22">เป้าบนเครื่อง ${_ufAdj.target}</text>`;
   }
+  /* SBP */
+  const sbp = (typeof timeline!=='undefined' ? timeline : []).filter(e=>e.type==='vital' && e.sbp && e.ts && e.ts < 9e14)
+    .map(e=>({h:hOf(e.ts), v:+e.sbp, d:e.dbp, p:e.phase})).filter(p=>p.h>=-0.5 && p.h<=dur+1).sort((a,b)=>a.h-b.h);
+  if(sbp.length){
+    g += `<polyline fill="none" stroke="#e74c3c" stroke-width="1.4" opacity=".75" points="${sbp.map(p=>`${x(Math.max(0,p.h))},${ys(p.v)}`).join(' ')}"/>`;
+    sbp.forEach(p=>{ g += `<circle cx="${x(Math.max(0,p.h))}" cy="${ys(p.v)}" r="2.8" fill="${p.v<90?'#c0392b':'#e74c3c'}"><title>${p.p==='pre'?'ก่อนฟอก ':''}BP ${p.v}/${p.d??'-'} (${Math.round(Math.max(0,p.h)*60)} นาที)</title></circle>`; });
+  }
   if(pts.length){
     const poly = [{h:0,v:0}].concat(pts).map(p=>`${x(p.h)},${y(p.v)}`).join(' ');
-    g += `<polyline fill="none" stroke="var(--success)" stroke-width="2" points="${poly}"/>`;
-    pts.forEach(p=>{ const exp = goal*p.h/dur; const behind = p.v < exp - Math.max(150, goal*0.1); g += `<circle cx="${x(p.h)}" cy="${y(p.v)}" r="3.5" fill="${behind?'#e67e22':'var(--success)'}"><title>${Math.round(p.h*60)} นาที: ${p.v} mL (แผน ${Math.round(exp)})</title></circle>`; });
+    g += `<polyline fill="none" stroke="var(--success)" stroke-width="2.2" points="${poly}"/>`;
+    pts.forEach(p=>{ const exp = goal*p.h/dur; const behind = p.v < exp - Math.max(150, goal*0.1); g += `<circle cx="${x(p.h)}" cy="${y(p.v)}" r="3.5" fill="${behind?'#e67e22':'var(--success)'}"><title>${Math.round(p.h*60)} นาที: UF ${p.v} mL (แผน ${Math.round(exp)})</title></circle>`; });
+    /* ข้อ 2: เส้นคาดการณ์จากตอนนี้ถึงจบ ด้วยอัตราล่าสุดบนเครื่อง */
+    const last = pts[pts.length-1];
+    const rate = parseFloat(document.getElementById('ufRate').textContent) || 0;
+    if(rate > 0 && nowH < dur){
+      const fin = last.v + rate*(dur - Math.max(last.h, nowH)) + rate*Math.max(0, nowH-last.h);
+      g += `<line x1="${x(last.h)}" y1="${y(last.v)}" x2="${x(dur)}" y2="${y(Math.min(fin, maxY))}" stroke="#8e44ad" stroke-dasharray="3 3" stroke-width="1.6"/>`;
+      g += `<text x="${x(dur)-2}" y="${y(Math.min(fin, maxY))+11}" font-size="9" text-anchor="end" fill="#8e44ad">≈${Math.round(fin)}</text>`;
+    }
   }
+  /* การแจ้งเตือน + คำสั่งแพทย์ */
+  _alertMarks.forEach(m=>{ const h = hOf(m.ts); if(h < 0 || h > dur+0.5) return;
+    const c = m.sev==='critical' ? '#e74c3c' : '#f39c12', cx = x(h);
+    g += `<path d="M${cx-4},${T-10} L${cx+4},${T-10} L${cx},${T-3} Z" fill="${c}"><title>${(m.title+(m.order?' → สั่ง: '+m.order:'')).replace(/[<>&"]/g,'')} (${Math.round(h*60)} นาที)</title></path>`;
+    g += `<line x1="${cx}" y1="${T-3}" x2="${cx}" y2="${y(0)}" stroke="${c}" stroke-width=".6" opacity=".35"/>`; });
   svg.innerHTML = g; svg.style.display='block'; note.style.display='block';
 }
 function showUfWatch(w){
@@ -1648,11 +1706,43 @@ function showUfWatch(w){
   if(!w.flag || w.flag==='no_goal'){ el.textContent=''; return; }
   const col = w.flag==='high_rate' ? 'var(--danger)' : (w.flag==='ok' ? 'var(--success)' : '#e67e22');
   el.style.color = col; el.textContent = `${w.flag_th}${w.text?' — '+w.text:''}`;
+  /* ข้อ 2: คาดการณ์ตอนจบรอบ */
+  let pj = document.getElementById('ufProjection');
+  if(!pj){ pj = document.createElement('div'); pj.id = 'ufProjection'; pj.style.cssText = 'font-size:.8rem;margin-top:4px;font-weight:600'; el.after(pj); }
+  if(w.projection_text){
+    const d = w.projected_vs_dw;
+    pj.style.color = d != null && d > 0.5 ? '#e67e22' : 'var(--fg-muted)';
+    pj.textContent = '🔮 ' + w.projection_text;
+  } else pj.textContent = '';
 }
 /* ── 🧮 UF Auto-Calc (14 พ.ย. 2569) ──
    รู้: เป้า UF, น้ำหนักแห้ง, เวลาเริ่ม, ชั่วโมงที่สั่ง → คำนวณให้:
    ควรดึงได้แล้วเท่าไรตามแผน (เส้นตรง), เหลือเท่าไร, อัตราที่ต้องใช้ต่อจากนี้ให้ครบตามเวลา,
    เทียบเพดาน 13 mL/kg/h (ระวัง >10), ช้า/เร็วกว่าแผน, ทางเลือกยืดเวลา/ลดเป้า — เป็นข้อเสนอ พยาบาล/แพทย์ตัดสินใจ */
+/* ข้อ 1 + 9: ข้อมูลเฉพาะราย (เพดาน UF / เกณฑ์น้ำหนักขึ้น) */
+let _ufCoach = null;
+function loadUfCoach(hn){
+  if(!hn) return;
+  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(hn)+'/uf-coach').then(r=>r.ok?r.json():null).then(d=>{ _ufCoach = d; }).catch(()=>{});
+}
+/* ข้อ 8: รูปหน้าจอเครื่องฟอก → เติมค่า (ไม่บันทึกเอง) */
+function readMachineScreen(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  const st = document.getElementById('machineReadStatus');
+  st.textContent = '⏳ กำลังอ่านตัวเลขจากรูป...'; st.style.color = 'var(--fg-muted)';
+  const fd = new FormData(); fd.append('image', f); if(sessionData.session_id) fd.append('session_id', sessionData.session_id);
+  hdFetch('/hd/api/v1/machine-screen/read', {method:'POST', body: fd}).then(r=>r.json()).then(d=>{
+    inp.value = '';
+    const v = (d && d.values) || {}; const got = [];
+    if(v.uf_removed != null){ document.getElementById('modalUfRemoved').value = v.uf_removed; got.push('UF '+v.uf_removed+' mL'); ufAutoCalc('removed'); }
+    if(v.uf_rate != null){ document.getElementById('modalUfRate').value = v.uf_rate; _ufManual.rate = true; got.push('อัตรา '+v.uf_rate+' mL/ชม.'); ufAutoCalc('rate'); }
+    if(v.uf_goal != null) got.push('เป้าบนเครื่อง '+v.uf_goal);
+    if(v.time_left_min != null) got.push('เหลือ '+v.time_left_min+' นาที');
+    if(v.sbp != null) got.push('BP '+v.sbp+'/'+(v.dbp??'-'));
+    if(!got.length){ st.textContent = '⚠️ อ่านตัวเลขไม่ได้ — ถ่ายใหม่ให้ตรงและชัด หรือกรอกเอง'; st.style.color = 'var(--danger)'; return; }
+    st.innerHTML = '✅ อ่านได้: <b>' + got.join(' · ') + '</b> — <u>ตรวจกับหน้าจอก่อนกดบันทึก</u>'; st.style.color = 'var(--success)';
+  }).catch(()=>{ inp.value=''; st.textContent = '❌ อ่านรูปไม่สำเร็จ — กรอกเอง'; st.style.color = 'var(--danger)'; });
+}
 let _ufManual = {remaining:false, rate:false};
 let _ufAdj = {target:null, extend:0};      /* เป้า/เวลาที่ตั้งบนเครื่องแล้ว (บันทึกไว้ใน UF record) */
 let _ufPending = {target:null, extend:0};  /* ที่เลือกในหน้าต่างนี้ ยังไม่บันทึก */
@@ -1704,6 +1794,7 @@ function ufAutoCalc(src){
   const diff = removed - expected;
   const kg = c.dw ? (needRate != null ? needRate / c.dw : null) : null;
   const lim = {max:13, caution:10};
+  const pcl = (_ufCoach && _ufCoach.tolerance && _ufCoach.tolerance.personal_ceiling) || null;   /* ข้อ 1 */
   let lvl = 'ok', col = 'var(--success)';
   if(kg != null && kg > lim.max){ lvl='high'; col='var(--danger)'; } else if(kg != null && kg > lim.caution){ lvl='caution'; col='#e67e22'; }
   const pct = Math.round(removed / c.goal * 100);
@@ -1713,6 +1804,12 @@ function ufAutoCalc(src){
   if(needRate != null && c.left > 0.05){
     h += `<br>เหลือ <b>${remaining}</b> mL ใน ${Math.round(c.left*60)} นาที → ต้องใช้ <b style="color:${col}">${needRate} mL/ชม.</b>` + (kg != null ? ` = <b style="color:${col}">${kg.toFixed(1)} mL/kg/ชม.</b> ${lvl==='high'?'⛔ เกินเพดาน 13 (เสี่ยง IDH/ตะคริว)':(lvl==='caution'?'⚠️ ระวัง (10–13)':'✅ ในเกณฑ์')}` : ' (ไม่มี DW — คำนวณต่อ kg ไม่ได้)');
   } else if(c.left <= 0.05){ h += `<br>หมดเวลาตามแผนแล้ว · ${remaining>0?`ยังเหลือ ${remaining} mL`:'ครบเป้า ✅'}`; }
+  /* ข้อ 1: เพดานเฉพาะรายจากประวัติ (ข้อมูลประกอบ แพทย์ตัดสินใจ) */
+  if(pcl && kg != null && kg > pcl && lvl !== 'high'){
+    h += `<br><b style="color:#e67e22">🧍 สูงกว่าเพดานเฉพาะรายของผู้ป่วยคนนี้ (~${pcl} mL/kg/ชม.)</b>`;
+    if(lvl === 'ok'){ lvl = 'caution'; col = '#e67e22'; }
+  }
+  if(_ufCoach && _ufCoach.tolerance && _ufCoach.tolerance.text) h += `<br><span style="font-size:.72rem;color:var(--fg-muted)">🧍 ${_ufCoach.tolerance.text}</span>`;
   info.innerHTML = h; info.style.borderLeft = `4px solid ${col}`;
   // ทางเลือก (เป็นข้อเสนอ) เมื่ออัตราที่ต้องใช้สูงเกิน
   let o = '';
@@ -2134,11 +2231,12 @@ function showSessionSummary(s){
 }
 
 function sendSummaryToPatient(){
-  if(!_sessionSummary || !sessionData.session_id) return;
+  if(!sessionData.session_id) return;
   const el = document.getElementById('lineSendStatus');
   el.textContent = '📤 กำลังส่ง LINE ให้ผู้ป่วย...';
+  const note = (document.getElementById('patientCardNote')||{}).value || '';
   hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/send-summary',{
-    method:'POST', body:JSON.stringify({target:'patient'})
+    method:'POST', body:JSON.stringify({target:'patient', note: note.trim()})
   }).then(r=>r.json()).then(d=>{
     if(d.sent) el.innerHTML = '✅ ส่ง LINE ให้ผู้ป่วยสำเร็จ';
     else el.innerHTML = '⚠️ '+(d.message||'ผู้ป่วยยังไม่ได้ผูก LINE — ส่งไม่ได้');

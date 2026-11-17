@@ -284,6 +284,12 @@ def water_ro_page():
     return render_template("hd_water_ro.html")
 
 
+@hd_web.route("/radar")
+def hd_radar_page():
+    """ข้อ 5 (17 พ.ย. 2569): เรดาร์หัวหน้าเวร — ทุกเตียงเรียงตามความเร่งด่วน"""
+    return render_template("hd_radar.html")
+
+
 @hd_web.route("/tv")
 def hd_tv_page():
     """Nurse Station TV mode — standalone, dark, auto-refresh, no nav (ว้าว #6)."""
@@ -3366,6 +3372,8 @@ def send_session_summary(session_id):
         return jsonify({"sent": False, "message": "LINE Push ไม่พร้อมใช้งาน"})
 
     if target == "patient":
+        if data.get("note"):
+            summary["doctor_note"] = str(data["note"]).strip()[:500]
         r = send_patient_summary(session_id, summary=summary, trigger="manual")
         return jsonify(r), (200 if r.get("sent") or r.get("reason") else 500)
 
@@ -3453,6 +3461,41 @@ def _resolve_patient_line_id(hn):
         return ""
 
 
+def _add_card_extras(summary):
+    """ข้อ 10: น้ำหนักขึ้นระหว่างรอบเทียบเกณฑ์ (รายคน/⚙️/4%) + ข้อความจากแพทย์ (⚙️ patient_card_note)"""
+    import os
+    try:
+        import psycopg2
+        from .uf_coach import idwg, limit_pct
+        conn = psycopg2.connect(os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", ""), connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""SELECT p.idwg_limit_pct, s.pre_weight,
+                                      (SELECT s2.post_weight FROM hd_sessions s2 WHERE s2.patient_id = s.patient_id
+                                         AND s2.status = 'completed' AND s2.post_weight IS NOT NULL
+                                         AND (s2.session_date < s.session_date OR (s2.session_date = s.session_date AND s2.id < s.id))
+                                       ORDER BY s2.session_date DESC, s2.id DESC LIMIT 1),
+                                      p.dry_weight
+                               FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                               WHERE s.id = %s""", (summary.get("session_id"),))
+                r = cur.fetchone()
+        finally:
+            conn.close()
+        if r:
+            pct = limit_pct(r[0], get_setting_value("idwg_limit_pct", ""))
+            res = idwg(r[1], r[2], r[3], pct) if (r[1] and r[2] and r[3]) else None
+            summary["idwg_limit_pct"] = pct
+            if res:
+                summary["idwg"] = res
+    except Exception as e:
+        logger.warning("card extras: %s", e)
+    note = (get_setting_value("patient_card_note", "") or "").strip()
+    if summary.get("doctor_note"):
+        note = (summary["doctor_note"] + ("\n" + note if note else "")).strip()
+    summary["card_note"] = note[:600]
+    return summary
+
+
 def send_patient_summary(session_id, summary=None, trigger="auto"):
     """ว้าว #7 — Flex summary to the patient's own LINE. Returns {sent, reason?}.
     Never raises; nothing is written except the audit log."""
@@ -3496,6 +3539,7 @@ def send_patient_summary(session_id, summary=None, trigger="auto"):
             conn.close()
     except Exception as e:
         logger.warning("patient summary enrich: %s", e)
+    _add_card_extras(summary)
     flex = build_flex(summary, history)
     push_multi = current_app.config.get("LINE_PUSH_MESSAGES_FN")
     push_fn = current_app.config.get("LINE_PUSH_FN")
@@ -3534,7 +3578,9 @@ def patient_summary_preview(session_id):
     except Exception as e:
         logger.warning("patient summary preview: %s", e)
     linked = bool(_resolve_patient_line_id(summary.get("patient_hn") or ""))
+    _add_card_extras(summary)
     return jsonify({"text": build_text(summary, history), "linked": linked,
+                    "card_note": summary.get("card_note") or "",
                     "auto": (get_setting_value("patient_summary_auto", "on") or "on").lower() != "off"})
 
 
@@ -4783,6 +4829,103 @@ def import_patient_roster():
     return jsonify(summary)
 
 
+# ── 17 พ.ย. 2569: UF coach (ข้อ 1, 9) + อ่านหน้าจอเครื่องฟอก (ข้อ 8) ──
+
+@hd_bp.route("/patients/<hn>/uf-coach", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def patient_uf_coach(hn):
+    """เพดาน UF เฉพาะราย + เกณฑ์น้ำหนักขึ้นระหว่างรอบ + น้ำหนักที่ผู้ป่วยส่งจากบ้าน (read-only)"""
+    import os
+    import psycopg2
+    from .uf_coach import (limit_pct, patient_context, recent_home_weights, sessions_for_tolerance,
+                           tolerance_from_sessions)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        ceiling = float(get_setting_value("uf_rate_max", "13") or 13)
+    except ValueError:
+        ceiling = 13.0
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            pc = patient_context(cur, hn)
+            if not pc:
+                return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+            tol = tolerance_from_sessions(sessions_for_tolerance(cur, hn), ceiling=ceiling)
+            setting_pct = get_setting_value("idwg_limit_pct", "")
+            pct = limit_pct(pc["patient_pct"], setting_pct)
+            home = recent_home_weights(cur, hn)
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"hn": hn, "tolerance": tol, "idwg_limit_pct": pct, "idwg_patient_pct": pc["patient_pct"],
+                    "idwg_default_pct": limit_pct(None, setting_pct), "dry_weight": pc["dw"],
+                    "idwg_limit_kg": round(pc["dw"] * pct / 100, 1) if pc["dw"] else None,
+                    "last_post_weight": pc["prev_post"], "home_weights": home})
+
+
+def _ocr_words(img_bytes):
+    """รูป → [{t,x,y,w,h}] : Google Vision (มีตำแหน่งคำ) → สำรอง Tesseract image_to_data
+    รูปหน้าจอเครื่องไม่ถูกเก็บ — ประมวลผลในหน่วยความจำแล้วทิ้ง"""
+    words = []
+    try:
+        from google.cloud import vision
+        client = vision.ImageAnnotatorClient()
+        resp = client.document_text_detection(image=vision.Image(content=img_bytes))
+        if not resp.error.message and resp.full_text_annotation:
+            for page in resp.full_text_annotation.pages:
+                for block in page.blocks:
+                    for para in block.paragraphs:
+                        for w in para.words:
+                            t = "".join(sym.text for sym in w.symbols)
+                            xs = [v.x for v in w.bounding_box.vertices]
+                            ys = [v.y for v in w.bounding_box.vertices]
+                            words.append({"t": t, "x": min(xs), "y": min(ys), "w": max(xs) - min(xs), "h": max(ys) - min(ys)})
+            if words:
+                return words, "vision"
+    except Exception as e:
+        logger.info("machine-screen vision: %s", type(e).__name__)
+    try:
+        import io
+        import pytesseract
+        from PIL import Image, ImageOps
+        img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes))).convert("L")
+        if img.width > 1600:
+            img = img.resize((1600, int(img.height * 1600 / img.width)))
+        d = pytesseract.image_to_data(img, config="--psm 11", output_type=pytesseract.Output.DICT, timeout=25)
+        for i, t in enumerate(d["text"]):
+            if t and t.strip():
+                words.append({"t": t.strip(), "x": d["left"][i], "y": d["top"][i], "w": d["width"][i], "h": d["height"][i]})
+    except Exception as e:
+        logger.info("machine-screen tesseract: %s", type(e).__name__)
+    return words, "tesseract"
+
+
+@hd_bp.route("/machine-screen/read", methods=["POST"])
+@require_role("physician", "nurse")
+def read_machine_screen():
+    """ข้อ 8: รูปหน้าจอเครื่องฟอก → UF removed / UF rate / UF goal / เวลาที่เหลือ / BP
+    ผลเป็นค่าแนะนำให้พยาบาลตรวจก่อนกดบันทึกเสมอ — ไม่บันทึกอะไรเอง"""
+    from .uf_coach import parse_machine_text, parse_machine_words
+    f = request.files.get("image")
+    if not f:
+        return jsonify({"error": "ไม่พบรูป"}), 400
+    data = f.read()
+    if not data or len(data) > 12 * 1024 * 1024:
+        return jsonify({"error": "รูปว่างหรือใหญ่เกิน 12 MB"}), 400
+    words, engine = _ocr_words(data)
+    vals = parse_machine_words(words)
+    if not any(k in vals for k in ("uf_removed", "uf_rate", "uf_goal")):
+        alt = parse_machine_text(" ".join(w["t"] for w in words))
+        vals = {**alt, **{k: v for k, v in vals.items() if k != "raw"}}
+    found = [k for k in ("uf_removed", "uf_rate", "uf_goal", "time_left_min", "sbp") if k in vals]
+    log_action(user_id=g.get("hd_user_id"), action="machine_screen.read", resource_type="session",
+               resource_id=_safe_int(request.form.get("session_id")),
+               new_values={"engine": engine, "found": found}, ip_address=request.remote_addr or "")
+    return jsonify({"values": vals, "engine": engine, "found": found, "words": len(words)})
+
+
 @hd_bp.route("/patients/<hn>", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def get_patient(hn):
@@ -5660,6 +5803,10 @@ def update_settings():
         "esa_step_pct", "esa_min_interval_days", "esa_resume_below",
         "monthly_lab_summary",       # push สรุปผลเลือดรายเดือนให้ผู้ป่วย (on/off)
         "weekly_health_tips",        # push tip สุขภาพไตรายสัปดาห์ให้ผู้ป่วย (on/off)
+        "idwg_limit_pct",            # 17 พ.ย. 2569: เกณฑ์น้ำหนักขึ้นระหว่างรอบ (% DW) ค่าเริ่มต้น 4
+        "patient_weight_coach",      # ตอบผู้ป่วยที่ส่ง "น้ำหนัก xx" ทาง LINE (on/off)
+        "tpl_weight_reply",          # ข้อความตอบน้ำหนัก (แก้ได้ มีตัวแปร {weight} {gain} ...)
+        "patient_card_note",         # ข้อความจากแพทย์ต่อท้ายการ์ดสรุปหลังฟอกทุกใบ
     ]
     if key not in allowed_keys:
         return jsonify({"error": f"Invalid setting key: {key}"}), 400
@@ -6029,16 +6176,23 @@ def update_patient(hn):
         return jsonify({"error": "No data"}), 400
 
     allowed = {"patient_name", "schedule_days", "vascular_access", "dry_weight",
-               "esa_drug", "esa_dose", "primary_diagnosis", "needs_review", "is_active", "default_shift"}
+               "esa_drug", "esa_dose", "primary_diagnosis", "needs_review", "is_active", "default_shift",
+               "idwg_limit_pct"}
+    if "idwg_limit_pct" in data and data["idwg_limit_pct"] not in ("", None):
+        try:
+            if not (1.0 <= float(data["idwg_limit_pct"]) <= 10.0):
+                raise ValueError
+        except (TypeError, ValueError):
+            return jsonify({"error": "เกณฑ์น้ำหนักขึ้นต้องอยู่ระหว่าง 1–10 % ของ DW"}), 400
     if "default_shift" in data and data["default_shift"] not in ("", None, "morning", "afternoon", "evening"):
         return jsonify({"error": "default_shift ต้องเป็น morning / afternoon / evening"}), 400
     updates = []
     params = []
     for key in allowed:
         if key in data:
-            if key == "dry_weight":
+            if key in ("dry_weight", "idwg_limit_pct"):
                 updates.append(f"{key} = %s")
-                params.append(float(data[key]) if data[key] else None)
+                params.append(float(data[key]) if data[key] not in ("", None) else None)
             elif key in ("needs_review", "is_active"):
                 updates.append(f"{key} = %s")
                 params.append(bool(data[key]))

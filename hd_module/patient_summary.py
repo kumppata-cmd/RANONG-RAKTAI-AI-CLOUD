@@ -50,7 +50,12 @@ def gentle_notes(summary):
     n = []
     pre, post, dw = summary.get("pre_weight"), summary.get("post_weight"), summary.get("dry_weight")
     try:
-        if pre and dw and (pre - dw) / dw * 100 > 3.5:
+        iw = summary.get("idwg")
+        if iw:   # 17 พ.ย. 2569: เทียบน้ำหนักหลังฟอกครั้งก่อน กับเกณฑ์รายคน (ค่าเริ่มต้น 4% DW)
+            if iw["over"]:
+                n.append(f"น้ำหนักขึ้นระหว่างรอบ {iw['idwg_kg']:.1f} กก. เกินเกณฑ์ {iw['limit_kg']:.1f} กก. "
+                         "รอบหน้าลองจำกัดน้ำดื่มและอาหารเค็มให้มากขึ้น")
+        elif pre and dw and (pre - dw) / dw * 100 > 3.5:
             n.append("น้ำหนักก่อนฟอกครั้งนี้ขึ้นจากน้ำหนักแห้งค่อนข้างมาก ลองจำกัดน้ำดื่มและอาหารเค็มระหว่างรอบ")
         if post and dw and post > dw + 0.5:
             n.append("หลังฟอกยังมีน้ำเหลืออยู่บ้าง สังเกตอาการบวมหรือหายใจเหนื่อย")
@@ -72,6 +77,9 @@ def build_text(summary, history=None, today=None):
         L.append(f"⚖️ น้ำหนัก {s['pre_weight']:.1f} → {s['post_weight']:.1f} kg" + (f" (น้ำหนักแห้ง {s['dry_weight']:.1f})" if s.get("dry_weight") else ""))
     if s.get("actual_uf"):
         L.append(f"💧 ดึงน้ำออก {s['actual_uf'] / 1000:.1f} ลิตร")
+    if s.get("idwg"):
+        iw = s["idwg"]
+        L.append(f"📈 น้ำหนักขึ้นระหว่างรอบ {iw['idwg_kg']:+.1f} กก. (เกณฑ์ ≤ {iw['limit_kg']:.1f} กก.) {'🟠 เกิน' if iw['over'] else '🟢 ผ่าน'}")
     if s.get("bp_pre") or s.get("bp_post"):
         L.append(f"❤️ ความดัน {s.get('bp_pre') or '-'} → {s.get('bp_post') or '-'}")
     L.append(f"⏱ ฟอก {s.get('duration_hours', 4)} ชั่วโมง")
@@ -80,6 +88,8 @@ def build_text(summary, history=None, today=None):
     L.append("━━━━━━━━━━━━")
     for n in gentle_notes(s):
         L.append(f"💡 {n}")
+    if s.get("card_note"):
+        L.append(f"👨‍⚕️ จากแพทย์: {s['card_note']}")
     nxt = next_schedule_day(s.get("schedule_days"), today)
     if nxt:
         L.append(f"📅 นัดครั้งถัดไป วัน{DAY_TH[nxt.weekday()]}ที่ {_d(nxt)}")
@@ -126,6 +136,9 @@ def build_flex(summary, history=None, today=None):
         rows.append(_row("น้ำหนักแห้ง", f"{s['dry_weight']:.1f} kg"))
     if s.get("actual_uf"):
         rows.append(_row("ดึงน้ำออก", f"{s['actual_uf'] / 1000:.1f} ลิตร", True))
+    if s.get("idwg"):
+        iw = s["idwg"]
+        rows.append(_row("น้ำหนักขึ้นระหว่างรอบ", f"{iw['idwg_kg']:+.1f} กก. ({'เกิน' if iw['over'] else 'ผ่าน'}เกณฑ์ {iw['limit_kg']:.1f})", True))
     if s.get("bp_pre") or s.get("bp_post"):
         rows.append(_row("ความดัน ก่อน → หลัง", f"{s.get('bp_pre') or '-'} → {s.get('bp_post') or '-'}"))
     rows.append(_row("เวลาฟอก", f"{s.get('duration_hours', 4)} ชั่วโมง"))
@@ -141,6 +154,11 @@ def build_flex(summary, history=None, today=None):
     body.append({"type": "separator", "margin": "lg"})
     for n in gentle_notes(s):
         body.append({"type": "text", "text": f"💡 {n}", "size": "xs", "wrap": True, "margin": "sm", "color": "#334155"})
+    if s.get("card_note"):
+        body.append({"type": "box", "layout": "vertical", "margin": "md", "paddingAll": "8px", "backgroundColor": "#ECFDF5",
+                     "cornerRadius": "6px", "contents": [
+                         {"type": "text", "text": "👨‍⚕️ จากแพทย์", "size": "xs", "weight": "bold", "color": "#047857"},
+                         {"type": "text", "text": s["card_note"][:500], "size": "xs", "wrap": True, "color": "#065F46"}]})
     nxt = next_schedule_day(s.get("schedule_days"), today)
     footer = []
     if nxt:

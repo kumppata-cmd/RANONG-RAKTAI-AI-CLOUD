@@ -179,6 +179,28 @@
   </div>
 </div>
 
+<!-- 17 พ.ย. 2569: น้ำหนักขึ้นระหว่างรอบ + โค้ชน้ำหนักทาง LINE + ข้อความจากแพทย์ (ข้อ 9, 10) -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>⚖️ น้ำหนักขึ้นระหว่างรอบ · โค้ชน้ำหนักทาง LINE</span>
+    <button class="btn btn-primary save-btn" onclick="['idwg_limit_pct','patient_weight_coach','tpl_weight_reply','patient_card_note'].forEach(saveSetting)">💾 บันทึกทั้งหมด</button>
+  </div>
+  <div class="grid-2" style="margin-top:12px;">
+    <div class="form-group"><label class="form-label">เกณฑ์น้ำหนักขึ้นระหว่างรอบ (% ของ DW) — default 4 · ปรับรายคนได้ที่หน้าผู้ป่วย</label>
+      <input type="number" step="0.5" min="1" max="10" class="form-control" id="setting_idwg_limit_pct" placeholder="4"><div class="setting-status" id="status_idwg_limit_pct"></div></div>
+    <div class="form-group"><label class="form-label">ตอบผู้ป่วยที่พิมพ์ "น้ำหนัก 62.4" ทาง LINE</label>
+      <select class="form-control" id="setting_patient_weight_coach"><option value="on">เปิด — ตอบทันที + บันทึกน้ำหนัก (เกินเกณฑ์ ≥1 กก. แจ้งกลุ่มพยาบาล)</option><option value="off">ปิด</option></select>
+      <div class="setting-status" id="status_patient_weight_coach"></div></div>
+  </div>
+  <div class="form-group"><label class="form-label">ข้อความตอบน้ำหนัก (แก้ได้) — ตัวแปร: {weight} {date} {prev_post} {gain} {limit_kg} {limit_pct} {dw} {status} {next_line} {name}</label>
+    <textarea class="form-control" id="setting_tpl_weight_reply" rows="7" style="font-family:inherit" placeholder="ว่าง = ใช้ข้อความมาตรฐาน"></textarea>
+    <div style="display:flex;gap:6px;margin-top:4px"><button type="button" class="btn btn-outline" style="font-size:.75rem" onclick="document.getElementById('setting_tpl_weight_reply').value=WEIGHT_TPL_DEFAULT">↺ ใส่ข้อความมาตรฐานเพื่อแก้</button></div>
+    <div class="setting-status" id="status_tpl_weight_reply"></div></div>
+  <div class="form-group"><label class="form-label">👨‍⚕️ ข้อความจากแพทย์ต่อท้ายการ์ดสรุปหลังฟอกทุกใบ (ว่าง = ไม่แนบ) · แก้รายรอบได้ที่หน้ารอบฟอก</label>
+    <textarea class="form-control" id="setting_patient_card_note" rows="2" style="font-family:inherit" placeholder="เช่น จำกัดน้ำดื่มวันละไม่เกิน 750 มล. งดผลไม้โพแทสเซียมสูง"></textarea>
+    <div class="setting-status" id="status_patient_card_note"></div></div>
+</div>
+
 <!-- RO water daily check limits -->
 <div class="card setting-card">
   <div class="card-header">
@@ -525,6 +547,7 @@ function testGroup(){
     .finally(()=>{btn.disabled=false;});
 }
 
+const WEIGHT_TPL_DEFAULT = "⚖️ บันทึกน้ำหนัก {weight} กก. แล้ว ({date})\n━━━━━━━━━━━━\nหลังฟอกครั้งล่าสุด {prev_post} กก. → ขึ้นมา {gain} กก.\nเกณฑ์ไม่ควรเกิน {limit_kg} กก. ({limit_pct}% ของน้ำหนักแห้ง {dw} กก.)\n{status}\n{next_line}";
 function saveSetting(key){
   const el = document.getElementById('setting_'+key);
   if(!el) return;

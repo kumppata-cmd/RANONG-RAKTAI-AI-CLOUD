@@ -31,7 +31,7 @@ def _utc(dt):
 
 
 def evaluate(goal, removed, started_at, duration_h, dry_weight=None, last_record_at=None, now=None, limits=None,
-             target=None, extend_min=0):
+             target=None, extend_min=0, current_rate=None, pre_weight=None):
     """→ dict(flag, flag_th, pct, expected, behind_ml, elapsed_min, left_min, need_rate, need_rate_kg,
               avg_rate, since_record_min, text). Never raises on missing data."""
     lim = dict(DEFAULTS, **(limits or {}))
@@ -116,6 +116,27 @@ def evaluate(goal, removed, started_at, duration_h, dry_weight=None, last_record
     if flag == "overdue":
         parts.append(f"บันทึกล่าสุด {out['since_record_min']} นาทีก่อน")
     out["text"] = " · ".join(parts)
+    # 17 พ.ย. 2569 (ข้อ 2): คาดการณ์ตอนจบรอบ — ถ้าคงอัตราบนเครื่องตอนนี้ไปจนจบ
+    try:
+        rate = float(current_rate) if current_rate else (float(out["avg_rate"]) if out["avg_rate"] else None)
+        if rate is not None and rate >= 0:
+            fin = int(round(rem + rate * left))
+            out["projected_final"] = fin
+            out["projected_short_ml"] = int(round(plan_goal - fin))
+            ptxt = f"ถ้าคงอัตรา {int(rate)} mL/ชม. จนจบ → UF ≈ {fin} mL"
+            if pre_weight:
+                pw = round(float(pre_weight) - fin / 1000.0, 1)
+                out["projected_post_weight"] = pw
+                ptxt += f" → น้ำหนักหลังฟอก ≈ {pw:.1f} kg"
+                if dw:
+                    d = round(pw - float(dw), 1)
+                    out["projected_vs_dw"] = d
+                    ptxt += (f" (เกิน DW {d:.1f})" if d > 0.2 else f" (ต่ำกว่า DW {-d:.1f})" if d < -0.2 else " (ถึง DW)")
+            elif out["projected_short_ml"] > 50:
+                ptxt += f" (ขาดเป้า {out['projected_short_ml']} mL)"
+            out["projection_text"] = ptxt
+    except (TypeError, ValueError):
+        pass
     return out
 
 
@@ -162,14 +183,18 @@ def for_session(cur, session_id, limits=None, now=None):
     """Evaluate a live session straight from the DB (read-only)."""
     cur.execute("""SELECT s.uf_goal, s.started_at, p.dry_weight,
                           COALESCE((SELECT r.duration_hours FROM hd_prescriptions r WHERE r.patient_id = s.patient_id
-                                    AND r.is_active = TRUE ORDER BY r.id DESC LIMIT 1), 4.0)
+                                    AND r.is_active = TRUE ORDER BY r.id DESC LIMIT 1), 4.0),
+                          s.pre_weight,
+                          (SELECT u.uf_rate FROM hd_uf_records u WHERE u.session_id = s.id AND u.uf_rate > 0
+                           ORDER BY u.recorded_at DESC, u.id DESC LIMIT 1)
                    FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id WHERE s.id = %s""", (session_id,))
     r = cur.fetchone()
     if not r:
         return None
     removed, at = latest_record(cur, session_id)
     tgt, ext = latest_adjustment(cur, session_id)
-    return evaluate(r[0], removed, r[1], r[3], r[2], at, now=now, limits=limits, target=tgt, extend_min=ext)
+    return evaluate(r[0], removed, r[1], r[3], r[2], at, now=now, limits=limits, target=tgt, extend_min=ext,
+                    current_rate=(r[5] if len(r) > 5 else None), pre_weight=(r[4] if len(r) > 4 else None))
 
 
 def handover_lines(items):

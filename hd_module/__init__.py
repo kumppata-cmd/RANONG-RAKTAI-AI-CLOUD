@@ -137,6 +137,11 @@ def _run_hd_migrations():
                 "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS pre_symptoms TEXT",
                 "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS post_symptoms TEXT",
                 "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS dialyzer_reuse INTEGER",
+                # 17 พ.ย. 2569: เกณฑ์น้ำหนักขึ้นระหว่างรอบรายคน (% ของ DW; ว่าง = ใช้ค่าใน ⚙️ / 4%)
+                "ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS idwg_limit_pct NUMERIC(4,1)",
+                """CREATE TABLE IF NOT EXISTS hd_home_weights (id SERIAL PRIMARY KEY, hn VARCHAR(20) NOT NULL,
+                   weight NUMERIC(5,1) NOT NULL, idwg_kg NUMERIC(4,1), over_limit BOOLEAN, via VARCHAR(20) DEFAULT 'line',
+                   recorded_at TIMESTAMP DEFAULT NOW())""",
                 "ALTER TABLE hd_uf_records ADD COLUMN IF NOT EXISTS notes VARCHAR(200)",
                 "ALTER TABLE hd_uf_records ALTER COLUMN recorded_at SET DEFAULT NOW()",
                 "ALTER TABLE hd_uf_records ALTER COLUMN recorded_at DROP NOT NULL",

@@ -357,9 +357,13 @@ function hepBadge(b){
   return `<span class="bed-anticoag" style="white-space:normal;line-height:1.35">💉 ${b.anticoag_drug}${parts.length?'<br>'+parts.join(' · '):''}</span>`;
 }
 function ufWatchLine(b){
-  const u = b.uf_watch; if(!u || !u.flag || u.flag==='ok' || u.flag==='no_goal') return '';
+  const u = b.uf_watch; if(!u || !u.flag || u.flag==='no_goal') return '';
+  /* ข้อ 2: คาดการณ์ตอนจบ — แสดงเมื่อจะจบเกิน DW > 0.5 kg แม้สถานะอื่นจะปกติ */
+  const pj = (u.projected_vs_dw != null && u.projected_vs_dw > 0.5)
+    ? `<div class="bed-chk" style="margin-top:2px;color:#e67e22" title="${(u.projection_text||'').replace(/"/g,'')}">🔮 จบที่ ≈ ${u.projected_post_weight} kg (เกิน DW ${u.projected_vs_dw})</div>` : '';
+  if(u.flag==='ok') return pj;
   const col = u.flag==='high_rate' ? 'var(--danger)' : 'var(--warning)';
-  return `<div class="bed-chk" style="margin-top:3px;color:${col};font-weight:700" title="${(u.text||'').replace(/"/g,'')}">${u.flag_th}${u.flag==='target_reduced'?' −'+u.reduced_ml+' mL':(u.behind_ml>100&&!u.reduced_ml&&!u.extend_min?' −'+u.behind_ml+' mL':'')}${u.need_rate_kg!=null&&(u.flag==='high_rate'||u.flag==='caution')?' · ต้องใช้ '+u.need_rate_kg+' mL/kg/ชม.':''}</div>`;
+  return `<div class="bed-chk" style="margin-top:3px;color:${col};font-weight:700" title="${(u.text||'').replace(/"/g,'')}">${u.flag_th}${u.flag==='target_reduced'?' −'+u.reduced_ml+' mL':(u.behind_ml>100&&!u.reduced_ml&&!u.extend_min?' −'+u.behind_ml+' mL':'')}${u.need_rate_kg!=null&&(u.flag==='high_rate'||u.flag==='caution')?' · ต้องใช้ '+u.need_rate_kg+' mL/kg/ชม.':''}</div>${pj}`;
 }
 function idhLine(b){
   const r = b.idh_risk; if(!r || r.level==='low') return '';

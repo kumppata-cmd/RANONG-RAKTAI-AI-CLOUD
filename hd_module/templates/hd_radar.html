@@ -1,0 +1,98 @@
+{% extends "hd_base.html" %}
+{% block title %}เรดาร์หัวหน้าเวร{% endblock %}
+{% block page_title %}🎯 เรดาร์หัวหน้าเวร{% endblock %}
+{% block nav_radar %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.rd-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.rd-sum{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:8px;margin-bottom:14px}
+.rd-sum div{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius-sm);padding:10px;text-align:center}
+.rd-sum b{display:block;font-size:1.5rem;font-variant-numeric:tabular-nums}
+.rd-sum span{font-size:.72rem;color:var(--fg-muted)}
+.rd-list{display:flex;flex-direction:column;gap:8px}
+.rd-row{display:grid;grid-template-columns:64px minmax(0,1fr) auto;gap:10px;align-items:center;background:var(--bg-card);
+  border:1px solid var(--border);border-left:6px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;text-decoration:none;color:inherit}
+.rd-row.lv3{border-left-color:var(--danger);background:rgba(231,76,60,.05)}
+.rd-row.lv2{border-left-color:#e67e22}
+.rd-row.lv1{border-left-color:#f1c40f}
+.rd-row.lv0{border-left-color:var(--success)}
+.rd-bed{font-size:1.4rem;font-weight:800;text-align:center;line-height:1}
+.rd-bed small{display:block;font-size:.62rem;font-weight:600;color:var(--fg-muted);margin-top:3px}
+.rd-name{font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rd-why{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.rd-why span{font-size:.72rem;padding:2px 8px;border-radius:10px;background:var(--bg);border:1px solid var(--border)}
+.rd-why span.r{background:rgba(231,76,60,.12);border-color:rgba(231,76,60,.4)}
+.rd-why span.o{background:rgba(230,126,34,.12);border-color:rgba(230,126,34,.4)}
+.rd-score{font-size:1.1rem;font-weight:800;text-align:right;font-variant-numeric:tabular-nums}
+.rd-score small{display:block;font-size:.62rem;color:var(--fg-muted);font-weight:600}
+@media(max-width:480px){.rd-row{grid-template-columns:48px minmax(0,1fr)}.rd-score{display:none}}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="rd-bar">
+  <span style="font-size:.85rem;color:var(--fg-muted)">ทุกเตียงที่กำลังฟอก เรียงจากเตียงที่ต้องไปดูก่อน · อัปเดตทุก 60 วินาที</span>
+  <span style="flex:1"></span>
+  <span id="rdTime" style="font-size:.8rem;color:var(--fg-muted)"></span>
+  <button class="btn btn-outline" onclick="loadRadar()">🔄 รีเฟรช</button>
+</div>
+<div class="rd-sum" id="rdSum"></div>
+<div class="rd-list" id="rdList"><div style="color:var(--fg-muted)">กำลังโหลด…</div></div>
+<div style="font-size:.72rem;color:var(--fg-muted);margin-top:12px;line-height:1.6">
+  คะแนน = การแจ้งเตือนที่ยังไม่รับทราบ (วิกฤต 40 · เฝ้าระวัง 20) + UF (เกินเพดาน 40 · ช้า/ไม่บันทึก 20 · ระวัง 10 · คาดว่าจบเกิน DW 10)
+  + ความเสี่ยงความดันตก (สูง 30 · ปานกลาง 15) + BP ไม่ได้วัด (≥30 นาที 20 · ≥45 นาที 30) · เป็นตัวช่วยจัดลำดับ ไม่ใช่คำสั่งการรักษา
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const SHIFTS = ['morning','afternoon','evening'];
+const SH_TH = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
+function _ageMin(ts){ if(!ts) return null; const d = hdParseUtc(ts); return isNaN(d) ? null : Math.max(0, Math.round((Date.now()-d.getTime())/60000)); }
+function esc(t){ return String(t==null?'':t).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function scoreBed(b){
+  const why = []; let s = 0;
+  const al = b.alerts || [];
+  const crit = al.filter(a=>a.severity==='critical').length, warn = al.filter(a=>a.severity==='warning').length;
+  if(crit){ s += 40; why.push(['r', `🔴 แจ้งเตือนวิกฤต ${crit}`]); }
+  if(warn){ s += 20; why.push(['o', `🟡 เฝ้าระวัง ${warn}`]); }
+  const u = b.uf_watch || {};
+  if(u.flag==='high_rate'){ s += 40; why.push(['r', `⛔ UF เกินเพดาน ${u.need_rate_kg??''} mL/kg/ชม.`]); }
+  else if(['behind','overdue','no_record'].includes(u.flag)){ s += 20; why.push(['o', u.flag_th + (u.behind_ml>100?` −${u.behind_ml} mL`:'')]); }
+  else if(u.flag==='caution' || u.flag==='target_reduced'){ s += 10; why.push(['o', u.flag_th]); }
+  if(u.projected_vs_dw != null && u.projected_vs_dw > 0.5){ s += 10; why.push(['o', `🔮 คาดจบเกิน DW ${u.projected_vs_dw} kg`]); }
+  const r = b.idh_risk || {};
+  if(r.level==='high'){ s += 30; why.push(['r', `⚡ เสี่ยงความดันตกสูง ${r.score??''}%`]); }
+  else if(r.level==='moderate' || r.level==='medium'){ s += 15; why.push(['o', `⚡ เสี่ยงความดันตก ${r.score??''}%`]); }
+  const age = _ageMin(b.last_vital_at || b.start_time);
+  if(age != null && age >= 45){ s += 30; why.push(['r', `⏰ ไม่ได้วัด BP ${age} นาที`]); }
+  else if(age != null && age >= 30){ s += 20; why.push(['o', `⏰ ไม่ได้วัด BP ${age} นาที`]); }
+  const v = b.current_vitals;
+  return {s, why, age, bp: v ? `${v.sbp??'-'}/${v.dbp??'-'}` : '-'};
+}
+function loadRadar(){
+  Promise.all(SHIFTS.map(sh=>hdFetch('/hd/api/v1/dashboard/beds?shift='+sh).then(r=>r.ok?r.json():{beds:[]}).then(d=>(d.beds||[]).map(b=>Object.assign(b,{_shift:sh}))).catch(()=>[])))
+  .then(all=>{
+    const seen = new Set(); const beds = [];
+    all.flat().forEach(b=>{ if(!['active','warning','critical'].includes(b.status) || !b.session_id || seen.has(b.session_id)) return; seen.add(b.session_id); beds.push(b); });
+    const rows = beds.map(b=>Object.assign({b}, scoreBed(b))).sort((x,y)=>y.s-x.s || (x.b.bed_number-y.b.bed_number));
+    const n3 = rows.filter(r=>r.s>=40).length, n2 = rows.filter(r=>r.s>=20 && r.s<40).length;
+    document.getElementById('rdSum').innerHTML =
+      `<div><b>${rows.length}</b><span>กำลังฟอก</span></div><div><b style="color:var(--danger)">${n3}</b><span>ต้องดูทันที</span></div>` +
+      `<div><b style="color:#e67e22">${n2}</b><span>เฝ้าระวัง</span></div><div><b style="color:var(--success)">${rows.length-n3-n2}</b><span>ปกติ</span></div>`;
+    document.getElementById('rdList').innerHTML = rows.length ? rows.map(r=>{
+      const lv = r.s>=40?3:r.s>=20?2:r.s>0?1:0;
+      return `<a class="rd-row lv${lv}" href="/hd/session/${r.b.session_id}${(r.b.alerts||[]).length?'#alerts':''}">
+        <div class="rd-bed">${r.b.bed_number}<small>${SH_TH[r.b._shift]||''}</small></div>
+        <div style="min-width:0"><div class="rd-name">${esc(r.b.patient_name||'-')} <span style="font-weight:400;color:var(--fg-muted);font-size:.78rem">HN ${esc(r.b.patient_hn||'')} · BP ${r.bp}</span></div>
+          <div class="rd-why">${r.why.length ? r.why.map(w=>`<span class="${w[0]}">${esc(w[1])}</span>`).join('') : '<span>✅ ไม่มีสิ่งผิดปกติ</span>'}</div></div>
+        <div class="rd-score">${r.s}<small>คะแนน</small></div></a>`; }).join('')
+      : '<div style="color:var(--fg-muted);padding:20px;text-align:center">ไม่มีผู้ป่วยกำลังฟอกอยู่ตอนนี้</div>';
+    document.getElementById('rdTime').textContent = 'อัปเดต ' + new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+  });
+}
+loadRadar();
+setInterval(()=>{ if(!document.hidden) loadRadar(); }, 60000);
+</script>
+{% endblock %}
