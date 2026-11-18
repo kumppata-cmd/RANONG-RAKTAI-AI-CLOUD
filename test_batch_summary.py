@@ -68,7 +68,8 @@ class TestBatchSummary(BatchFixture):
         self.assertIn("สรุปชุด 3 รูป ✅ เข้าระบบครบ 3/3", text)
         self.assertIn("🩸 ฟอกเลือด ×3", text)                     # จัดกลุ่ม ไม่ไล่ทีละใบ
         self.assertEqual(text.count("63203_สมมติ"), 1)
-        self.assertIn("รหัส: doc00001 doc00002 doc00003", text)   # เรียงตามหน้า
+        # เรียงตามหน้า + เลขรูป/ประเภทกำกับ (18 พ.ย. 2026 — รู้ว่ารูปไหนเป็นอะไร)
+        self.assertIn("①🩸doc00001 ②🩸doc00002 ③🩸doc00003", text)
         self.assertLessEqual(len(text.splitlines()), 5)
         # ผู้รับแจ้ง: ไม่ส่งซ้ำหาผู้ส่ง (Udoctor) → เฉพาะ Ustaff, push เดียว
         self.assertEqual([t for t, _ in self.sent_multi], ["Ustaff"])

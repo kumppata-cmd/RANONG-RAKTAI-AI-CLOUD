@@ -150,7 +150,7 @@ class RecatFixture(unittest.TestCase):
 
         self.updates = []
         s.doc_index.update_category = (
-            lambda d, c, p: self.updates.append((d, c, p)) or True
+            lambda d, c, p, extra_fields=None: self.updates.append((d, c, p)) or True
         )
 
         self.audits = []
@@ -229,12 +229,29 @@ class TestChangeCategory(RecatFixture):
     def test_เอกสารคลินิกที่หา_hn_ไม่ได้ต้องถูกปฏิเสธ(self):
         """ห้ามปล่อยให้ลงที่รากหมวดโดยไม่มีแฟ้มผู้ป่วย"""
         self.doc["extracted_text"] = "ไม่มีเลข HN ในเอกสารนี้"
+        # เอกสารที่ยังไม่อยู่ในแฟ้มผู้ป่วยใด (path ระดับเดือน ไม่มีโฟลเดอร์ HN)
+        _root = "04_LAB_RESULTS/2026-Q4/2026-10/f.jpg"
+        self.bucket.objects[_root] = b"image-bytes"
+        self.doc["gcs_object_path"] = f"gs://test-bucket/{_root}"
         r = self.server._change_document_category(
             self.DOC_ID[:8], "dialysis", "", "actor-hash",
         )
         self.assertIn("error", r)
         self.assertIn("HN", r["error"])
         self.assertEqual(self.bucket.copies, [])
+
+    def test_คงแฟ้มผู้ป่วยเดิมเมื่อไม่ระบุ_hn_และข้อความไม่มี_hn(self):
+        """18 พ.ย. 2026: ใบในชุดหลายรูปเข้าแฟ้มจากใบอื่นในชุด (หน้านั้นอ่าน HN ไม่ได้)
+        เปลี่ยนประเภทใบยา → ใบฟอกเลือด ต้องได้โดยไม่ต้องพิมพ์ HN และคงแฟ้มเดิม"""
+        self.doc["extracted_text"] = "ไม่มีเลข HN ในเอกสารนี้"
+        self.doc["patient_hn_folder"] = "57042_Somchai"
+        r = self.server._change_document_category(
+            self.DOC_ID[:8], "dialysis", "", "actor-hash",
+        )
+        self.assertEqual(r.get("status"), "changed", r)
+        _, new_path = self.bucket.copies[0]
+        self.assertIn("57042_Somchai", new_path)
+        self.assertNotEqual(new_path.split("/")[0], self.OLD_PATH.split("/")[0])
 
     def test_hn_ที่ไม่มีในทะเบียนถูกปฏิเสธ(self):
         r = self._change("rx", hn="99999")

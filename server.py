@@ -13928,6 +13928,43 @@ def detect_bill_company(text: str) -> str:
     return resolve_bill_vendor(text).folder
 
 
+def _fuzzy_mark_hits(marks, text_lower: str, already=()) -> list[str]:
+    """เครื่องหมายฟอร์ม (อังกฤษ ≥ 9 ตัวอักษร) ที่ OCR สะกดเพี้ยนเล็กน้อย
+    เช่น "nursing diagnosls" / "pre-dialysis assesrnent" — เทียบทีละกลุ่มคำ
+    จำนวนคำเท่ากัน ต้องคล้าย ≥ 0.85 · คำสั้นไม่ใช้ (เพี้ยนแล้วชนคำอื่นง่าย)"""
+    import difflib
+    words = re.findall(r"[a-z0-9/%.\-]+", text_lower or "")
+    if not words:
+        return []
+    out: list[str] = []
+    pool = [a for a in already if a]
+    grams_by_n: dict[int, set] = {}
+
+    def _same_concept(mk: str) -> bool:
+        # คำสะกดอีกแบบของเครื่องหมายที่นับไปแล้ว (assesment/assessment) ไม่นับซ้ำ
+        return any(len(a) >= 6 and (a in mk or mk in a
+                                    or difflib.SequenceMatcher(None, a, mk).ratio() >= 0.8)
+                   for a in pool)
+
+    for mk in marks:
+        if mk in already or len(mk) < 9 or not mk.isascii() or _same_concept(mk):
+            continue
+        n = len(mk.split())
+        grams = grams_by_n.get(n)
+        if grams is None:
+            grams = {" ".join(words[i:i + n]) for i in range(len(words) - n + 1)}
+            grams_by_n[n] = grams
+        for g in grams:
+            if abs(len(g) - len(mk)) > 3:
+                continue
+            sm = difflib.SequenceMatcher(None, mk, g)
+            if sm.real_quick_ratio() >= 0.85 and sm.quick_ratio() >= 0.85 and sm.ratio() >= 0.85:
+                out.append(mk)
+                pool.append(mk)
+                break
+    return out
+
+
 def classify_with_keywords(filepath: str, override_text: str | None = None) -> dict:
     """Fallback: จำแนกด้วย keyword matching + OCR.
 
@@ -14163,16 +14200,69 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
         "nursing managment", "nursing management", "health edecation", "health education",
         "discharge by", "hd no", "sleep disturbance", "jvp engorged", "prolong bleeding",
         "conduct", "tmp", "vp", "ufr",
+        # ── 18 พ.ย. 2026 (HN 68408): ช่องในตัวฟอร์มที่อ่านได้แม้รูปตัดหัวกระดาษ ──
+        # เลือกเฉพาะช่องของใบฟอกเลือด ไม่ใช้คำตรวจร่างกาย (dyspnea/thrill/bruit)
+        # ที่ใบตรวจรักษา OPD ก็มี
+        "pre bw", "post bw", "dry bw", "wt gain", "wt lose", "last wt",
+        "target uf", "meal/drink", "extra fluid", "time start", "time off",
+        "blood leak", "clot dialyzer", "hypotenstion", "monitor v/s",
+        "bp ก่อนกลับ", "start hd",
     ]
     _ws_hits = [kw for kw in _worksheet_marks if _kw_in_text(kw, content_lower)]
-    if len(_ws_hits) >= 3:
+    if len(_ws_hits) < 3:
+        # รูปถ่ายเบลอ/เอียง → OCR สะกดเพี้ยน 1–2 ตัวอักษร ("Nursing diagnosls")
+        # จับแบบใกล้เคียงเฉพาะคำยาว ≥ 9 ตัวอักษร (คำสั้นเพี้ยนแล้วชนคำอื่นง่าย)
+        _ws_hits += _fuzzy_mark_hits(_worksheet_marks, content_lower, set(_ws_hits))
+
+    # ฟอร์มสั่งยา/ใบตรวจรักษา — ถ้ามีหลายจุด ห้ามลัดเป็นใบฟอกเลือด
+    _order_marks = [
+        "order for one day", "order for continuation", "medication order",
+        "order form", "medication record", "แพทย์ผู้สั่ง", "วันที่สั่ง",
+        "regimen", "frequency", "ใบสั่งยา", "ใบตรวจรักษา", "diag text",
+        "visit note", "ผู้ตรวจรักษา",
+    ]
+    _order_hits = [k for k in _order_marks if k in content_lower]
+
+    # ชื่อยา (ใช้ทั้งที่นี่และ pre-check ใบสั่งยาด้านล่าง)
+    _rx_drug_names = [
+        "losartan", "enalapril", "amlodipine", "atorvastatin",
+        "omeprazole", "aspirin", "carvedilol", "metformin",
+        "calcium carbonate", "folic acid", "ferrous", "calcitriol",
+        "sodium bicarbonate", "venofer", "furosemide", "simvastatin",
+        "clopidogrel", "warfarin", "insulin", "metoprolol",
+        "nifedipine", "diltiazem", "verapamil", "hydralazine",
+        "spironolactone", "hydrochlorothiazide", "doxazosin",
+        "allopurinol", "colchicine", "prednisolone", "dexamethasone",
+        "pantoprazole", "ranitidine", "domperidone", "ondansetron",
+        "paracetamol", "tramadol", "gabapentin", "pregabalin",
+        "amitriptyline", "fluoxetine", "diazepam", "alprazolam",
+        "phenytoin", "levetiracetam", "ciprofloxacin", "amoxicillin",
+        "cephalexin", "clindamycin", "metronidazole", "doxycycline",
+        "azithromycin", "levofloxacin", "co-trimoxazole",
+        "sevelamer", "lanthanum", "cinacalcet", "epo",
+        "erythropoietin", "darbepoetin", "epoetin",
+        # ── ยาที่พบบ่อยในคลินิกไต เพิ่มเติม ──
+        "manidipine", "epiao", "bicarbo", "iron venofe",
+        "calcium carbon",
+        # ── สะกดผิดที่พบบ่อยจาก OCR หรือฟอร์มจริง ──
+        "atrovastatin",  # = atorvastatin
+    ]
+    _drug_hits = [d for d in _rx_drug_names if d.lower() in content_lower]
+
+    _ws_ok = len(_ws_hits) >= 3 and (
+        len(_order_hits) < 2 or len(_ws_hits) >= 2 * len(_order_hits) + 2
+    )
+    if _ws_ok:
         logger.info("  pre-check: HD work sheet detected (%d marks) → dialysis", len(_ws_hits))
-        return {
+        _res = {
             "category": "dialysis",
             "reason": f"HD work sheet pre-check ({len(_ws_hits)} marks)",
             "confidence": min(len(_ws_hits) / 6.0, 1.0),
             "_ocr_text": content,
         }
+        if _order_hits or len(_drug_hits) >= 3:
+            _res["ambiguous_with"] = "rx"
+        return _res
 
     # ── Pre-check: ใบสั่งยาฟอกเลือด (HD Prescription) ──
     # ใบยา HD มีทั้ง dialysis + medication keywords → บังคับ rx
@@ -14184,15 +14274,22 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
                   "oral", "prescription", "mg", "tab", "cap", "ใบสั่งยา"]
     _hd_hits = sum(1 for kw in _hd_rx_strong if kw.lower() in content_lower)
     _rx_hits = sum(1 for kw in _rx_strong if _kw_in_text(kw.lower(), content_lower))
-    if _hd_hits >= 1 and _rx_hits >= 2:
+    # 18 พ.ย. 2026: ใบฟอกเลือดที่ OCR อ่านได้ไม่ครบ (เครื่องหมายใบฟอก 2 จุด)
+    # ก็มี Heparin + Medication + Route ในตัว → เคยถูกจัดเป็นใบยา
+    # ถ้าไม่มีหัวฟอร์มสั่งยาและชื่อยาไม่ถึง 3 ตัว → ไม่ลัดเป็นใบยาที่นี่
+    _ws_partial = (len(_ws_hits) >= 2 and not _order_hits and len(_drug_hits) < 3)
+    if _hd_hits >= 1 and _rx_hits >= 2 and not _ws_partial:
         logger.info("  pre-check: HD prescription detected (%d HD + %d rx hits) → rx",
                      _hd_hits, _rx_hits)
-        return {
+        _res = {
             "category": "rx",
             "reason": f"HD prescription pre-check ({_hd_hits} HD + {_rx_hits} rx hits)",
             "confidence": min((_hd_hits + _rx_hits) / 4.0, 1.0),
             "_ocr_text": content,
         }
+        if _ws_hits:
+            _res["ambiguous_with"] = "dialysis"
+        return _res
 
     # ถ้าพบ keyword ที่บ่งชี้ว่าเป็นสลิปโอนเงินชัดเจน → บังคับ bills
     # เพื่อป้องกันการจัดประเภทผิดเป็นผลแล็บ
@@ -14276,12 +14373,15 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
     _mr_cols = [c for c in ("dose", "frequency", "route", "regimen") if _kw_in_text(c, content_lower)]
     if "medication record" in content_lower or ("medication" in content_lower and len(_mr_cols) >= 3):
         logger.info("  pre-check: Medication Record form (%d columns) → rx", len(_mr_cols))
-        return {
+        _res = {
             "category": "rx",
             "reason": f"Medication Record pre-check ({len(_mr_cols)} columns)",
             "confidence": 0.9,
             "_ocr_text": content,
         }
+        if len(_ws_hits) >= 2:
+            _res["ambiguous_with"] = "dialysis"
+        return _res
 
     # ── Pre-check: ใบรายงานผลตรวจทางห้องปฏิบัติการ (Lab Report) ──
     # *** ต้องอยู่ก่อน rx pre-check ***
@@ -14335,29 +14435,7 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
     # ถ้าพบชื่อยา ≥3 ตัว + keyword ทางการแพทย์ → บังคับ rx
     # ป้องกัน "บาท" ท้ายใบยาจากการดึงเอกสารเข้า bills
     # ป้องกัน Medication Order Form ที่มี dialysate/heparin ถูกจัดเป็น dialysis
-    _rx_drug_names = [
-        "losartan", "enalapril", "amlodipine", "atorvastatin",
-        "omeprazole", "aspirin", "carvedilol", "metformin",
-        "calcium carbonate", "folic acid", "ferrous", "calcitriol",
-        "sodium bicarbonate", "venofer", "furosemide", "simvastatin",
-        "clopidogrel", "warfarin", "insulin", "metoprolol",
-        "nifedipine", "diltiazem", "verapamil", "hydralazine",
-        "spironolactone", "hydrochlorothiazide", "doxazosin",
-        "allopurinol", "colchicine", "prednisolone", "dexamethasone",
-        "pantoprazole", "ranitidine", "domperidone", "ondansetron",
-        "paracetamol", "tramadol", "gabapentin", "pregabalin",
-        "amitriptyline", "fluoxetine", "diazepam", "alprazolam",
-        "phenytoin", "levetiracetam", "ciprofloxacin", "amoxicillin",
-        "cephalexin", "clindamycin", "metronidazole", "doxycycline",
-        "azithromycin", "levofloxacin", "co-trimoxazole",
-        "sevelamer", "lanthanum", "cinacalcet", "epo",
-        "erythropoietin", "darbepoetin", "epoetin",
-        # ── ยาที่พบบ่อยในคลินิกไต เพิ่มเติม ──
-        "manidipine", "epiao", "bicarbo", "iron venofe",
-        "calcium carbon",
-        # ── สะกดผิดที่พบบ่อยจาก OCR หรือฟอร์มจริง ──
-        "atrovastatin",  # = atorvastatin
-    ]
+    # (_rx_drug_names / _drug_hits คำนวณไว้แล้วด้านบน — ก่อน pre-check ใบฟอกเลือด)
     _rx_medical_kws = [
         "mg", "mcg", "tab", "cap", "เม็ด", "หลังอาหาร",
         "ก่อนอาหาร", "ก่อนนอน", "วันละ", "ครั้งละ",
@@ -14371,14 +14449,13 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
         "medication", "medication record", "medication list",
         "แพทย์ผู้สั่ง", "วันที่สั่ง",
     ]
-    _drug_hits = [d for d in _rx_drug_names if d.lower() in content_lower]
     _rx_med_hits = [k for k in _rx_medical_kws if k.lower() in content_lower]
     if len(_drug_hits) >= 3 and len(_rx_med_hits) >= 1:
         logger.info(
             f"  pre-check: prescription detected "
             f"({len(_drug_hits)} drugs, {len(_rx_med_hits)} medical kws) → rx"
         )
-        return {
+        _res = {
             "category": "rx",
             "reason": (
                 f"prescription pre-check "
@@ -14387,6 +14464,9 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             "confidence": min((len(_drug_hits) + len(_rx_med_hits)) / 8.0, 1.0),
             "_ocr_text": content,
         }
+        if _ws_hits:
+            _res["ambiguous_with"] = "dialysis"
+        return _res
 
     # ── Pre-check: ใบฟอกเลือด (Hemodialysis) ──
     # ถ้าพบ strong HD keywords ≥2 → บังคับ dialysis
@@ -14409,12 +14489,16 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
             f"  pre-check: hemodialysis detected "
             f"({len(_hd_hits)} strong HD kws) → dialysis"
         )
-        return {
+        _res = {
             "category": "dialysis",
             "reason": f"hemodialysis pre-check ({len(_hd_hits)} strong HD hits)",
             "confidence": min(len(_hd_hits) / 4.0, 1.0),
             "_ocr_text": content,
         }
+        if _ws_partial or _order_hits:
+            # ข้อความมีทั้งลักษณะใบฟอกเลือดและใบยา — ระบบไม่แน่ใจ ให้คนยืนยัน
+            _res["ambiguous_with"] = "rx"
+        return _res
 
     # ── keyword matching helper ──
     # คำสั้น ≤3 ตัวอักษร (เช่น "HD", "UF", "QB") ต้อง match แบบ
@@ -14467,6 +14551,11 @@ def classify_with_keywords(filepath: str, override_text: str | None = None) -> d
     # ถ้าจัดเป็น bills → ตรวจจับบริษัทจาก OCR text
     if best == "bills":
         result["bill_company"] = detect_bill_company(content)
+    # ใบยา ↔ ใบฟอกเลือด ที่ตัดสินด้วยการนับคำทั่วไป — แจ้งให้คนยืนยัน
+    elif best == "rx" and _ws_hits:
+        result["ambiguous_with"] = "dialysis"
+    elif best == "dialysis" and (_order_hits or len(_drug_hits) >= 2):
+        result["ambiguous_with"] = "rx"
 
     result["_ocr_text"] = content
     return result
@@ -15754,6 +15843,13 @@ def process_file_async(
             ]
             if bill_company and category == "bills":
                 _reply_lines.append(f"🏢 บริษัท: {bill_company}")
+            if category in _FIX_TO and result.get("ambiguous_with"):
+                # 18 พ.ย. 2026: ข้อความมีลักษณะทั้งใบยาและใบฟอกเลือด — ให้คนยืนยัน
+                _fx = _FIX_TO[category]
+                _reply_lines.append(
+                    "⚠️ ระบบไม่แน่ใจว่าเป็นใบยาหรือใบฟอกเลือด — ถ้าผิดพิมพ์ "
+                    f"'เปลี่ยนประเภท {_doc_id[:8]} {_fx[1]}'"
+                )
             if invoice_parsed and category == "bills":
                 _reply_lines.append("🧾 บันทึกค่าใช้จ่ายอัตโนมัติแล้ว")
                 _reply_lines.append(
@@ -15849,12 +15945,20 @@ def process_file_async(
                     ),
                     "clinical": category in CLINICAL_CATEGORIES,
                     "status": "ask" if _ask_pending else "ok",
+                    # 18 พ.ย. 2026: ประเภทจริง + ธงไม่แน่ใจ (ใบยา ↔ ใบฟอกเลือด)
+                    # → สรุปชุดแสดงรหัสตามลำดับรูป และปุ่มแก้ประเภทกดครั้งเดียว
+                    "category": category,
+                    "ambiguous": (
+                        str(result.get("ambiguous_with") or "")
+                        if category in ("rx", "dialysis") else ""
+                    ),
                 }
                 _batch_bubble = None
                 if category != "review":
                     try:
                         _batch_bubble = _build_doc_flex_bubble(
                             category, cat_name, _storage_display, _doc_id, dest,
+                            n=batch_index, ambiguous=_batch_item["ambiguous"],
                         )
                     except Exception:
                         _batch_bubble = None
@@ -16717,6 +16821,17 @@ def _change_document_category(
             "status": "unchanged",
             "message": f"เอกสารนี้เป็นประเภท '{new_category}' อยู่แล้ว",
         }
+    # แฟ้มผู้ป่วยเดิมของเอกสาร (ใบยา ↔ ใบฟอกเลือด ของคนเดียวกัน — แก้แค่ประเภท)
+    _existing_folder = ""
+    if old_category in CLINICAL_CATEGORIES:
+        try:
+            _existing_folder = (
+                doc_index.derive_patient_folder(doc)
+                if hasattr(doc_index, "derive_patient_folder")
+                else (doc.get("patient_hn_folder") or "")
+            ).strip()
+        except Exception:
+            _existing_folder = ""
 
     gcs_path = doc.get("gcs_object_path", "")
     blob_path = (
@@ -16743,6 +16858,12 @@ def _change_document_category(
                 f"{patient.hn_display} — "
                 f"{patient.patient_name or 'ไม่มีชื่อ'}"
             )
+        elif _existing_folder:
+            # 18 พ.ย. 2026: ใบในชุดหลายรูปที่เข้าแฟ้มผู้ป่วยจากใบอื่นในชุด
+            # (หน้านั้นอ่าน HN ไม่ได้) เปลี่ยนประเภทไม่ได้เพราะหา HN ในข้อความไม่เจอ
+            # → คงแฟ้มผู้ป่วยเดิมไว้ ไม่ต้องพิมพ์ HN ซ้ำ
+            patient_folder = _existing_folder
+            patient_label = _existing_folder
         elif doc_text:
             # ไม่ระบุ HN มา — ลองหาจาก HN ในเอกสาร เหมือนเส้นทางอัตโนมัติ
             try:
@@ -16801,7 +16922,10 @@ def _change_document_category(
         if not dest.exists():
             storage._bucket.copy_blob(src, storage._bucket, new_blob_path)
 
-        doc_index.update_category(doc_id, new_category, new_blob_path)
+        doc_index.update_category(
+            doc_id, new_category, new_blob_path,
+            extra_fields=({"patient_hn_folder": patient_folder} if patient_folder else None),
+        )
 
         audit_logger.log("document_category_changed", actor_hash, {
             "doc_id": doc_id[:8],
@@ -17290,6 +17414,42 @@ def _move_bill_to_vendor(
 # Page image data: /tmp/ranong_raktai/multipage/{user_hash}_p{N}.dat
 
 
+def _ocr_batch_page(data: bytes, ext: str) -> str:
+    """OCR หนึ่งรูปในชุดหลายรูป — ใช้เส้นทางเดียวกับการส่งรูปเดี่ยว
+
+    18 พ.ย. 2026 (HN 68408): ส่ง 4 รูป (ใบฟอกเลือด 3 + ใบยา 1) ระบบจัดเป็น
+    ใบยา 2 + ฟอกเลือด 2 — สาเหตุหลัก: ชุดหลายรูปใช้ _ocr_from_bytes
+    (Tesseract รอบเดียว ไม่ใช้ Google Vision ไม่หมุนรูปตาม EXIF/OSD)
+    ขณะที่รูปเดี่ยวใช้ extract_text_with_ocr (Vision → Tesseract v3)
+    ข้อความจากชุดจึงเพี้ยนกว่ามาก เครื่องหมายใบฟอกเลือดหาย เหลือแต่
+    คำว่า Medication/Route/Heparin → ถูกจัดเป็นใบยา
+    ตอนนี้ทั้งสองเส้นทางใช้ OCR ชุดเดียวกัน ถ้าได้ข้อความว่างจึงถอยไปใช้แบบเดิม
+    """
+    suffix = ext if ext in (".jpg", ".jpeg", ".png") else ".jpg"
+    text = ""
+    tmp_path = ""
+    try:
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(data)
+            tmp_path = tmp.name
+        text = extract_text_with_ocr(tmp_path) or ""
+    except Exception as e:
+        logger.warning("batch OCR (vision/v3) ล้มเหลว: %s", type(e).__name__)
+        text = ""
+    finally:
+        if tmp_path:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+    if len(text.strip()) < 5 and HAS_TESSERACT and HAS_PIL:
+        try:
+            text = _ocr_from_bytes(data, "image")
+        except Exception as e:
+            logger.warning("batch OCR fallback ล้มเหลว: %s", type(e).__name__)
+    return (text or "").strip()
+
+
 def _multipage_flush(user_hash: str):
     """ประมวลผลรูปภาพทั้งหมดในบัฟเฟอร์ของผู้ใช้เมื่อหมดเวลารอ.
 
@@ -17408,14 +17568,13 @@ def _multipage_flush(user_hash: str):
     page_texts: list[str] = []
     for i, (page_data, page_ext, _, _, _) in enumerate(pages_data, 1):
         page_text = ""
-        if HAS_TESSERACT and HAS_PIL:
-            try:
-                page_text = _ocr_from_bytes(page_data, "image")
-            except Exception as ocr_err:
-                logger.warning(
-                    f"Multi-image OCR ล้มเหลว หน้า {i}: "
-                    f"{type(ocr_err).__name__}"
-                )
+        try:
+            page_text = _ocr_batch_page(page_data, page_ext)
+        except Exception as ocr_err:
+            logger.warning(
+                f"Multi-image OCR ล้มเหลว หน้า {i}: "
+                f"{type(ocr_err).__name__}"
+            )
         page_texts.append(page_text.strip())
 
     # จัดประเภทจากหน้าแรก (ไม่ใช้ External AI — keyword classifier เดิม)
@@ -17581,6 +17740,52 @@ _BATCH_SHORT_CAT = {
 }
 
 
+# ใบยา ↔ ใบฟอกเลือด คือคู่ที่จัดสลับกันบ่อยที่สุด — ปุ่มแก้ประเภทกดครั้งเดียว
+_FIX_TO = {"rx": ("dialysis", "ใบฟอกเลือด", "ฟอกเลือด"),
+           "dialysis": ("rx", "ใบยา", "ใบยา")}
+_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+
+
+def _batch_num(n) -> str:
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return ""
+    return _CIRCLED[n - 1] if 1 <= n <= len(_CIRCLED) else f"({n})"
+
+
+def _batch_fix_quick_items(col: dict) -> list[dict]:
+    """ปุ่ม quick reply แก้ประเภทใบยา ↔ ใบฟอกเลือด ของแต่ละรูปในชุด
+    ใบที่ระบบไม่แน่ใจขึ้นก่อน · LINE จำกัด 13 ปุ่ม"""
+    ok = [i for i in col.get("items", [])
+          if i.get("status") == "ok" and i.get("category") in _FIX_TO and i.get("doc8")]
+    ok.sort(key=lambda i: (0 if i.get("ambiguous") else 1, i.get("n", 0)))
+    items = []
+    for i in ok[:13]:
+        _to, _word, _short = _FIX_TO[i["category"]]
+        _from = "ใบยา" if i["category"] == "rx" else "ฟอกเลือด"
+        _n = i.get("n", "?")
+        if i.get("ambiguous"):
+            label = f"⚠️รูป{_n}→{_short}"
+        else:
+            label = f"รูป{_n} {_from}→{_short}"
+            if len(label) > 20:
+                label = f"รูป{_n}→{_short}"
+        items.append({
+            "type": "action",
+            "action": {
+                "type": "message",
+                "label": label[:20],
+                "text": f"เปลี่ยนประเภท {i['doc8']} {_word}",
+            },
+        })
+    return items
+
+
+def _can_recategorize(user_hash: str) -> bool:
+    return bool(user_hash) and (user_hash in PHYSICIAN_USERS or user_hash in ADMIN_USERS)
+
+
 def _batch_summary_text(col: dict, partial: bool) -> str:
     """ข้อความสรุปชุด — กระชับ: จัดกลุ่มตามแฟ้ม/บริษัท ไม่ไล่ทีละใบ
     (2026-11-02 แพทย์สั่ง: "สรุปอยู่ที่ 1–2 ข้อความ ไม่รกตา")"""
@@ -17625,7 +17830,20 @@ def _batch_summary_text(col: dict, partial: bool) -> str:
             need_move_hint = True
             lines.append("   รหัส: " + " ".join(i.get("doc8", "") for i in lst))
     if ok:
-        lines.append("รหัส: " + " ".join(i.get("doc8", "") for i in ok))
+        # รหัสตามลำดับรูป + ประเภท → รู้ทันทีว่ารูปไหนถูกจัดเป็นอะไร (18 พ.ย. 2026)
+        lines.append("รหัส (ตามลำดับรูป): " + " ".join(
+            f"{_batch_num(i.get('n', 0))}{i.get('emoji', '📄')}{i.get('doc8', '')}"
+            for i in ok
+        ))
+    unsure = [i for i in ok if i.get("ambiguous")]
+    if unsure:
+        lines.append(
+            "⚠️ ระบบไม่แน่ใจ ใบยา/ใบฟอกเลือด — โปรดเปิดดู: "
+            + " ".join(f"{_batch_num(i.get('n', 0))}{i.get('doc8', '')}" for i in unsure)
+        )
+    if any(i.get("category") in _FIX_TO for i in ok):
+        lines.append("🔁 จัดประเภทผิด? แพทย์กดปุ่มแก้ได้ทันที หรือพิมพ์ "
+                     "'เปลี่ยนประเภท <รหัส> ใบฟอกเลือด'")
     if ask:
         lines.append(
             f"❓ รอคำตอบประเภท {len(ask)} ใบ (ตอบ 1–4 ตามคำถามด้านบน): "
@@ -17696,8 +17914,21 @@ def _batch_flush(batch_id: str, from_timer: bool) -> None:
 
     text = _batch_summary_text(col, partial)
     sender = col.get("line_user_id", "")
+    fix_items = []
+    try:
+        fix_items = _batch_fix_quick_items(col)
+    except Exception:
+        fix_items = []
     if sender:
-        push_message(sender, text)
+        if fix_items and _can_recategorize(col.get("owner_hash", "")):
+            # แพทย์/ผู้ดูแลส่งเอง → แนบปุ่มแก้ประเภทกับข้อความสรุป
+            if not push_messages(sender, [{
+                "type": "text", "text": text[:5000],
+                "quickReply": {"items": fix_items},
+            }]):
+                push_message(sender, text)
+        else:
+            push_message(sender, text)
 
     # ผู้รับแจ้งเตือน (ไม่รวมผู้ส่งเอง) — ข้อความสรุป + carousel ปุ่มเปิดเอกสาร
     try:
@@ -17716,7 +17947,22 @@ def _batch_flush(batch_id: str, from_timer: bool) -> None:
                 "altText": f"📄 เอกสารชุดใหม่ {len(bubbles)} ใบ — กดเพื่อเปิด",
                 "contents": {"type": "carousel", "contents": bubbles},
             })
-        sent = sum(1 for rid in notif_ids if push_messages(rid, msgs))
+        # ปุ่มแก้ประเภท (quick reply) แนบที่ข้อความสุดท้าย — เฉพาะผู้มีสิทธิ์แก้
+        msgs_fix = msgs
+        if fix_items:
+            msgs_fix = [dict(m) for m in msgs]
+            msgs_fix[-1]["quickReply"] = {"items": fix_items}
+
+        def _send(rid) -> bool:
+            try:
+                _fix_ok = msgs_fix is not msgs and _can_recategorize(hash_user_id(rid))
+            except Exception:
+                _fix_ok = False
+            if _fix_ok and push_messages(rid, msgs_fix):
+                return True
+            # ส่งแบบไม่มีปุ่ม (เดิม) — ปุ่มเสริมต้องไม่ทำให้สรุปชุดส่งไม่ถึง
+            return push_messages(rid, msgs)
+        sent = sum(1 for rid in notif_ids if _send(rid))
         logger.info(
             "batch %s: สรุป %d/%d ใบ → ผู้ส่ง=%s ผู้รับแจ้ง %d/%d ราย%s",
             batch_id, len(col["items"]), col["total"], bool(sender),
@@ -17728,7 +17974,7 @@ def _batch_flush(batch_id: str, from_timer: bool) -> None:
 
 def _build_doc_flex_bubble(
     category: str, cat_name: str, storage_display: str,
-    doc_id: str, dest: str,
+    doc_id: str, dest: str, n: int = 0, ambiguous: str = "",
 ) -> dict | None:
     """Flex bubble ปุ่ม "เปิดเอกสาร" + "สั่งการรักษา" ของเอกสารหนึ่งใบ
     (ย้ายมาจากโค้ดแจ้งเตือนรายใบ — ใช้ร่วมกันทั้งรายใบและ carousel ของชุด)
@@ -17763,8 +18009,27 @@ def _build_doc_flex_bubble(
             "action": {"type": "uri", "label": "✏️ สั่งการรักษา", "uri": annotate},
             "margin": "sm",
         })
+    # 18 พ.ย. 2026: ปุ่มแก้ประเภทใบยา ↔ ใบฟอกเลือด บนการ์ดของใบนั้นเลย
+    # (ส่งคำสั่ง 'เปลี่ยนประเภท' ปกติ — ระบบตรวจสิทธิ์แพทย์/ผู้ดูแลเหมือนเดิม)
+    if category in _FIX_TO and doc_id:
+        _to, _word, _short = _FIX_TO[category]
+        footer.append({
+            "type": "button", "style": "secondary", "height": "sm", "margin": "sm",
+            "action": {"type": "message", "label": f"🔁 เป็น{_word}"[:20],
+                       "text": f"เปลี่ยนประเภท {doc_id[:8]} {_word}"},
+        })
+    _title = f"{emoji} {cat_name}"
+    if n:
+        _title = f"{_batch_num(n)} {_title}"
     body = [
-        {"type": "text", "text": f"{emoji} {cat_name}", "weight": "bold", "size": "lg"},
+        {"type": "text", "text": _title, "weight": "bold", "size": "lg"},
+    ]
+    if ambiguous:
+        body.append({"type": "text", "text": "⚠️ ระบบไม่แน่ใจ ใบยา/ใบฟอกเลือด — โปรดเปิดดู",
+                     "size": "xs", "color": "#B45309", "wrap": True, "margin": "sm"})
+    body += [
+        {"type": "text", "text": f"รหัส {doc_id[:8]}", "size": "xs",
+         "color": "#888888", "margin": "sm"},
         {"type": "separator", "margin": "md"},
         {"type": "box", "layout": "vertical", "margin": "md", "contents": [{
             "type": "box", "layout": "horizontal", "contents": [
