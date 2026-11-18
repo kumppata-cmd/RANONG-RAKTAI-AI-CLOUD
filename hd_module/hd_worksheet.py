@@ -378,8 +378,12 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         for col in range(3):
             cell(LM + col * third, nurs_y - (r + 1) * RH, third, RH)
 
-    # Sticker EPO area
-    cell(RM - 70, nurs_y - RH, 70, 3 * RH, "Sticker EPO", sz=6, align="center")
+    # Sticker EPO area — อยู่เหนือ Nursing Diagnosis ในช่องว่างด้านขวา
+    sticker_h = nurs_y + RH - (nurs_y + RH)  # คำนวณช่องว่างที่เหลือ
+    # วาง Sticker EPO ตรงช่องว่างเหนือ Nursing Diagnosis
+    sticker_top = nurs_y + 3  # เหนือ header Nursing เล็กน้อย
+    sticker_box_h = 40  # สูง 40pt พอติด sticker
+    cell(RM - 100, sticker_top, 100, sticker_box_h, "Sticker EPO", sz=7, bold=True, align="center")
 
     # Pre HD Note
     pre_y = nurs_y - 4 * RH
