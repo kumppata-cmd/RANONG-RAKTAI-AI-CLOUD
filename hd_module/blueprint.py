@@ -3002,14 +3002,29 @@ def create_session():
             if not uf_goal or uf_goal <= 0:
                 uf_goal = 2000  # fallback only when no weights given
 
+            # Auto-link equipment: ดึงเครื่องฟอก active ที่ผูกเตียงนี้
+            _eq_id = data.get("equipment_id")  # manual override
+            if not _eq_id:
+                cur.execute("SAVEPOINT sp_eq_lookup")
+                try:
+                    cur.execute("""SELECT id FROM hd_equipment
+                                   WHERE bed_number = %s AND equipment_type = 'dialysis_machine'
+                                     AND status = 'active' LIMIT 1""", (bed,))
+                    _eq_row = cur.fetchone()
+                    if _eq_row:
+                        _eq_id = _eq_row[0]
+                    cur.execute("RELEASE SAVEPOINT sp_eq_lookup")
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_eq_lookup")
+
             cur.execute(f"""
                 INSERT INTO hd_sessions
                     (patient_id, bed_number, session_date, status,
                      pre_weight, post_weight, uf_goal,
-                     started_at, nurse_id, shift)
+                     started_at, nurse_id, shift, equipment_id)
                 VALUES (%s, %s, %s, '{init_status}',
                         %s, NULL, %s,
-                        {started}, %s, %s)
+                        {started}, %s, %s, %s)
                 RETURNING id
             """, (
                 patient_id, bed,
@@ -3018,6 +3033,7 @@ def create_session():
                 uf_goal,
                 g.get("hd_user_id"),
                 shift,
+                _eq_id,
             ))
             session_id = cur.fetchone()[0]
 
@@ -3189,6 +3205,25 @@ def _session_record_extras(cur, session_id, patient_id):
         if r:
             out["va_location"] = r[0]
     q("va", "SELECT va_location FROM hd_patient_mapping WHERE id = %s", (patient_id,), _va)
+
+    def _machine(c):
+        r = c.fetchone()
+        if r:
+            out["machine"] = {"id": r[0], "brand": r[1], "model": r[2], "serial": r[3], "status": r[4]}
+    q("machine", """SELECT e.id, e.brand, e.model, e.serial_number, e.status
+                    FROM hd_equipment e JOIN hd_sessions s ON e.id = s.equipment_id
+                    WHERE s.id = %s""", (session_id,), _machine)
+    if "machine" not in out:
+        # fallback: ดึงจาก bed_number mapping (session เก่าที่ยังไม่มี equipment_id)
+        def _machine_bed(c):
+            r = c.fetchone()
+            if r:
+                out["machine"] = {"id": r[0], "brand": r[1], "model": r[2], "serial": r[3], "status": r[4]}
+        q("machine_bed", """SELECT e.id, e.brand, e.model, e.serial_number, e.status
+                            FROM hd_equipment e, hd_sessions s
+                            WHERE s.id = %s AND e.bed_number = s.bed_number
+                              AND e.equipment_type = 'dialysis_machine' AND e.status = 'active'
+                            LIMIT 1""", (session_id,), _machine_bed)
 
     def _nurse(c):
         r = c.fetchone()
@@ -5484,6 +5519,23 @@ def bed_dashboard():
                                 beds[bnum - 1]["anticoag_text"] = hrow[0]
                     except Exception as he:
                         logger.warning("bed heparin fetch: %s", he)
+
+                # Machine-Bed Mapping: เครื่องฟอกที่ผูกแต่ละเตียง
+                try:
+                    cur.execute("""SELECT id, brand, model, serial_number, bed_number, status
+                                   FROM hd_equipment
+                                   WHERE equipment_type = 'dialysis_machine' AND bed_number IS NOT NULL""")
+                    for mr in cur.fetchall():
+                        mb = mr[4]
+                        if 1 <= mb <= len(beds):
+                            beds[mb - 1]["machine"] = {
+                                "id": mr[0], "brand": mr[1], "model": mr[2],
+                                "serial": mr[3], "status": mr[5],
+                            }
+                            if mr[5] in ("repair", "retired"):
+                                beds[mb - 1].setdefault("machine_warning", f"เครื่อง {mr[5]}")
+                except Exception as me:
+                    logger.warning("bed machine map: %s", me)
 
             conn.close()
         except Exception as e:
@@ -8853,6 +8905,73 @@ def delete_equipment(equip_id):
         return jsonify({"ok": True})
     except Exception as e:
         logger.warning("equipment DELETE: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ═══ Machine-Bed Mapping API (18 พ.ย. 2569) ═══════════════════
+
+@hd_bp.route("/bed-machines", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def get_bed_machines():
+    """ดึง mapping เตียง ↔ เครื่องฟอก (เฉพาะ dialysis_machine ที่ active)."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    mapping = {}  # {bed_number: {id, brand, model, serial, status}}
+    if not db_url:
+        return jsonify({"mapping": mapping, "total_beds": HdConfig.TOTAL_BEDS})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, brand, model, serial_number, bed_number, status
+                           FROM hd_equipment
+                           WHERE equipment_type = 'dialysis_machine' AND bed_number IS NOT NULL
+                           ORDER BY bed_number""")
+            for r in cur.fetchall():
+                mapping[str(r[4])] = {"id": r[0], "brand": r[1], "model": r[2],
+                                      "serial": r[3], "bed": r[4], "status": r[5]}
+        conn.close()
+    except Exception as e:
+        logger.warning("bed-machines GET: %s", e)
+    return jsonify({"mapping": mapping, "total_beds": HdConfig.TOTAL_BEDS})
+
+
+@hd_bp.route("/bed-machines/<int:bed_number>", methods=["PUT"])
+@require_role("physician", "admin")
+def set_bed_machine(bed_number):
+    """ผูก/ถอดเครื่องฟอกกับเตียง. Body: {equipment_id: N} หรือ {equipment_id: null} เพื่อถอด."""
+    import os, psycopg2
+    if bed_number < 1 or bed_number > HdConfig.TOTAL_BEDS:
+        return jsonify({"error": f"เตียงต้องอยู่ระหว่าง 1-{HdConfig.TOTAL_BEDS}"}), 400
+    data = request.get_json(silent=True) or {}
+    eq_id = data.get("equipment_id")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 500
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            if eq_id is None:
+                # ถอดเครื่องออกจากเตียง
+                cur.execute("UPDATE hd_equipment SET bed_number = NULL WHERE bed_number = %s AND equipment_type = 'dialysis_machine'", (bed_number,))
+            else:
+                # ตรวจว่าเครื่องมีอยู่จริง
+                cur.execute("SELECT id, bed_number FROM hd_equipment WHERE id = %s AND equipment_type = 'dialysis_machine'", (eq_id,))
+                eq = cur.fetchone()
+                if not eq:
+                    conn.close()
+                    return jsonify({"error": "ไม่พบเครื่องฟอกนี้ในทะเบียน"}), 404
+                # ถอดเครื่องเดิมออกจากเตียงนี้
+                cur.execute("UPDATE hd_equipment SET bed_number = NULL WHERE bed_number = %s AND equipment_type = 'dialysis_machine'", (bed_number,))
+                # ย้ายเครื่องใหม่มาเตียงนี้
+                cur.execute("UPDATE hd_equipment SET bed_number = %s WHERE id = %s", (bed_number, eq_id))
+            conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action="bed_machine.set",
+                   resource_type="bed", resource_id=bed_number,
+                   new_values={"equipment_id": eq_id}, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "bed": bed_number, "equipment_id": eq_id})
+    except Exception as e:
+        logger.warning("bed-machine PUT: %s", e)
         return jsonify({"error": str(e)}), 500
 
 

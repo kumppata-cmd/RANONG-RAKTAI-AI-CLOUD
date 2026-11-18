@@ -187,6 +187,8 @@ def _run_hd_migrations():
                 __import__("hd_module.dw_autopilot", fromlist=["CREATE_SQL"]).CREATE_SQL,
                 # ตรวจระบบน้ำ RO ประจำวัน (Hardness / Free Cl / Total Cl)
                 *[stmt.strip() for stmt in __import__("hd_module.water_check", fromlist=["CREATE_SQL"]).CREATE_SQL.split(";") if stmt.strip()],
+                # 18 พ.ย. 2569: Machine-Bed Link — เตียง 28 เตียง + ผูกเครื่องฟอกกับ session
+                "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS equipment_id INTEGER REFERENCES hd_equipment(id)",
                 # Set alert_recipients
                 """INSERT INTO hd_settings (key, value, description, updated_at)
                     VALUES ('alert_recipients', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId แพทย์', NOW())

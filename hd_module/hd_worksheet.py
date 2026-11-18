@@ -240,8 +240,13 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     hep_bolus = hep.get("bolus", "") or ""
     hep_maint = hep.get("maintenance", "") or ""
 
+    # Machine info from equipment registry
+    machine = ex.get("machine", {}) or {}
+    machine_label = f"{machine.get('brand', '')} {machine.get('model', '')}".strip() if machine else ""
+    machine_sn = (machine.get("serial", "") or "") if machine else ""
+
     rx_items = [
-        ("Machine", "", "No.", ""),
+        ("Machine", machine_label, "S/N", machine_sn),
         ("Dialyzer", dialyzer, "Surface area", "m2"),
         ("Use No.", str(reuse) if reuse else "", "Last TCV", ""),
         (f"Loading    {hep_bolus or '____'}", "", f"Maintenance    {hep_maint or '____'}", ""),

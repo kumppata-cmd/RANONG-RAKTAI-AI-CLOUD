@@ -36,4 +36,4 @@ class HdConfig:
     MAX_PAGE_SIZE = 100
 
     # ── Bed count ─────────────────────────────────────────
-    TOTAL_BEDS = int(os.environ.get("HD_TOTAL_BEDS", "25"))
+    TOTAL_BEDS = int(os.environ.get("HD_TOTAL_BEDS", "28"))
