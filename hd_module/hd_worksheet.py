@@ -406,10 +406,6 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     # ════════════════════════════════════════════════════════════
     tbl_y = pre_y - 4
 
-    # Nurse start label
-    c.setFont("Loma", 6)
-    c.drawRightString(RM, tbl_y + 2, "Nurse start")
-
     # Header แบบ 2 แถว: ชื่อ (บน) + หน่วย (ล่าง) เหมือนฟอร์มจริง
     hdr_names = ["TIME", "BP", "PR", "RR", "BFR", "VP", "TMP", "UFR", "Conduct", "Total UF", "Remark"]
     hdr_units = ["", "mm/Hg", "/min", "/min", "ml/min", "mm/Hg", "mm/Hg", "ml/hr", "mS/cm", "ml", ""]
@@ -494,8 +490,6 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     # POST-HD: Nurse Off / Total UF / Net UF
     # ════════════════════════════════════════════════════════════
     y_post = y_row - 2
-    c.setFont("Loma", 6)
-    c.drawRightString(RM, y_post + 3, "Nurse Off")
     y_post -= 10
     post_labels = ["Nss", "50%glucose", "Extra fluid", "meal and drink",
                    "Total repletcement", "Total UF", "Net UF balance"]
