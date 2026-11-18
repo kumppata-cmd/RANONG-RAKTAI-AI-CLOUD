@@ -446,8 +446,8 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
             (entry.get("remark", "") or "")[:30],
         ])
 
-    # Empty rows to fill space
-    while y_row > 155:
+    # Empty rows to fill space (ลดเหลือพอดีกับช่องลายเซ็น)
+    while y_row > 220:
         _draw_row([""] * 11)
 
     # ════════════════════════════════════════════════════════════
