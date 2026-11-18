@@ -595,55 +595,69 @@ def _build_overlay(rec, extras=None):
         txtc(WT_X, 669, _f(round(float(pre_w) - float(post_w), 1)), WT_W, size=8)
 
     # ════════════════════════════════════════════════════════
-    # HEMODIALYSIS PRESCRIPTION — ฝั่งขวา
-    # grid: Machine y≈768, Dialyzer y≈756, Surface area y≈744 ...
+    # HEMODIALYSIS PRESCRIPTION — วัดจาก fine grid (6pt)
+    # คอลัมน์: Machine/Dialyzer x≈310-430, Anticoag x≈430-540, Duration x≈540-590
+    # แถว: Anxiety y≈773, Sleep y≈761, Dyspnea y≈749, Orthopnea y≈737
+    #       Crepitation y≈725, JVP y≈713, Arrhythmia y≈701, Fever y≈689
     # ════════════════════════════════════════════════════════
     machine = ex.get("machine", {}) or {}
-    # Machine: field-map V2 box(345,773,85,11)
-    machine_label = f"{machine.get('brand', '')} {machine.get('model', '')}".strip() if machine else ""
-    txtc(345, 775, machine_label, 85, size=7, bold=True)
-    # Serial No: box(432,773,55,11)
-    txtc(432, 775, machine.get("serial", "") if machine else "", 55, size=5.5)
-    # Dialyzer: box(345,761,85,11)
-    dialyzer = ex.get("dialyzer_type", "") or ""
-    txtc(345, 763, dialyzer, 85, size=7, bold=True)
-    # Use No. (reuse): box(345,737,50,11)
-    reuse = ex.get("dialyzer_reuse")
-    txtc(345, 739, str(reuse) if reuse else "", 50, size=7)
+    RX_X, RX_W = 310, 120   # Machine/Dialyzer column
+    SN_X, SN_W = 432, 60    # Serial No. column (after "No.")
+    RX_Y0 = 763             # Anxiety row (ลง 10pt จาก header)
 
-    # Anticoagulant checkboxes: y≈768 area ฝั่งขวาสุด
+    # Machine: แถว Anxiety (y=763)
+    machine_label = f"{machine.get('brand', '')} {machine.get('model', '')}".strip() if machine else ""
+    txtc(RX_X, RX_Y0, machine_label, RX_W, size=7, bold=True)
+    # Serial No.: ช่องหลัง "No."
+    txtc(SN_X, RX_Y0, machine.get("serial", "") if machine else "", SN_W, size=5.5)
+
+    # Dialyzer: แถว Sleep (y=751)
+    dialyzer = ex.get("dialyzer_type", "") or ""
+    txtc(RX_X, RX_Y0 - 12, dialyzer, RX_W, size=7, bold=True)
+
+    # Surface area: แถว Dyspnea (y=739) — ถ้ามีค่า
+    surface = ex.get("surface_area")
+    if surface:
+        txtc(RX_X, RX_Y0 - 24, str(surface), RX_W, size=7)
+
+    # Use No.: แถว Orthopnea (y=727)
+    reuse = ex.get("dialyzer_reuse")
+    txtc(RX_X, RX_Y0 - 36, str(reuse) if reuse else "", RX_W, size=7)
+
+    # ── Anticoagulant / Heparin ──
     hep = ex.get("heparin", {}) or {}
     hep_protocol = (hep.get("protocol", "") or "").lower()
 
-    # Duration: field-map box(553,773,35,11)
-    duration = rec.get("duration_hr") or _DURATION_HR
-    txtc(553, 775, str(duration), 35, size=8, bold=True)
-    # Time start: box(540,761,50,11)
-    txtc(540, 763, _thai_time(rec.get("started_at")), 50, size=7, bold=True)
-    # Time off: box(540,749,50,11)
-    txtc(540, 751, _thai_time(rec.get("ended_at")), 50, size=7, bold=True)
-
-    # Heparin checkbox: ☐ Heparin y≈762
+    # Heparin checkbox
     if "heparin" in hep_protocol and "free" not in hep_protocol:
-        tick(468, 762)
+        tick(468, RX_Y0)
     elif "lmwh" in hep_protocol:
-        tick(468, 750)
+        tick(468, RX_Y0 - 12)
 
-    # Loading: field-map box(440,713,70,11)
-    txtc(440, 715, str(hep.get("bolus", "")) or "", 70, size=7, bold=True)
-    # Maintenance: box(440,701,70,11)
-    txtc(440, 703, str(hep.get("maintenance", "")) or "", 70, size=7, bold=True)
+    # Loading: แถว Crepitation (y=715) — center ในช่อง x=430-510
+    HP_X, HP_W = 430, 80
+    txtc(HP_X, RX_Y0 - 48, str(hep.get("bolus", "")) or "", HP_W, size=7, bold=True)  # Loading
+    # Maintenance: แถว JVP (y=703)
+    txtc(HP_X, RX_Y0 - 60, str(hep.get("maintenance", "")) or "", HP_W, size=7, bold=True)
 
-    # No Heparin free technique checkbox: y≈691
+    # No Heparin free technique checkbox
     if "free" in hep_protocol:
-        tick(468, 691)
+        tick(468, RX_Y0 - 72)
 
-    # Hct=: field-map box(550,701,40,11)
+    # ── Duration / Time ── ช่อง x=540-590 (w=50)
+    DUR_X, DUR_W = 540, 50
+    duration = rec.get("duration_hr") or _DURATION_HR
+    txtc(DUR_X, RX_Y0, str(duration), DUR_W, size=8, bold=True)       # Duration (Anxiety)
+    txtc(DUR_X, RX_Y0 - 12, _thai_time(rec.get("started_at")), DUR_W, size=7, bold=True)  # Time start (Sleep)
+    txtc(DUR_X, RX_Y0 - 24, _thai_time(rec.get("ended_at")), DUR_W, size=7, bold=True)    # Time off (Dyspnea)
+
+    # ── BT / Hct / Hb ── ช่อง x=540-590 (w=50)
+    bt = rec.get("bt") or ex.get("bt_value")
+    txtc(DUR_X, RX_Y0 - 48, _f(bt), DUR_W, size=7, bold=True)        # BT (Crepitation)
     hct = rec.get("hct") or ex.get("hct_value")
     hb = rec.get("hb") or ex.get("hb_value")
-    txtc(550, 703, _f(hct), 40, size=7, bold=True)
-    # Hb=: box(550,689,40,11)
-    txtc(550, 691, _f(hb), 40, size=7, bold=True)
+    txtc(DUR_X, RX_Y0 - 60, _f(hct), DUR_W, size=7, bold=True)       # Hct (JVP)
+    txtc(DUR_X, RX_Y0 - 72, _f(hb), DUR_W, size=7, bold=True)        # Hb (Arrhythmia)
 
     # ════════════════════════════════════════════════════════
     # VASCULAR ACCESS — y≈652 area
