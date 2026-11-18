@@ -5142,23 +5142,52 @@ def get_patient_last_clinical(hn):
                 result["hep_bolus"] = h[1]
                 result["hep_maintenance"] = h[2]
 
-            # VA + ตำแหน่ง: ค่าจากทะเบียนผู้ป่วย (อัปเดตทุกครั้งที่เริ่มฟอก) + วันที่ของรอบล่าสุด
+            # VA + ตำแหน่ง + วันที่ + น้ำหนักหลังฟอกครั้งก่อน + เครื่องฟอก
             cur.execute("SAVEPOINT sp_lc_va")
             try:
                 cur.execute("SELECT vascular_access, va_location FROM hd_patient_mapping WHERE id = %s", (pid,))
                 v = cur.fetchone()
                 if v:
                     result["access_type"], result["va_location"] = v[0], v[1]
-                cur.execute("""SELECT session_date FROM hd_sessions WHERE patient_id = %s
-                               AND status IN ('completed', 'in_progress') ORDER BY session_date DESC, id DESC LIMIT 1""",
+                cur.execute("""SELECT session_date, post_weight, bed_number FROM hd_sessions WHERE patient_id = %s
+                               AND status = 'completed' AND post_weight IS NOT NULL
+                               ORDER BY session_date DESC, id DESC LIMIT 1""",
                             (pid,))
                 ld = cur.fetchone()
-                if ld and ld[0]:
-                    result["last_date"] = ld[0].isoformat()
+                if ld:
+                    if ld[0]:
+                        result["last_date"] = ld[0].isoformat()
+                    if ld[1] is not None:
+                        result["prev_post_weight"] = float(ld[1])
+                else:
+                    # ไม่มีรอบ completed → ดูรอบล่าสุดแทน (อาจเป็น in_progress)
+                    cur.execute("""SELECT session_date FROM hd_sessions WHERE patient_id = %s
+                                   AND status IN ('completed', 'in_progress')
+                                   ORDER BY session_date DESC, id DESC LIMIT 1""", (pid,))
+                    ld2 = cur.fetchone()
+                    if ld2 and ld2[0]:
+                        result["last_date"] = ld2[0].isoformat()
                 cur.execute("RELEASE SAVEPOINT sp_lc_va")
             except Exception as e:
                 cur.execute("ROLLBACK TO SAVEPOINT sp_lc_va")
                 logger.debug("last-clinical va: %s", e)
+
+            # เครื่องฟอก (Machine) ที่ผูกเตียง — ดึงจาก bed_number ล่าสุดหรือเตียงที่เลือก
+            cur.execute("SAVEPOINT sp_lc_machine")
+            try:
+                bed_param = request.args.get("bed")
+                if bed_param:
+                    cur.execute("""SELECT e.id, e.brand, e.model, e.serial_number, e.status
+                                   FROM hd_equipment e
+                                   WHERE e.bed_number = %s AND e.equipment_type = 'dialysis_machine'
+                                     AND e.status = 'active' LIMIT 1""", (int(bed_param),))
+                    mr = cur.fetchone()
+                    if mr:
+                        result["machine"] = {"id": mr[0], "brand": mr[1], "model": mr[2], "serial": mr[3], "status": mr[4]}
+                cur.execute("RELEASE SAVEPOINT sp_lc_machine")
+            except Exception as e:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_lc_machine")
+                logger.debug("last-clinical machine: %s", e)
 
         conn.close()
     except Exception as e:

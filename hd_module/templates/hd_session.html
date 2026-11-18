@@ -875,7 +875,8 @@ function onDialyzerChange(){
 }
 function fillLastClinical(hn){
   if(!hn) return;
-  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(hn)+'/last-clinical')
+  const bed = document.getElementById('bedSelect').value || '';
+  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(hn)+'/last-clinical?bed='+bed)
     .then(r=>r.ok?r.json():Promise.reject())
     .then(d=>{
       let autoFilled = false;
@@ -896,9 +897,23 @@ function fillLastClinical(hn){
         if(d.hep_maintenance != null) document.getElementById('hepMaintenance').value = d.hep_maintenance;
         autoFilled = true;
       }
+      /* น้ำหนักหลังฟอกครั้งก่อน */
+      if(d.prev_post_weight != null){
+        document.getElementById('prevPostWeight').value = d.prev_post_weight;
+        autoFilled = true;
+      }
+      /* เครื่องฟอก (Machine) ที่ผูกเตียง */
+      if(d.machine){
+        const ml = (d.machine.brand||'')+' '+(d.machine.model||'');
+        const ms = d.machine.serial || '';
+        let me = document.getElementById('machineInfo');
+        if(!me){ me = document.createElement('div'); me.id='machineInfo'; me.style.cssText='margin-top:6px;font-size:.82rem;color:var(--fg-muted);'; const pi=document.getElementById('patientInfo'); if(pi) pi.after(me); }
+        me.innerHTML = '🔧 เครื่อง: <strong>'+ml.trim()+'</strong>'+(ms?' · S/N '+ms:'');
+        if(d.machine.status==='repair') me.innerHTML += ' <span style="color:#e67e22">⚠️ ซ่อม</span>';
+      }
       if(autoFilled){
         const el = document.getElementById('clinicalAutoFill');
-        el.innerHTML = 'ℹ️ ใช้ค่าจากรอบก่อน' + (d.last_date ? ' ('+hdDate(d.last_date)+')' : '') + ' — ตัวกรอง/VA/Heparin ตรวจสอบแล้วกดเริ่มฟอกได้เลย แก้ได้ถ้าเปลี่ยน';
+        el.innerHTML = 'ℹ️ ใช้ค่าจากรอบก่อน' + (d.last_date ? ' ('+hdDate(d.last_date)+')' : '') + ' — ตัวกรอง/VA/Heparin/น้ำหนัก ตรวจสอบแล้วกดเริ่มฟอกได้เลย แก้ได้ถ้าเปลี่ยน';
         el.style.display = 'block';
       }
     }).catch(()=>{ /* No previous data — nurse fills manually */ });
@@ -1225,6 +1240,8 @@ function loadExistingSession(sid){
       /* Fill Pre-HD vitals if available */
       if(d.pre_weight) document.getElementById('preWeight').value = d.pre_weight;
       if(d.dry_weight) document.getElementById('dryWeight').value = d.dry_weight;
+      /* Auto-fill prev post weight + machine from last-clinical */
+      if(d.patient_hn) fillLastClinical(d.patient_hn);
       /* Status */
       if(d.status==='in_progress'){
         document.getElementById('sessionStatus').textContent = 'กำลังฟอก';
