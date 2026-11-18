@@ -562,6 +562,11 @@ function renderBeds(beds){
     if(b.session_id && (b.status === 'active' || b.status === 'warning' || b.status === 'critical')){
       quickBtn = `<button class="quick-vital-btn" onclick="event.stopPropagation();openQuickVital(${b.session_id},${b.bed_number},'${pName}')">❤️ วัด BP</button>`;
     }
+    /* Work Sheet PDF button */
+    let wsBtn = '';
+    if(b.session_id){
+      wsBtn = `<a class="quick-vital-btn" style="text-decoration:none;background:#0d6efd22;color:#0d6efd;font-size:.62rem;" href="/hd/sessions/${b.session_id}/worksheet.pdf" target="_blank" onclick="event.stopPropagation()">📋 Work Sheet</a>`;
+    }
 
     /* Filter-aware content: show different info based on active filter */
     let filterContent = '';
@@ -597,6 +602,7 @@ function renderBeds(beds){
       <div class="bed-status">${s.label}</div>
       ${nextBadge}
       ${quickBtn}
+      ${wsBtn}
     `;
     grid.appendChild(card);
 

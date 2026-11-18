@@ -603,6 +603,66 @@ def session_worksheet_pdf(session_id):
     return _pdf_response(data, fname)
 
 
+@hd_bp.route("/worksheets/batch.pdf", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def batch_worksheets_pdf():
+    """ข้อ 5: Batch print — รวม Work Sheet ทั้งเวร/วัน เป็น PDF เดียว.
+    ?date=YYYY-MM-DD&shift=morning|afternoon|evening (optional)"""
+    import os
+    import psycopg2
+    from .hd_worksheet import load_and_build
+
+    day = request.args.get("date", _thai_today().isoformat())
+    shift = request.args.get("shift")
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 500
+
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            sql = "SELECT id FROM hd_sessions WHERE session_date = %s AND status = 'completed'"
+            params = [day]
+            if shift:
+                sql += " AND shift = %s"
+                params.append(shift)
+            sql += " ORDER BY bed_number, started_at"
+            cur.execute(sql, params)
+            ids = [r[0] for r in cur.fetchall()]
+
+        if not ids:
+            return jsonify({"error": f"No completed sessions on {day}"}), 404
+
+        # Merge all PDFs
+        from pypdf import PdfReader, PdfWriter
+        import io as _io
+        writer = PdfWriter()
+        clinic = get_setting_value("clinic_name", "") or "ระนอง รักษ์ไต"
+
+        for sid in ids:
+            pdf_bytes, _ = load_and_build(conn, sid, clinic, mode="draw")
+            if pdf_bytes:
+                reader = PdfReader(_io.BytesIO(pdf_bytes))
+                for page in reader.pages:
+                    writer.add_page(page)
+    finally:
+        conn.close()
+
+    if len(writer.pages) == 0:
+        return jsonify({"error": "No worksheets generated"}), 404
+
+    out = _io.BytesIO()
+    writer.write(out)
+    shift_th = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}.get(shift or "", "ทั้งวัน")
+    fname = f"HD-WorkSheets-{day}-{shift_th}.pdf"
+    log_action(user_id=g.get("hd_user_id"), action="session.batch_worksheets", resource_type="batch",
+               resource_id=day, ip_address=request.remote_addr or "")
+    return _pdf_response(out.getvalue(), fname)
+
+
+
 def run_daily_export(day, trigger="manual", user=None):
     """Render CSV + shift PDFs + session PDFs for `day` and upload to GCS
     (HD-Records/YYYY/YYYY-MM/YYYY-MM-DD/). Pushes a LINE summary to the
@@ -3408,6 +3468,11 @@ def update_session(session_id):
     # Check ESA alert: patient has prescribed ESA but didn't get it and no reason given
     if data.get("status") == "completed":
         _check_esa_missing_alert(session_id)
+        # Auto-generate Work Sheet PDF + upload GCS + LINE notify
+        try:
+            result["worksheet"] = _auto_worksheet_on_complete(session_id)
+        except Exception as e:
+            logger.warning("auto worksheet: %s", e)
         # B8: when this was the last session of the shift → shift summary to the nurse group
         try:
             result["shift_summary"] = _maybe_send_shift_summary(session_id)
@@ -3421,6 +3486,54 @@ def update_session(session_id):
             logger.warning("patient summary: %s", e)
 
     return jsonify(result)
+
+
+def _auto_worksheet_on_complete(session_id):
+    """Auto-generate Work Sheet PDF, upload to GCS, and LINE notify nurse group."""
+    import os
+    import psycopg2
+    from .hd_worksheet import load_and_build
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"ok": False, "error": "no db"}
+
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        clinic = get_setting_value("clinic_name", "") or "ระนอง รักษ์ไต"
+        pdf_bytes, fname = load_and_build(conn, session_id, clinic, mode="draw")
+    finally:
+        conn.close()
+
+    if not pdf_bytes:
+        return {"ok": False, "error": "no data"}
+
+    result = {"ok": True, "filename": fname}
+
+    # Upload to GCS (HD-Records/WorkSheets/YYYY-MM/)
+    try:
+        from . import _gcs_upload_bytes
+        now = _thai_now()
+        gcs_path = f"HD-Records/WorkSheets/{now.strftime('%Y-%m')}/{fname}"
+        url = _gcs_upload_bytes(pdf_bytes, gcs_path, content_type="application/pdf")
+        if url:
+            result["gcs_url"] = url
+            logger.info("worksheet uploaded: %s", gcs_path)
+    except Exception as e:
+        logger.warning("worksheet GCS upload: %s", e)
+
+    # LINE notify nurse group (ข้อ 4)
+    try:
+        base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://ranong-raktai-ai-cloud.onrender.com")
+        ws_url = f"{base_url}/hd/sessions/{session_id}/worksheet.pdf"
+        from . import _send_line_to_nurse_group
+        _send_line_to_nurse_group(f"📋 Work Sheet พร้อมแล้ว\n{fname}\n{ws_url}")
+        result["line_sent"] = True
+    except Exception as e:
+        logger.warning("worksheet LINE notify: %s", e)
+
+    return result
 
 
 def _maybe_send_shift_summary(session_id):

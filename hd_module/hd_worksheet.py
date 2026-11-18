@@ -186,6 +186,17 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         c.setFont("Loma-Bold" if val_bold else "Loma", sz + 1)
         c.drawRightString(x + w - 3, y + (h - sz) / 2, str(val) if val else "")
 
+    # ข้อ 7: DRAFT watermark ถ้ายังฟอกไม่เสร็จ
+    session_status = rec.get("status", "")
+    if session_status and session_status != "completed":
+        c.saveState()
+        c.setFillColor(HexColor("#cccccc"))
+        c.setFont("Loma-Bold", 60)
+        c.translate(W / 2, H / 2)
+        c.rotate(45)
+        c.drawCentredString(0, 0, "DRAFT")
+        c.restoreState()
+
     # ════════════════════════════════════════════════════════════
     # HEADER
     # ════════════════════════════════════════════════════════════
@@ -201,6 +212,12 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     c.drawRightString(RM - 80, y, f"HD No.  {hd_no or '____'}")
     c.setFont("Loma-Bold", 10)
     c.drawRightString(RM, y, f"{_thai_date(rec.get('date'))}")
+
+    # ข้อ 8: Running number (เลขที่ใบ = WS-{session_id})
+    session_id = rec.get("session_id") or rec.get("id") or ""
+    if session_id:
+        c.setFont("Loma", 6)
+        c.drawRightString(RM, H - 10, f"เลขที่ WS-{session_id}")
 
     # Patient line
     y -= 16

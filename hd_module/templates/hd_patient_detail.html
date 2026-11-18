@@ -103,6 +103,7 @@
           <th>น้ำหนัก (ก่อน→หลัง)</th>
           <th>UF (mL)</th>
           <th>หมายเหตุ</th>
+          <th>PDF</th>
         </tr>
       </thead>
       <tbody id="historyBody">
@@ -191,7 +192,7 @@ document.addEventListener('DOMContentLoaded', loadUfCoachCard);
 function renderSessions(sessions){
   const tbody = document.getElementById('historyBody');
   if(!sessions.length){
-    tbody.innerHTML = '<tr><td colspan="6" class="no-data">ยังไม่มีประวัติการฟอก</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="no-data">ยังไม่มีประวัติการฟอก</td></tr>';
     return;
   }
   tbody.innerHTML = sessions.map(s=>{
@@ -209,6 +210,7 @@ function renderSessions(sessions){
       <td>${preW} → ${postW}</td>
       <td>${uf}</td>
       <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${s.notes||'-'}</td>
+      <td><a href="/hd/sessions/${s.id}/worksheet.pdf" target="_blank" onclick="event.stopPropagation()" style="font-size:.75rem;text-decoration:none;">📋</a></td>
     </tr>`;
   }).join('');
 }

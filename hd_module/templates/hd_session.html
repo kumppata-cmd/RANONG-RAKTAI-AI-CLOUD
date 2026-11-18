@@ -509,6 +509,7 @@
       <button class="btn btn-outline" onclick="previewPatientSummary()">👁 ดูข้อความที่ผู้ป่วยจะได้รับ</button>
       <button class="btn btn-primary" onclick="sendSummaryToDoctor()">👨‍⚕️ ส่ง LINE หมอ</button>
       <button class="btn btn-outline" onclick="exportPDF()" style="color:var(--accent);border-color:var(--accent);">📄 พิมพ์ / PDF</button>
+      <button class="btn btn-outline" onclick="openWorkSheet()" style="color:#0d6efd;border-color:#0d6efd;">📋 Work Sheet</button>
       <a class="btn btn-outline" id="lnk360" href="#" style="display:none;text-decoration:none;">🧭 Patient 360</a>
     </div>
     <!-- ข้อ 10: ส่งอัตโนมัติแล้วตอนจบรอบ — แพทย์แก้/เพิ่มข้อความแล้วส่งซ้ำได้ -->
@@ -2313,6 +2314,11 @@ function exportPDF(){
   if(!sessionData.session_id){ showToast('ยังไม่มี session','warning'); return; }
   /* Real PDF (summary page + Monitoring Sheet page), Thai font embedded */
   window.open('/hd/api/v1/sessions/'+sessionData.session_id+'/record.pdf?token='+encodeURIComponent(getHdToken()||''),'_blank');
+}
+
+function openWorkSheet(){
+  if(!sessionData.session_id){ showToast('ยังไม่มี session','warning'); return; }
+  window.open('/hd/sessions/'+sessionData.session_id+'/worksheet.pdf?token='+encodeURIComponent(getHdToken()||''),'_blank');
 }
 </script>
 {% endblock %}
