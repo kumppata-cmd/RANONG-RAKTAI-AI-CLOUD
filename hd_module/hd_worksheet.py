@@ -292,49 +292,75 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     rx_half = RX_W / 2
     ry = top_y
 
-    # ข้อ 7: Checkbox ☑ เมื่อมีข้อมูล
+    # ── 3 columns: Machine/Dialyzer | Anticoagulant | Duration ──
+    dur_w = 80
+    rx_mid = (RX_W - dur_w) / 2  # แบ่ง 2 ช่องเท่ากัน
+    dur_x = RX_X + RX_W - dur_w
+    anti_x = RX_X + rx_mid  # Anticoagulant column
+
+    # ข้อ 7: Checkbox ☑
     _hep_ck = "☑" if "heparin" in hep_protocol and "free" not in hep_protocol else "☐"
     _lmwh_ck = "☑" if "lmwh" in hep_protocol else "☐"
     _free_ck = "☑" if "free" in hep_protocol else "☐"
-    rx_rows = [
-        ("Machine", f"{machine_label}", "Anticoagulant", ""),
-        ("Dialyzer", dialyzer, f"{_hep_ck} Heparin", ""),
-        ("Surface area", "", f"{_lmwh_ck} LMWH", ""),
-        ("Use No.", str(reuse) if reuse else "", "☐ Other", ""),
-        ("Last TCV", "", f"Loading  {hep_bolus or '____'}  start", ""),
-        ("เปิดใช้เมื่อ", "", f"Maintenance  {hep_maint or '____'}  In  hr", ""),
-        ("Tesk leak  O Y  O N", "", f"{_free_ck} No Heparin free technique", ""),
-        ("☐ Disinfectant ☐ Paracetic", "", "☐ Heparin", ""),
-        ("☐ Formalin ☐ Other", "", "☐ Flush Nss  cc q  min", ""),
+
+    # Column 1: Machine/Dialyzer/Tesk leak
+    col1 = [
+        ("Machine", machine_label),
+        ("Dialyzer", dialyzer),
+        ("Surface area", "m2"),
+        ("Use No.", str(reuse) if reuse else ""),
+        ("Last TCV", ""),
+        ("เปิดใช้เมื่อ", ""),
+        ("Tesk leak  O Y  O N", ""),
+        ("☐ Disinfectant ☐ Paracetic", ""),
+        ("☐ Formalin ☐ Other", ""),
     ]
-
-    # Duration column (far right)
-    dur_w = 80
-    rx_mid = RX_W - dur_w
-    dur_x = RX_X + rx_mid
-
-    dur_rows = [
+    # Column 2: Anticoagulant / Heparin
+    col2 = [
+        ("Anticoagulant", ""),
+        (f"{_hep_ck} Heparin", ""),
+        (f"{_lmwh_ck} LMWH", ""),
+        ("☐ Other", ""),
+        (f"Loading  {hep_bolus or '____'}", "start"),
+        (f"Maintenance  {hep_maint or '____'}", "In  hr"),
+        (f"{_free_ck} No Heparin free technique", ""),
+        ("☐ Heparin ........................", ""),
+        ("☐ Flush Nss   cc q   min", ""),
+    ]
+    # Column 3: Duration / Time / BT / Hct / Hb
+    col3 = [
         f"Duration  {duration}  hr",
         f"Time start  {_thai_time(rec.get('started_at'))}",
         f"Time off  {_thai_time(rec.get('ended_at'))}",
-        "O2 sat            %",
+        "O2 sat              %",
         f"BT  {_f(rec.get('bt') or ex.get('bt_value'))}  'C",
         f"Hct=  {_f(rec.get('hct') or ex.get('hct_value'))}  %",
         f"Hb =  {_f(rec.get('hb') or ex.get('hb_value'))}  g/dl",
     ]
 
-    for i, row in enumerate(rx_rows):
+    n_rx = max(len(col1), len(col2), len(col3))
+    for i in range(n_rx):
         iy = ry - i * RH
-        # Left half
-        cell(RX_X, iy - RH, rx_mid / 2, RH, row[0], sz=5.5)
-        cell(RX_X + rx_mid / 2, iy - RH, rx_mid / 2, RH, row[1], sz=6, bold=bool(row[1]))
-        # Duration column (right)
-        if i < len(dur_rows):
-            cell(dur_x, iy - RH, dur_w, RH, dur_rows[i], sz=5.5, bold=True)
+        # Col 1: Machine/Dialyzer
+        if i < len(col1):
+            lbl, val = col1[i]
+            cell(RX_X, iy - RH, rx_mid, RH, f"{lbl}  {val}" if val else lbl, sz=5.5, bold=bool(val))
+        else:
+            cell(RX_X, iy - RH, rx_mid, RH)
+        # Col 2: Anticoagulant
+        if i < len(col2):
+            lbl, val = col2[i]
+            txt_a = f"{lbl}  {val}" if val else lbl
+            cell(anti_x, iy - RH, rx_mid, RH, txt_a, sz=5.5, bold=(i == 0))
+        else:
+            cell(anti_x, iy - RH, rx_mid, RH)
+        # Col 3: Duration
+        if i < len(col3):
+            cell(dur_x, iy - RH, dur_w, RH, col3[i], sz=5.5, bold=True)
         else:
             cell(dur_x, iy - RH, dur_w, RH)
 
-    rx_bottom = ry - len(rx_rows) * RH
+    rx_bottom = ry - n_rx * RH
 
     # Vascular access — อยู่ฝั่งซ้าย ใต้ Pre-dialysis assessment
     va = (rec.get("va", "") or "").upper()
