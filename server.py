@@ -16352,6 +16352,43 @@ def _mp_clear(user_hash: str, page_count: int):
     # ไม่ลบ .lock file — ป้องกัน race condition กับ worker อื่นที่อาจถือ lock อยู่
 
 
+def _mp_rescue_stale_buffers():
+    """กู้คืน multipage buffer ที่ค้าง (timer thread หายเพราะ worker restart).
+
+    เรียกจาก scheduled job ทุก 60 วินาที — ตรวจ /tmp/ranong_raktai/multipage/
+    ถ้าพบ .json ที่ last_image_ts เก่ากว่า 3× WINDOW → flush ทันที
+    """
+    stale_sec = _MULTIPAGE_WINDOW_SECS * 3  # 36 วินาที default
+    rescued = 0
+    try:
+        for fname in os.listdir(_MULTIPAGE_DIR):
+            if not fname.endswith(".json"):
+                continue
+            user_hash = fname[:-5]  # strip .json
+            try:
+                meta = _mp_read_meta(user_hash)
+                if not meta or not meta.get("pages"):
+                    continue
+                elapsed = time.time() - meta.get("last_image_ts", 0)
+                if elapsed < stale_sec:
+                    continue
+                # Buffer ค้าง → flush
+                logger.warning(
+                    f"[RESCUE] multipage buffer stale {elapsed:.0f}s "
+                    f"(user={user_hash[:8]}…, pages={len(meta['pages'])}) — flushing now"
+                )
+                _multipage_flush(user_hash)
+                rescued += 1
+            except Exception as e:
+                logger.warning(f"[RESCUE] error flushing {user_hash[:8]}: {type(e).__name__}: {e}")
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        logger.warning(f"[RESCUE] scan error: {type(e).__name__}")
+    if rescued:
+        logger.info(f"[RESCUE] rescued {rescued} stale buffer(s)")
+
+
 def _mp_acquire_lock(user_hash: str):
     """Acquire file-based lock for cross-worker synchronization."""
     import fcntl
@@ -22606,6 +22643,12 @@ def _reminder_scheduler_worker():
                                 _mc.close()
                 except Exception as _me:
                     logger.warning("monthly_summary scheduler: %s", _me)
+            # ── Rescue stale multipage buffers ──
+            # รูปภาพที่ค้างใน buffer เพราะ timer thread หาย (worker restart)
+            try:
+                _mp_rescue_stale_buffers()
+            except Exception as _resc_e:
+                logger.warning("rescue stale buffers: %s", type(_resc_e).__name__)
         except Exception as _e:
             logger.warning("reminder scheduler: %s", type(_e).__name__)
         _t.sleep(60)

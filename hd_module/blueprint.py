@@ -571,6 +571,30 @@ def session_record_pdf(session_id):
     return _pdf_response(data, session_filename(rec["hn"], rec["name"], rec["bed"], rec["shift"]))
 
 
+@hd_bp.route("/sessions/<int:session_id>/worksheet.pdf", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def session_worksheet_pdf(session_id):
+    """PDF ใบบันทึกรอบฟอก (Hemodialysis Work Sheet) ตามแบบฟอร์มคลินิก."""
+    import os
+    import psycopg2
+    from .hd_worksheet import load_and_build
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 500
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        data, fname = load_and_build(conn, session_id,
+                                     get_setting_value("clinic_name", "") or "ระนอง รักษ์ไต")
+    finally:
+        conn.close()
+    if not data:
+        return jsonify({"error": "session not found"}), 404
+    log_action(user_id=g.get("hd_user_id"), action="session.worksheet_pdf", resource_type="session",
+               resource_id=session_id, ip_address=request.remote_addr or "")
+    return _pdf_response(data, fname)
+
+
 def run_daily_export(day, trigger="manual", user=None):
     """Render CSV + shift PDFs + session PDFs for `day` and upload to GCS
     (HD-Records/YYYY/YYYY-MM/YYYY-MM-DD/). Pushes a LINE summary to the
