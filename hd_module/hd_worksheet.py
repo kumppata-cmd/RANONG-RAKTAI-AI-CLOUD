@@ -526,17 +526,29 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
             cell(LM + 3 * q, ry, q, 8)
 
     # ════════════════════════════════════════════════════════════
-    # SIGNATURES
+    # SIGNATURES — ใต้ตาราง Complication
     # ════════════════════════════════════════════════════════════
-    sig_y = 22
+    sig_y = y_bot - (max_rows + 1) * 8 - 4
     nurse_name = ex.get("nurse_name", "") or ""
+
+    # Nephrologist (ซ้าย)
+    c.setFont("Loma-Bold", 7)
+    c.drawString(LM, sig_y, "Nephrologist")
     c.setFont("Loma", 7)
-    c.drawString(LM, sig_y, "Nephrologist  __________________________")
-    c.drawString(LM + CW * 0.45, sig_y, f"Nurse  {nurse_name}")
+    c.line(LM + 60, sig_y - 1, LM + 200, sig_y - 1)
+
+    # Nurse (กลาง-ขวา) พร้อมชื่อ + เส้นเซ็น
+    c.setFont("Loma-Bold", 7)
+    c.drawString(LM + CW * 0.42, sig_y, "Nurse")
+    c.setFont("Loma", 7)
+    if nurse_name:
+        c.drawString(LM + CW * 0.42 + 32, sig_y, nurse_name)
+    # รายชื่อพยาบาล (เว้นช่องไว้สำหรับเซ็นหลายคน)
+    c.line(LM + CW * 0.42 + 32, sig_y - 1, RM, sig_y - 1)
 
     # Footer
     c.setFont("Loma", 4.5)
-    c.drawRightString(RM, 10, f"HD Smart Monitoring · {_thai_date(_thai_now().date())} {_thai_time(_thai_now())}")
+    c.drawRightString(RM, sig_y - 12, f"HD Smart Monitoring · {_thai_date(_thai_now().date())} {_thai_time(_thai_now())}")
 
     c.showPage()
     c.save()
