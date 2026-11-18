@@ -590,8 +590,10 @@ def session_worksheet_pdf(session_id):
     conn = psycopg2.connect(db_url, connect_timeout=5)
     conn.autocommit = True
     try:
+        mode = request.args.get("mode", "overlay")  # overlay=แบบA, draw=แบบB
         data, fname = load_and_build(conn, session_id,
-                                     get_setting_value("clinic_name", "") or "ระนอง รักษ์ไต")
+                                     get_setting_value("clinic_name", "") or "ระนอง รักษ์ไต",
+                                     mode=mode)
     finally:
         conn.close()
     if not data:

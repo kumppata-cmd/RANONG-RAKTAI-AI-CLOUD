@@ -189,6 +189,9 @@ def _run_hd_migrations():
                 *[stmt.strip() for stmt in __import__("hd_module.water_check", fromlist=["CREATE_SQL"]).CREATE_SQL.split(";") if stmt.strip()],
                 # 18 พ.ย. 2569: Machine-Bed Link — เตียง 28 เตียง + ผูกเครื่องฟอกกับ session
                 "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS equipment_id INTEGER REFERENCES hd_equipment(id)",
+                # 18 พ.ย. 2569: วันเกิด + เพศ สำหรับ Work Sheet PDF
+                "ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS date_of_birth DATE",
+                "ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS gender VARCHAR(10)",
                 # Set alert_recipients
                 """INSERT INTO hd_settings (key, value, description, updated_at)
                     VALUES ('alert_recipients', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId แพทย์', NOW())

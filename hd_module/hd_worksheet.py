@@ -493,8 +493,227 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     return buf.getvalue()
 
 
-def load_and_build(conn, session_id, clinic_name="ระนอง รักษ์ไต"):
-    """Load session data from DB and build the work sheet PDF. Returns (bytes, filename) or (None, None)."""
+# ═══════════════════════════════════════════════════════════
+# แบบ A: Overlay บน PDF ต้นฉบับ
+# ═══════════════════════════════════════════════════════════
+
+_TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "templates", "hd_worksheet_template.pdf")
+
+def _build_overlay(rec, extras=None):
+    """สร้าง transparent PDF overlay ที่มีแค่ตัวอักษร/ติ๊ก — ไม่มี background.
+    ใช้ merge ทับ template PDF ต้นฉบับ."""
+    _register_fonts()
+    from reportlab.lib.pagesizes import A4
+    from reportlab.pdfgen import canvas as canvasmod
+
+    buf = io.BytesIO()
+    W, H = A4
+    c = canvasmod.Canvas(buf, pagesize=A4)
+    ex = extras or {}
+
+    # ── Helpers ──
+    def txt(x, y, text, size=7, bold=False):
+        c.setFont("Loma-Bold" if bold else "Loma", size)
+        c.drawString(x, y, str(text or ""))
+
+    def tick(x, y):
+        c.setFont("Loma-Bold", 8)
+        c.drawString(x + 1.5, y + 0.5, "✓")
+
+    # ── HEADER ──
+    # Patient's name (ตำแหน่งจากฟอร์ม: ประมาณ y=800, x=110)
+    txt(110, 800, rec.get("name", ""), size=8, bold=True)
+    # Age
+    age = rec.get("age")
+    txt(345, 800, str(age) if age else "", size=8)
+    # HN
+    txt(410, 800, rec.get("hn", ""), size=8, bold=True)
+    # Dx CKD stage
+    txt(508, 800, "5", size=7)
+    # HD No.
+    hd_no = rec.get("hd_no")
+    txt(545, 814, str(hd_no) if hd_no else "", size=8, bold=True)
+    # Date
+    txt(545, 800, _thai_date(rec.get("date")), size=7)
+
+    # ── PRE-DIALYSIS: Weight fields (ด้านขวาของ OY/ON) ──
+    pre_w = rec.get("pre_weight")
+    post_w = rec.get("post_weight")
+    dw = rec.get("dry_weight")
+    # Pre BW (y ≈ 752)
+    txt(192, 752, _f(pre_w), size=7, bold=True)
+    # Dry BW (y ≈ 742)
+    txt(192, 742, _f(dw), size=7, bold=True)
+    # Wt Gain = pre - dw
+    if pre_w and dw:
+        txt(192, 732, _f(round(float(pre_w) - float(dw), 1)), size=7)
+    # Target UF
+    txt(192, 712, _f(rec.get("uf_goal"), 0), size=7)
+    # Post BW
+    txt(192, 702, _f(post_w), size=7, bold=True)
+    # Wt lose = pre - post
+    if pre_w and post_w:
+        txt(192, 692, _f(round(float(pre_w) - float(post_w), 1)), size=7)
+
+    # ── HEMODIALYSIS PRESCRIPTION ──
+    machine = ex.get("machine", {}) or {}
+    # Machine
+    machine_label = f"{machine.get('brand', '')} {machine.get('model', '')}".strip() if machine else ""
+    txt(330, 772, machine_label, size=7, bold=True)
+    # Machine S/N
+    txt(430, 772, machine.get("serial", "") if machine else "", size=6)
+    # Dialyzer
+    dialyzer = ex.get("dialyzer_type", "") or ""
+    txt(330, 762, dialyzer, size=7, bold=True)
+    # Use No. (reuse count)
+    reuse = ex.get("dialyzer_reuse")
+    txt(330, 752, str(reuse) if reuse else "", size=7)
+    # Loading / Maintenance (Heparin)
+    hep = ex.get("heparin", {}) or {}
+    txt(390, 742, str(hep.get("bolus", "")) or "", size=7)
+    txt(480, 742, str(hep.get("maintenance", "")) or "", size=7)
+
+    # Heparin checkbox
+    hep_protocol = (hep.get("protocol", "") or "").lower()
+    if "heparin" in hep_protocol and "free" not in hep_protocol:
+        tick(354, 727)  # Heparin checkbox
+    elif "lmwh" in hep_protocol:
+        tick(414, 727)  # LMWH
+    elif "free" in hep_protocol:
+        tick(454, 727)
+
+    # Duration / Time start / Time off
+    txt(548, 772, "4", size=7)  # Duration
+    txt(548, 762, _thai_time(rec.get("started_at")), size=7)  # Time start
+    txt(548, 752, _thai_time(rec.get("ended_at")), size=7)  # Time off
+
+    # Hct / Hb
+    hct = rec.get("hct") or ex.get("hct_value")
+    hb = rec.get("hb") or ex.get("hb_value")
+    txt(553, 722, _f(hct), size=7, bold=True)  # Hct
+    txt(553, 712, _f(hb), size=7, bold=True)   # Hb
+
+    # Vascular access checkboxes
+    va = (rec.get("va", "") or "").upper()
+    # AVF
+    if "AVF" in va:
+        tick(312, 672)
+    elif "AVG" in va:
+        tick(360, 672)
+    elif "DLC" in va:
+        tick(265, 660)
+    elif "PERM" in va or "PC" in va:
+        tick(312, 660)
+
+    # Dialysate (เขียนค่ามาตรฐาน)
+    # K+ 2, Ca 3.5, Hco3 32, Temp 36.5, Flow 600
+    # (ค่าเหล่านี้มีอยู่แล้วในฟอร์ม — ไม่ต้องเขียนทับ)
+
+    # Medication (EPO)
+    esa_drug = ex.get("esa_drug_given") or rec.get("esa_drug") or rec.get("esa_rx") or ""
+    esa_route = ex.get("esa_route") or rec.get("esa_route") or ""
+    txt(475, 650, esa_drug, size=6)
+    if "IV" in esa_route.upper():
+        txt(530, 650, "IV", size=6, bold=True)
+    elif "SC" in esa_route.upper():
+        txt(545, 650, "SC", size=6, bold=True)
+
+    # Pre HD Note
+    pre_note = rec.get("pre_hd_note", "") or ""
+    txt(80, 579, pre_note[:60], size=6)
+
+    # ── MONITORING TABLE ──
+    # ตำแหน่ง: เริ่มที่ y ≈ 548 (Pre-HD row), ลดทีละ ~16 pt
+    sheet = rec.get("sheet", [])
+    table_x = [25, 68, 117, 148, 178, 218, 258, 298, 338, 378, 440]  # TIME,BP,PR,RR,BFR,VP,TMP,UFR,Conduct,TotalUF,Remark
+    row_h = 16.0
+    y_start = 548  # Pre-HD row
+
+    # Pre-HD row
+    pre_v = ex.get("pre_vitals", {}) or {}
+    if pre_v.get("sbp"):
+        txt(table_x[1], y_start, f"{pre_v['sbp']}/{pre_v.get('dbp','')}", size=5.5)
+        txt(table_x[2], y_start, str(pre_v.get("hr", "")), size=5.5)
+
+    # Start HD row
+    y_start -= row_h
+    txt(table_x[0], y_start, _thai_time(rec.get("started_at")), size=5.5)
+
+    # Data rows
+    for i, entry in enumerate(sheet[:10]):
+        y_row = y_start - (i + 1) * row_h
+        if y_row < 260:
+            break
+        txt(table_x[0], y_row, entry.get("slot_time", ""), size=5.5)
+        if entry.get("sbp"):
+            txt(table_x[1], y_row, f"{entry['sbp']}/{entry.get('dbp','')}", size=5.5)
+        txt(table_x[2], y_row, _f(entry.get("pr"), 0), size=5.5)
+        txt(table_x[3], y_row, _f(entry.get("rr"), 0), size=5.5)
+        txt(table_x[4], y_row, _f(entry.get("bfr"), 0), size=5.5)
+        txt(table_x[5], y_row, _f(entry.get("vp"), 0), size=5.5)
+        txt(table_x[6], y_row, _f(entry.get("tmp"), 0), size=5.5)
+        txt(table_x[7], y_row, _f(entry.get("ufr"), 0), size=5.5)
+        txt(table_x[8], y_row, _f(entry.get("conductivity"), 1), size=5.5)
+        txt(table_x[9], y_row, _f(entry.get("total_uf"), 0), size=5.5)
+        remark = (entry.get("remark", "") or "")[:20]
+        if remark:
+            txt(table_x[10], y_row, remark, size=5)
+
+    # ── POST-HD: Total UF / Net UF balance ──
+    actual_uf = rec.get("actual_uf")
+    if actual_uf is not None:
+        txt(378, 243, str(int(actual_uf)), size=6, bold=True)  # Total UF
+        txt(500, 243, str(int(actual_uf)), size=6, bold=True)  # Net UF balance
+
+    # BP before discharge
+    post_v = ex.get("post_vitals", {}) or {}
+    if post_v.get("sbp"):
+        txt(470, 110, f"{post_v['sbp']}/{post_v.get('dbp','')}", size=7, bold=True)
+
+    # Discharge: Home
+    tick(445, 95)
+
+    # Nurse name
+    nurse = ex.get("nurse_name", "") or ""
+    txt(340, 25, nurse, size=7)
+
+    # Shift (รอบ)
+    shift_th = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}.get(rec.get("shift", ""), "")
+    txt(475, 814, f"รอบ{shift_th}", size=7)
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def build_overlay_pdf(rec, extras=None):
+    """สร้าง PDF แบบ A: overlay ข้อมูลบน template ฟอร์มจริง. Returns bytes."""
+    from pypdf import PdfReader, PdfWriter
+
+    # 1. สร้าง overlay (ตัวอักษร/ติ๊กเท่านั้น บน transparent background)
+    overlay_bytes = _build_overlay(rec, extras)
+
+    # 2. Merge overlay ทับ template
+    template = PdfReader(_TEMPLATE_PATH)
+    overlay = PdfReader(io.BytesIO(overlay_bytes))
+
+    writer = PdfWriter()
+    page = template.pages[0]
+    page.merge_page(overlay.pages[0])
+    writer.add_page(page)
+
+    out = io.BytesIO()
+    writer.write(out)
+    return out.getvalue()
+
+
+def load_and_build(conn, session_id, clinic_name="ระนอง รักษ์ไต", mode="overlay"):
+    """Load session data from DB and build the work sheet PDF.
+
+    mode='overlay' (default) = แบบ A — เติมข้อมูลบน template ฟอร์มจริง
+    mode='draw'              = แบบ B — วาด layout ใหม่ทั้งหมด
+    Returns (bytes, filename) or (None, None).
+    """
     from .daily_records import load_session_record, SHIFT_TH, safe_name
     from .blueprint import _session_record_extras
 
@@ -502,20 +721,29 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
     if not rec:
         return None, None
 
-    # Load extras (dialyzer, heparin, VA, nurse name, pre/post vitals)
+    # Load extras (dialyzer, heparin, VA, nurse name, pre/post vitals, machine)
     extras = {}
     try:
         with conn.cursor() as cur:
-            extras = _session_record_extras(cur, session_id, None)
-            # get patient_id for extras
-            cur.execute("SELECT patient_id FROM hd_sessions WHERE id = %s", (session_id,))
-            pid_row = cur.fetchone()
-            if pid_row:
-                extras = _session_record_extras(cur, session_id, pid_row[0])
+            pid = rec.get("patient_id")
+            if not pid:
+                cur.execute("SELECT patient_id FROM hd_sessions WHERE id = %s", (session_id,))
+                pid_row = cur.fetchone()
+                pid = pid_row[0] if pid_row else None
+            if pid:
+                extras = _session_record_extras(cur, session_id, pid)
     except Exception as e:
         logger.warning("hd_worksheet extras: %s", e)
 
-    pdf = build_worksheet_pdf(rec, extras, clinic_name)
+    if mode == "overlay" and os.path.exists(_TEMPLATE_PATH):
+        try:
+            pdf = build_overlay_pdf(rec, extras)
+        except Exception as e:
+            logger.warning("overlay PDF failed (%s) — fallback to draw mode", e)
+            pdf = build_worksheet_pdf(rec, extras, clinic_name)
+    else:
+        pdf = build_worksheet_pdf(rec, extras, clinic_name)
+
     shift_th = SHIFT_TH.get(rec["shift"], rec["shift"])
     fname = f"HD-WorkSheet-{safe_name(rec['hn'], 12)}-{safe_name(rec['name'])}-{rec['date'].isoformat()}-{shift_th}.pdf"
     return pdf, fname

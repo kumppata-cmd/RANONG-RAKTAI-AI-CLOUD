@@ -136,7 +136,8 @@ def load_session_record(conn, session_id):
                    s.started_at, s.ended_at, s.pre_weight, s.post_weight, s.uf_goal, s.actual_uf,
                    s.esa_given, s.esa_drug_given, s.esa_dose_given, s.esa_route, s.esa_skip_reason,
                    s.hb_value, s.hct_value, s.notes, s.pre_hd_note,
-                   p.hn, p.patient_name, p.vascular_access, p.dry_weight, p.esa_drug, p.schedule_days
+                   p.hn, p.patient_name, p.vascular_access, p.dry_weight, p.esa_drug, p.schedule_days,
+                   p.date_of_birth, p.gender, p.id as patient_id
             FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
             WHERE s.id = %s
         """, (session_id,))
@@ -150,7 +151,24 @@ def load_session_record(conn, session_id):
             "esa_given": r[11], "esa_drug": r[12], "esa_dose": r[13], "esa_route": r[14], "esa_skip": r[15],
             "hb": r[16], "hct": r[17], "notes": r[18], "pre_hd_note": r[19],
             "hn": r[20], "name": r[21], "va": r[22], "dry_weight": r[23], "esa_rx": r[24], "schedule": r[25],
+            "date_of_birth": r[26], "gender": r[27], "patient_id": r[28],
         }
+        # HD No. = จำนวนครั้งที่ฟอก (completed) ของผู้ป่วยคนนี้ ถึงรอบปัจจุบัน
+        try:
+            cur.execute("""SELECT COUNT(*) FROM hd_sessions
+                           WHERE patient_id = %s AND status = 'completed'
+                             AND (session_date < %s OR (session_date = %s AND id <= %s))""",
+                        (rec["patient_id"], rec["date"], rec["date"], session_id))
+            rec["hd_no"] = cur.fetchone()[0]
+        except Exception:
+            rec["hd_no"] = None
+        # Age = คำนวณจาก DOB
+        if rec.get("date_of_birth") and rec.get("date"):
+            dob = rec["date_of_birth"]
+            d = rec["date"]
+            rec["age"] = d.year - dob.year - ((d.month, d.day) < (dob.month, dob.day))
+        else:
+            rec["age"] = None
         cur.execute("""SELECT phase::text, sbp, dbp, heart_rate, temperature, spo2, recorded_at
                        FROM hd_vital_signs WHERE session_id = %s ORDER BY recorded_at""", (session_id,))
         rec["vitals"] = cur.fetchall()
