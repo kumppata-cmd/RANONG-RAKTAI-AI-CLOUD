@@ -89,9 +89,9 @@
       </div>
       <div class="form-group">
         <label class="form-label">เตียง</label>
-        <select class="form-control" id="bedSelect">
+        <select class="form-control" id="bedSelect" onchange="onBedChange()">
           <option value="">-- เลือกเตียง --</option>
-          {% for i in range(1, 26) %}
+          {% for i in range(1, (total_beds or 28) + 1) %}
           <option value="{{ i }}">เตียง {{ i }}</option>
           {% endfor %}
         </select>
@@ -853,6 +853,24 @@ function onPatientSelect(){
   }).catch(()=>{});
 
   fillLastClinical(hn);
+}
+
+/* ═══ เปลี่ยนเตียง → ดึงเครื่องฟอกของเตียงนั้นมาแสดง ═══ */
+function onBedChange(){
+  const bed = document.getElementById('bedSelect').value;
+  const hn = document.getElementById('patientSelect').value;
+  if(bed && hn) fillLastClinical(hn); /* ส่ง ?bed=N ไปดึงเครื่อง */
+  else if(bed){
+    /* ยังไม่เลือกผู้ป่วย → ดึงเฉพาะเครื่อง */
+    hdFetch('/hd/api/v1/bed-machines').then(r=>r.ok?r.json():null).then(d=>{
+      if(!d) return;
+      const m = d.mapping[bed];
+      let me = document.getElementById('machineInfo');
+      if(!me){ me = document.createElement('div'); me.id='machineInfo'; me.style.cssText='margin-top:6px;font-size:.82rem;color:var(--fg-muted);'; const pi=document.getElementById('patientInfo'); if(pi) pi.after(me); }
+      if(m){ me.innerHTML = '🔧 เครื่อง: <strong>'+((m.brand||'')+' '+(m.model||'')).trim()+'</strong>'+(m.serial?' · S/N '+m.serial:''); }
+      else { me.innerHTML = '🔧 เตียงนี้ยังไม่มีเครื่องฟอก'; }
+    }).catch(()=>{});
+  }
 }
 
 /* ═══ จำค่าจากรอบก่อน: ตัวกรอง (นับ reuse ต่ออัตโนมัติ) · VA · ตำแหน่ง · Heparin/Bolus/Maintenance ═══ */

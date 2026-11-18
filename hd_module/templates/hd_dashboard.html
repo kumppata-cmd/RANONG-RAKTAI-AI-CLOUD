@@ -547,6 +547,16 @@ function renderBeds(beds){
       alertLine = `<div style="font-size:.68rem;font-weight:700;color:${b.status==='critical'?'var(--danger)':'var(--warning)'};margin-top:3px;line-height:1.3">${icon} ${reason}${ordered}</div>`;
     }
 
+    /* Machine badge — แสดงทุกเตียง (ว่างก็เห็นเครื่อง) */
+    let machineBadge = '';
+    if(b.machine){
+      const m = b.machine;
+      const ml = ((m.brand||'')+' '+(m.model||'')).trim();
+      const ms = m.serial ? ' · '+m.serial : '';
+      const warn = m.status==='repair' ? ' ⚠️ซ่อม' : m.status==='retired' ? ' ❌เลิกใช้' : '';
+      machineBadge = `<div style="font-size:.62rem;color:var(--fg-dim);margin-top:1px;">🔧 ${ml}${ms}${warn}</div>`;
+    }
+
     /* Quick vital button for active + alerting beds */
     let quickBtn = '';
     if(b.session_id && (b.status === 'active' || b.status === 'warning' || b.status === 'critical')){
@@ -581,6 +591,7 @@ function renderBeds(beds){
       <div class="bed-num">${b.bed_number}</div>
       <div class="bed-patient">${pName}${seroBadge(b.serology,'.68rem')?' '+seroBadge(b.serology,'.68rem'):''}</div>
       ${hnLine}
+      ${machineBadge}
       ${filterContent}
       ${alertLine}
       <div class="bed-status">${s.label}</div>
