@@ -140,6 +140,8 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     """Build HD Work Sheet PDF — แบบ B: วาด layout เหมือนฟอร์มกระดาษจริง 100%.
 
     ข้อมูลตรงช่องทุกจุดเพราะช่องกับตัวเลขสร้างพร้อมกัน
+    v10: +Health Education, +Nursing Dx, +full Complication, +checkbox ☑,
+         +HD No.ใหญ่, +ชื่อแพทย์, +QR Code
     """
     _register_fonts()
     from reportlab.lib.pagesizes import A4
@@ -193,9 +195,11 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     y -= 15
     c.setFont("Loma", 8)
     c.drawString(LM, y, clinic_name)
+    # ข้อ 5: HD No. ใหญ่เด่นชัด
     hd_no = rec.get("hd_no")
-    c.setFont("Loma-Bold", 10)
+    c.setFont("Loma-Bold", 12)
     c.drawRightString(RM - 80, y, f"HD No.  {hd_no or '____'}")
+    c.setFont("Loma-Bold", 10)
     c.drawRightString(RM, y, f"{_thai_date(rec.get('date'))}")
 
     # Patient line
@@ -288,18 +292,20 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     rx_half = RX_W / 2
     ry = top_y
 
-    # Row 0: Machine | Anticoagulant | Duration
+    # ข้อ 7: Checkbox ☑ เมื่อมีข้อมูล
+    _hep_ck = "☑" if "heparin" in hep_protocol and "free" not in hep_protocol else "☐"
+    _lmwh_ck = "☑" if "lmwh" in hep_protocol else "☐"
+    _free_ck = "☑" if "free" in hep_protocol else "☐"
     rx_rows = [
-        # (left_label, left_val, right_label, right_val)
         ("Machine", f"{machine_label}", "Anticoagulant", ""),
-        ("Dialyzer", dialyzer, "☐ Heparin", ""),
-        ("Surface area", "", "☐ LMWH", ""),
+        ("Dialyzer", dialyzer, f"{_hep_ck} Heparin", ""),
+        ("Surface area", "", f"{_lmwh_ck} LMWH", ""),
         ("Use No.", str(reuse) if reuse else "", "☐ Other", ""),
         ("Last TCV", "", f"Loading  {hep_bolus or '____'}  start", ""),
         ("เปิดใช้เมื่อ", "", f"Maintenance  {hep_maint or '____'}  In  hr", ""),
-        ("Tesk leak  O Y  O N", "", "☐ No Heparin free technique", ""),
+        ("Tesk leak  O Y  O N", "", f"{_free_ck} No Heparin free technique", ""),
         ("☐ Disinfectant ☐ Paracetic", "", "☐ Heparin", ""),
-        ("☐ Formalin ☐ Other", "", f"☐ Flush Nss  cc q  min", ""),
+        ("☐ Formalin ☐ Other", "", "☐ Flush Nss  cc q  min", ""),
     ]
 
     # Duration column (far right)
@@ -373,10 +379,16 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     cell(LM, nurs_y, third, RH, "Nursing Diagnosis", sz=6, bold=True, align="center", bg=GRAY)
     cell(LM + third, nurs_y, third, RH, "Nursing care plan", sz=6, bold=True, align="center", bg=GRAY)
     cell(LM + 2 * third, nurs_y, third, RH, "Expective outcome", sz=6, bold=True, align="center", bg=GRAY)
-    # 3 blank rows
-    for r in range(3):
-        for col in range(3):
-            cell(LM + col * third, nurs_y - (r + 1) * RH, third, RH)
+    # ข้อ 2: Nursing Diagnosis 3 รายการตามฟอร์มจริง
+    nurs_dx = [
+        ("☐ มีภาวะ Azotemia และ E'lyte imbalance", "OVHDและลดUFตามแผนการรักษา", "☐ ลดภาวะ Azotemia ลด E'lyte"),
+        ("☐ เสี่ยงต่อ complication ระหว่าง HD",      "☐ obs v/s และ Complication",  "☐ No complication"),
+        ("☐ Bleeding precaution",                    "☐ Haparin free technique",    "☐ No bleeding"),
+    ]
+    for r, (dx, plan, outcome) in enumerate(nurs_dx):
+        cell(LM, nurs_y - (r + 1) * RH, third, RH, dx, sz=5)
+        cell(LM + third, nurs_y - (r + 1) * RH, third, RH, plan, sz=5)
+        cell(LM + 2 * third, nurs_y - (r + 1) * RH, third, RH, outcome, sz=5)
 
     # Sticker EPO area — อยู่เหนือ Nursing Diagnosis ในช่องว่างด้านขวา
     sticker_h = nurs_y + RH - (nurs_y + RH)  # คำนวณช่องว่างที่เหลือ
@@ -510,8 +522,11 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
                   "Headache", "Fever/chill", "Arrhythmia", "VA problem",
                   "Dialyzer", "Cardiac arrest", "DDS", "Air embolism",
                   "No Complication", "other"]
+    # ข้อ 3: Technical complication ครบ + ข้อ 1: Health Education
     tech_items = ["Blood leak", "Clot dialyzer", "clotted bloodline",
                   "machine problem", ">2 needle", "No complication"]
+    health_ed = ["Nutrition", "Vascular access", "Exercise",
+                 "Personal hygiene", "Medication", "Fluid control", "KT", "Other"]
     nurs_items = ["Monitor V/S", "Psycho support", "Oxygen therapy",
                   "Trendelenburg position", "Decrease UFR", "Decrease BFR",
                   "Hypertonic solution", "moniter access flow",
@@ -525,9 +540,15 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         # Complication
         txt_c = f"☐ {comp_items[r]}" if r < len(comp_items) else ""
         cell(LM, ry, q, 8, txt_c, sz=5)
-        # Technical
-        txt_t = f"☐ {tech_items[r]}" if r < len(tech_items) else ""
-        cell(LM + q, ry, q, 8, txt_t, sz=5)
+        # Technical + Health Education
+        if r < len(tech_items):
+            cell(LM + q, ry, q, 8, f"☐ {tech_items[r]}", sz=5)
+        elif r == len(tech_items):
+            cell(LM + q, ry, q, 8, "Health Education", sz=5.5, bold=True, bg=GRAY)
+        elif r - len(tech_items) - 1 < len(health_ed):
+            cell(LM + q, ry, q, 8, f"☐ {health_ed[r - len(tech_items) - 1]}", sz=5)
+        else:
+            cell(LM + q, ry, q, 8)
         # Nursing
         txt_n = f"☐ {nurs_items[r]}" if r < len(nurs_items) else ""
         cell(LM + 2 * q, ry, q, 8, txt_n, sz=5)
@@ -558,25 +579,46 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     # ════════════════════════════════════════════════════════════
     sig_y = y_bot - (max_rows + 1) * 8 - 4
     nurse_name = ex.get("nurse_name", "") or ""
+    # ข้อ 6: ชื่อแพทย์อัตโนมัติ
+    doctor_name = ex.get("doctor_name", "") or rec.get("doctor_name", "") or ""
 
-    # Nephrologist (ซ้าย)
+    # Nephrologist (ซ้าย) + ชื่อแพทย์
     c.setFont("Loma-Bold", 7)
     c.drawString(LM, sig_y, "Nephrologist")
     c.setFont("Loma", 7)
-    c.line(LM + 60, sig_y - 1, LM + 200, sig_y - 1)
+    if doctor_name:
+        c.drawString(LM + 62, sig_y, doctor_name)
+    c.line(LM + 60, sig_y - 1, LM + 210, sig_y - 1)
 
-    # Nurse (กลาง-ขวา) พร้อมชื่อ + เส้นเซ็น
+    # Nurse (กลาง-ขวา) พร้อมชื่อพยาบาล + เส้นเซ็น
     c.setFont("Loma-Bold", 7)
     c.drawString(LM + CW * 0.42, sig_y, "Nurse")
     c.setFont("Loma", 7)
     if nurse_name:
         c.drawString(LM + CW * 0.42 + 32, sig_y, nurse_name)
-    # รายชื่อพยาบาล (เว้นช่องไว้สำหรับเซ็นหลายคน)
-    c.line(LM + CW * 0.42 + 32, sig_y - 1, RM, sig_y - 1)
+    c.line(LM + CW * 0.42 + 32, sig_y - 1, RM - 55, sig_y - 1)
+
+    # ข้อ 8: QR Code — link กลับไปหน้า session
+    try:
+        import qrcode as _qr
+        session_id = rec.get("session_id") or rec.get("id")
+        if session_id:
+            base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://ranong-raktai-ai-cloud.onrender.com")
+            qr_url = f"{base_url}/hd/sessions/{session_id}"
+            qr_img = _qr.make(qr_url, box_size=2, border=1)
+            qr_buf = io.BytesIO()
+            qr_img.save(qr_buf, format="PNG")
+            qr_buf.seek(0)
+            from reportlab.lib.utils import ImageReader
+            c.drawImage(ImageReader(qr_buf), RM - 50, sig_y - 8, width=42, height=42)
+            c.setFont("Loma", 3.5)
+            c.drawCentredString(RM - 29, sig_y - 11, "สแกนดูข้อมูล")
+    except ImportError:
+        pass  # qrcode not installed — skip silently
 
     # Footer
     c.setFont("Loma", 4.5)
-    c.drawRightString(RM, sig_y - 12, f"HD Smart Monitoring · {_thai_date(_thai_now().date())} {_thai_time(_thai_now())}")
+    c.drawRightString(RM, sig_y - 15, f"HD Smart Monitoring · {_thai_date(_thai_now().date())} {_thai_time(_thai_now())}")
 
     c.showPage()
     c.save()
