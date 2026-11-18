@@ -588,11 +588,11 @@ def _build_overlay(rec, extras=None):
     txtc(WT_X, 735, _f(dw), WT_W, size=8, bold=True)              # Dry BW   (Dyspnea row)
     if pre_w and dw:                                                # Wt Gain  (Orthopnea row)
         txtc(WT_X, 723, _f(round(float(pre_w) - float(dw), 1)), WT_W, size=8)
-    # Crepitation (Meal/drink) row 711 — skip
-    txtc(WT_X, 699, _f(rec.get("uf_goal"), 0), WT_W, size=8, bold=True)  # Target UF (JVP row)
-    txtc(WT_X, 687, _f(post_w), WT_W, size=8, bold=True)          # Post BW  (Arrhythmia row)
+    # Crepitation (Meal/drink) row — skip
+    txtc(WT_X, 687, _f(rec.get("uf_goal"), 0), WT_W, size=8, bold=True)  # Target UF (JVP row)
+    txtc(WT_X, 675, _f(post_w), WT_W, size=8, bold=True)          # Post BW  (Arrhythmia row)
     if pre_w and post_w:                                            # Wt lose  (Fever row)
-        txtc(WT_X, 675, _f(round(float(pre_w) - float(post_w), 1)), WT_W, size=8)
+        txtc(WT_X, 663, _f(round(float(pre_w) - float(post_w), 1)), WT_W, size=8)
 
     # ════════════════════════════════════════════════════════
     # HEMODIALYSIS PRESCRIPTION — ฝั่งขวา
