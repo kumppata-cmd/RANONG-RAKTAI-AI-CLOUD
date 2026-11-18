@@ -500,186 +500,265 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
 _TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), "templates", "hd_worksheet_template.pdf")
 
 def _build_overlay(rec, extras=None):
-    """สร้าง transparent PDF overlay ที่มีแค่ตัวอักษร/ติ๊ก — ไม่มี background.
-    ใช้ merge ทับ template PDF ต้นฉบับ."""
+    """สร้าง transparent PDF overlay — พิกัดวัดจาก grid 20pt บน template จริง.
+    PDF coordinate: origin = bottom-left, y increases upward."""
     _register_fonts()
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as canvasmod
 
     buf = io.BytesIO()
-    W, H = A4
+    W, H = A4  # 595.28 x 841.89
     c = canvasmod.Canvas(buf, pagesize=A4)
     ex = extras or {}
 
     # ── Helpers ──
     def txt(x, y, text, size=7, bold=False):
+        if not text and text != 0:
+            return
         c.setFont("Loma-Bold" if bold else "Loma", size)
-        c.drawString(x, y, str(text or ""))
+        c.drawString(x, y, str(text))
+
+    def txtr(x, y, text, size=7, bold=False):
+        """Right-aligned text."""
+        if not text and text != 0:
+            return
+        c.setFont("Loma-Bold" if bold else "Loma", size)
+        c.drawRightString(x, y, str(text))
 
     def tick(x, y):
-        c.setFont("Loma-Bold", 8)
-        c.drawString(x + 1.5, y + 0.5, "✓")
+        c.setFont("Loma-Bold", 9)
+        c.drawString(x, y, "✓")
 
-    # ── HEADER ──
-    # Patient's name (ตำแหน่งจากฟอร์ม: ประมาณ y=800, x=110)
-    txt(110, 800, rec.get("name", ""), size=8, bold=True)
-    # Age
+    # ════════════════════════════════════════════════════════
+    # HEADER ROW — จาก grid: y≈805 (ชื่อคลินิก), y≈790 (Patient's name)
+    # ════════════════════════════════════════════════════════
+    # Patient's name: x≈108, y≈790
+    txt(108, 790, rec.get("name", ""), size=8, bold=True)
+    # Age: หลังคำว่า Age — x≈340, y≈790
     age = rec.get("age")
-    txt(345, 800, str(age) if age else "", size=8)
-    # HN
-    txt(410, 800, rec.get("hn", ""), size=8, bold=True)
-    # Dx CKD stage
-    txt(508, 800, "5", size=7)
-    # HD No.
+    txt(340, 790, str(age) if age else "", size=8)
+    # Yrs: x≈362
+    # HN: หลังคำว่า HN — x≈400, y≈790
+    txt(400, 790, rec.get("hn", ""), size=8, bold=True)
+    # Dx CKD stage 5: x≈490, y≈790
+    txt(492, 790, "5", size=7)
+    # HD No.: x≈550, y≈805 (บรรทัดบนสุดขวา)
     hd_no = rec.get("hd_no")
-    txt(545, 814, str(hd_no) if hd_no else "", size=8, bold=True)
-    # Date
-    txt(545, 800, _thai_date(rec.get("date")), size=7)
+    txt(555, 805, str(hd_no) if hd_no else "", size=8, bold=True)
+    # Date: x≈550, y≈790
+    txt(545, 790, _thai_date(rec.get("date")), size=7)
+    # Shift (รอบเช้า/บ่าย/ค่ำ): x≈490, y≈805
+    shift_th = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}.get(rec.get("shift", ""), "")
+    txt(490, 805, f"รอบ{shift_th}", size=7)
 
-    # ── PRE-DIALYSIS: Weight fields (ด้านขวาของ OY/ON) ──
+    # ════════════════════════════════════════════════════════
+    # PRE-DIALYSIS ASSESSMENT — ฝั่งซ้าย
+    # grid: แถว Last wt y≈768, Pre BW y≈756, Dry BW y≈744 ...
+    # ค่า kg อยู่หลังช่อง OY ON ≈ x=228
+    # ════════════════════════════════════════════════════════
     pre_w = rec.get("pre_weight")
     post_w = rec.get("post_weight")
     dw = rec.get("dry_weight")
-    # Pre BW (y ≈ 752)
-    txt(192, 752, _f(pre_w), size=7, bold=True)
-    # Dry BW (y ≈ 742)
-    txt(192, 742, _f(dw), size=7, bold=True)
-    # Wt Gain = pre - dw
+
+    # Last wt: y≈770
+    prev_post = rec.get("prev_post_weight") or ex.get("prev_post_weight")
+    txtr(258, 770, _f(prev_post), size=7)
+    # Pre BW: y≈758
+    txtr(258, 758, _f(pre_w), size=7, bold=True)
+    # Dry BW: y≈746
+    txtr(258, 746, _f(dw), size=7, bold=True)
+    # Wt Gain (pre - dw): y≈722
     if pre_w and dw:
-        txt(192, 732, _f(round(float(pre_w) - float(dw), 1)), size=7)
-    # Target UF
-    txt(192, 712, _f(rec.get("uf_goal"), 0), size=7)
-    # Post BW
-    txt(192, 702, _f(post_w), size=7, bold=True)
-    # Wt lose = pre - post
+        txtr(258, 722, _f(round(float(pre_w) - float(dw), 1)), size=7)
+    # Meal/drink: y≈710 — skip
+    # Target UF: y≈698
+    txtr(258, 698, _f(rec.get("uf_goal"), 0), size=7)
+    # Post BW: y≈686
+    txtr(258, 686, _f(post_w), size=7, bold=True)
+    # Wt lose (pre - post): y≈674
     if pre_w and post_w:
-        txt(192, 692, _f(round(float(pre_w) - float(post_w), 1)), size=7)
+        txtr(258, 674, _f(round(float(pre_w) - float(post_w), 1)), size=7)
 
-    # ── HEMODIALYSIS PRESCRIPTION ──
+    # ════════════════════════════════════════════════════════
+    # HEMODIALYSIS PRESCRIPTION — ฝั่งขวา
+    # grid: Machine y≈768, Dialyzer y≈756, Surface area y≈744 ...
+    # ════════════════════════════════════════════════════════
     machine = ex.get("machine", {}) or {}
-    # Machine
+    # Machine: หลังคำว่า Machine x≈350, y≈772
     machine_label = f"{machine.get('brand', '')} {machine.get('model', '')}".strip() if machine else ""
-    txt(330, 772, machine_label, size=7, bold=True)
-    # Machine S/N
-    txt(430, 772, machine.get("serial", "") if machine else "", size=6)
-    # Dialyzer
+    txt(350, 772, machine_label, size=6, bold=True)
+    # No. (serial): หลัง No. x≈432, y≈772
+    txt(432, 772, machine.get("serial", "") if machine else "", size=5.5)
+    # Dialyzer: x≈350, y≈760
     dialyzer = ex.get("dialyzer_type", "") or ""
-    txt(330, 762, dialyzer, size=7, bold=True)
-    # Use No. (reuse count)
+    txt(350, 760, dialyzer, size=6, bold=True)
+    # Surface area / m2: y≈748 — skip
+    # Use No. (reuse): y≈736
     reuse = ex.get("dialyzer_reuse")
-    txt(330, 752, str(reuse) if reuse else "", size=7)
-    # Loading / Maintenance (Heparin)
+    txt(350, 736, str(reuse) if reuse else "", size=7)
+
+    # Anticoagulant checkboxes: y≈768 area ฝั่งขวาสุด
     hep = ex.get("heparin", {}) or {}
-    txt(390, 742, str(hep.get("bolus", "")) or "", size=7)
-    txt(480, 742, str(hep.get("maintenance", "")) or "", size=7)
-
-    # Heparin checkbox
     hep_protocol = (hep.get("protocol", "") or "").lower()
+
+    # Duration: ช่อง Duration x≈560, y≈772
+    duration = rec.get("duration_hr") or _DURATION_HR
+    txt(560, 772, str(duration), size=7)
+    # Time start: x≈548, y≈760
+    txt(548, 760, _thai_time(rec.get("started_at")), size=6)
+    # Time off: x≈548, y≈748
+    txt(548, 748, _thai_time(rec.get("ended_at")), size=6)
+
+    # Heparin checkbox: ☐ Heparin y≈760
     if "heparin" in hep_protocol and "free" not in hep_protocol:
-        tick(354, 727)  # Heparin checkbox
+        tick(468, 760)
     elif "lmwh" in hep_protocol:
-        tick(414, 727)  # LMWH
-    elif "free" in hep_protocol:
-        tick(454, 727)
+        tick(468, 748)
 
-    # Duration / Time start / Time off
-    txt(548, 772, "4", size=7)  # Duration
-    txt(548, 762, _thai_time(rec.get("started_at")), size=7)  # Time start
-    txt(548, 752, _thai_time(rec.get("ended_at")), size=7)  # Time off
+    # Loading: x≈450, y≈712
+    txt(450, 712, str(hep.get("bolus", "")) or "", size=7)
+    # Maintenance: x≈450, y≈700
+    txt(450, 700, str(hep.get("maintenance", "")) or "", size=7)
 
-    # Hct / Hb
+    # No Heparin free technique checkbox: y≈688
+    if "free" in hep_protocol:
+        tick(468, 688)
+
+    # Hct=: x≈560, y≈700
     hct = rec.get("hct") or ex.get("hct_value")
     hb = rec.get("hb") or ex.get("hb_value")
-    txt(553, 722, _f(hct), size=7, bold=True)  # Hct
-    txt(553, 712, _f(hb), size=7, bold=True)   # Hb
+    txt(560, 700, _f(hct), size=7, bold=True)
+    # Hb=: x≈560, y≈688
+    txt(560, 688, _f(hb), size=7, bold=True)
 
-    # Vascular access checkboxes
+    # ════════════════════════════════════════════════════════
+    # VASCULAR ACCESS — y≈652 area
+    # ════════════════════════════════════════════════════════
     va = (rec.get("va", "") or "").upper()
-    # AVF
+    # O AVF y≈630, O AVG same line
     if "AVF" in va:
-        tick(312, 672)
+        tick(305, 630)
     elif "AVG" in va:
-        tick(360, 672)
+        tick(360, 630)
+    # O DLC y≈618, O Perm Cath same line
     elif "DLC" in va:
-        tick(265, 660)
+        tick(305, 618)
     elif "PERM" in va or "PC" in va:
-        tick(312, 660)
+        tick(370, 618)
 
-    # Dialysate (เขียนค่ามาตรฐาน)
-    # K+ 2, Ca 3.5, Hco3 32, Temp 36.5, Flow 600
-    # (ค่าเหล่านี้มีอยู่แล้วในฟอร์ม — ไม่ต้องเขียนทับ)
-
-    # Medication (EPO)
+    # ════════════════════════════════════════════════════════
+    # MEDICATION (EPO) — y≈632 ฝั่งขวา
+    # ════════════════════════════════════════════════════════
     esa_drug = ex.get("esa_drug_given") or rec.get("esa_drug") or rec.get("esa_rx") or ""
     esa_route = ex.get("esa_route") or rec.get("esa_route") or ""
-    txt(475, 650, esa_drug, size=6)
+    # Medication EPO: x≈470, y≈632
+    txt(470, 632, esa_drug, size=6)
+    # Route: x≈545, y≈632
     if "IV" in esa_route.upper():
-        txt(530, 650, "IV", size=6, bold=True)
+        txt(545, 632, "IV", size=6, bold=True)
     elif "SC" in esa_route.upper():
-        txt(545, 650, "SC", size=6, bold=True)
+        txt(560, 632, "SC", size=6, bold=True)
 
-    # Pre HD Note
+    # ════════════════════════════════════════════════════════
+    # STICKER EPO — x≈550, y≈510 area (ขวาบน Nursing Diagnosis)
+    # ════════════════════════════════════════════════════════
+    # Sticker EPO label already on form
+
+    # ════════════════════════════════════════════════════════
+    # PRE HD NOTE — y≈472
+    # ════════════════════════════════════════════════════════
     pre_note = rec.get("pre_hd_note", "") or ""
-    txt(80, 579, pre_note[:60], size=6)
+    txt(80, 472, pre_note[:70], size=6)
 
-    # ── MONITORING TABLE ──
-    # ตำแหน่ง: เริ่มที่ y ≈ 548 (Pre-HD row), ลดทีละ ~16 pt
+    # ════════════════════════════════════════════════════════
+    # MONITORING TABLE
+    # จาก grid: header TIME/BP/PR... y≈448
+    # Pre-HD row y≈435, Start HD y≈420
+    # แถวข้อมูล: y ลดทีละ ~15pt
+    # คอลัมน์ x จาก grid:
+    #   TIME≈22, BP≈72, PR≈122, RR≈152, BFR≈182
+    #   VP≈222, TMP≈262, UFR≈302, Conduct≈352, TotalUF≈412, Remark≈475
+    # ════════════════════════════════════════════════════════
     sheet = rec.get("sheet", [])
-    table_x = [25, 68, 117, 148, 178, 218, 258, 298, 338, 378, 440]  # TIME,BP,PR,RR,BFR,VP,TMP,UFR,Conduct,TotalUF,Remark
-    row_h = 16.0
-    y_start = 548  # Pre-HD row
+    # column x positions (left edge of each column)
+    COL_TIME = 22
+    COL_BP = 73
+    COL_PR = 127
+    COL_RR = 157
+    COL_BFR = 190
+    COL_VP = 230
+    COL_TMP = 270
+    COL_UFR = 318
+    COL_COND = 360
+    COL_TUF = 420
+    COL_REM = 478
+    ROW_H = 15.0
+    SZ = 5.5  # font size for table
 
-    # Pre-HD row
+    # Pre-HD row: y≈406
+    y_pre = 406
     pre_v = ex.get("pre_vitals", {}) or {}
     if pre_v.get("sbp"):
-        txt(table_x[1], y_start, f"{pre_v['sbp']}/{pre_v.get('dbp','')}", size=5.5)
-        txt(table_x[2], y_start, str(pre_v.get("hr", "")), size=5.5)
+        txt(COL_BP, y_pre, f"{pre_v['sbp']}/{pre_v.get('dbp','')}", size=SZ)
+        txt(COL_PR, y_pre, str(pre_v.get("hr", "")), size=SZ)
 
-    # Start HD row
-    y_start -= row_h
-    txt(table_x[0], y_start, _thai_time(rec.get("started_at")), size=5.5)
+    # Start HD row: y≈391
+    y_start_hd = y_pre - ROW_H
+    txt(COL_TIME, y_start_hd, _thai_time(rec.get("started_at")), size=SZ)
 
-    # Data rows
-    for i, entry in enumerate(sheet[:10]):
-        y_row = y_start - (i + 1) * row_h
-        if y_row < 260:
+    # Data rows: เริ่มหลัง Start HD
+    for i, entry in enumerate(sheet[:12]):
+        y_row = y_start_hd - (i + 1) * ROW_H
+        if y_row < 275:
             break
-        txt(table_x[0], y_row, entry.get("slot_time", ""), size=5.5)
+        txt(COL_TIME, y_row, entry.get("slot_time", ""), size=SZ)
         if entry.get("sbp"):
-            txt(table_x[1], y_row, f"{entry['sbp']}/{entry.get('dbp','')}", size=5.5)
-        txt(table_x[2], y_row, _f(entry.get("pr"), 0), size=5.5)
-        txt(table_x[3], y_row, _f(entry.get("rr"), 0), size=5.5)
-        txt(table_x[4], y_row, _f(entry.get("bfr"), 0), size=5.5)
-        txt(table_x[5], y_row, _f(entry.get("vp"), 0), size=5.5)
-        txt(table_x[6], y_row, _f(entry.get("tmp"), 0), size=5.5)
-        txt(table_x[7], y_row, _f(entry.get("ufr"), 0), size=5.5)
-        txt(table_x[8], y_row, _f(entry.get("conductivity"), 1), size=5.5)
-        txt(table_x[9], y_row, _f(entry.get("total_uf"), 0), size=5.5)
-        remark = (entry.get("remark", "") or "")[:20]
+            txt(COL_BP, y_row, f"{entry['sbp']}/{entry.get('dbp','')}", size=SZ)
+        txt(COL_PR, y_row, _f(entry.get("pr"), 0), size=SZ)
+        txt(COL_RR, y_row, _f(entry.get("rr"), 0), size=SZ)
+        txt(COL_BFR, y_row, _f(entry.get("bfr"), 0), size=SZ)
+        txt(COL_VP, y_row, _f(entry.get("vp"), 0), size=SZ)
+        txt(COL_TMP, y_row, _f(entry.get("tmp"), 0), size=SZ)
+        txt(COL_UFR, y_row, _f(entry.get("ufr"), 0), size=SZ)
+        txt(COL_COND, y_row, _f(entry.get("conductivity"), 1), size=SZ)
+        txt(COL_TUF, y_row, _f(entry.get("total_uf"), 0), size=SZ)
+        remark = (entry.get("remark", "") or "")[:25]
         if remark:
-            txt(table_x[10], y_row, remark, size=5)
+            txt(COL_REM, y_row, remark, size=4.5)
 
-    # ── POST-HD: Total UF / Net UF balance ──
+    # ════════════════════════════════════════════════════════
+    # POST-HD SECTION
+    # Nurse Off: y≈270
+    # Total repletcement / Total UF / Net UF balance: y≈253
+    # ════════════════════════════════════════════════════════
     actual_uf = rec.get("actual_uf")
     if actual_uf is not None:
-        txt(378, 243, str(int(actual_uf)), size=6, bold=True)  # Total UF
-        txt(500, 243, str(int(actual_uf)), size=6, bold=True)  # Net UF balance
+        # Total UF: x≈455, y≈253
+        txt(458, 253, str(int(actual_uf)), size=6, bold=True)
+        # Net UF balance: x≈540, y≈253
+        txt(540, 253, str(int(actual_uf)), size=6, bold=True)
 
-    # BP before discharge
+    # ════════════════════════════════════════════════════════
+    # BP ก่อนกลับ: y≈75 area
+    # ════════════════════════════════════════════════════════
     post_v = ex.get("post_vitals", {}) or {}
     if post_v.get("sbp"):
-        txt(470, 110, f"{post_v['sbp']}/{post_v.get('dbp','')}", size=7, bold=True)
+        # BP ก่อนกลับ: x≈430, y≈72
+        txt(432, 72, f"{post_v['sbp']}/{post_v.get('dbp','')}", size=7, bold=True)
 
-    # Discharge: Home
-    tick(445, 95)
+    # ════════════════════════════════════════════════════════
+    # DISCHARGE BY: y≈40
+    # ════════════════════════════════════════════════════════
+    # ( ) Home: x≈410, y≈40
+    tick(412, 38)
 
-    # Nurse name
+    # ════════════════════════════════════════════════════════
+    # SIGNATURES — y≈18 (bottom)
+    # ════════════════════════════════════════════════════════
+    # Nephrologist: x≈85, y≈18 — มีชื่อแพทย์อยู่แล้วในฟอร์ม
+    # Nurse: x≈370, y≈18
     nurse = ex.get("nurse_name", "") or ""
-    txt(340, 25, nurse, size=7)
-
-    # Shift (รอบ)
-    shift_th = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}.get(rec.get("shift", ""), "")
-    txt(475, 814, f"รอบ{shift_th}", size=7)
+    txt(370, 18, nurse, size=7)
 
     c.showPage()
     c.save()
