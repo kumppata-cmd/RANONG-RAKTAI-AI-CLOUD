@@ -518,6 +518,14 @@ def _build_overlay(rec, extras=None):
         c.setFont("Loma-Bold" if bold else "Loma", size)
         c.drawString(x, y, str(text))
 
+    def txtc(x, y, text, width, size=7, bold=False):
+        """Center-aligned text within a box starting at x with given width."""
+        if not text and text != 0:
+            return
+        c.setFont("Loma-Bold" if bold else "Loma", size)
+        tw = c.stringWidth(str(text), "Loma-Bold" if bold else "Loma", size)
+        c.drawString(x + (width - tw) / 2, y, str(text))
+
     def txtr(x, y, text, size=7, bold=False):
         """Right-aligned text."""
         if not text and text != 0:
@@ -532,24 +540,23 @@ def _build_overlay(rec, extras=None):
     # ════════════════════════════════════════════════════════
     # HEADER ROW — จาก grid: y≈805 (ชื่อคลินิก), y≈790 (Patient's name)
     # ════════════════════════════════════════════════════════
-    # Patient's name: x≈108, y≈790
-    txt(108, 790, rec.get("name", ""), size=8, bold=True)
-    # Age: หลังคำว่า Age — x≈340, y≈790
+    # Patient's name: x≈108, y≈788
+    txt(108, 788, rec.get("name", ""), size=9, bold=True)
+    # Age: ตัวหนาใหญ่ 2 เท่า — x≈340, y≈786
     age = rec.get("age")
-    txt(340, 790, str(age) if age else "", size=8)
-    # Yrs: x≈362
-    # HN: หลังคำว่า HN — x≈400, y≈790
-    txt(400, 790, rec.get("hn", ""), size=8, bold=True)
-    # Dx CKD stage 5: x≈490, y≈790
+    txt(338, 786, str(age) if age else "", size=14, bold=True)
+    # HN: ตัวหนาใหญ่ 2 เท่า — x≈400, y≈786
+    txt(398, 786, rec.get("hn", ""), size=14, bold=True)
+    # Dx CKD stage 5: x≈492, y≈790
     txt(492, 790, "5", size=7)
-    # HD No.: x≈550, y≈805 (บรรทัดบนสุดขวา)
+    # HD No.: x≈555, y≈805
     hd_no = rec.get("hd_no")
-    txt(555, 805, str(hd_no) if hd_no else "", size=8, bold=True)
-    # Date: x≈550, y≈790
-    txt(545, 790, _thai_date(rec.get("date")), size=7)
+    txt(555, 803, str(hd_no) if hd_no else "", size=10, bold=True)
+    # Date: ตัวหนาใหญ่ 2 เท่า — x≈538, y≈786
+    txt(538, 786, _thai_date(rec.get("date")), size=14, bold=True)
     # Shift (รอบเช้า/บ่าย/ค่ำ): x≈490, y≈805
     shift_th = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}.get(rec.get("shift", ""), "")
-    txt(490, 805, f"รอบ{shift_th}", size=7)
+    txt(490, 805, f"รอบ{shift_th}", size=8, bold=True)
 
     # ════════════════════════════════════════════════════════
     # PRE-DIALYSIS ASSESSMENT — ฝั่งซ้าย
@@ -560,76 +567,77 @@ def _build_overlay(rec, extras=None):
     post_w = rec.get("post_weight")
     dw = rec.get("dry_weight")
 
-    # Last wt: y≈770
+    # Weight fields: ช่อง kg ≈ x=230-270, center at 250
+    # Last wt: y≈772 (แถว Anxiety/Last wt)
     prev_post = rec.get("prev_post_weight") or ex.get("prev_post_weight")
-    txtr(258, 770, _f(prev_post), size=7)
-    # Pre BW: y≈758
-    txtr(258, 758, _f(pre_w), size=7, bold=True)
-    # Dry BW: y≈746
-    txtr(258, 746, _f(dw), size=7, bold=True)
-    # Wt Gain (pre - dw): y≈722
+    txtc(230, 772, _f(prev_post), 40, size=8, bold=True)
+    # Pre BW: y≈760 (แถว Sleep disturbance/Pre BW)
+    txtc(230, 760, _f(pre_w), 40, size=8, bold=True)
+    # Dry BW: y≈748 (แถว Dyspnea/Dry BW)
+    txtc(230, 748, _f(dw), 40, size=8, bold=True)
+    # Wt Gain (pre - dw): y≈724 (แถว Crepitation/Wt Gain — skip Orthopnea)
     if pre_w and dw:
-        txtr(258, 722, _f(round(float(pre_w) - float(dw), 1)), size=7)
-    # Meal/drink: y≈710 — skip
-    # Target UF: y≈698
-    txtr(258, 698, _f(rec.get("uf_goal"), 0), size=7)
-    # Post BW: y≈686
-    txtr(258, 686, _f(post_w), size=7, bold=True)
-    # Wt lose (pre - post): y≈674
+        txtc(230, 724, _f(round(float(pre_w) - float(dw), 1)), 40, size=8)
+    # Meal/drink: y≈712 — skip
+    # Target UF: y≈700 (แถว JVP engorged/Target UF)
+    txtc(230, 700, _f(rec.get("uf_goal"), 0), 40, size=8, bold=True)
+    # Post BW: y≈688 (แถว Arrhythmia/Post BW)
+    txtc(230, 688, _f(post_w), 40, size=8, bold=True)
+    # Wt lose (pre - post): y≈676 (แถว Fever/Wt lose)
     if pre_w and post_w:
-        txtr(258, 674, _f(round(float(pre_w) - float(post_w), 1)), size=7)
+        txtc(230, 676, _f(round(float(pre_w) - float(post_w), 1)), 40, size=8)
 
     # ════════════════════════════════════════════════════════
     # HEMODIALYSIS PRESCRIPTION — ฝั่งขวา
     # grid: Machine y≈768, Dialyzer y≈756, Surface area y≈744 ...
     # ════════════════════════════════════════════════════════
     machine = ex.get("machine", {}) or {}
-    # Machine: หลังคำว่า Machine x≈350, y≈772
+    # Machine: หลังคำว่า Machine x≈348, y≈774 (แถว Anxiety/Machine)
     machine_label = f"{machine.get('brand', '')} {machine.get('model', '')}".strip() if machine else ""
-    txt(350, 772, machine_label, size=6, bold=True)
-    # No. (serial): หลัง No. x≈432, y≈772
-    txt(432, 772, machine.get("serial", "") if machine else "", size=5.5)
-    # Dialyzer: x≈350, y≈760
+    txt(348, 774, machine_label, size=7, bold=True)
+    # No. (serial): หลัง No. x≈430, y≈774
+    txt(430, 774, machine.get("serial", "") if machine else "", size=6)
+    # Dialyzer: x≈348, y≈762 (แถว Sleep disturbance/Dialyzer)
     dialyzer = ex.get("dialyzer_type", "") or ""
-    txt(350, 760, dialyzer, size=6, bold=True)
-    # Surface area / m2: y≈748 — skip
-    # Use No. (reuse): y≈736
+    txt(348, 762, dialyzer, size=7, bold=True)
+    # Surface area / m2: y≈750 — skip
+    # Use No. (reuse): y≈738 (แถว Orthopnea/Use No.)
     reuse = ex.get("dialyzer_reuse")
-    txt(350, 736, str(reuse) if reuse else "", size=7)
+    txt(348, 738, str(reuse) if reuse else "", size=7)
 
     # Anticoagulant checkboxes: y≈768 area ฝั่งขวาสุด
     hep = ex.get("heparin", {}) or {}
     hep_protocol = (hep.get("protocol", "") or "").lower()
 
-    # Duration: ช่อง Duration x≈560, y≈772
+    # Duration: ช่อง Duration x≈558, y≈774 (แถว Anxiety/Duration)
     duration = rec.get("duration_hr") or _DURATION_HR
-    txt(560, 772, str(duration), size=7)
-    # Time start: x≈548, y≈760
-    txt(548, 760, _thai_time(rec.get("started_at")), size=6)
-    # Time off: x≈548, y≈748
-    txt(548, 748, _thai_time(rec.get("ended_at")), size=6)
+    txt(558, 774, str(duration), size=8, bold=True)
+    # Time start: x≈545, y≈762 (แถว Sleep disturbance/Time start)
+    txt(545, 762, _thai_time(rec.get("started_at")), size=7, bold=True)
+    # Time off: x≈545, y≈750 (แถว Dyspnea/Time off)
+    txt(545, 750, _thai_time(rec.get("ended_at")), size=7, bold=True)
 
-    # Heparin checkbox: ☐ Heparin y≈760
+    # Heparin checkbox: ☐ Heparin y≈762
     if "heparin" in hep_protocol and "free" not in hep_protocol:
-        tick(468, 760)
+        tick(468, 762)
     elif "lmwh" in hep_protocol:
-        tick(468, 748)
+        tick(468, 750)
 
-    # Loading: x≈450, y≈712
-    txt(450, 712, str(hep.get("bolus", "")) or "", size=7)
-    # Maintenance: x≈450, y≈700
-    txt(450, 700, str(hep.get("maintenance", "")) or "", size=7)
+    # Loading: x≈448, y≈714 (แถว Crepitation/Loading)
+    txt(448, 714, str(hep.get("bolus", "")) or "", size=7, bold=True)
+    # Maintenance: x≈448, y≈702 (แถว JVP/Maintenance)
+    txt(448, 702, str(hep.get("maintenance", "")) or "", size=7, bold=True)
 
-    # No Heparin free technique checkbox: y≈688
+    # No Heparin free technique checkbox: y≈690
     if "free" in hep_protocol:
-        tick(468, 688)
+        tick(468, 690)
 
-    # Hct=: x≈560, y≈700
+    # Hct=: x≈558, y≈702
     hct = rec.get("hct") or ex.get("hct_value")
     hb = rec.get("hb") or ex.get("hb_value")
-    txt(560, 700, _f(hct), size=7, bold=True)
-    # Hb=: x≈560, y≈688
-    txt(560, 688, _f(hb), size=7, bold=True)
+    txt(558, 702, _f(hct), size=7, bold=True)
+    # Hb=: x≈558, y≈690
+    txt(558, 690, _f(hb), size=7, bold=True)
 
     # ════════════════════════════════════════════════════════
     # VASCULAR ACCESS — y≈652 area
@@ -681,50 +689,53 @@ def _build_overlay(rec, extras=None):
     # ════════════════════════════════════════════════════════
     sheet = rec.get("sheet", [])
     # column x positions (left edge of each column)
-    COL_TIME = 22
-    COL_BP = 73
-    COL_PR = 127
-    COL_RR = 157
-    COL_BFR = 190
-    COL_VP = 230
-    COL_TMP = 270
-    COL_UFR = 318
-    COL_COND = 360
-    COL_TUF = 420
-    COL_REM = 478
+    # Column definitions: (x_start, width) for center alignment
+    # จาก grid: TIME 15-65, BP 65-120, PR 120-150, RR 150-183, BFR 183-222
+    #           VP 222-262, TMP 262-305, UFR 305-350, Conduct 350-412, TotalUF 412-468, Remark 468-580
+    CX_TIME = (15, 50)
+    CX_BP = (65, 55)
+    CX_PR = (120, 30)
+    CX_RR = (150, 33)
+    CX_BFR = (183, 39)
+    CX_VP = (224, 38)
+    CX_TMP = (264, 41)
+    CX_UFR = (305, 45)
+    CX_COND = (350, 62)
+    CX_TUF = (412, 56)
+    CX_REM = (468, 112)
     ROW_H = 15.0
-    SZ = 5.5  # font size for table
+    SZ = 6  # font size for table
 
     # Pre-HD row: y≈406
     y_pre = 406
     pre_v = ex.get("pre_vitals", {}) or {}
     if pre_v.get("sbp"):
-        txt(COL_BP, y_pre, f"{pre_v['sbp']}/{pre_v.get('dbp','')}", size=SZ)
-        txt(COL_PR, y_pre, str(pre_v.get("hr", "")), size=SZ)
+        txtc(CX_BP[0], y_pre, f"{pre_v['sbp']}/{pre_v.get('dbp','')}", CX_BP[1], size=SZ)
+        txtc(CX_PR[0], y_pre, str(pre_v.get("hr", "")), CX_PR[1], size=SZ)
 
     # Start HD row: y≈391
     y_start_hd = y_pre - ROW_H
-    txt(COL_TIME, y_start_hd, _thai_time(rec.get("started_at")), size=SZ)
+    txtc(CX_TIME[0], y_start_hd, _thai_time(rec.get("started_at")), CX_TIME[1], size=SZ)
 
     # Data rows: เริ่มหลัง Start HD
     for i, entry in enumerate(sheet[:12]):
         y_row = y_start_hd - (i + 1) * ROW_H
         if y_row < 275:
             break
-        txt(COL_TIME, y_row, entry.get("slot_time", ""), size=SZ)
+        txtc(CX_TIME[0], y_row, entry.get("slot_time", ""), CX_TIME[1], size=SZ)
         if entry.get("sbp"):
-            txt(COL_BP, y_row, f"{entry['sbp']}/{entry.get('dbp','')}", size=SZ)
-        txt(COL_PR, y_row, _f(entry.get("pr"), 0), size=SZ)
-        txt(COL_RR, y_row, _f(entry.get("rr"), 0), size=SZ)
-        txt(COL_BFR, y_row, _f(entry.get("bfr"), 0), size=SZ)
-        txt(COL_VP, y_row, _f(entry.get("vp"), 0), size=SZ)
-        txt(COL_TMP, y_row, _f(entry.get("tmp"), 0), size=SZ)
-        txt(COL_UFR, y_row, _f(entry.get("ufr"), 0), size=SZ)
-        txt(COL_COND, y_row, _f(entry.get("conductivity"), 1), size=SZ)
-        txt(COL_TUF, y_row, _f(entry.get("total_uf"), 0), size=SZ)
+            txtc(CX_BP[0], y_row, f"{entry['sbp']}/{entry.get('dbp','')}", CX_BP[1], size=SZ)
+        txtc(CX_PR[0], y_row, _f(entry.get("pr"), 0), CX_PR[1], size=SZ)
+        txtc(CX_RR[0], y_row, _f(entry.get("rr"), 0), CX_RR[1], size=SZ)
+        txtc(CX_BFR[0], y_row, _f(entry.get("bfr"), 0), CX_BFR[1], size=SZ)
+        txtc(CX_VP[0], y_row, _f(entry.get("vp"), 0), CX_VP[1], size=SZ)
+        txtc(CX_TMP[0], y_row, _f(entry.get("tmp"), 0), CX_TMP[1], size=SZ)
+        txtc(CX_UFR[0], y_row, _f(entry.get("ufr"), 0), CX_UFR[1], size=SZ)
+        txtc(CX_COND[0], y_row, _f(entry.get("conductivity"), 1), CX_COND[1], size=SZ)
+        txtc(CX_TUF[0], y_row, _f(entry.get("total_uf"), 0), CX_TUF[1], size=SZ)
         remark = (entry.get("remark", "") or "")[:25]
         if remark:
-            txt(COL_REM, y_row, remark, size=4.5)
+            txt(CX_REM[0] + 2, y_row, remark, size=5)
 
     # ════════════════════════════════════════════════════════
     # POST-HD SECTION
@@ -743,8 +754,8 @@ def _build_overlay(rec, extras=None):
     # ════════════════════════════════════════════════════════
     post_v = ex.get("post_vitals", {}) or {}
     if post_v.get("sbp"):
-        # BP ก่อนกลับ: x≈430, y≈72
-        txt(432, 72, f"{post_v['sbp']}/{post_v.get('dbp','')}", size=7, bold=True)
+        # BP ก่อนกลับ: center ในช่อง x≈400-480, y≈74
+        txtc(400, 74, f"{post_v['sbp']}/{post_v.get('dbp','')}", 80, size=10, bold=True)
 
     # ════════════════════════════════════════════════════════
     # DISCHARGE BY: y≈40
