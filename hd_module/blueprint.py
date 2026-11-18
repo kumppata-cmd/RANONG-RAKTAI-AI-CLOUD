@@ -3312,6 +3312,20 @@ def update_session(session_id):
                 if data.get("post_weight") is not None:
                     updates.append("post_weight = %s")
                     params.append(data["post_weight"])
+                    # Auto-calculate actual_uf = (pre_weight - post_weight) × 1000
+                    # เมื่อกรอก post_weight แต่ไม่ได้ส่ง actual_uf มาด้วย
+                    if data.get("actual_uf") is None:
+                        try:
+                            cur.execute("SELECT pre_weight FROM hd_sessions WHERE id = %s", (session_id,))
+                            _pw_row = cur.fetchone()
+                            if _pw_row and _pw_row[0] is not None:
+                                _auto_uf = round((float(_pw_row[0]) - float(data["post_weight"])) * 1000)
+                                if _auto_uf > 0:
+                                    updates.append("actual_uf = %s")
+                                    params.append(_auto_uf)
+                                    logger.info(f"[UF-AUTO] session {session_id}: pre={_pw_row[0]} post={data['post_weight']} → UF={_auto_uf} mL")
+                        except Exception as _uf_e:
+                            logger.warning(f"[UF-AUTO] calc failed: {_uf_e}")
                 if data.get("actual_uf") is not None:
                     updates.append("actual_uf = %s")
                     params.append(data["actual_uf"])
