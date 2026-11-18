@@ -18903,21 +18903,33 @@ def webhook():
                     try:
                         from hd_module.uf_coach import parse_weight_message as _pwm
                         _wkg = _pwm(text)
-                    except Exception:
+                    except Exception as _imp_e:
+                        logger.warning(f"weight parse import: {type(_imp_e).__name__}: {str(_imp_e)[:120]}")
                         _wkg = None
-                    _wpt = None
                     if _wkg is not None:
+                        # ── น้ำหนักถูก parse แล้ว → ต้องตอบทุกกรณี ห้ามเงียบ ──
+                        _wpt = None
                         try:
                             _wpt = hn_registry.get_by_owner(user_hash)
                         except Exception:
                             _wpt = None
-                    if _wkg is not None and _wpt and getattr(_wpt, "clinic_hn", ""):
+                        if not _wpt or not getattr(_wpt, "clinic_hn", ""):
+                            # ผู้ป่วยยังไม่ได้ผูก LINE กับ HN
+                            reply_message(reply_token,
+                                "⚖️ รับทราบน้ำหนัก {:.1f} กก.\n\n"
+                                "แต่บัญชี LINE นี้ยังไม่ได้ผูกกับเลข HN\n"
+                                "กรุณาพิมพ์ 'ผูก <รหัส>' ที่ได้จากเจ้าหน้าที่ก่อนนะครับ/ค่ะ\n"
+                                "แล้วส่งน้ำหนักใหม่อีกครั้ง".format(_wkg))
+                            continue
                         _wreply = None
                         try:
                             with app.app_context():
                                 from hd_module.blueprint import get_setting_value as _gsv_w
                                 _on = (_gsv_w("patient_weight_coach", "on") or "on").lower() != "off"
-                                if _on:
+                                if not _on:
+                                    _wreply = ("⚖️ รับทราบน้ำหนัก {:.1f} กก. แล้วครับ/ค่ะ\n"
+                                               "ระบบโค้ชน้ำหนักยังไม่เปิดใช้งาน — เจ้าหน้าที่จะดูให้ในรอบฟอกถัดไป").format(_wkg)
+                                else:
                                     import psycopg2 as _pg_w
                                     from hd_module.uf_coach import weight_coach as _wcoach
                                     _dbw = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
@@ -18930,23 +18942,27 @@ def webhook():
                                         _cw.commit()
                                     finally:
                                         _cw.close()
-                                    # เกินเกณฑ์ ≥ 1 กก. → แจ้งกลุ่มพยาบาล (วันละครั้งต่อผู้ป่วย)
-                                    try:
-                                        _iw = (_wctx or {}).get("idwg")
-                                        _kday = f"wcoach_{_wpt.clinic_hn}_{datetime.now().strftime('%Y%m%d')}"
-                                        if _iw and _iw["over_kg"] >= 1.0 and _kday not in getattr(app, "_wcoach_sent", set()):
-                                            app._wcoach_sent = getattr(app, "_wcoach_sent", set()) | {_kday}
-                                            from hd_module.blueprint import push_nurse_group as _png_w
-                                            _png_w(f"⚖️ น้ำหนักจากบ้าน HN {_wpt.clinic_hn}: {_wkg:.1f} กก. "
-                                                   f"(ขึ้น {_iw['idwg_kg']:+.1f} / เกณฑ์ {_iw['limit_kg']:.1f}) — เกิน {_iw['over_kg']:.1f} กก.")
-                                    except Exception as _ne:
-                                        logger.info(f"weight coach notify: {type(_ne).__name__}")
+                                    if not _wreply:
+                                        # ผู้ป่วยผูก LINE แล้วแต่ยังไม่อยู่ในระบบ HD
+                                        _wreply = ("⚖️ รับทราบน้ำหนัก {:.1f} กก. แล้วครับ/ค่ะ\n"
+                                                   "ยังไม่พบข้อมูลไตเทียมของท่านในระบบ — เจ้าหน้าที่จะดูให้ในรอบฟอกถัดไป").format(_wkg)
+                                    else:
+                                        # เกินเกณฑ์ ≥ 1 กก. → แจ้งกลุ่มพยาบาล (วันละครั้งต่อผู้ป่วย)
+                                        try:
+                                            _iw = (_wctx or {}).get("idwg")
+                                            _kday = f"wcoach_{_wpt.clinic_hn}_{datetime.now().strftime('%Y%m%d')}"
+                                            if _iw and _iw["over_kg"] >= 1.0 and _kday not in getattr(app, "_wcoach_sent", set()):
+                                                app._wcoach_sent = getattr(app, "_wcoach_sent", set()) | {_kday}
+                                                from hd_module.blueprint import push_nurse_group as _png_w
+                                                _png_w(f"⚖️ น้ำหนักจากบ้าน HN {_wpt.clinic_hn}: {_wkg:.1f} กก. "
+                                                       f"(ขึ้น {_iw['idwg_kg']:+.1f} / เกณฑ์ {_iw['limit_kg']:.1f}) — เกิน {_iw['over_kg']:.1f} กก.")
+                                        except Exception as _ne:
+                                            logger.info(f"weight coach notify: {type(_ne).__name__}")
                         except Exception as _we2:
                             logger.warning(f"weight coach: {type(_we2).__name__}: {str(_we2)[:120]}")
                             _wreply = "ขออภัย บันทึกน้ำหนักไม่สำเร็จ ลองใหม่อีกครั้ง หรือแจ้งเจ้าหน้าที่ที่คลินิก"
-                        if _wreply:
-                            reply_message(reply_token, _wreply[:4900])
-                            continue
+                        reply_message(reply_token, (_wreply or "⚖️ รับทราบน้ำหนักแล้ว")[:4900])
+                        continue
 
                 # ── ตรวจน้ำ RO ประจำวัน: "น้ำRO H 0 F 0.1 T 0" ในกลุ่มพยาบาล ──
                 try:
