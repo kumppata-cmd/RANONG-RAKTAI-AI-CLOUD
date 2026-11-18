@@ -18899,68 +18899,110 @@ def webhook():
                     continue
 
                 # ── 17 พ.ย. 2569 (ข้อ 9): ผู้ป่วยที่ผูก LINE ส่ง "น้ำหนัก 62.4" → ตอบโควตาน้ำหนักถึงรอบถัดไป ──
+                # + แพทย์/admin ทดสอบแทนคนไข้: "น้ำหนัก 65 HN 12345" (แชท 1:1 เท่านั้น)
                 if not (_src_c.get("groupId") or _src_c.get("roomId")):
+                    # ── parse: "น้ำหนัก 65" / "น้ำหนัก 65 HN 12345" ──
+                    _wkg = None
+                    _w_target_hn = None  # HN ที่ระบุ (admin/physician test mode)
                     try:
                         from hd_module.uf_coach import parse_weight_message as _pwm
                         _wkg = _pwm(text)
+                        # admin/physician: "น้ำหนัก 65 HN 12345" → ทดสอบแทนคนไข้
+                        if _wkg is None:
+                            import re as _re_w
+                            _m_adm = _re_w.match(
+                                r"^\s*(?:น้ำหนัก|นน\.?|weight)\s+(\d{2,3}(?:[.,]\d{1,2})?)\s+"
+                                r"(?:HN|hn)\s*(\d{3,6})\s*$", text or "")
+                            if _m_adm:
+                                _wkg = float(_m_adm.group(1).replace(",", "."))
+                                _w_target_hn = _m_adm.group(2)
+                                if not (30 <= _wkg <= 250):
+                                    _wkg = None
                     except Exception as _imp_e:
-                        logger.warning(f"weight parse import: {type(_imp_e).__name__}: {str(_imp_e)[:120]}")
+                        logger.warning(f"[WEIGHT] parse import error: {type(_imp_e).__name__}: {str(_imp_e)[:120]}")
                         _wkg = None
+                    logger.info(f"[WEIGHT] parse result: kg={_wkg}, target_hn={_w_target_hn}, text={text[:30]!r}")
                     if _wkg is not None:
                         # ── น้ำหนักถูก parse แล้ว → ต้องตอบทุกกรณี ห้ามเงียบ ──
-                        _wpt = None
-                        try:
-                            _wpt = hn_registry.get_by_owner(user_hash)
-                        except Exception:
+                        _w_is_admin = (user_hash in ADMIN_USERS or is_physician_user(user_hash))
+                        _w_hn = None  # HN ที่จะใช้จริง
+
+                        if _w_target_hn and _w_is_admin:
+                            # admin/physician ระบุ HN → ใช้ HN นั้น
+                            _w_hn = _w_target_hn
+                            logger.info(f"[WEIGHT] admin test mode: HN {_w_hn}")
+                        else:
+                            # ผู้ป่วย → ดู HN จาก LINE linking
                             _wpt = None
-                        if not _wpt or not getattr(_wpt, "clinic_hn", ""):
-                            # ผู้ป่วยยังไม่ได้ผูก LINE กับ HN
-                            reply_message(reply_token,
-                                "⚖️ รับทราบน้ำหนัก {:.1f} กก.\n\n"
-                                "แต่บัญชี LINE นี้ยังไม่ได้ผูกกับเลข HN\n"
-                                "กรุณาพิมพ์ 'ผูก <รหัส>' ที่ได้จากเจ้าหน้าที่ก่อนนะครับ/ค่ะ\n"
-                                "แล้วส่งน้ำหนักใหม่อีกครั้ง".format(_wkg))
-                            continue
+                            try:
+                                _wpt = hn_registry.get_by_owner(user_hash)
+                            except Exception as _wpt_e:
+                                logger.warning(f"[WEIGHT] get_by_owner error: {type(_wpt_e).__name__}")
+                                _wpt = None
+                            if _wpt and getattr(_wpt, "clinic_hn", ""):
+                                _w_hn = _wpt.clinic_hn
+                                logger.info(f"[WEIGHT] patient linked: HN {_w_hn}")
+                            else:
+                                logger.info(f"[WEIGHT] not linked: user_hash={user_hash[:8]}")
+                                reply_message(reply_token,
+                                    "⚖️ รับทราบน้ำหนัก {:.1f} กก.\n\n"
+                                    "แต่บัญชี LINE นี้ยังไม่ได้ผูกกับเลข HN\n"
+                                    "กรุณาพิมพ์ 'ผูก <รหัส>' ที่ได้จากเจ้าหน้าที่ก่อนนะครับ/ค่ะ\n"
+                                    "แล้วส่งน้ำหนักใหม่อีกครั้ง{}".format(
+                                        _wkg,
+                                        "\n\n💡 แพทย์/เจ้าหน้าที่ทดสอบ: พิมพ์ 'น้ำหนัก 65 HN 12345'" if _w_is_admin else ""))
+                                continue
+
+                        # ── มี HN แล้ว → เรียก weight_coach ──
                         _wreply = None
                         try:
+                            from hd_module.blueprint import get_setting_value as _gsv_w
                             with app.app_context():
-                                from hd_module.blueprint import get_setting_value as _gsv_w
                                 _on = (_gsv_w("patient_weight_coach", "on") or "on").lower() != "off"
-                                if not _on:
-                                    _wreply = ("⚖️ รับทราบน้ำหนัก {:.1f} กก. แล้วครับ/ค่ะ\n"
-                                               "ระบบโค้ชน้ำหนักยังไม่เปิดใช้งาน — เจ้าหน้าที่จะดูให้ในรอบฟอกถัดไป").format(_wkg)
+                            logger.info(f"[WEIGHT] setting patient_weight_coach on={_on}")
+                            if not _on:
+                                _wreply = ("⚖️ รับทราบน้ำหนัก {:.1f} กก. แล้วครับ/ค่ะ\n"
+                                           "ระบบโค้ชน้ำหนักยังไม่เปิดใช้งาน — เจ้าหน้าที่จะดูให้ในรอบฟอกถัดไป").format(_wkg)
+                            else:
+                                import psycopg2 as _pg_w
+                                from hd_module.uf_coach import weight_coach as _wcoach
+                                _dbw = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+                                if not _dbw:
+                                    logger.error("[WEIGHT] no DATABASE_URL configured!")
+                                    _wreply = "ขออภัย ระบบฐานข้อมูลยังไม่พร้อม กรุณาแจ้งเจ้าหน้าที่"
                                 else:
-                                    import psycopg2 as _pg_w
-                                    from hd_module.uf_coach import weight_coach as _wcoach
-                                    _dbw = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
                                     _cw = _pg_w.connect(_dbw, connect_timeout=5)
                                     try:
                                         with _cw.cursor() as _cur_w:
-                                            _wreply, _wctx = _wcoach(_cur_w, _wpt.clinic_hn, _wkg,
+                                            _wreply, _wctx = _wcoach(_cur_w, _w_hn, _wkg,
                                                                      setting_pct=_gsv_w("idwg_limit_pct", ""),
                                                                      template=(_gsv_w("tpl_weight_reply", "") or None))
                                         _cw.commit()
+                                        logger.info(f"[WEIGHT] weight_coach result: reply={'yes' if _wreply else 'None'}, ctx={'yes' if _wctx else 'None'}")
                                     finally:
                                         _cw.close()
                                     if not _wreply:
                                         # ผู้ป่วยผูก LINE แล้วแต่ยังไม่อยู่ในระบบ HD
+                                        logger.info(f"[WEIGHT] patient HN {_w_hn} not in hd_patient_mapping")
                                         _wreply = ("⚖️ รับทราบน้ำหนัก {:.1f} กก. แล้วครับ/ค่ะ\n"
-                                                   "ยังไม่พบข้อมูลไตเทียมของท่านในระบบ — เจ้าหน้าที่จะดูให้ในรอบฟอกถัดไป").format(_wkg)
+                                                   "ยังไม่พบข้อมูลไตเทียมของ HN {} ในระบบ — "
+                                                   "เจ้าหน้าที่จะดูให้ในรอบฟอกถัดไป").format(_wkg, _w_hn)
                                     else:
                                         # เกินเกณฑ์ ≥ 1 กก. → แจ้งกลุ่มพยาบาล (วันละครั้งต่อผู้ป่วย)
                                         try:
                                             _iw = (_wctx or {}).get("idwg")
-                                            _kday = f"wcoach_{_wpt.clinic_hn}_{datetime.now().strftime('%Y%m%d')}"
+                                            _kday = f"wcoach_{_w_hn}_{datetime.now().strftime('%Y%m%d')}"
                                             if _iw and _iw["over_kg"] >= 1.0 and _kday not in getattr(app, "_wcoach_sent", set()):
                                                 app._wcoach_sent = getattr(app, "_wcoach_sent", set()) | {_kday}
                                                 from hd_module.blueprint import push_nurse_group as _png_w
-                                                _png_w(f"⚖️ น้ำหนักจากบ้าน HN {_wpt.clinic_hn}: {_wkg:.1f} กก. "
+                                                _png_w(f"⚖️ น้ำหนักจากบ้าน HN {_w_hn}: {_wkg:.1f} กก. "
                                                        f"(ขึ้น {_iw['idwg_kg']:+.1f} / เกณฑ์ {_iw['limit_kg']:.1f}) — เกิน {_iw['over_kg']:.1f} กก.")
                                         except Exception as _ne:
-                                            logger.info(f"weight coach notify: {type(_ne).__name__}")
+                                            logger.info(f"[WEIGHT] notify nurse: {type(_ne).__name__}")
                         except Exception as _we2:
-                            logger.warning(f"weight coach: {type(_we2).__name__}: {str(_we2)[:120]}")
+                            logger.warning(f"[WEIGHT] error: {type(_we2).__name__}: {str(_we2)[:200]}")
                             _wreply = "ขออภัย บันทึกน้ำหนักไม่สำเร็จ ลองใหม่อีกครั้ง หรือแจ้งเจ้าหน้าที่ที่คลินิก"
+                        logger.info(f"[WEIGHT] replying: {(_wreply or '(fallback)')[:60]}")
                         reply_message(reply_token, (_wreply or "⚖️ รับทราบน้ำหนักแล้ว")[:4900])
                         continue
 
@@ -20122,6 +20164,56 @@ def health_live():
         }), 200
     except Exception:
         return jsonify({"status": "unhealthy"}), 503
+
+
+@app.route("/health/weight-test", methods=["GET"])
+def health_weight_test():
+    """ทดสอบระบบน้ำหนัก — ไม่บันทึกข้อมูลจริง"""
+    import os as _os_wt
+    results = {}
+    # 1. import chain
+    try:
+        from hd_module.uf_coach import parse_weight_message as _pwm_t, patient_context as _pc_t, HOME_WEIGHT_SQL as _hw_sql
+        results["import"] = "OK"
+    except Exception as _e:
+        results["import"] = f"FAIL: {type(_e).__name__}: {_e}"
+        return jsonify(results), 500
+    # 2. parse test
+    for _t in ["น้ำหนัก 65 kg", "น้ำหนัก 65", "นน 62.4 กก"]:
+        results[f"parse({_t})"] = _pwm_t(_t)
+    # 3. DB connection + table
+    _db = _os_wt.environ.get("HD_DATABASE_URL", "") or _os_wt.environ.get("DATABASE_URL", "")
+    if not _db:
+        results["db"] = "NO DATABASE_URL"
+        return jsonify(results), 200
+    try:
+        import psycopg2 as _pg_t
+        _cn = _pg_t.connect(_db, connect_timeout=5)
+        with _cn.cursor() as _cr:
+            _cr.execute(_hw_sql)
+            _cn.commit()
+            results["hd_home_weights_table"] = "OK"
+            _cr.execute("SELECT COUNT(*) FROM hd_patient_mapping")
+            results["hd_patient_mapping_count"] = _cr.fetchone()[0]
+            _cr.execute("SELECT COUNT(*) FROM hd_sessions WHERE status='completed'")
+            results["completed_sessions"] = _cr.fetchone()[0]
+            _cr.execute("SELECT key, value FROM hd_settings WHERE key IN ('patient_weight_coach','idwg_limit_pct')")
+            results["settings"] = {r[0]: r[1] for r in _cr.fetchall()}
+            _cr.execute("SELECT hn, patient_name, dry_weight FROM hd_patient_mapping WHERE dry_weight IS NOT NULL LIMIT 3")
+            results["sample_patients_with_dw"] = [{"hn": r[0], "name": r[1][:6] + "…" if r[1] and len(r[1]) > 6 else r[1], "dw": float(r[2]) if r[2] else None} for r in _cr.fetchall()]
+            _cr.execute("SELECT hn FROM hd_patient_mapping WHERE dry_weight IS NOT NULL LIMIT 1")
+            _tr = _cr.fetchone()
+            if _tr:
+                results["patient_context_test"] = _pc_t(_cr, _tr[0])
+        _cn.close()
+    except Exception as _e:
+        results["db_error"] = f"{type(_e).__name__}: {_e}"
+    # 4. HN registry stats
+    try:
+        results["hn_registry_count"] = len(hn_registry._cache) if hasattr(hn_registry, '_cache') else "unknown"
+    except Exception:
+        pass
+    return jsonify(results), 200
 
 
 @app.route("/health/ready", methods=["GET"])
