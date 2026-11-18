@@ -116,6 +116,12 @@ hd_web = Blueprint(
 )
 
 
+@hd_web.context_processor
+def inject_total_beds():
+    """ส่ง total_beds ให้ทุก template อัตโนมัติ — ไม่ต้องใส่รายหน้า."""
+    return {"total_beds": HdConfig.TOTAL_BEDS}
+
+
 @hd_web.route("/")
 def hd_index():
     """Redirect root to login."""
@@ -131,7 +137,7 @@ def hd_login_page():
 @hd_web.route("/dashboard")
 def hd_dashboard_page():
     """Render 30-bed dashboard."""
-    resp = make_response(render_template("hd_dashboard.html", config=HdConfig))
+    resp = make_response(render_template("hd_dashboard.html", config=HdConfig, total_beds=HdConfig.TOTAL_BEDS))
     resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return resp
 

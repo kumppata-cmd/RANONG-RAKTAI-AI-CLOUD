@@ -1,7 +1,7 @@
 {% extends "hd_base.html" %}
-{% block title %}แดชบอร์ด 25 เตียง{% endblock %}
+{% block title %}แดชบอร์ด {{ total_beds }} เตียง{% endblock %}
 {% block nav_dashboard %}active{% endblock %}
-{% block page_title %}📊 แดชบอร์ด 25 เตียง{% endblock %}
+{% block page_title %}📊 แดชบอร์ด {{ total_beds }} เตียง{% endblock %}
 {% block topbar_extra %}
 <button class="btn btn-outline" onclick="toggleTheme()" style="font-size:.85rem;">🌓 โหมด</button>
 <a href="/hd/alerts" class="alert-badge" id="alertBadge" style="display:none;">
