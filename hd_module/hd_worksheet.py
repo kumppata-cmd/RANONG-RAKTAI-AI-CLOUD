@@ -579,8 +579,9 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     # ════════════════════════════════════════════════════════════
     sig_y = y_bot - (max_rows + 1) * 8 - 4
     nurse_name = ex.get("nurse_name", "") or ""
-    # ข้อ 6: ชื่อแพทย์อัตโนมัติ
-    doctor_name = ex.get("doctor_name", "") or rec.get("doctor_name", "") or ""
+    # ข้อ 6: ชื่อแพทย์อัตโนมัติ (default = แพทย์เจ้าของคลินิก)
+    _DEFAULT_DOCTOR = "นายแพทย์กัมพล พัฒนสมบัติสกุล ว.26015"
+    doctor_name = ex.get("doctor_name", "") or rec.get("doctor_name", "") or _DEFAULT_DOCTOR
 
     # Nephrologist (ซ้าย) + ชื่อแพทย์
     c.setFont("Loma-Bold", 7)
