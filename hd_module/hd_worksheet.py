@@ -511,8 +511,8 @@ def _build_overlay(rec, extras=None):
     c = canvasmod.Canvas(buf, pagesize=A4)
     ex = extras or {}
 
-    # ── Global X offset (pt) — ปรับ +/- เพื่อขยับทั้งแผ่น ──
-    DX = -28  # ขยับซ้าย 1 cm (28 pt) — ปรับค่านี้เพื่อเลื่อนทั้งแผ่น
+    # ── Global X offset (pt) — ตั้งเป็น 0 แล้ววัดทีละช่องแทน ──
+    DX = 0
 
     # ── Helpers (DX applied automatically) ──
     def txt(x, y, text, size=7, bold=False):
@@ -570,94 +570,77 @@ def _build_overlay(rec, extras=None):
     post_w = rec.get("post_weight")
     dw = rec.get("dry_weight")
 
-    # Weight fields: จาก fine grid วัดได้ x=196..256 (w=60), row spacing ≈12pt
-    # center ตัวเลขกลางช่องว่างระหว่าง "OY ON" กับ "kg"
-    WT_X, WT_W = 196, 60
-    WT_DY = 12   # ระยะห่างแต่ละแถว
-    # แถว Anxiety (Last wt)   = y≈771 (grid: 772-1)
-    # แถว Sleep (Pre BW)      = y≈759
-    # แถว Dyspnea (Dry BW)    = y≈747
-    # แถว Orthopnea (Wt Gain) = y≈735
-    # แถว Crepitation (Meal)  = y≈723
-    # แถว JVP (Target UF)     = y≈711
-    # แถว Arrhythmia (Post BW)= y≈699
-    # แถว Fever (Wt lose)     = y≈687
+    # ════════════════════════════════════════════════════════
+    # WEIGHT + PRESCRIPTION — วัดจาก precise grid (DX=0)
+    # Row Y positions (จาก 4pt grid): ทุกแถวห่างกัน 11.5pt
+    # Row 0 (Anxiety/Last wt/Machine)      y = 770
+    # Row 1 (Sleep/Pre BW/Dialyzer)        y = 758
+    # Row 2 (Dyspnea/Dry BW/Surface)       y = 747
+    # Row 3 (Orthopnea/Wt Gain/Use No)     y = 735
+    # Row 4 (Crepitation/Meal/Last TCV)     y = 724
+    # Row 5 (JVP/Target UF/เปิดใช้เมื่อ)    y = 712
+    # Row 6 (Arrhythmia/Post BW/Tesk leak)  y = 701
+    # Row 7 (Fever/Wt lose/Disinfectant)    y = 689
+    # ════════════════════════════════════════════════════════
+    RY = [770, 758, 747, 735, 724, 712, 701, 689]  # y ของแต่ละแถว
+
+    # ── WEIGHT (ช่องว่าง x=222-252, w=30, center) ──
+    WT_X, WT_W = 222, 30
     prev_post = rec.get("prev_post_weight") or ex.get("prev_post_weight")
-    txtc(WT_X, 759, _f(prev_post), WT_W, size=8, bold=True)       # Last wt  (Anxiety row)
-    txtc(WT_X, 747, _f(pre_w), WT_W, size=8, bold=True)           # Pre BW   (Sleep row)
-    txtc(WT_X, 735, _f(dw), WT_W, size=8, bold=True)              # Dry BW   (Dyspnea row)
-    if pre_w and dw:                                                # Wt Gain  (Orthopnea row)
-        txtc(WT_X, 723, _f(round(float(pre_w) - float(dw), 1)), WT_W, size=8)
-    # Crepitation (Meal/drink) row — skip
-    txtc(WT_X, 693, _f(rec.get("uf_goal"), 0), WT_W, size=8, bold=True)  # Target UF (JVP row)
-    txtc(WT_X, 681, _f(post_w), WT_W, size=8, bold=True)          # Post BW  (Arrhythmia row)
-    if pre_w and post_w:                                            # Wt lose  (Fever row)
-        txtc(WT_X, 669, _f(round(float(pre_w) - float(post_w), 1)), WT_W, size=8)
+    txtc(WT_X, RY[0], _f(prev_post), WT_W, size=8, bold=True)    # Last wt
+    txtc(WT_X, RY[1], _f(pre_w), WT_W, size=8, bold=True)        # Pre BW
+    txtc(WT_X, RY[2], _f(dw), WT_W, size=8, bold=True)           # Dry BW
+    if pre_w and dw:                                                # Wt Gain
+        txtc(WT_X, RY[3], _f(round(float(pre_w) - float(dw), 1)), WT_W, size=8)
+    # Row 4 (Meal/drink) — skip
+    txtc(WT_X, RY[5], _f(rec.get("uf_goal"), 0), WT_W, size=8, bold=True)  # Target UF
+    txtc(WT_X, RY[6], _f(post_w), WT_W, size=8, bold=True)       # Post BW
+    if pre_w and post_w:                                            # Wt lose
+        txtc(WT_X, RY[7], _f(round(float(pre_w) - float(post_w), 1)), WT_W, size=8)
 
-    # ════════════════════════════════════════════════════════
-    # HEMODIALYSIS PRESCRIPTION — วัดจาก fine grid (6pt)
-    # คอลัมน์: Machine/Dialyzer x≈310-430, Anticoag x≈430-540, Duration x≈540-590
-    # แถว: Anxiety y≈773, Sleep y≈761, Dyspnea y≈749, Orthopnea y≈737
-    #       Crepitation y≈725, JVP y≈713, Arrhythmia y≈701, Fever y≈689
-    # ════════════════════════════════════════════════════════
+    # ── MACHINE / DIALYZER (หลัง label: x=375) ──
     machine = ex.get("machine", {}) or {}
-    RX_X, RX_W = 310, 120   # Machine/Dialyzer column
-    SN_X, SN_W = 432, 60    # Serial No. column (after "No.")
-    RX_Y0 = 763             # Anxiety row (ลง 10pt จาก header)
-
-    # Machine: แถว Anxiety (y=763) — หลังคำว่า "Machine" (label จบ ~x=348)
     machine_label = f"{machine.get('brand', '')} {machine.get('model', '')}".strip() if machine else ""
-    txt(350, RX_Y0, machine_label, size=7, bold=True)
-    # Serial No.: ช่องหลัง "No."
-    txtc(SN_X, RX_Y0, machine.get("serial", "") if machine else "", SN_W, size=5.5)
-
-    # Dialyzer: แถว Sleep (y=751) — หลังคำว่า "Dialyzer" (label จบ ~x=348)
+    txt(375, RY[0], machine_label, size=7, bold=True)              # Machine
+    txt(440, RY[0], machine.get("serial", "") if machine else "", size=5.5)  # S/N
     dialyzer = ex.get("dialyzer_type", "") or ""
-    txt(350, RX_Y0 - 12, dialyzer, size=7, bold=True)
-
-    # Surface area: แถว Dyspnea (y=739) — ถ้ามีค่า
+    txt(375, RY[1], dialyzer, size=7, bold=True)                   # Dialyzer
     surface = ex.get("surface_area")
     if surface:
-        txtc(RX_X, RX_Y0 - 24, str(surface), RX_W, size=7)
-
-    # Use No.: แถว Orthopnea (y=727)
+        txt(395, RY[2], str(surface), size=7)                      # Surface area
     reuse = ex.get("dialyzer_reuse")
-    txtc(RX_X, RX_Y0 - 36, str(reuse) if reuse else "", RX_W, size=7)
+    if reuse:
+        txt(375, RY[3], str(reuse), size=7)                        # Use No.
 
-    # ── Anticoagulant / Heparin ──
+    # ── HEPARIN (Loading x=460, Maintenance x=460) ──
     hep = ex.get("heparin", {}) or {}
     hep_protocol = (hep.get("protocol", "") or "").lower()
 
-    # Heparin checkbox
     if "heparin" in hep_protocol and "free" not in hep_protocol:
-        tick(468, RX_Y0)
+        tick(495, RY[0])   # ☐ Heparin
     elif "lmwh" in hep_protocol:
-        tick(468, RX_Y0 - 12)
+        tick(495, RY[1])   # ☐ LMWH
 
-    # Loading: แถว Crepitation (y=715) — center ในช่อง x=430-510
-    HP_X, HP_W = 430, 80
-    txtc(HP_X, RX_Y0 - 48, str(hep.get("bolus", "")) or "", HP_W, size=7, bold=True)  # Loading
-    # Maintenance: แถว JVP (y=703)
-    txtc(HP_X, RX_Y0 - 60, str(hep.get("maintenance", "")) or "", HP_W, size=7, bold=True)
+    txt(460, RY[4], str(hep.get("bolus", "")) or "", size=7, bold=True)        # Loading
+    txt(460, RY[5], str(hep.get("maintenance", "")) or "", size=7, bold=True)   # Maintenance
 
-    # No Heparin free technique checkbox
     if "free" in hep_protocol:
-        tick(468, RX_Y0 - 72)
+        tick(495, RY[6])
 
-    # ── Duration / Time ── ช่อง x=540-590 (w=50)
-    DUR_X, DUR_W = 540, 50
+    # ── DURATION / TIME (ช่อง x=555-590, w=35) ──
+    DUR_X, DUR_W = 555, 35
     duration = rec.get("duration_hr") or _DURATION_HR
-    txtc(DUR_X, RX_Y0, str(duration), DUR_W, size=8, bold=True)       # Duration (Anxiety)
-    txtc(DUR_X, RX_Y0 - 12, _thai_time(rec.get("started_at")), DUR_W, size=7, bold=True)  # Time start (Sleep)
-    txtc(DUR_X, RX_Y0 - 24, _thai_time(rec.get("ended_at")), DUR_W, size=7, bold=True)    # Time off (Dyspnea)
+    txtc(DUR_X, RY[0], str(duration), DUR_W, size=8, bold=True)                  # Duration
+    txtc(DUR_X, RY[1], _thai_time(rec.get("started_at")), DUR_W, size=7, bold=True)  # Time start
+    txtc(DUR_X, RY[2], _thai_time(rec.get("ended_at")), DUR_W, size=7, bold=True)    # Time off
 
-    # ── BT / Hct / Hb ── ช่อง x=540-590 (w=50)
+    # ── O2 sat / BT / Hct / Hb (ช่อง x=555-590) ──
     bt = rec.get("bt") or ex.get("bt_value")
-    txtc(DUR_X, RX_Y0 - 48, _f(bt), DUR_W, size=7, bold=True)        # BT (Crepitation)
+    txtc(DUR_X, RY[4], _f(bt), DUR_W, size=7, bold=True)          # BT
     hct = rec.get("hct") or ex.get("hct_value")
     hb = rec.get("hb") or ex.get("hb_value")
-    txtc(DUR_X, RX_Y0 - 60, _f(hct), DUR_W, size=7, bold=True)       # Hct (JVP)
-    txtc(DUR_X, RX_Y0 - 72, _f(hb), DUR_W, size=7, bold=True)        # Hb (Arrhythmia)
+    txtc(DUR_X, RY[5], _f(hct), DUR_W, size=7, bold=True)         # Hct
+    txtc(DUR_X, RY[6], _f(hb), DUR_W, size=7, bold=True)          # Hb
 
     # ════════════════════════════════════════════════════════
     # VASCULAR ACCESS — y≈652 area
