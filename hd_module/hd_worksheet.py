@@ -394,22 +394,24 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     c.setFont("Loma", 6)
     c.drawRightString(RM, tbl_y + 2, "Nurse start")
 
-    headers = ["TIME", "BP\nmm/Hg", "PR\n/min", "RR\n/min", "BFR\nml/min", "VP\nmm/Hg",
-               "TMP\nmm/Hg", "UFR\nml/hr", "Conduct\nmS/cm", "Total UF\nml", "Remark"]
-    # Column widths proportional
+    # Header แบบ 2 แถว: ชื่อ (บน) + หน่วย (ล่าง) เหมือนฟอร์มจริง
+    hdr_names = ["TIME", "BP", "PR", "RR", "BFR", "VP", "TMP", "UFR", "Conduct", "Total UF", "Remark"]
+    hdr_units = ["", "mm/Hg", "/min", "/min", "ml/min", "mm/Hg", "mm/Hg", "ml/hr", "mS/cm", "ml", ""]
     col_pct = [0.065, 0.085, 0.052, 0.052, 0.062, 0.062, 0.062, 0.062, 0.062, 0.070, 0.296]
     cws = [CW * p for p in col_pct]
-    tbl_rh = 13  # table row height
-    hdr_h = 20
+    tbl_rh = 13
+    hdr_row_h = 12  # แต่ละแถว header
+    hdr_h = hdr_row_h * 2  # 2 แถว
 
-    # Header
+    # แถวบน: ชื่อคอลัมน์
     cx = LM
-    for i, hdr in enumerate(headers):
-        cell(cx, tbl_y - hdr_h, cws[i], hdr_h, "", bg=GRAY)
-        lines = hdr.split("\n")
-        for j, line in enumerate(lines):
-            c.setFont("Loma-Bold", 5.5)
-            c.drawCentredString(cx + cws[i] / 2, tbl_y - 8 - j * 8, line)
+    for i, name in enumerate(hdr_names):
+        cell(cx, tbl_y - hdr_row_h, cws[i], hdr_row_h, name, sz=6, bold=True, align="center", bg=GRAY)
+        cx += cws[i]
+    # แถวล่าง: หน่วย
+    cx = LM
+    for i, unit in enumerate(hdr_units):
+        cell(cx, tbl_y - hdr_h, cws[i], hdr_row_h, unit, sz=5.5, align="center", bg=GRAY)
         cx += cws[i]
 
     y_row = tbl_y - hdr_h
