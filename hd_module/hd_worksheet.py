@@ -583,16 +583,16 @@ def _build_overlay(rec, extras=None):
     # แถว Arrhythmia (Post BW)= y≈699
     # แถว Fever (Wt lose)     = y≈687
     prev_post = rec.get("prev_post_weight") or ex.get("prev_post_weight")
-    txtc(WT_X, 771, _f(prev_post), WT_W, size=8, bold=True)       # Last wt
-    txtc(WT_X, 759, _f(pre_w), WT_W, size=8, bold=True)           # Pre BW
-    txtc(WT_X, 747, _f(dw), WT_W, size=8, bold=True)              # Dry BW
-    if pre_w and dw:                                                # Wt Gain
-        txtc(WT_X, 735, _f(round(float(pre_w) - float(dw), 1)), WT_W, size=8)
-    # Meal/drink row 723 — skip
-    txtc(WT_X, 711, _f(rec.get("uf_goal"), 0), WT_W, size=8, bold=True)  # Target UF
-    txtc(WT_X, 699, _f(post_w), WT_W, size=8, bold=True)          # Post BW
-    if pre_w and post_w:                                            # Wt lose
-        txtc(WT_X, 687, _f(round(float(pre_w) - float(post_w), 1)), WT_W, size=8)
+    txtc(WT_X, 759, _f(prev_post), WT_W, size=8, bold=True)       # Last wt  (Anxiety row)
+    txtc(WT_X, 747, _f(pre_w), WT_W, size=8, bold=True)           # Pre BW   (Sleep row)
+    txtc(WT_X, 735, _f(dw), WT_W, size=8, bold=True)              # Dry BW   (Dyspnea row)
+    if pre_w and dw:                                                # Wt Gain  (Orthopnea row)
+        txtc(WT_X, 723, _f(round(float(pre_w) - float(dw), 1)), WT_W, size=8)
+    # Crepitation (Meal/drink) row 711 — skip
+    txtc(WT_X, 699, _f(rec.get("uf_goal"), 0), WT_W, size=8, bold=True)  # Target UF (JVP row)
+    txtc(WT_X, 687, _f(post_w), WT_W, size=8, bold=True)          # Post BW  (Arrhythmia row)
+    if pre_w and post_w:                                            # Wt lose  (Fever row)
+        txtc(WT_X, 675, _f(round(float(pre_w) - float(post_w), 1)), WT_W, size=8)
 
     # ════════════════════════════════════════════════════════
     # HEMODIALYSIS PRESCRIPTION — ฝั่งขวา
