@@ -605,15 +605,15 @@ def _build_overlay(rec, extras=None):
     SN_X, SN_W = 432, 60    # Serial No. column (after "No.")
     RX_Y0 = 763             # Anxiety row (ลง 10pt จาก header)
 
-    # Machine: แถว Anxiety (y=763) — ชิดหลังคำว่า "Machine"
+    # Machine: แถว Anxiety (y=763) — หลังคำว่า "Machine" (label จบ ~x=348)
     machine_label = f"{machine.get('brand', '')} {machine.get('model', '')}".strip() if machine else ""
-    txt(316, RX_Y0, machine_label, size=7, bold=True)
+    txt(350, RX_Y0, machine_label, size=7, bold=True)
     # Serial No.: ช่องหลัง "No."
     txtc(SN_X, RX_Y0, machine.get("serial", "") if machine else "", SN_W, size=5.5)
 
-    # Dialyzer: แถว Sleep (y=751) — ชิดหลังคำว่า "Dialyzer"
+    # Dialyzer: แถว Sleep (y=751) — หลังคำว่า "Dialyzer" (label จบ ~x=348)
     dialyzer = ex.get("dialyzer_type", "") or ""
-    txt(316, RX_Y0 - 12, dialyzer, size=7, bold=True)
+    txt(350, RX_Y0 - 12, dialyzer, size=7, bold=True)
 
     # Surface area: แถว Dyspnea (y=739) — ถ้ามีค่า
     surface = ex.get("surface_area")
