@@ -511,12 +511,15 @@ def _build_overlay(rec, extras=None):
     c = canvasmod.Canvas(buf, pagesize=A4)
     ex = extras or {}
 
-    # ── Helpers ──
+    # ── Global X offset (pt) — ปรับ +/- เพื่อขยับทั้งแผ่น ──
+    DX = -28  # ขยับซ้าย 1 cm (28 pt) — ปรับค่านี้เพื่อเลื่อนทั้งแผ่น
+
+    # ── Helpers (DX applied automatically) ──
     def txt(x, y, text, size=7, bold=False):
         if not text and text != 0:
             return
         c.setFont("Loma-Bold" if bold else "Loma", size)
-        c.drawString(x, y, str(text))
+        c.drawString(x + DX, y, str(text))
 
     def txtc(x, y, text, width, size=7, bold=False):
         """Center-aligned text within a box starting at x with given width."""
@@ -524,18 +527,18 @@ def _build_overlay(rec, extras=None):
             return
         c.setFont("Loma-Bold" if bold else "Loma", size)
         tw = c.stringWidth(str(text), "Loma-Bold" if bold else "Loma", size)
-        c.drawString(x + (width - tw) / 2, y, str(text))
+        c.drawString(x + DX + (width - tw) / 2, y, str(text))
 
     def txtr(x, y, text, size=7, bold=False):
         """Right-aligned text."""
         if not text and text != 0:
             return
         c.setFont("Loma-Bold" if bold else "Loma", size)
-        c.drawRightString(x, y, str(text))
+        c.drawRightString(x + DX, y, str(text))
 
     def tick(x, y):
         c.setFont("Loma-Bold", 9)
-        c.drawString(x, y, "✓")
+        c.drawString(x + DX, y, "✓")
 
     # ════════════════════════════════════════════════════════
     # HEADER ROW — จาก grid: y≈805 (ชื่อคลินิก), y≈790 (Patient's name)
