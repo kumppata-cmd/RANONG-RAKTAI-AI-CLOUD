@@ -564,8 +564,8 @@ class TestHdBlueprint(unittest.TestCase):
             )
             self.assertEqual(resp.status_code, 200)
             data = resp.get_json()
-            self.assertEqual(data["total"], 25)
-            self.assertEqual(len(data["beds"]), 25)
+            self.assertEqual(data["total"], 28)
+            self.assertEqual(len(data["beds"]), 28)
 
     def test_create_session_validation(self):
         """Create session validates required fields."""
@@ -685,7 +685,7 @@ class TestHdConfig(unittest.TestCase):
 
     def test_config_defaults(self):
         from hd_module.config import HdConfig
-        self.assertEqual(HdConfig.TOTAL_BEDS, 25)
+        self.assertEqual(HdConfig.TOTAL_BEDS, 28)
         self.assertEqual(HdConfig.ALERT_BRADYCARDIA_HR, 50)
         self.assertEqual(HdConfig.ALERT_TACHYCARDIA_HR, 120)
         self.assertEqual(HdConfig.ALERT_SEVERE_IDH_SBP, 90)
@@ -936,7 +936,7 @@ class TestNewFeatures(unittest.TestCase):
                              headers={"Authorization": f"Bearer {token}"})
                 self.assertEqual(resp.status_code, 200)
                 data = resp.get_json()
-                self.assertEqual(data["total"], 25)
+                self.assertEqual(data["total"], 28)
 
 
 if __name__ == "__main__":

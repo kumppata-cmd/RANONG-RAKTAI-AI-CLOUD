@@ -72,6 +72,7 @@ class ExtrasTests(unittest.TestCase):
             ("standard", 2000, 500),
             ("FX80", 3, 20),
             ("แขนซ้าย",),
+            (1, "NIKKISO", "DBB-07", "J1913572", "active"),  # machine by equipment_id
             ("พยาบาล ก",),
         ])
         out = bp._session_record_extras(cur, 86, 5)
