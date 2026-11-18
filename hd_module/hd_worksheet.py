@@ -570,19 +570,29 @@ def _build_overlay(rec, extras=None):
     post_w = rec.get("post_weight")
     dw = rec.get("dry_weight")
 
-    # Weight fields: จาก field-map V2: x=220, w=38 (ช่อง kg ก่อนเส้นแบ่ง)
-    WT_X, WT_W = 220, 38
-    # แถวแต่ละ row ห่างกัน 12pt: y base = 773
+    # Weight fields: จาก fine grid วัดได้ x=196..256 (w=60), row spacing ≈12pt
+    # center ตัวเลขกลางช่องว่างระหว่าง "OY ON" กับ "kg"
+    WT_X, WT_W = 196, 60
+    WT_DY = 12   # ระยะห่างแต่ละแถว
+    # แถว Anxiety (Last wt)   = y≈771 (grid: 772-1)
+    # แถว Sleep (Pre BW)      = y≈759
+    # แถว Dyspnea (Dry BW)    = y≈747
+    # แถว Orthopnea (Wt Gain) = y≈735
+    # แถว Crepitation (Meal)  = y≈723
+    # แถว JVP (Target UF)     = y≈711
+    # แถว Arrhythmia (Post BW)= y≈699
+    # แถว Fever (Wt lose)     = y≈687
     prev_post = rec.get("prev_post_weight") or ex.get("prev_post_weight")
-    txtc(WT_X, 775, _f(prev_post), WT_W, size=8, bold=True)       # Last wt
-    txtc(WT_X, 763, _f(pre_w), WT_W, size=8, bold=True)           # Pre BW
-    txtc(WT_X, 751, _f(dw), WT_W, size=8, bold=True)              # Dry BW
+    txtc(WT_X, 771, _f(prev_post), WT_W, size=8, bold=True)       # Last wt
+    txtc(WT_X, 759, _f(pre_w), WT_W, size=8, bold=True)           # Pre BW
+    txtc(WT_X, 747, _f(dw), WT_W, size=8, bold=True)              # Dry BW
     if pre_w and dw:                                                # Wt Gain
-        txtc(WT_X, 727, _f(round(float(pre_w) - float(dw), 1)), WT_W, size=8)
-    txtc(WT_X, 703, _f(rec.get("uf_goal"), 0), WT_W, size=8, bold=True)  # Target UF
-    txtc(WT_X, 691, _f(post_w), WT_W, size=8, bold=True)          # Post BW
+        txtc(WT_X, 735, _f(round(float(pre_w) - float(dw), 1)), WT_W, size=8)
+    # Meal/drink row 723 — skip
+    txtc(WT_X, 711, _f(rec.get("uf_goal"), 0), WT_W, size=8, bold=True)  # Target UF
+    txtc(WT_X, 699, _f(post_w), WT_W, size=8, bold=True)          # Post BW
     if pre_w and post_w:                                            # Wt lose
-        txtc(WT_X, 679, _f(round(float(pre_w) - float(post_w), 1)), WT_W, size=8)
+        txtc(WT_X, 687, _f(round(float(pre_w) - float(post_w), 1)), WT_W, size=8)
 
     # ════════════════════════════════════════════════════════
     # HEMODIALYSIS PRESCRIPTION — ฝั่งขวา
