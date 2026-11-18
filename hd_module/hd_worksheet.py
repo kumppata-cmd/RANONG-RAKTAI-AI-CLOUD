@@ -336,16 +336,19 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
 
     rx_bottom = ry - len(rx_rows) * RH
 
-    # Vascular access + Dialysate + Medication (remaining rows on right)
+    # Vascular access — อยู่ฝั่งซ้าย ใต้ Pre-dialysis assessment
     va = (rec.get("va", "") or "").upper()
-    va_items = [("☐ Arm", "☐ Leg"), ("☐ Lt", "☐ Rt"),
-                (f"{'☑' if 'AVF' in va else '☐'} AVF", f"{'☑' if 'AVG' in va else '☐'} AVG"),
-                (f"{'☑' if 'DLC' in va else '☐'} DLC", f"{'☑' if 'PERM' in va else '☐'} Perm Cath"),
-                ("☐ Subclavian ☐ jugular", ""), ("☐ Femoral", "")]
-
-    cell(LM, rx_bottom - RH, LEFT_W, RH, "Vascular access", sz=6, bold=True, align="center", bg=GRAY)
-    for i, (l, r) in enumerate(va_items):
-        iy = rx_bottom - (i + 1) * RH - RH
+    va_y = left_bottom  # เริ่มต่อจาก assessment items
+    cell(LM, va_y - RH, LEFT_W, RH, "Vascular access", sz=6, bold=True, align="center", bg=GRAY)
+    # 2 คอลัมน์: ซ้าย-ขวา
+    va_rows = [
+        (f"{'☑' if 'AVF' in va else '☐'} AVF", f"{'☑' if 'AVG' in va else '☐'} AVG"),
+        (f"{'☑' if 'DLC' in va else '☐'} DLC", f"{'☑' if 'PERM' in va else '☐'} Perm Cath"),
+        ("☐ Subclavian", "☐ jugular"),
+        ("☐ Femoral", ""),
+    ]
+    for i, (l, r) in enumerate(va_rows):
+        iy = va_y - (i + 2) * RH
         cell(LM, iy, LEFT_W / 2, RH, l, sz=5.5)
         cell(LM + LEFT_W / 2, iy, LEFT_W / 2, RH, r, sz=5.5)
 
