@@ -446,9 +446,31 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
             (entry.get("remark", "") or "")[:30],
         ])
 
-    # Empty rows to fill space (ลดเหลือพอดีกับช่องลายเซ็น)
+    # Empty rows with time slots (ให้พยาบาลเห็นเวลาที่ต้องบันทึก)
+    # คำนวณ time slots ต่อจาก data rows
+    from datetime import timedelta as _td
+    last_time = None
+    if sheet:
+        # หา slot_time สุดท้าย
+        last_slot = sheet[-1].get("slot_time", "")
+        if last_slot and ":" in last_slot:
+            parts = last_slot.split(":")
+            last_time = datetime(2000, 1, 1, int(parts[0]), int(parts[1]))
+    elif rec.get("started_at"):
+        last_time = rec["started_at"].replace(second=0, microsecond=0)
+
+    slot_idx = 0
     while y_row > 220:
-        _draw_row([""] * 11)
+        time_label = ""
+        if last_time:
+            next_time = last_time + _td(minutes=30 * (slot_idx + 1))
+            # หยุดถ้าเลย ended_at
+            if rec.get("ended_at") and next_time > rec["ended_at"]:
+                time_label = ""
+            else:
+                time_label = f"{next_time.hour:02d}:{next_time.minute:02d}"
+        _draw_row([time_label] + [""] * 10)
+        slot_idx += 1
 
     # ════════════════════════════════════════════════════════════
     # POST-HD: Nurse Off / Total UF / Net UF
