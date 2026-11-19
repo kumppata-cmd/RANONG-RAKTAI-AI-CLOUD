@@ -1030,7 +1030,6 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
 
     # Load extras (dialyzer, heparin, VA, nurse name, pre/post vitals, machine)
     extras = {}
-    ws_data = {}  # Interactive checklist data
     try:
         with conn.cursor() as cur:
             pid = rec.get("patient_id")
@@ -1040,17 +1039,24 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
                 pid = pid_row[0] if pid_row else None
             if pid:
                 extras = _session_record_extras(cur, session_id, pid)
-            # Load interactive worksheet data
-            try:
-                cur.execute("SELECT * FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
-                ws_row = cur.fetchone()
-                if ws_row:
-                    col_names = [desc[0] for desc in cur.description]
-                    ws_data = dict(zip(col_names, ws_row))
-            except Exception:
-                pass  # table may not exist yet
     except Exception as e:
         logger.warning("hd_worksheet extras: %s", e)
+
+    # Load interactive worksheet data — SEPARATE connection to avoid transaction issues
+    ws_data = {}
+    try:
+        conn.autocommit = True  # ensure clean state
+        with conn.cursor() as cur2:
+            cur2.execute("SELECT * FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
+            ws_row = cur2.fetchone()
+            if ws_row:
+                col_names = [desc[0] for desc in cur2.description]
+                ws_data = dict(zip(col_names, ws_row))
+                logger.info("hd_worksheet: loaded ws_data for session %s (%d fields)", session_id, len(ws_data))
+            else:
+                logger.info("hd_worksheet: no ws_data for session %s", session_id)
+    except Exception as ws_err:
+        logger.warning("hd_worksheet ws_data: %s", ws_err)
 
     if mode == "overlay" and os.path.exists(_TEMPLATE_PATH):
         try:
