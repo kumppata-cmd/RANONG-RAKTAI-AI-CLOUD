@@ -1236,21 +1236,61 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
 
     # Load interactive worksheet data — NEW connection to guarantee clean state
     ws_data = {}
+    _ALTER_SQLS = [
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_fever VARCHAR(10)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_dyspnea VARCHAR(10)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_chest_pain VARCHAR(10)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_headache VARCHAR(10)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_cramp VARCHAR(10)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS post_dyspnea VARCHAR(10)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS post_bleeding VARCHAR(10)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS discharge_type VARCHAR(20)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS discharge_mobility VARCHAR(20)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_sbp INTEGER",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_dbp INTEGER",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_monitor_vs BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_psycho_support BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_oxygen BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_trendelenburg BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_decrease_ufr BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_decrease_bfr BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_hypertonic BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_access_flow BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_hot_compress BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_cold_compress BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_aspirate BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_chang_dialyzer BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_chang_bloodline BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_post_hd_care BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_nutrition BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_vascular_access BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_exercise BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_personal_hygiene BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_medication BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_fluid_control BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_kt BOOLEAN",
+    ]
     try:
         import psycopg2 as _pg2
         db_url2 = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
         conn2 = _pg2.connect(db_url2, connect_timeout=5)
         conn2.autocommit = True
         with conn2.cursor() as cur2:
+            # Ensure all columns exist before SELECT *
+            for _asql in _ALTER_SQLS:
+                try:
+                    cur2.execute(_asql)
+                except Exception:
+                    pass
             cur2.execute("SELECT * FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
             ws_row = cur2.fetchone()
             if ws_row:
                 col_names = [desc[0] for desc in cur2.description]
                 ws_data = dict(zip(col_names, ws_row))
-                logger.info("hd_worksheet: loaded ws_data for session %s — keys: %s", session_id,
-                            [k for k, v in ws_data.items() if v is not None and k not in ('id','session_id','created_at','updated_at','updated_by')])
+                logger.info("hd_worksheet: ws_data session %s — %d non-null",
+                            session_id, sum(1 for v in ws_data.values() if v is not None))
             else:
-                logger.info("hd_worksheet: no ws_data found for session %s", session_id)
+                logger.info("hd_worksheet: no ws_data for session %s", session_id)
         conn2.close()
     except Exception as ws_err:
         logger.warning("hd_worksheet ws_data FAILED: %s", ws_err)
