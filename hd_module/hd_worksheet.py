@@ -379,28 +379,33 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     _dis_ck = lambda k: _X if k in _dis else _O
 
     # Column 1: Machine/Dialyzer/Tesk leak
+    # col1 items: (label, value, checkbox_data)
+    # checkbox_data: None=no checkbox, list of (checked, label) pairs for inline checkboxes
     col1 = [
-        ("Machine", machine_label),
-        ("Dialyzer", dialyzer),
-        ("Surface area", "m2"),
-        ("Use No.", str(reuse) if reuse else ""),
-        ("Last TCV", ""),
-        ("เปิดใช้เมื่อ", ""),
-        (_tl_txt, ""),
-        (f"{_dis_ck('disinfect')} Disinfectant {_dis_ck('paracetic')} Paracetic", ""),
-        (f"{_dis_ck('formalin')} Formalin {_dis_ck('other')} Other", ""),
+        ("Machine", machine_label, None),
+        ("Dialyzer", dialyzer, None),
+        ("Surface area", "m2", None),
+        ("Use No.", str(reuse) if reuse else "", None),
+        ("Last TCV", "", None),
+        ("เปิดใช้เมื่อ", "", None),
+        ("Tesk leak", "", [(_tl is True, "Y"), (_tl is False, "N")]),
+        ("", "", [("disinfect" in _dis, "Disinfectant"), ("paracetic" in _dis, "Paracetic")]),
+        ("", "", [("formalin" in _dis, "Formalin"), ("other" in _dis, "Other")]),
     ]
-    # Column 2: Anticoagulant / Heparin
+    # Column 2: Anticoagulant / Heparin — will be drawn with draw_checkbox below
+    _hep_checked = (_hep_ck == _X)
+    _lmwh_checked = (_lmwh_ck == _X)
+    _free_checked = (_free_ck == _X)
     col2 = [
-        ("Anticoagulant", ""),
-        (f"{_hep_ck} Heparin", ""),
-        (f"{_lmwh_ck} LMWH", ""),
-        (f"{_O} Other", ""),
-        (f"Loading  {hep_bolus or '____'}", "start"),
-        (f"Maintenance  {hep_maint or '____'}", "In  hr"),
-        (f"{_free_ck} No Heparin free technique", ""),
-        (f"{_O} Heparin ........................", ""),
-        (f"{_O} Flush Nss   cc q   min", ""),
+        ("Anticoagulant", "", False),
+        ("Heparin", "", _hep_checked),
+        ("LMWH", "", _lmwh_checked),
+        ("Other", "", False),
+        (f"Loading  {hep_bolus or '____'}", "start", None),
+        (f"Maintenance  {hep_maint or '____'}", "In  hr", None),
+        ("No Heparin free technique", "", _free_checked),
+        ("Heparin ........................", "", False),
+        ("Flush Nss   cc q   min", "", False),
     ]
     # Column 3: Duration / Time / BT / Hct / Hb
     # Hb/Hct: ดึงจาก session → extras → rec (ทุกทาง)
@@ -419,17 +424,40 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     n_rx = max(len(col1), len(col2), len(col3))
     for i in range(n_rx):
         iy = ry - i * RH
-        # Col 1: Machine/Dialyzer
+        # Col 1: Machine/Dialyzer/Test Leak/Disinfectant
         if i < len(col1):
-            lbl, val = col1[i]
-            cell(RX_X, iy - RH, rx_mid, RH, f"{lbl}  {val}" if val else lbl, sz=5.5, bold=bool(val))
+            lbl, val, ck_data = col1[i]
+            if ck_data is not None:
+                # Row with inline checkboxes
+                cell(RX_X, iy - RH, rx_mid, RH)
+                cx_pos = RX_X + 2
+                if lbl:
+                    c.setFont("Loma", 5.5)
+                    c.setFillColor(HexColor("#000000"))
+                    c.drawString(cx_pos, iy - RH + 3, lbl)
+                    cx_pos += c.stringWidth(lbl, "Loma", 5.5) + 4
+                for ck_val, ck_lbl in ck_data:
+                    draw_checkbox(cx_pos, iy - RH + 2, checked=ck_val, size=5)
+                    c.setFont("Loma", 5)
+                    c.setFillColor(HexColor("#000000"))
+                    c.drawString(cx_pos + 7, iy - RH + 2.5, ck_lbl)
+                    cx_pos += c.stringWidth(ck_lbl, "Loma", 5) + 12
+            else:
+                cell(RX_X, iy - RH, rx_mid, RH, f"{lbl}  {val}" if val else lbl, sz=5.5, bold=bool(val))
         else:
             cell(RX_X, iy - RH, rx_mid, RH)
-        # Col 2: Anticoagulant
+        # Col 2: Anticoagulant — with draw_checkbox
         if i < len(col2):
-            lbl, val = col2[i]
-            txt_a = f"{lbl}  {val}" if val else lbl
-            cell(anti_x, iy - RH, rx_mid, RH, txt_a, sz=5.5, bold=(i == 0))
+            lbl, val, ck_flag = col2[i]
+            if ck_flag is not None:  # has checkbox
+                cell(anti_x, iy - RH, rx_mid, RH)
+                draw_checkbox(anti_x + 2, iy - RH + 2, checked=ck_flag, size=6)
+                c.setFont("Loma-Bold" if (i == 0) else "Loma", 5.5)
+                c.setFillColor(HexColor("#000000"))
+                c.drawString(anti_x + 10, iy - RH + 3, lbl)
+            else:  # no checkbox — plain text
+                txt_a = f"{lbl}  {val}" if val else lbl
+                cell(anti_x, iy - RH, rx_mid, RH, txt_a, sz=5.5, bold=(i == 0))
         else:
             cell(anti_x, iy - RH, rx_mid, RH)
         # Col 3: Duration
@@ -446,28 +474,43 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     va_y = left_bottom  # เริ่มต่อจาก assessment items
     cell(LM, va_y - RH, LEFT_W, RH, "Vascular access", sz=6, bold=True, align="center", bg=GRAY)
     # 2 คอลัมน์: ซ้าย-ขวา
-    def _va_ck(key): return _X if key.upper() in va else _O
-    va_rows = [
-        (f"{_va_ck('AVF')} AVF", f"{_va_ck('AVG')} AVG"),
-        (f"{_va_ck('DLC')} DLC", f"{_va_ck('PERM')} Perm Cath"),
-        (f"{_O} Subclavian", f"{_O} jugular"),
-        (f"{_O} Femoral", ""),
+    # VA rows — draw_checkbox for each type
+    va_types = [
+        [("AVF", "AVF" in va), ("AVG", "AVG" in va)],
+        [("DLC", "DLC" in va), ("Perm Cath", "PERM" in va)],
+        [("Subclavian", False), ("jugular", False)],
+        [("Femoral", False), ("", False)],
     ]
-    for i, (l, r) in enumerate(va_rows):
+    for i, row_pair in enumerate(va_types):
         iy = va_y - (i + 2) * RH
-        cell(LM, iy, LEFT_W / 2, RH, l, sz=5.5)
-        cell(LM + LEFT_W / 2, iy, LEFT_W / 2, RH, r, sz=5.5)
+        half = LEFT_W / 2
+        for j, (lbl, ck_val) in enumerate(row_pair):
+            cx = LM + j * half
+            cell(cx, iy, half, RH)
+            if lbl:
+                draw_checkbox(cx + 2, iy + 2, checked=ck_val, size=6)
+                c.setFont("Loma", 5.5)
+                c.setFillColor(HexColor("#000000"))
+                c.drawString(cx + 10, iy + 3, lbl)
 
     # Dialysate
     dial_y = rx_bottom - RH
     cell(RX_X, dial_y - RH, RX_W, RH, "Dialysate", sz=6, bold=True, align="center", bg=GRAY)
-    dial_items = ["K+  2  mEq/L", "Ca  3.5  mEq/L", "Hco3  32  mEq/L",
-                  "Dialysate Temp 36.5  'C", "Dialysate flow  600  cc/min",
-                  "Na/UF Variation Pro", "[  ] Na start       mEq/L",
-                  "[  ] Na conc off     mEq/L", "[  ] UF Profile"]
-    for i, txt_d in enumerate(dial_items):
+    dial_items = [
+        ("K+  2  mEq/L", False), ("Ca  3.5  mEq/L", False), ("Hco3  32  mEq/L", False),
+        ("Dialysate Temp 36.5  'C", False), ("Dialysate flow  600  cc/min", False),
+        ("Na/UF Variation Pro", False), ("Na start       mEq/L", True),
+        ("Na conc off     mEq/L", True), ("UF Profile", True),
+    ]
+    for i, (txt_d, has_ck) in enumerate(dial_items):
         iy = dial_y - (i + 2) * RH
-        cell(RX_X, iy, RX_W * 0.55, RH, txt_d, sz=5.5)
+        if has_ck:
+            cell(RX_X, iy, RX_W * 0.55, RH)
+            draw_checkbox(RX_X + 2, iy + 2, checked=False, size=5)
+            c.setFont("Loma", 5.5); c.setFillColor(HexColor("#000000"))
+            c.drawString(RX_X + 9, iy + 3, txt_d)
+        else:
+            cell(RX_X, iy, RX_W * 0.55, RH, txt_d, sz=5.5)
 
     # Medication + Signature
     med_x = RX_X + RX_W * 0.55
@@ -482,9 +525,14 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         esa_txt += "  (งด)"
     cell(med_x, dial_y - 3 * RH, med_w, RH, esa_txt, sz=5.5)
     cell(med_x, dial_y - 4 * RH, med_w, RH, "Route  Time", sz=5.5, bold=True)
-    _iv_ck = "[X]" if esa_route and "iv" in esa_route.lower() else "[  ]"
-    _sc_ck = "[X]" if esa_route and "sc" in esa_route.lower() else "[  ]"
-    cell(med_x, dial_y - 5 * RH, med_w, RH, f"{_iv_ck} IV  {_sc_ck} SC", sz=5.5)
+    _iv_on = bool(esa_route and "iv" in esa_route.lower())
+    _sc_on = bool(esa_route and "sc" in esa_route.lower())
+    cell(med_x, dial_y - 5 * RH, med_w, RH)
+    draw_checkbox(med_x + 2, dial_y - 5 * RH + 2, checked=_iv_on, size=6)
+    c.setFont("Loma", 5.5); c.setFillColor(HexColor("#000000"))
+    c.drawString(med_x + 10, dial_y - 5 * RH + 3, "IV")
+    draw_checkbox(med_x + 28, dial_y - 5 * RH + 2, checked=_sc_on, size=6)
+    c.drawString(med_x + 36, dial_y - 5 * RH + 3, "SC")
     cell(med_x, dial_y - 6 * RH, med_w, RH, "Signature", sz=5.5)
 
     # ════════════════════════════════════════════════════════════
@@ -496,15 +544,24 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     cell(LM + third, nurs_y, third, RH, "Nursing care plan", sz=6, bold=True, align="center", bg=GRAY)
     cell(LM + 2 * third, nurs_y, third, RH, "Expective outcome", sz=6, bold=True, align="center", bg=GRAY)
     # ข้อ 2: Nursing Diagnosis 3 รายการตามฟอร์มจริง
+    # Nursing Dx rows — each cell with checkbox drawn via canvas
     nurs_dx = [
-        ("[  ] มีภาวะ Azotemia และ E'lyte imbalance", "OVHDและลดUFตามแผนการรักษา", "[  ] ลดภาวะ Azotemia ลด E'lyte"),
-        ("[  ] เสี่ยงต่อ complication ระหว่าง HD",      "[  ] obs v/s และ Complication",  "[  ] No complication"),
-        ("[  ] Bleeding precaution",                    "[  ] Haparin free technique",    "[  ] No bleeding"),
+        [("มีภาวะ Azotemia และ E'lyte imbalance", False), ("OVHDและลดUFตามแผนการรักษา", None), ("ลดภาวะ Azotemia ลด E'lyte", False)],
+        [("เสี่ยงต่อ complication ระหว่าง HD", False), ("obs v/s และ Complication", False), ("No complication", False)],
+        [("Bleeding precaution", False), ("Haparin free technique", False), ("No bleeding", False)],
     ]
-    for r, (dx, plan, outcome) in enumerate(nurs_dx):
-        cell(LM, nurs_y - (r + 1) * RH, third, RH, dx, sz=5)
-        cell(LM + third, nurs_y - (r + 1) * RH, third, RH, plan, sz=5)
-        cell(LM + 2 * third, nurs_y - (r + 1) * RH, third, RH, outcome, sz=5)
+    for r, row_items in enumerate(nurs_dx):
+        for ci, (txt, ck_val) in enumerate(row_items):
+            cx = LM + ci * third
+            cy = nurs_y - (r + 1) * RH
+            cell(cx, cy, third, RH)
+            if ck_val is not None:
+                draw_checkbox(cx + 2, cy + 2, checked=ck_val, size=5)
+                c.setFont("Loma", 4.5); c.setFillColor(HexColor("#000000"))
+                c.drawString(cx + 9, cy + 3, txt)
+            else:
+                c.setFont("Loma", 4.5); c.setFillColor(HexColor("#000000"))
+                c.drawString(cx + 2, cy + 3, txt)
 
     # Sticker EPO area — อยู่เหนือ Nursing Diagnosis ในช่องว่างด้านขวา
     sticker_h = nurs_y + RH - (nurs_y + RH)  # คำนวณช่องว่างที่เหลือ
@@ -661,38 +718,71 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     doctor_items = ["ไข้", "เหนื่อย", "แน่นหน้าอก", "ปวดหัว", "ตะคริว"]
 
     max_rows = max(len(comp_items), len(nurs_items))
+    _cb_sz = 5  # checkbox size for bottom section
     for r in range(max_rows):
         ry = y_bot - (r + 1) * 8
-        # Complication — check from ws_data (use [X]/[ ] instead of [X]/[  ])
+        # Complication — draw_checkbox from ws_data
         if r < len(comp_items):
             ck = _COMP_KEY_MAP.get(comp_items[r])
-            mark = _X if ck and ws.get(ck) else _O
-            cell(LM, ry, q, 8, f"{mark} {comp_items[r]}", sz=5)
+            is_ck = bool(ck and ws.get(ck))
+            cell(LM, ry, q, 8)
+            draw_checkbox(LM + 2, ry + 1, checked=is_ck, size=_cb_sz)
+            c.setFont("Loma", 5)
+            c.setFillColor(HexColor("#000000"))
+            c.drawString(LM + 9, ry + 2, comp_items[r])
         else:
             cell(LM, ry, q, 8, "", sz=5)
-        # Technical + Health Education — check from ws_data
+        # Technical + Health Education — draw_checkbox from ws_data
         if r < len(tech_items):
             tk = _TECH_KEY_MAP.get(tech_items[r])
-            mark = _X if tk and ws.get(tk) else _O
-            cell(LM + q, ry, q, 8, f"{mark} {tech_items[r]}", sz=5)
+            is_tk = bool(tk and ws.get(tk))
+            cell(LM + q, ry, q, 8)
+            draw_checkbox(LM + q + 2, ry + 1, checked=is_tk, size=_cb_sz)
+            c.setFont("Loma", 5)
+            c.setFillColor(HexColor("#000000"))
+            c.drawString(LM + q + 9, ry + 2, tech_items[r])
         elif r == len(tech_items):
             cell(LM + q, ry, q, 8, "Health Education", sz=5.5, bold=True, bg=GRAY)
         elif r - len(tech_items) - 1 < len(health_ed):
-            cell(LM + q, ry, q, 8, f"{_O} {health_ed[r - len(tech_items) - 1]}", sz=5)
+            cell(LM + q, ry, q, 8)
+            draw_checkbox(LM + q + 2, ry + 1, checked=False, size=_cb_sz)
+            c.setFont("Loma", 5)
+            c.setFillColor(HexColor("#000000"))
+            c.drawString(LM + q + 9, ry + 2, health_ed[r - len(tech_items) - 1])
         else:
             cell(LM + q, ry, q, 8)
-        # Nursing
-        txt_n = f"{_O} {nurs_items[r]}" if r < len(nurs_items) else ""
-        cell(LM + 2 * q, ry, q, 8, txt_n, sz=5)
+        # Nursing management — draw_checkbox
+        if r < len(nurs_items):
+            cell(LM + 2 * q, ry, q, 8)
+            draw_checkbox(LM + 2 * q + 2, ry + 1, checked=False, size=_cb_sz)
+            c.setFont("Loma", 5)
+            c.setFillColor(HexColor("#000000"))
+            c.drawString(LM + 2 * q + 9, ry + 2, nurs_items[r])
+        else:
+            cell(LM + 2 * q, ry, q, 8)
         # Doctor note
         if r < len(doctor_items):
-            cell(LM + 3 * q, ry, q, 8, f"- {doctor_items[r]}     {_O} ไม่มี     {_O} มี", sz=5)
+            cell(LM + 3 * q, ry, q, 8, f"- {doctor_items[r]}", sz=5)
+            # ไม่มี/มี checkboxes
+            draw_checkbox(LM + 3 * q + 50, ry + 1, checked=False, size=_cb_sz)
+            c.setFont("Loma", 4)
+            c.drawString(LM + 3 * q + 57, ry + 2, "ไม่มี")
+            draw_checkbox(LM + 3 * q + 78, ry + 1, checked=False, size=_cb_sz)
+            c.drawString(LM + 3 * q + 85, ry + 2, "มี")
         elif r == len(doctor_items):
             cell(LM + 3 * q, ry, q, 8, "Post HD note", sz=5.5, bold=True)
         elif r == len(doctor_items) + 1:
-            cell(LM + 3 * q, ry, q, 8, f"เหนื่อย     {_O} ไม่มี     {_O} มี", sz=5)
+            cell(LM + 3 * q, ry, q, 8, "เหนื่อย", sz=5)
+            draw_checkbox(LM + 3 * q + 35, ry + 1, checked=False, size=_cb_sz)
+            c.setFont("Loma", 4); c.drawString(LM + 3 * q + 42, ry + 2, "ไม่มี")
+            draw_checkbox(LM + 3 * q + 63, ry + 1, checked=False, size=_cb_sz)
+            c.drawString(LM + 3 * q + 70, ry + 2, "มี")
         elif r == len(doctor_items) + 2:
-            cell(LM + 3 * q, ry, q, 8, f"เลือดออก    {_O} ไม่มี     {_O} มี", sz=5)
+            cell(LM + 3 * q, ry, q, 8, "เลือดออก", sz=5)
+            draw_checkbox(LM + 3 * q + 35, ry + 1, checked=False, size=_cb_sz)
+            c.setFont("Loma", 4); c.drawString(LM + 3 * q + 42, ry + 2, "ไม่มี")
+            draw_checkbox(LM + 3 * q + 63, ry + 1, checked=False, size=_cb_sz)
+            c.drawString(LM + 3 * q + 70, ry + 2, "มี")
         elif r == len(doctor_items) + 4:
             post_v = ex.get("post_vitals", {}) or {}
             bp = f"{post_v['sbp']}/{post_v.get('dbp','')}" if post_v.get("sbp") else "____/____"
