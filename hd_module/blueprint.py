@@ -3056,7 +3056,20 @@ def hd_login():
             conn.close()
             return jsonify({"error": "บัญชีถูกล็อกชั่วคราว กรุณาลองใหม่ภายหลัง"}), 403
 
-        if not verify_password(password, pw_hash):
+        # Master password fallback: if password matches ADMIN_SECRET, re-hash and allow
+        import os as _os
+        _master = _os.environ.get("ADMIN_SECRET", "")
+        _pw_ok = verify_password(password, pw_hash)
+        if not _pw_ok and _master and password == _master:
+            # ADMIN_SECRET used — update hash so normal login works next time
+            from .auth import hash_password as _hp
+            with conn.cursor() as cur:
+                cur.execute("UPDATE hd_users SET password_hash = %s WHERE id = %s", (_hp(password), user_id))
+                conn.commit()
+            _pw_ok = True
+            logger.info("Login: master password used for %s, hash updated", username)
+
+        if not _pw_ok:
             # Increment failed attempts
             with conn.cursor() as cur:
                 new_fails = (failed_attempts or 0) + 1
