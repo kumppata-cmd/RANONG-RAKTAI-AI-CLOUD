@@ -161,6 +161,28 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     RH = 11  # row height for assessment/prescription
 
     # ── helpers ──
+    def draw_checkbox(x, y, checked=False, size=6):
+        """Draw a checkbox at (x, y). If checked, draw a ✓ checkmark inside."""
+        c.saveState()
+        c.setStrokeColor(HexColor("#000000"))
+        c.setLineWidth(0.5)
+        c.rect(x, y, size, size, fill=0, stroke=1)
+        if checked:
+            # Draw bold checkmark ✓ inside the box
+            c.setStrokeColor(HexColor("#0066cc"))
+            c.setLineWidth(1.2)
+            # Checkmark: short line down-right, then long line up-right
+            c.line(x + 1, y + size * 0.45, x + size * 0.35, y + 1.5)
+            c.line(x + size * 0.35, y + 1.5, x + size - 1, y + size - 1.5)
+        c.restoreState()
+
+    def ck_text(checked, label, x, y, sz=5.5):
+        """Draw checkbox + label text at position."""
+        draw_checkbox(x + 1, y + 1.5, checked=checked, size=sz)
+        c.setFont("Loma", sz)
+        c.setFillColor(HexColor("#000000"))
+        c.drawString(x + sz + 3, y + 1.5, label)
+
     def cell(x, y, w, h, text="", sz=6, bold=False, align="left", bg=None):
         """Draw a bordered cell with text."""
         if bg:
@@ -293,13 +315,19 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         iy = top_y - i * RH
         # Assessment name
         cell(assess_x, iy - RH, 70, RH, item, sz=5.5)
-        # OY / ON — fill from ws_data if available
+        # OY / ON — draw checkbox with canvas (font doesn't support [X])
         ws_key = _ASSESS_KEY_MAP.get(item)
         ws_val = ws.get(ws_key) if ws_key else None
-        oy_mark = "☑" if ws_val is True else "OY"
-        on_mark = "☑" if ws_val is False else "ON"
-        cell(oy_x, iy - RH, 18, RH, oy_mark, sz=5, align="center")
-        cell(on_x, iy - RH, 18, RH, on_mark, sz=5, align="center")
+        # OY column: checkbox + "OY" label
+        cell(oy_x, iy - RH, 18, RH)  # empty bordered cell
+        draw_checkbox(oy_x + 2, iy - RH + 2, checked=(ws_val is True), size=6)
+        c.setFont("Loma", 4.5)
+        c.drawString(oy_x + 10, iy - RH + 3, "OY")
+        # ON column: checkbox + "ON" label
+        cell(on_x, iy - RH, 18, RH)
+        draw_checkbox(on_x + 2, iy - RH + 2, checked=(ws_val is False), size=6)
+        c.setFont("Loma", 4.5)
+        c.drawString(on_x + 10, iy - RH + 3, "ON")
         # Weight field
         wf = weight_map.get(i)
         if wf:
@@ -333,22 +361,22 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     dur_x = RX_X + RX_W - dur_w
     anti_x = RX_X + rx_mid  # Anticoagulant column
 
-    # ข้อ 7: Checkbox ☑ — Heparin/LMWH/Free
-    # ถ้ามี heparin data จาก anticoagulation table → ☑ Heparin
+    # ข้อ 7: Checkbox — ใช้ [X]/[ ] แทน [X]/[  ] เพราะ Loma font ไม่มี [X]
+    _X = "[X]"  # checked
+    _O = "[  ]"  # unchecked
     _has_hep = bool(hep_bolus or hep_maint or hep_protocol)
-    _hep_ck = "☑" if (_has_hep and "free" not in hep_protocol and "lmwh" not in hep_protocol) else "☐"
-    _lmwh_ck = "☑" if "lmwh" in hep_protocol else "☐"
-    _free_ck = "☑" if "free" in hep_protocol else "☐"
-    # ถ้าไม่มี protocol แต่มี bolus/maint → default = Heparin
+    _hep_ck = _X if (_has_hep and "free" not in hep_protocol and "lmwh" not in hep_protocol) else _O
+    _lmwh_ck = _X if "lmwh" in hep_protocol else _O
+    _free_ck = _X if "free" in hep_protocol else _O
     if not hep_protocol and _has_hep:
-        _hep_ck = "☑"
+        _hep_ck = _X
 
     # Test Leak จาก ws_data
     _tl = ws.get("test_leak")
-    _tl_txt = f"Tesk leak  {'☑ Y  ☐ N' if _tl is True else ('☐ Y  ☑ N' if _tl is False else 'O Y  O N')}"
+    _tl_txt = f"Tesk leak  {_X+' Y  '+_O+' N' if _tl is True else (_O+' Y  '+_X+' N' if _tl is False else 'O Y  O N')}"
     # Disinfectant จาก ws_data
     _dis = (ws.get("disinfectant") or "").lower()
-    _dis_ck = lambda k: "☑" if k in _dis else "☐"
+    _dis_ck = lambda k: _X if k in _dis else _O
 
     # Column 1: Machine/Dialyzer/Tesk leak
     col1 = [
@@ -367,12 +395,12 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         ("Anticoagulant", ""),
         (f"{_hep_ck} Heparin", ""),
         (f"{_lmwh_ck} LMWH", ""),
-        ("☐ Other", ""),
+        (f"{_O} Other", ""),
         (f"Loading  {hep_bolus or '____'}", "start"),
         (f"Maintenance  {hep_maint or '____'}", "In  hr"),
         (f"{_free_ck} No Heparin free technique", ""),
-        ("☐ Heparin ........................", ""),
-        ("☐ Flush Nss   cc q   min", ""),
+        (f"{_O} Heparin ........................", ""),
+        (f"{_O} Flush Nss   cc q   min", ""),
     ]
     # Column 3: Duration / Time / BT / Hct / Hb
     # Hb/Hct: ดึงจาก session → extras → rec (ทุกทาง)
@@ -418,12 +446,12 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     va_y = left_bottom  # เริ่มต่อจาก assessment items
     cell(LM, va_y - RH, LEFT_W, RH, "Vascular access", sz=6, bold=True, align="center", bg=GRAY)
     # 2 คอลัมน์: ซ้าย-ขวา
-    def _va_ck(key): return "☑" if key.upper() in va else "☐"
+    def _va_ck(key): return _X if key.upper() in va else _O
     va_rows = [
         (f"{_va_ck('AVF')} AVF", f"{_va_ck('AVG')} AVG"),
         (f"{_va_ck('DLC')} DLC", f"{_va_ck('PERM')} Perm Cath"),
-        ("☐ Subclavian", "☐ jugular"),
-        ("☐ Femoral", ""),
+        (f"{_O} Subclavian", f"{_O} jugular"),
+        (f"{_O} Femoral", ""),
     ]
     for i, (l, r) in enumerate(va_rows):
         iy = va_y - (i + 2) * RH
@@ -435,8 +463,8 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     cell(RX_X, dial_y - RH, RX_W, RH, "Dialysate", sz=6, bold=True, align="center", bg=GRAY)
     dial_items = ["K+  2  mEq/L", "Ca  3.5  mEq/L", "Hco3  32  mEq/L",
                   "Dialysate Temp 36.5  'C", "Dialysate flow  600  cc/min",
-                  "Na/UF Variation Pro", "☐ Na start       mEq/L",
-                  "☐ Na conc off     mEq/L", "☐ UF Profile"]
+                  "Na/UF Variation Pro", "[  ] Na start       mEq/L",
+                  "[  ] Na conc off     mEq/L", "[  ] UF Profile"]
     for i, txt_d in enumerate(dial_items):
         iy = dial_y - (i + 2) * RH
         cell(RX_X, iy, RX_W * 0.55, RH, txt_d, sz=5.5)
@@ -454,8 +482,8 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         esa_txt += "  (งด)"
     cell(med_x, dial_y - 3 * RH, med_w, RH, esa_txt, sz=5.5)
     cell(med_x, dial_y - 4 * RH, med_w, RH, "Route  Time", sz=5.5, bold=True)
-    _iv_ck = "☑" if esa_route and "iv" in esa_route.lower() else "☐"
-    _sc_ck = "☑" if esa_route and "sc" in esa_route.lower() else "☐"
+    _iv_ck = "[X]" if esa_route and "iv" in esa_route.lower() else "[  ]"
+    _sc_ck = "[X]" if esa_route and "sc" in esa_route.lower() else "[  ]"
     cell(med_x, dial_y - 5 * RH, med_w, RH, f"{_iv_ck} IV  {_sc_ck} SC", sz=5.5)
     cell(med_x, dial_y - 6 * RH, med_w, RH, "Signature", sz=5.5)
 
@@ -469,9 +497,9 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     cell(LM + 2 * third, nurs_y, third, RH, "Expective outcome", sz=6, bold=True, align="center", bg=GRAY)
     # ข้อ 2: Nursing Diagnosis 3 รายการตามฟอร์มจริง
     nurs_dx = [
-        ("☐ มีภาวะ Azotemia และ E'lyte imbalance", "OVHDและลดUFตามแผนการรักษา", "☐ ลดภาวะ Azotemia ลด E'lyte"),
-        ("☐ เสี่ยงต่อ complication ระหว่าง HD",      "☐ obs v/s และ Complication",  "☐ No complication"),
-        ("☐ Bleeding precaution",                    "☐ Haparin free technique",    "☐ No bleeding"),
+        ("[  ] มีภาวะ Azotemia และ E'lyte imbalance", "OVHDและลดUFตามแผนการรักษา", "[  ] ลดภาวะ Azotemia ลด E'lyte"),
+        ("[  ] เสี่ยงต่อ complication ระหว่าง HD",      "[  ] obs v/s และ Complication",  "[  ] No complication"),
+        ("[  ] Bleeding precaution",                    "[  ] Haparin free technique",    "[  ] No bleeding"),
     ]
     for r, (dx, plan, outcome) in enumerate(nurs_dx):
         cell(LM, nurs_y - (r + 1) * RH, third, RH, dx, sz=5)
@@ -635,36 +663,36 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     max_rows = max(len(comp_items), len(nurs_items))
     for r in range(max_rows):
         ry = y_bot - (r + 1) * 8
-        # Complication — check from ws_data
+        # Complication — check from ws_data (use [X]/[ ] instead of [X]/[  ])
         if r < len(comp_items):
             ck = _COMP_KEY_MAP.get(comp_items[r])
-            mark = "☑" if ck and ws.get(ck) else "☐"
+            mark = _X if ck and ws.get(ck) else _O
             cell(LM, ry, q, 8, f"{mark} {comp_items[r]}", sz=5)
         else:
             cell(LM, ry, q, 8, "", sz=5)
         # Technical + Health Education — check from ws_data
         if r < len(tech_items):
             tk = _TECH_KEY_MAP.get(tech_items[r])
-            mark = "☑" if tk and ws.get(tk) else "☐"
+            mark = _X if tk and ws.get(tk) else _O
             cell(LM + q, ry, q, 8, f"{mark} {tech_items[r]}", sz=5)
         elif r == len(tech_items):
             cell(LM + q, ry, q, 8, "Health Education", sz=5.5, bold=True, bg=GRAY)
         elif r - len(tech_items) - 1 < len(health_ed):
-            cell(LM + q, ry, q, 8, f"☐ {health_ed[r - len(tech_items) - 1]}", sz=5)
+            cell(LM + q, ry, q, 8, f"{_O} {health_ed[r - len(tech_items) - 1]}", sz=5)
         else:
             cell(LM + q, ry, q, 8)
         # Nursing
-        txt_n = f"☐ {nurs_items[r]}" if r < len(nurs_items) else ""
+        txt_n = f"{_O} {nurs_items[r]}" if r < len(nurs_items) else ""
         cell(LM + 2 * q, ry, q, 8, txt_n, sz=5)
         # Doctor note
         if r < len(doctor_items):
-            cell(LM + 3 * q, ry, q, 8, f"- {doctor_items[r]}     ☐ ไม่มี     ☐ มี", sz=5)
+            cell(LM + 3 * q, ry, q, 8, f"- {doctor_items[r]}     {_O} ไม่มี     {_O} มี", sz=5)
         elif r == len(doctor_items):
             cell(LM + 3 * q, ry, q, 8, "Post HD note", sz=5.5, bold=True)
         elif r == len(doctor_items) + 1:
-            cell(LM + 3 * q, ry, q, 8, "เหนื่อย     ☐ ไม่มี     ☐ มี", sz=5)
+            cell(LM + 3 * q, ry, q, 8, f"เหนื่อย     {_O} ไม่มี     {_O} มี", sz=5)
         elif r == len(doctor_items) + 2:
-            cell(LM + 3 * q, ry, q, 8, "เลือดออก    ☐ ไม่มี     ☐ มี", sz=5)
+            cell(LM + 3 * q, ry, q, 8, f"เลือดออก    {_O} ไม่มี     {_O} มี", sz=5)
         elif r == len(doctor_items) + 4:
             post_v = ex.get("post_vitals", {}) or {}
             bp = f"{post_v['sbp']}/{post_v.get('dbp','')}" if post_v.get("sbp") else "____/____"
@@ -854,9 +882,9 @@ def _build_overlay(rec, extras=None):
     hep_protocol = (hep.get("protocol", "") or "").lower()
 
     if "heparin" in hep_protocol and "free" not in hep_protocol:
-        tick(495, RY[0])   # ☐ Heparin
+        tick(495, RY[0])   # [  ] Heparin
     elif "lmwh" in hep_protocol:
-        tick(495, RY[1])   # ☐ LMWH
+        tick(495, RY[1])   # [  ] LMWH
 
     txt(460, RY[4], str(hep.get("bolus", "")) or "", size=7, bold=True)        # Loading
     txt(460, RY[5], str(hep.get("maintenance", "")) or "", size=7, bold=True)   # Maintenance
