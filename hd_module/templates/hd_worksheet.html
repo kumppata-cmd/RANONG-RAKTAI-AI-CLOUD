@@ -126,6 +126,10 @@
   <button class="btn-pdf" onclick="openPDF()">📄 PDF</button>
 </div>
 <div class="ws-status" id="wsStatus"></div>
+<div style="margin-top:8px;text-align:center">
+  <button onclick="debugWS()" style="padding:6px 16px;border:1px solid #ccc;border-radius:8px;font-size:.7rem;background:#f8f8f8;cursor:pointer">🔍 Debug ตรวจสอบ DB</button>
+  <pre id="debugOut" style="font-size:.65rem;text-align:left;background:#f0f0f0;padding:8px;border-radius:8px;margin-top:6px;display:none;overflow:auto;max-height:200px"></pre>
+</div>
 
 <script>
 const SID = {{ session_id }};
@@ -427,6 +431,19 @@ function openPDF(){
 }
 
 /* ── Init — wait for base template scripts (hdFetch, getHdToken) ── */
+async function debugWS(){
+  const el = document.getElementById('debugOut');
+  el.style.display='block';
+  el.textContent='กำลังตรวจสอบ...';
+  try {
+    const r = await hdFetch('/hd/api/v1/sessions/'+SID+'/worksheet-debug');
+    const d = await r.json();
+    el.textContent = JSON.stringify(d, null, 2);
+  } catch(e){
+    el.textContent = 'Error: '+e.message;
+  }
+}
+
 function _wsInit(){
   if(typeof hdFetch === 'undefined'){
     /* base script not loaded yet — retry */

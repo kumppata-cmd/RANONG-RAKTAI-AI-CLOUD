@@ -736,6 +736,48 @@ def save_worksheet_data(session_id):
         conn.close()
 
 
+@hd_bp.route("/sessions/<int:session_id>/worksheet-debug", methods=["GET"])
+@require_role("physician", "admin")
+def worksheet_debug(session_id):
+    """DEBUG: ตรวจสอบว่า worksheet data ถูกบันทึกและอ่านได้จริง."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    result = {"session_id": session_id, "db_url_set": bool(db_url)}
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            # 1. Table exists?
+            cur.execute("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='hd_worksheet_data')")
+            result["table_exists"] = cur.fetchone()[0]
+
+            # 2. Row exists?
+            if result["table_exists"]:
+                cur.execute("SELECT COUNT(*) FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
+                result["row_count"] = cur.fetchone()[0]
+
+                # 3. Actual data
+                cur.execute("SELECT * FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
+                row = cur.fetchone()
+                if row:
+                    col_names = [desc[0] for desc in cur.description]
+                    data = dict(zip(col_names, row))
+                    # แสดงเฉพาะ fields ที่มีค่า
+                    result["non_null_fields"] = {k: v for k, v in data.items()
+                                                  if v is not None and k not in ('id', 'created_at', 'updated_at', 'updated_by')}
+                    result["all_fields_count"] = len(col_names)
+                else:
+                    result["row_data"] = None
+
+                # 4. All rows in table
+                cur.execute("SELECT session_id, assess_anxiety, comp_no_complication, updated_at FROM hd_worksheet_data ORDER BY id DESC LIMIT 5")
+                result["recent_rows"] = [{"session_id": r[0], "assess_anxiety": r[1], "comp_no_comp": r[2], "updated": str(r[3])} for r in cur.fetchall()]
+        conn.close()
+    except Exception as e:
+        result["error"] = str(e)
+    return jsonify(result)
+
+
 @hd_bp.route("/sessions/<int:session_id>/worksheet.pdf", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def session_worksheet_pdf(session_id):
