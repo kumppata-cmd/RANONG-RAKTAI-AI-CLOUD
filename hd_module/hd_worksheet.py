@@ -749,9 +749,11 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     except ImportError:
         pass  # qrcode not installed — skip silently
 
-    # Footer
+    # Footer — with version + ws debug info
     c.setFont("Loma", 4.5)
-    c.drawRightString(RM, sig_y - 15, f"HD Smart Monitoring · {_thai_date(_thai_now().date())} {_thai_time(_thai_now())}")
+    _ws_keys = [k for k, v in ws.items() if v is True and k.startswith(('assess_', 'comp_', 'tech_'))]
+    _ws_debug = f"ws={len(_ws_keys)}ck" if _ws_keys else "ws=empty"
+    c.drawRightString(RM, sig_y - 15, f"HD Smart Monitoring v12 · {_thai_date(_thai_now().date())} {_thai_time(_thai_now())} · {_ws_debug}")
 
     c.showPage()
     c.save()

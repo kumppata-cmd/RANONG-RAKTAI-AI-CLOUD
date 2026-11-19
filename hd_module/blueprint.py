@@ -792,6 +792,29 @@ def session_worksheet_pdf(session_id):
     conn.autocommit = True
     try:
         mode = request.args.get("mode", "draw")  # draw=แบบB (default), overlay=แบบA
+
+        # Debug: if ?debug_ws=1, return ws_data as JSON instead of PDF
+        if request.args.get("debug_ws"):
+            from .hd_worksheet import load_and_build as _lab
+            # Load ws_data the same way as load_and_build
+            try:
+                conn_dbg = psycopg2.connect(db_url, connect_timeout=5)
+                conn_dbg.autocommit = True
+                with conn_dbg.cursor() as cur_dbg:
+                    cur_dbg.execute("SELECT * FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
+                    ws_row_dbg = cur_dbg.fetchone()
+                    if ws_row_dbg:
+                        col_names_dbg = [desc[0] for desc in cur_dbg.description]
+                        ws_data_dbg = dict(zip(col_names_dbg, ws_row_dbg))
+                        non_null = {k: v for k, v in ws_data_dbg.items() if v is not None}
+                        return jsonify({"ws_data_found": True, "non_null_count": len(non_null),
+                                        "sample": {k: v for k, v in list(non_null.items())[:15]}})
+                    else:
+                        return jsonify({"ws_data_found": False, "session_id": session_id})
+                conn_dbg.close()
+            except Exception as dbg_err:
+                return jsonify({"debug_error": str(dbg_err)})
+
         data, fname = load_and_build(conn, session_id,
                                      get_setting_value("clinic_name", "") or "ระนอง รักษ์ไต",
                                      mode=mode)
