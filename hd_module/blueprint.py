@@ -7942,9 +7942,8 @@ def epo_response(hn):
 # ── F5: QR Check-in ──────────────────────────────────────
 
 @hd_bp.route("/qr/beds", methods=["GET"])
-@require_role("physician", "nurse", "admin")
 def qr_all_beds():
-    """สร้างหน้าพิมพ์ QR Code ทุกเตียง."""
+    """สร้างหน้าพิมพ์ QR Code ทุกเตียง — no auth needed (page is for printing)."""
     from .qr_checkin import generate_all_bed_qr_page
     html = generate_all_bed_qr_page(HdConfig.TOTAL_BEDS)
     return make_response(html)
