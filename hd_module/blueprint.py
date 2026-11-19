@@ -3176,6 +3176,151 @@ def hd_refresh_token():
     })
 
 
+# ── Change Password / User Management ─────────────────────
+
+@hd_bp.route("/auth/change-password", methods=["POST"])
+@require_role("physician", "nurse", "admin", "auditor")
+def hd_change_password():
+    """ผู้ใช้เปลี่ยนรหัสผ่านของตัวเอง — ต้องใส่รหัสเก่าก่อน."""
+    import os, psycopg2
+    from .auth import verify_password, hash_password
+
+    data = request.get_json(silent=True) or {}
+    old_pw = data.get("old_password", "")
+    new_pw = data.get("new_password", "")
+
+    if not old_pw or not new_pw:
+        return jsonify({"error": "กรุณาระบุรหัสผ่านเก่าและรหัสผ่านใหม่"}), 400
+    if len(new_pw) < 4:
+        return jsonify({"error": "รหัสผ่านใหม่ต้องมีอย่างน้อย 4 ตัวอักษร"}), 400
+
+    user_id = g.get("hd_user_id")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT password_hash FROM hd_users WHERE id = %s", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบบัญชีผู้ใช้"}), 404
+            if not verify_password(old_pw, row[0]):
+                conn.close()
+                return jsonify({"error": "รหัสผ่านเก่าไม่ถูกต้อง"}), 401
+            cur.execute("UPDATE hd_users SET password_hash = %s WHERE id = %s",
+                        (hash_password(new_pw), user_id))
+            conn.commit()
+        conn.close()
+        log_action(user_id=user_id, action="auth.change_password", resource_type="user",
+                   resource_id=user_id, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "message": "เปลี่ยนรหัสผ่านสำเร็จ ✅"})
+    except Exception as e:
+        logger.error("change password error: %s", e)
+        return jsonify({"error": "เปลี่ยนรหัสผ่านไม่สำเร็จ กรุณาลองใหม่"}), 500
+
+
+@hd_bp.route("/auth/reset-password", methods=["POST"])
+@require_role("admin")
+def hd_reset_password():
+    """Admin reset รหัสผ่านให้ผู้ใช้คนอื่น."""
+    import os, psycopg2
+    from .auth import hash_password
+
+    data = request.get_json(silent=True) or {}
+    target_user_id = data.get("user_id")
+    new_pw = data.get("new_password", "")
+
+    if not target_user_id or not new_pw:
+        return jsonify({"error": "ต้องระบุ user_id และ new_password"}), 400
+    if len(new_pw) < 4:
+        return jsonify({"error": "รหัสผ่านต้องมีอย่างน้อย 4 ตัวอักษร"}), 400
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hd_users SET password_hash = %s, failed_attempts = 0, locked_until = NULL WHERE id = %s",
+                        (hash_password(new_pw), target_user_id))
+            if cur.rowcount == 0:
+                conn.close()
+                return jsonify({"error": "ไม่พบผู้ใช้ ID นี้"}), 404
+            conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action="admin.reset_password", resource_type="user",
+                   resource_id=target_user_id, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "message": "Reset รหัสผ่านสำเร็จ ✅"})
+    except Exception as e:
+        logger.error("reset password error: %s", e)
+        return jsonify({"error": "Reset ไม่สำเร็จ"}), 500
+
+
+@hd_bp.route("/auth/users", methods=["GET"])
+@require_role("admin")
+def hd_list_users():
+    """Admin ดูรายชื่อผู้ใช้ทั้งหมด."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, username, full_name, role, is_active,
+                           last_login, license_number
+                           FROM hd_users ORDER BY role, username""")
+            rows = cur.fetchall()
+        conn.close()
+        users = [{"id": r[0], "username": r[1], "full_name": r[2], "role": r[3],
+                  "is_active": r[4], "last_login": r[5].isoformat() if r[5] else None,
+                  "license_number": r[6] or ""} for r in rows]
+        return jsonify({"users": users})
+    except Exception as e:
+        logger.error("list users error: %s", e)
+        return jsonify({"error": "โหลดรายชื่อไม่ได้"}), 500
+
+
+@hd_bp.route("/auth/users", methods=["POST"])
+@require_role("admin")
+def hd_create_user():
+    """Admin สร้างบัญชีผู้ใช้ใหม่."""
+    import os, psycopg2
+    from .auth import hash_password
+
+    data = request.get_json(silent=True) or {}
+    username = data.get("username", "").strip()
+    password = data.get("password", "")
+    full_name = data.get("full_name", "").strip()
+    role = data.get("role", "nurse")
+    license_number = data.get("license_number", "").strip()
+
+    if not username or not password:
+        return jsonify({"error": "ต้องระบุ username และ password"}), 400
+    if len(password) < 4:
+        return jsonify({"error": "รหัสผ่านต้องมีอย่างน้อย 4 ตัวอักษร"}), 400
+    if role not in ("physician", "nurse", "admin", "auditor"):
+        return jsonify({"error": "role ต้องเป็น physician/nurse/admin/auditor"}), 400
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_users WHERE username = %s", (username,))
+            if cur.fetchone():
+                conn.close()
+                return jsonify({"error": f"ชื่อผู้ใช้ '{username}' มีอยู่แล้ว"}), 409
+            cur.execute("""INSERT INTO hd_users (username, password_hash, full_name, role, license_number, is_active)
+                           VALUES (%s, %s, %s, %s::hd_user_role, %s, TRUE) RETURNING id""",
+                        (username, hash_password(password), full_name, role, license_number))
+            new_id = cur.fetchone()[0]
+            conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action="admin.create_user", resource_type="user",
+                   resource_id=new_id, new_values={"username": username, "role": role},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "user_id": new_id, "message": f"สร้างบัญชี '{username}' สำเร็จ ✅"})
+    except Exception as e:
+        logger.error("create user error: %s", e)
+        return jsonify({"error": "สร้างบัญชีไม่สำเร็จ"}), 500
+
+
 # ── Sessions ──────────────────────────────────────────────
 
 @hd_bp.route("/sessions", methods=["GET"])

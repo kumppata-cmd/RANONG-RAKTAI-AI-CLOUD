@@ -32,6 +32,63 @@
   </div>
 </div>
 
+<!-- Change Password -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🔑 เปลี่ยนรหัสผ่าน</span>
+    <button class="btn btn-primary save-btn" onclick="changePassword()">💾 เปลี่ยน</button>
+  </div>
+  <div style="margin-top:12px;">
+    <div class="form-group">
+      <label class="form-label">รหัสผ่านเก่า</label>
+      <input type="password" class="form-control" id="old_password" placeholder="กรอกรหัสผ่านปัจจุบัน">
+    </div>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="form-group">
+        <label class="form-label">รหัสผ่านใหม่</label>
+        <input type="password" class="form-control" id="new_password" placeholder="อย่างน้อย 4 ตัวอักษร">
+      </div>
+      <div class="form-group">
+        <label class="form-label">ยืนยันรหัสผ่านใหม่</label>
+        <input type="password" class="form-control" id="confirm_password" placeholder="กรอกอีกครั้ง">
+      </div>
+    </div>
+    <div class="setting-desc">แต่ละคนสามารถตั้งรหัสผ่านของตัวเองได้</div>
+    <div class="setting-status" id="pwStatus"></div>
+  </div>
+</div>
+
+<!-- User Management (Admin only) -->
+<div class="card setting-card" id="userMgmtCard" style="display:none">
+  <div class="card-header">
+    <span>👥 จัดการผู้ใช้</span>
+    <button class="btn btn-primary save-btn" onclick="showAddUser()">➕ เพิ่มบัญชี</button>
+  </div>
+  <div style="margin-top:12px;">
+    <div id="userList" style="font-size:13px;">กำลังโหลด...</div>
+    <div id="addUserForm" style="display:none;margin-top:12px;padding:12px;background:var(--bg-secondary,#f5f5f5);border-radius:8px;">
+      <h4 style="margin:0 0 8px;">เพิ่มบัญชีใหม่</h4>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+        <div class="form-group"><label class="form-label">Username</label>
+          <input type="text" class="form-control" id="nu_username" placeholder="เช่น nurse2"></div>
+        <div class="form-group"><label class="form-label">รหัสผ่าน</label>
+          <input type="password" class="form-control" id="nu_password" placeholder="อย่างน้อย 4 ตัว"></div>
+        <div class="form-group"><label class="form-label">ชื่อ-สกุล</label>
+          <input type="text" class="form-control" id="nu_fullname" placeholder="พยาบาล xxx"></div>
+        <div class="form-group"><label class="form-label">ตำแหน่ง</label>
+          <select class="form-control" id="nu_role">
+            <option value="nurse">พยาบาล</option><option value="physician">แพทย์</option><option value="admin">ผู้ดูแล</option>
+          </select></div>
+      </div>
+      <div class="form-group"><label class="form-label">เลขที่ใบอนุญาต (ถ้ามี)</label>
+        <input type="text" class="form-control" id="nu_license" placeholder="ว.26015"></div>
+      <button class="btn btn-primary" onclick="createUser()" style="margin-top:8px;">✅ สร้างบัญชี</button>
+      <button class="btn" onclick="document.getElementById('addUserForm').style.display='none'" style="margin-top:8px;">ยกเลิก</button>
+      <div class="setting-status" id="addUserStatus"></div>
+    </div>
+  </div>
+</div>
+
 <!-- PIN Setup -->
 <div class="card setting-card">
   <div class="card-header">
@@ -500,6 +557,96 @@ function savePin(){
       }
     }).catch(()=>showToast('ตั้ง PIN ไม่สำเร็จ','danger'));
 }
+
+/* ── Change Password ── */
+async function changePassword(){
+  const old_pw = document.getElementById('old_password').value;
+  const new_pw = document.getElementById('new_password').value;
+  const cfm_pw = document.getElementById('confirm_password').value;
+  const el = document.getElementById('pwStatus');
+  if(!old_pw){showToast('กรุณากรอกรหัสผ่านเก่า','danger');return;}
+  if(!new_pw || new_pw.length<4){showToast('รหัสผ่านใหม่ต้องมีอย่างน้อย 4 ตัวอักษร','danger');return;}
+  if(new_pw !== cfm_pw){showToast('รหัสผ่านใหม่ไม่ตรงกัน','danger');return;}
+  try{
+    const r = await hdFetch('/hd/api/v1/auth/change-password',{method:'POST',body:JSON.stringify({old_password:old_pw, new_password:new_pw})});
+    const d = await r.json();
+    if(d.ok){
+      showToast('✅ เปลี่ยนรหัสผ่านสำเร็จ','success');
+      el.innerHTML='✅ เปลี่ยนรหัสผ่านสำเร็จ'; el.style.color='var(--success)';
+      document.getElementById('old_password').value='';
+      document.getElementById('new_password').value='';
+      document.getElementById('confirm_password').value='';
+    } else { showToast(d.error||'ไม่สำเร็จ','danger'); el.innerHTML='❌ '+(d.error||''); el.style.color='var(--danger)'; }
+  }catch(e){showToast('เปลี่ยนรหัสไม่สำเร็จ','danger');}
+}
+
+/* ── User Management (Admin) ── */
+async function loadUsers(){
+  const el = document.getElementById('userList'); if(!el) return;
+  try{
+    const r = await hdFetch('/hd/api/v1/auth/users'); const d = await r.json();
+    if(!r.ok){el.textContent='ไม่มีสิทธิ์ดูรายชื่อ';return;}
+    const roleTh = {physician:'แพทย์',nurse:'พยาบาล',admin:'ผู้ดูแล',auditor:'ผู้ตรวจ'};
+    let h='<table style="width:100%;border-collapse:collapse;font-size:.82rem"><tr style="border-bottom:1px solid var(--border)">'
+      +'<th style="text-align:left;padding:4px">ชื่อ</th><th style="text-align:left;padding:4px">Username</th>'
+      +'<th style="text-align:left;padding:4px">ตำแหน่ง</th><th style="text-align:left;padding:4px">สถานะ</th>'
+      +'<th style="padding:4px">Reset</th></tr>';
+    (d.users||[]).forEach(u=>{
+      h+=`<tr style="border-bottom:1px solid var(--border,#eee)"><td style="padding:4px">${u.full_name}</td>`
+        +`<td style="padding:4px">${u.username}</td><td style="padding:4px">${roleTh[u.role]||u.role}</td>`
+        +`<td style="padding:4px">${u.is_active?'✅':'❌'}</td>`
+        +`<td style="padding:4px;text-align:center"><button class="btn" style="font-size:.75rem;padding:2px 8px" onclick="resetPw(${u.id},'${u.username}')">🔄</button></td></tr>`;
+    });
+    h+='</table>';
+    el.innerHTML=h;
+  }catch(e){el.textContent='โหลดไม่ได้';}
+}
+async function resetPw(uid,uname){
+  const pw = prompt(`ตั้งรหัสผ่านใหม่ให้ ${uname}:`);
+  if(!pw) return;
+  if(pw.length<4){showToast('รหัสผ่านต้องมีอย่างน้อย 4 ตัว','danger');return;}
+  try{
+    const r = await hdFetch('/hd/api/v1/auth/reset-password',{method:'POST',body:JSON.stringify({user_id:uid,new_password:pw})});
+    const d = await r.json();
+    if(d.ok) showToast(`✅ Reset รหัสผ่าน ${uname} สำเร็จ`,'success');
+    else showToast(d.error||'ไม่สำเร็จ','danger');
+  }catch(e){showToast('Reset ไม่สำเร็จ','danger');}
+}
+function showAddUser(){document.getElementById('addUserForm').style.display='block';}
+async function createUser(){
+  const u = document.getElementById('nu_username').value.trim();
+  const p = document.getElementById('nu_password').value;
+  const fn = document.getElementById('nu_fullname').value.trim();
+  const role = document.getElementById('nu_role').value;
+  const lic = document.getElementById('nu_license').value.trim();
+  const el = document.getElementById('addUserStatus');
+  if(!u||!p){showToast('ต้องกรอก username และรหัสผ่าน','danger');return;}
+  if(p.length<4){showToast('รหัสผ่านต้องมีอย่างน้อย 4 ตัว','danger');return;}
+  try{
+    const r = await hdFetch('/hd/api/v1/auth/users',{method:'POST',body:JSON.stringify({username:u,password:p,full_name:fn,role,license_number:lic})});
+    const d = await r.json();
+    if(d.ok){
+      showToast(d.message||'สร้างสำเร็จ','success');
+      el.innerHTML='✅ '+d.message; el.style.color='var(--success)';
+      document.getElementById('addUserForm').style.display='none';
+      document.getElementById('nu_username').value='';document.getElementById('nu_password').value='';
+      document.getElementById('nu_fullname').value='';document.getElementById('nu_license').value='';
+      loadUsers();
+    } else { showToast(d.error||'ไม่สำเร็จ','danger'); el.innerHTML='❌ '+d.error; el.style.color='var(--danger)'; }
+  }catch(e){showToast('สร้างบัญชีไม่สำเร็จ','danger');}
+}
+// Show user mgmt card for admin
+document.addEventListener('DOMContentLoaded', ()=>{
+  try{
+    const tk = getHdToken(); if(!tk) return;
+    const parts = tk.split('.'); if(parts.length!==3) return;
+    const pay = JSON.parse(atob(parts[1].replace(/-/g,'+').replace(/_/g,'/')));
+    if(pay.role==='admin'){
+      document.getElementById('userMgmtCard').style.display='';
+      loadUsers();
+    }
+  }catch(e){}
+});
 
 /* ── Google Drive (OAuth as the physician) ── */
 function loadDriveStatus(){
