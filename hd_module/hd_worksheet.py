@@ -848,7 +848,9 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     # SIGNATURES — ใต้ตาราง Complication
     # ════════════════════════════════════════════════════════════
     sig_y = y_bot - (max_rows + 1) * 8 - 4
-    nurse_name = ex.get("nurse_name", "") or ""
+    # Nurse name: ws_data (interactive) → extras → empty
+    nurse_start = ws.get("nurse_start_name") or ex.get("nurse_name", "") or ""
+    nurse_end = ws.get("nurse_end_name") or nurse_start or ""
     # ข้อ 6: ชื่อแพทย์อัตโนมัติ (default = แพทย์เจ้าของคลินิก)
     _DEFAULT_DOCTOR = "นายแพทย์กัมพล พัฒนสมบัติสกุล ว.26015"
     doctor_name = ex.get("doctor_name", "") or rec.get("doctor_name", "") or _DEFAULT_DOCTOR
@@ -865,8 +867,8 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     c.setFont("Loma-Bold", 7)
     c.drawString(LM + CW * 0.42, sig_y, "Nurse")
     c.setFont("Loma", 7)
-    if nurse_name:
-        c.drawString(LM + CW * 0.42 + 32, sig_y, nurse_name)
+    if nurse_end:
+        c.drawString(LM + CW * 0.42 + 32, sig_y, nurse_end)
     c.line(LM + CW * 0.42 + 32, sig_y - 1, RM - 55, sig_y - 1)
 
     # ข้อ 8: QR Code — link กลับไปหน้า session
@@ -1280,6 +1282,8 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
         "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_medication BOOLEAN",
         "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_fluid_control BOOLEAN",
         "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_kt BOOLEAN",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nurse_start_name VARCHAR(100)",
+        "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nurse_end_name VARCHAR(100)",
     ]
     try:
         import psycopg2 as _pg2

@@ -157,6 +157,16 @@
   <textarea class="ws-textarea" id="healthEd" placeholder="สุขศึกษา/คำแนะนำ..."></textarea>
 </div>
 
+<!-- Nurse Signature -->
+<div class="ws-section">
+  <h3>✍️ ลายเซ็น</h3>
+  <div style="display:flex;gap:12px;font-size:.82rem">
+    <div style="flex:1"><span style="color:var(--fg-muted)">พยาบาลเริ่ม:</span> <strong id="nurseStartName">—</strong></div>
+    <div style="flex:1"><span style="color:var(--fg-muted)">พยาบาลปิด:</span> <strong id="nurseEndName">—</strong></div>
+  </div>
+  <div style="font-size:.7rem;color:var(--fg-dim);margin-top:4px">* ชื่อพยาบาลจะบันทึกอัตโนมัติตามผู้ที่ login กดบันทึก</div>
+</div>
+
 <!-- Actions -->
 <div class="ws-actions">
   <button class="btn-save" onclick="saveWorksheet()">💾 บันทึก</button>
@@ -556,6 +566,9 @@ async function loadWorksheetData(){
     }
     if(d.data.bp_discharge_sbp) document.getElementById('bpDischargeSbp').value=d.data.bp_discharge_sbp;
     if(d.data.bp_discharge_dbp) document.getElementById('bpDischargeDbp').value=d.data.bp_discharge_dbp;
+    // Nurse signatures
+    if(d.data.nurse_start_name) document.getElementById('nurseStartName').textContent=d.data.nurse_start_name;
+    if(d.data.nurse_end_name) document.getElementById('nurseEndName').textContent=d.data.nurse_end_name;
     sEl.textContent='✅ โหลดข้อมูลบันทึกล่าสุด: '+(d.data.updated_at||'');
   } catch(e){
     console.error('loadWorksheetData error:', e);

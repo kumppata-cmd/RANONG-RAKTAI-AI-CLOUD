@@ -617,7 +617,8 @@ _WS_TEXT_COLS = ["disinfectant", "va_type", "va_site", "nursing_dx",
                  # Doctor Note interactive
                  "dx_fever", "dx_dyspnea", "dx_chest_pain", "dx_headache", "dx_cramp",
                  "post_dyspnea", "post_bleeding",
-                 "discharge_type", "discharge_mobility"]
+                 "discharge_type", "discharge_mobility",
+                 "nurse_start_name", "nurse_end_name"]
 _WS_INT_COLS = ["nurse_start_id", "nurse_end_id", "bp_discharge_sbp", "bp_discharge_dbp"]
 _WS_ALL_COLS = _WS_BOOL_COLS + _WS_TEXT_COLS + _WS_INT_COLS
 
@@ -716,6 +717,9 @@ _WS_ALTER_SQLS = [
     "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_medication BOOLEAN",
     "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_fluid_control BOOLEAN",
     "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_kt BOOLEAN",
+    # Nurse signature names
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nurse_start_name VARCHAR(100)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nurse_end_name VARCHAR(100)",
 ]
 
 
@@ -755,6 +759,19 @@ def save_worksheet_data(session_id):
         _ensure_ws_table(conn)
 
         with conn.cursor() as cur:
+            # Auto-fill nurse name from logged-in user
+            user_id = g.get("hd_user_id")
+            user_role = g.get("hd_role", "")
+            nurse_name_auto = None
+            if user_id and user_role in ("nurse", "admin"):
+                try:
+                    cur.execute("SELECT full_name FROM hd_users WHERE id = %s", (user_id,))
+                    nr = cur.fetchone()
+                    if nr:
+                        nurse_name_auto = nr[0]
+                except Exception:
+                    pass
+
             # Build values
             vals = {}
             for col in _WS_BOOL_COLS:
@@ -765,6 +782,13 @@ def save_worksheet_data(session_id):
             for col in _WS_INT_COLS:
                 v = body.get(col)
                 vals[col] = int(v) if v else None
+
+            # Auto-fill nurse names if not explicitly set
+            if nurse_name_auto:
+                if not vals.get("nurse_start_name"):
+                    vals["nurse_start_name"] = nurse_name_auto
+                vals["nurse_end_name"] = nurse_name_auto  # always update end nurse
+                vals["nurse_end_id"] = user_id
 
             cols = list(vals.keys())
             placeholders = ", ".join(["%s"] * len(cols))
