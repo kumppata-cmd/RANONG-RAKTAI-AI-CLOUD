@@ -379,8 +379,8 @@ def create_default_hd_users():
                 synced = 0
                 for uname, pw in sync_map.items():
                     pw_hash = hash_password(pw)
-                    cur.execute("UPDATE hd_users SET password_hash = %s WHERE username = %s AND password_hash != %s",
-                                (pw_hash, uname, pw_hash))
+                    cur.execute("UPDATE hd_users SET password_hash = %s, failed_attempts = 0, locked_until = NULL WHERE username = %s",
+                                (pw_hash, uname))
                     synced += cur.rowcount
                 conn.commit()
                 if synced:

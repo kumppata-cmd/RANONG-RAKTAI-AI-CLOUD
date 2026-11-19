@@ -3099,8 +3099,38 @@ def hd_login():
         })
 
     except Exception as e:
-        logger.error("HD login error: %s", e)
-        return jsonify({"error": "ระบบขัดข้อง กรุณาลองใหม่"}), 500
+        import traceback
+        logger.error("HD login error: %s\n%s", e, traceback.format_exc())
+        return jsonify({"error": "ระบบขัดข้อง กรุณาลองใหม่", "detail": str(e)}), 500
+
+
+@hd_bp.route("/auth/force-reset", methods=["POST"])
+def hd_force_reset():
+    """Force reset password — requires ADMIN_SECRET, no login needed."""
+    import os, psycopg2
+    from .auth import hash_password
+    data = request.get_json(silent=True) or {}
+    secret = data.get("admin_secret", "")
+    real_secret = os.environ.get("ADMIN_SECRET", "changeme")
+    if not secret or secret != real_secret:
+        return jsonify({"error": "Invalid admin_secret"}), 403
+    username = data.get("username", "hd_admin")
+    new_pw = data.get("new_password", real_secret)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hd_users SET password_hash = %s, failed_attempts = 0, locked_until = NULL WHERE username = %s",
+                        (hash_password(new_pw), username))
+            updated = cur.rowcount
+            conn.commit()
+        conn.close()
+        if updated:
+            return jsonify({"ok": True, "message": f"Reset '{username}' สำเร็จ"})
+        return jsonify({"error": f"ไม่พบ username '{username}'"}), 404
+    except Exception as e:
+        logger.error("force reset error: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 @hd_bp.route("/auth/set-pin", methods=["POST"])
