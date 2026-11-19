@@ -358,6 +358,12 @@ def fluid_page():
     return render_template("hd_fluid.html")
 
 
+@hd_web.route("/patient/<hn>/trends")
+def patient_trends_page(hn):
+    """Patient Trend Dashboard — กราฟ Hb, Kt/V, น้ำหนัก, BP 6 เดือน."""
+    return render_template("hd_trends.html", patient_hn=hn)
+
+
 @hd_web.route("/patient/<hn>/360")
 def patient_360_page(hn):
     """Patient 360 — one timeline of sessions, alerts, labs, ESA, drugs, incidents."""
@@ -6493,6 +6499,89 @@ def bed_dashboard():
         "_debug_detail": debug_detail,
     })
 
+
+
+# ── Patient Trend Dashboard ───────────────────────────────
+
+@hd_bp.route("/patients/<hn>/trends", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def patient_trends(hn):
+    """6-month trend data: Hb, Kt/V, weight, BP, UF for charts."""
+    import os, psycopg2
+    from datetime import timedelta
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    months = min(int(request.args.get("months", 6) or 6), 24)
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "patient not found"}), 404
+            pid = row[0]
+            cutoff = (_thai_today() - timedelta(days=months * 30)).isoformat()
+
+            # Sessions: weight, UF, Kt/V, BP
+            cur.execute("""SELECT session_date, pre_weight, post_weight, uf_goal, actual_uf,
+                                  kt_v, urr
+                           FROM hd_sessions WHERE patient_id = %s AND session_date >= %s
+                           ORDER BY session_date, id""", (pid, cutoff))
+            sessions = []
+            for r in cur.fetchall():
+                sessions.append({
+                    "date": r[0].isoformat() if r[0] else None,
+                    "pre_weight": float(r[1]) if r[1] else None,
+                    "post_weight": float(r[2]) if r[2] else None,
+                    "uf_goal": r[3], "actual_uf": r[4],
+                    "kt_v": float(r[5]) if r[5] else None,
+                    "urr": float(r[6]) if r[6] else None,
+                })
+
+            # BP trends from vital signs (pre-HD)
+            cur.execute("""SELECT v.recorded_at::date, v.sbp, v.dbp, v.heart_rate
+                           FROM hd_vital_signs v
+                           JOIN hd_sessions s ON s.id = v.session_id
+                           WHERE s.patient_id = %s AND v.phase = 'pre'
+                             AND v.recorded_at::date >= %s
+                           ORDER BY v.recorded_at""", (pid, cutoff))
+            bp_data = [{"date": r[0].isoformat(), "sbp": r[1], "dbp": r[2], "hr": r[3]}
+                       for r in cur.fetchall()]
+
+            # Lab trends: Hb, Hct, BUN, Cr, K, Albumin
+            cur.execute("""SELECT result_date, hb, hct, bun, creatinine, potassium, albumin
+                           FROM hd_lab_results WHERE patient_id = %s AND result_date >= %s
+                           ORDER BY result_date""", (pid, cutoff))
+            labs = [{"date": r[0].isoformat() if r[0] else None,
+                     "hb": float(r[1]) if r[1] else None,
+                     "hct": float(r[2]) if r[2] else None,
+                     "bun": float(r[3]) if r[3] else None,
+                     "cr": float(r[4]) if r[4] else None,
+                     "k": float(r[5]) if r[5] else None,
+                     "alb": float(r[6]) if r[6] else None}
+                    for r in cur.fetchall()]
+
+            # ESA history
+            cur.execute("""SELECT s.session_date, s.esa_drug_given, s.esa_dose_given
+                           FROM hd_sessions s
+                           WHERE s.patient_id = %s AND s.session_date >= %s
+                             AND s.esa_given = TRUE
+                           ORDER BY s.session_date""", (pid, cutoff))
+            esa = [{"date": r[0].isoformat() if r[0] else None,
+                    "drug": r[1], "dose": r[2]}
+                   for r in cur.fetchall()]
+
+        conn.close()
+        return jsonify({
+            "hn": hn, "months": months,
+            "sessions": sessions, "bp": bp_data,
+            "labs": labs, "esa": esa,
+        })
+    except Exception as e:
+        logger.error("patient trends error: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 # ── Shift Handover ────────────────────────────────────────

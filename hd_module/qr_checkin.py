@@ -72,44 +72,62 @@ def generate_qr_svg(data: str, size: int = 200) -> str:
 
 
 def generate_all_bed_qr_page(total_beds: int = 25) -> str:
-    """สร้างหน้า HTML สำหรับพิมพ์ QR Code ทุกเตียง"""
+    """สร้างหน้า HTML สำหรับพิมพ์ QR Code ทุกเตียง — ใช้ JS qrcode library"""
     base_url = os.environ.get("RENDER_EXTERNAL_URL",
                                "https://ranong-raktai-ai-cloud.onrender.com")
-    html_parts = [
-        "<!DOCTYPE html><html><head><meta charset='UTF-8'>",
-        "<title>QR Check-in — ทุกเตียง</title>",
-        "<style>",
-        "@page{margin:10mm}",
-        "body{font-family:sans-serif;margin:0;padding:20px}",
-        ".grid{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}",
-        ".bed-qr{text-align:center;padding:16px;border:2px solid #2980b9;",
-        "border-radius:12px;page-break-inside:avoid}",
-        ".bed-num{font-size:2rem;font-weight:700;color:#2980b9}",
-        ".qr-url{font-size:.55rem;color:#666;word-break:break-all;margin-top:8px}",
-        "@media print{.no-print{display:none}}",
-        "</style></head><body>",
-        "<div class='no-print' style='text-align:right;margin-bottom:16px'>",
-        "<button onclick='window.print()' style='padding:10px 24px;",
-        "background:#2980b9;color:#fff;border:none;border-radius:8px;",
-        "font-size:14px;cursor:pointer'>🖨 พิมพ์</button></div>",
-        "<h1 style='text-align:center;color:#2980b9'>🏥 QR Check-in — คลินิกระนอง รักษ์ไต</h1>",
-        "<div class='grid'>",
-    ]
 
+    beds_json = []
     for bed in range(1, total_beds + 1):
         qr = generate_bed_qr_data(bed, base_url)
-        html_parts.append(f"""
-            <div class='bed-qr'>
-                <div class='bed-num'>เตียง {bed}</div>
-                <div style='font-size:4rem;margin:8px 0'>📱</div>
-                <div style='font-size:.85rem;font-weight:600'>สแกนเพื่อเช็คอิน</div>
-                <div class='qr-url'>{qr['url']}</div>
-            </div>
-        """)
+        beds_json.append({"bed": bed, "url": qr["url"]})
 
-    html_parts.append("</div>")
-    html_parts.append(f"<p style='text-align:center;margin-top:20px;color:#999;font-size:.75rem'>")
-    html_parts.append(f"Token ใช้ได้ภายในวันนี้ ({qr['date']}) — พิมพ์ใหม่ทุกวัน</p>")
-    html_parts.append("</body></html>")
+    import json
+    beds_str = json.dumps(beds_json)
+    today = time.strftime("%d/%m/%Y")
 
-    return "".join(html_parts)
+    return f"""<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>QR Check-in — คลินิกระนอง รักษ์ไต</title>
+<script src="https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js"></script>
+<style>
+@page{{margin:8mm}}
+body{{font-family:'Sarabun',sans-serif;margin:0;padding:16px;background:#fff}}
+.header{{text-align:center;margin-bottom:16px}}
+.header h1{{color:#1e40af;margin:0;font-size:1.5rem}}
+.header p{{color:#6b7280;margin:4px 0;font-size:.85rem}}
+.grid{{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}}
+.bed-card{{text-align:center;padding:12px 8px;border:2px solid #1e40af;border-radius:12px;page-break-inside:avoid}}
+.bed-num{{font-size:1.4rem;font-weight:800;color:#1e40af;margin-bottom:4px}}
+.qr-box{{margin:4px auto}}
+.qr-box canvas,.qr-box img{{max-width:120px;height:auto}}
+.scan-txt{{font-size:.7rem;color:#6b7280;margin-top:4px}}
+.footer{{text-align:center;margin-top:12px;font-size:.7rem;color:#9ca3af}}
+@media print{{.no-print{{display:none!important}}}}
+@media(max-width:600px){{.grid{{grid-template-columns:repeat(2,1fr)}}}}
+</style></head><body>
+<div class="no-print" style="text-align:right;margin-bottom:12px">
+  <button onclick="window.print()" style="padding:10px 20px;background:#1e40af;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">🖨 พิมพ์ QR ทุกเตียง</button>
+</div>
+<div class="header">
+  <h1>🏥 QR Check-in — คลินิกระนอง รักษ์ไต</h1>
+  <p>สแกน QR Code เพื่อเริ่มรอบฟอก · วันที่ {today}</p>
+</div>
+<div class="grid" id="qrGrid"></div>
+<div class="footer">Token ใช้ได้ภายในวันนี้ ({today}) · HD Smart Monitoring v2.2</div>
+<script>
+const beds = {beds_str};
+const grid = document.getElementById('qrGrid');
+beds.forEach(b => {{
+  const card = document.createElement('div');
+  card.className = 'bed-card';
+  card.innerHTML = '<div class="bed-num">เตียง '+b.bed+'</div><div class="qr-box" id="qr'+b.bed+'"></div><div class="scan-txt">📱 สแกนเพื่อเช็คอิน</div>';
+  grid.appendChild(card);
+  try {{
+    const qr = qrcode(0, 'M');
+    qr.addData(b.url);
+    qr.make();
+    document.getElementById('qr'+b.bed).innerHTML = qr.createSvgTag(3, 0);
+  }} catch(e) {{
+    document.getElementById('qr'+b.bed).innerHTML = '<div style="font-size:3rem">📱</div>';
+  }}
+}});
+</script></body></html>"""

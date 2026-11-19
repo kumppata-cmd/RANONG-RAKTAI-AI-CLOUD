@@ -1,0 +1,127 @@
+{% extends "hd_base.html" %}
+{% block title %}Trend — {{ patient_hn }}{% endblock %}
+{% block content %}
+<div style="max-width:900px;margin:0 auto;padding:12px">
+<h2 id="patName" style="text-align:center">📈 Patient Trend Dashboard</h2>
+<p id="patInfo" style="text-align:center;color:var(--fg-muted);font-size:.85rem"></p>
+
+<div style="display:flex;gap:8px;justify-content:center;margin:12px 0">
+  <button class="btn" onclick="load(3)">3 เดือน</button>
+  <button class="btn btn-primary" onclick="load(6)">6 เดือน</button>
+  <button class="btn" onclick="load(12)">1 ปี</button>
+</div>
+
+<div id="charts">กำลังโหลด...</div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+const HN = '{{ patient_hn }}';
+let charts = [];
+
+function destroyCharts(){ charts.forEach(c=>c.destroy()); charts=[]; }
+
+function makeChart(id, label, dates, datasets, yLabel, suggestedMin, suggestedMax, refLines){
+  const el = document.getElementById(id);
+  if(!el) return;
+  const annotations = {};
+  if(refLines){
+    refLines.forEach((r,i)=>{
+      annotations['line'+i] = {type:'line',yMin:r.y,yMax:r.y,borderColor:r.color||'rgba(255,0,0,0.4)',borderDash:[5,5],borderWidth:1,
+        label:{display:true,content:r.label,position:'end',font:{size:10}}};
+    });
+  }
+  const c = new Chart(el, {
+    type:'line',
+    data:{labels:dates, datasets:datasets.map(ds=>({...ds, tension:0.3, pointRadius:3, fill:false}))},
+    options:{responsive:true, plugins:{legend:{position:'top',labels:{font:{size:11}}}},
+      scales:{y:{title:{display:true,text:yLabel},suggestedMin,suggestedMax},
+              x:{title:{display:false},ticks:{maxTicksLimit:12,font:{size:10}}}}}
+  });
+  charts.push(c);
+}
+
+async function load(months){
+  destroyCharts();
+  const el = document.getElementById('charts');
+  el.innerHTML = 'กำลังโหลด...';
+  try{
+    // Patient info
+    const pi = await hdFetch('/hd/api/v1/patients/'+HN);
+    const pd = await pi.json();
+    if(pd.patient_name) document.getElementById('patName').textContent = '📈 '+pd.patient_name+' ('+HN+')';
+
+    const r = await hdFetch('/hd/api/v1/patients/'+HN+'/trends?months='+months);
+    const d = await r.json();
+    if(d.error){el.textContent='❌ '+d.error;return;}
+
+    let h = '';
+    // 1. Weight chart
+    if(d.sessions.length){
+      h += '<div class="card" style="padding:12px;margin-bottom:12px"><h3 style="margin:0 0 8px">⚖️ น้ำหนัก (kg)</h3><canvas id="cWeight"></canvas></div>';
+    }
+    // 2. BP chart
+    if(d.bp.length){
+      h += '<div class="card" style="padding:12px;margin-bottom:12px"><h3 style="margin:0 0 8px">💓 ความดันโลหิต Pre-HD</h3><canvas id="cBP"></canvas></div>';
+    }
+    // 3. Hb chart
+    if(d.labs.length){
+      h += '<div class="card" style="padding:12px;margin-bottom:12px"><h3 style="margin:0 0 8px">🩸 Hemoglobin (g/dL)</h3><canvas id="cHb"></canvas></div>';
+    }
+    // 4. Kt/V chart
+    const ktv = d.sessions.filter(s=>s.kt_v);
+    if(ktv.length){
+      h += '<div class="card" style="padding:12px;margin-bottom:12px"><h3 style="margin:0 0 8px">🧮 Kt/V (Adequacy)</h3><canvas id="cKtV"></canvas></div>';
+    }
+    // 5. UF chart
+    if(d.sessions.length){
+      h += '<div class="card" style="padding:12px;margin-bottom:12px"><h3 style="margin:0 0 8px">💧 UF (mL)</h3><canvas id="cUF"></canvas></div>';
+    }
+    // 6. Lab panel
+    const labK = d.labs.filter(l=>l.k);
+    if(labK.length){
+      h += '<div class="card" style="padding:12px;margin-bottom:12px"><h3 style="margin:0 0 8px">🔬 Potassium + Albumin</h3><canvas id="cLab"></canvas></div>';
+    }
+    if(!h) h = '<div style="text-align:center;color:var(--fg-muted);padding:40px">ไม่มีข้อมูลในช่วง '+months+' เดือน</div>';
+    el.innerHTML = h;
+
+    // Render charts
+    if(d.sessions.length){
+      const sDates = d.sessions.map(s=>s.date);
+      makeChart('cWeight','น้ำหนัก',sDates,[
+        {label:'Pre-HD',data:d.sessions.map(s=>s.pre_weight),borderColor:'#2563eb'},
+        {label:'Post-HD',data:d.sessions.map(s=>s.post_weight),borderColor:'#16a34a'}
+      ],'kg',null,null,[]);
+      makeChart('cUF','UF',sDates,[
+        {label:'UF Goal',data:d.sessions.map(s=>s.uf_goal),borderColor:'#9333ea',borderDash:[5,5]},
+        {label:'Actual UF',data:d.sessions.map(s=>s.actual_uf),borderColor:'#dc2626'}
+      ],'mL',0,null,[]);
+    }
+    if(d.bp.length){
+      makeChart('cBP','BP',d.bp.map(b=>b.date),[
+        {label:'SBP',data:d.bp.map(b=>b.sbp),borderColor:'#dc2626'},
+        {label:'DBP',data:d.bp.map(b=>b.dbp),borderColor:'#2563eb'},
+        {label:'HR',data:d.bp.map(b=>b.hr),borderColor:'#f59e0b',borderDash:[3,3]}
+      ],'mmHg / bpm',50,200,[{y:140,label:'SBP limit',color:'rgba(220,38,38,0.3)'}]);
+    }
+    if(d.labs.length){
+      makeChart('cHb','Hb',d.labs.map(l=>l.date),[
+        {label:'Hb',data:d.labs.map(l=>l.hb),borderColor:'#dc2626'}
+      ],'g/dL',6,16,[{y:10,label:'Target ≥10',color:'rgba(34,197,94,0.4)'},{y:12,label:'Target ≤12',color:'rgba(34,197,94,0.4)'}]);
+    }
+    if(ktv.length){
+      makeChart('cKtV','Kt/V',ktv.map(s=>s.date),[
+        {label:'Kt/V',data:ktv.map(s=>s.kt_v),borderColor:'#7c3aed'}
+      ],'Kt/V',0,2.5,[{y:1.2,label:'Target ≥1.2',color:'rgba(34,197,94,0.4)'}]);
+    }
+    if(labK.length){
+      makeChart('cLab','Lab',d.labs.map(l=>l.date),[
+        {label:'K+ (mEq/L)',data:d.labs.map(l=>l.k),borderColor:'#f59e0b'},
+        {label:'Albumin (g/dL)',data:d.labs.map(l=>l.alb),borderColor:'#06b6d4'}
+      ],'',0,8,[{y:5.5,label:'K+ limit',color:'rgba(245,158,11,0.3)'}]);
+    }
+  }catch(e){el.textContent='❌ '+e.message;}
+}
+document.addEventListener('DOMContentLoaded',()=>load(6));
+</script>
+{% endblock %}
