@@ -586,6 +586,81 @@ INSERT INTO hd_schema_version (version, description)
 VALUES ('2.0.0', 'Clinic Profile & Accreditation — profile, staff, equipment, water, incidents, self-assessment')
 ON CONFLICT (version) DO NOTHING;
 
+-- ══════════════════════════════════════════════════════════
+-- F22: HD Work Sheet Interactive Data
+-- ══════════════════════════════════════════════════════════
+CREATE TABLE IF NOT EXISTS hd_worksheet_data (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NOT NULL REFERENCES hd_sessions(id) UNIQUE,
+    -- Pre-dialysis assessment (OY=true, ON=false, null=not checked)
+    assess_anxiety BOOLEAN,
+    assess_sleep_disturbance BOOLEAN,
+    assess_dyspnea BOOLEAN,
+    assess_orthopnea BOOLEAN,
+    assess_crepitation BOOLEAN,
+    assess_jvp_engorged BOOLEAN,
+    assess_arrhythmia BOOLEAN,
+    assess_fever BOOLEAN,
+    assess_headache BOOLEAN,
+    assess_nausea_vomiting BOOLEAN,
+    assess_anorexia BOOLEAN,
+    assess_weakness BOOLEAN,
+    assess_prolong_bleeding BOOLEAN,
+    assess_pale BOOLEAN,
+    assess_edema BOOLEAN,
+    assess_itching BOOLEAN,
+    assess_constipation BOOLEAN,
+    assess_urine BOOLEAN,
+    -- Prescription extras
+    test_leak BOOLEAN,                       -- Test leak O Y / O N
+    disinfectant VARCHAR(30),                -- 'disinfectant','paracetic','formalin','other'
+    -- Vascular access assessment
+    va_type VARCHAR(20),                     -- AVF/AVG/DLC/Perm Cath
+    va_thrill BOOLEAN,
+    va_bruit BOOLEAN,
+    va_site VARCHAR(50),
+    -- Nursing Diagnosis (free text or structured)
+    nursing_dx TEXT,
+    -- Complications (checked items)
+    comp_hypotension BOOLEAN,
+    comp_hypertension BOOLEAN,
+    comp_muscle_cramp BOOLEAN,
+    comp_chest_pain BOOLEAN,
+    comp_headache BOOLEAN,
+    comp_fever_chill BOOLEAN,
+    comp_arrhythmia BOOLEAN,
+    comp_va_problem BOOLEAN,
+    comp_dialyzer BOOLEAN,
+    comp_cardiac_arrest BOOLEAN,
+    comp_dds BOOLEAN,
+    comp_air_embolism BOOLEAN,
+    comp_no_complication BOOLEAN,
+    -- Technical complications
+    tech_blood_leak BOOLEAN,
+    tech_clot_dialyzer BOOLEAN,
+    tech_clotted_bloodline BOOLEAN,
+    tech_machine_problem BOOLEAN,
+    tech_needle_gt2 BOOLEAN,
+    tech_no_complication BOOLEAN,
+    -- Nursing notes & doctor order
+    nursing_note TEXT,
+    doctor_order TEXT,
+    -- Health Education (ข้อ 1 ใน 8 form improvements)
+    health_ed TEXT,
+    -- Nurse signatures
+    nurse_start_id INTEGER REFERENCES hd_users(id),
+    nurse_end_id INTEGER REFERENCES hd_users(id),
+    -- Timestamps
+    created_at TIMESTAMP DEFAULT NOW(),
+    updated_at TIMESTAMP DEFAULT NOW(),
+    updated_by INTEGER REFERENCES hd_users(id)
+);
+CREATE INDEX IF NOT EXISTS idx_hd_ws_session ON hd_worksheet_data(session_id);
+
+INSERT INTO hd_schema_version (version, description)
+VALUES ('2.1.0', 'HD Work Sheet Interactive — checklist, complications, nursing notes per session')
+ON CONFLICT (version) DO NOTHING;
+
 -- v2.0.1: Schema fixes (DROP FK / ALTER type / ADD COLUMN) are applied by the
 -- post-migration script in __init__.py, which runs every boot statement-by-statement.
 """

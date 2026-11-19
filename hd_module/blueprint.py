@@ -260,6 +260,12 @@ def hd_sheet_page(session_id):
     return render_template("hd_sheet.html", session_id=session_id)
 
 
+@hd_web.route("/worksheet/<int:session_id>")
+def hd_worksheet_page(session_id):
+    """HD Work Sheet Interactive — พยาบาลกรอก checklist."""
+    return render_template("hd_worksheet.html", session_id=session_id)
+
+
 @hd_web.route("/epo-dashboard/<hn>")
 def hd_epo_dashboard_page(hn):
     """EPO Response Dashboard page."""
@@ -581,6 +587,100 @@ def session_record_pdf(session_id):
     log_action(user_id=g.get("hd_user_id"), action="session.pdf", resource_type="session",
                resource_id=session_id, ip_address=request.remote_addr or "")
     return _pdf_response(data, session_filename(rec["hn"], rec["name"], rec["bed"], rec["shift"]))
+
+
+# ── Work Sheet Interactive API ─────────────────────────────
+
+_WS_BOOL_COLS = [
+    "assess_anxiety", "assess_sleep_disturbance", "assess_dyspnea", "assess_orthopnea",
+    "assess_crepitation", "assess_jvp_engorged", "assess_arrhythmia", "assess_fever",
+    "assess_headache", "assess_nausea_vomiting", "assess_anorexia", "assess_weakness",
+    "assess_prolong_bleeding", "assess_pale", "assess_edema", "assess_itching",
+    "assess_constipation", "assess_urine",
+    "test_leak", "va_thrill", "va_bruit",
+    "comp_hypotension", "comp_hypertension", "comp_muscle_cramp", "comp_chest_pain",
+    "comp_headache", "comp_fever_chill", "comp_arrhythmia", "comp_va_problem",
+    "comp_dialyzer", "comp_cardiac_arrest", "comp_dds", "comp_air_embolism", "comp_no_complication",
+    "tech_blood_leak", "tech_clot_dialyzer", "tech_clotted_bloodline",
+    "tech_machine_problem", "tech_needle_gt2", "tech_no_complication",
+]
+_WS_TEXT_COLS = ["disinfectant", "va_type", "va_site", "nursing_dx",
+                 "nursing_note", "doctor_order", "health_ed"]
+_WS_INT_COLS = ["nurse_start_id", "nurse_end_id"]
+_WS_ALL_COLS = _WS_BOOL_COLS + _WS_TEXT_COLS + _WS_INT_COLS
+
+
+@hd_bp.route("/sessions/<int:session_id>/worksheet-data", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def get_worksheet_data(session_id):
+    """Load Work Sheet checklist data for a session."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 500
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {', '.join(_WS_ALL_COLS)}, updated_at FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
+            row = cur.fetchone()
+            if not row:
+                return jsonify({"data": None, "saved": False})
+            d = {}
+            for i, col in enumerate(_WS_ALL_COLS):
+                d[col] = row[i]
+            d["updated_at"] = row[-1].isoformat() if row[-1] else None
+            return jsonify({"data": d, "saved": True})
+    except Exception as e:
+        logger.error("get_worksheet_data: %s", e)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+
+@hd_bp.route("/sessions/<int:session_id>/worksheet-data", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def save_worksheet_data(session_id):
+    """Save or update Work Sheet checklist data."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 500
+    body = request.get_json(silent=True) or {}
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            # Build values
+            vals = {}
+            for col in _WS_BOOL_COLS:
+                v = body.get(col)
+                vals[col] = bool(v) if v is not None else None
+            for col in _WS_TEXT_COLS:
+                vals[col] = body.get(col) or None
+            for col in _WS_INT_COLS:
+                v = body.get(col)
+                vals[col] = int(v) if v else None
+
+            cols = list(vals.keys())
+            placeholders = ", ".join(["%s"] * len(cols))
+            update_set = ", ".join([f"{c} = EXCLUDED.{c}" for c in cols])
+            sql = f"""INSERT INTO hd_worksheet_data (session_id, {', '.join(cols)}, updated_at, updated_by)
+                      VALUES (%s, {placeholders}, NOW(), %s)
+                      ON CONFLICT (session_id) DO UPDATE SET {update_set},
+                          updated_at = NOW(), updated_by = EXCLUDED.updated_by
+                      RETURNING id"""
+            params = [session_id] + [vals[c] for c in cols] + [g.get("hd_user_id")]
+            cur.execute(sql, params)
+            rid = cur.fetchone()[0]
+        conn.commit()
+        log_action(user_id=g.get("hd_user_id"), action="worksheet.save", resource_type="hd_worksheet_data",
+                   resource_id=session_id, ip_address=request.remote_addr or "")
+        return jsonify({"id": rid, "saved": True}), 200
+    except Exception as e:
+        logger.error("save_worksheet_data: %s", e)
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
 
 
 @hd_bp.route("/sessions/<int:session_id>/worksheet.pdf", methods=["GET"])

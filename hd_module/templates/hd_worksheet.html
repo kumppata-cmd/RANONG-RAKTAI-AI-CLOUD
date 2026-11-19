@@ -1,0 +1,392 @@
+{% extends "hd_base.html" %}
+{% block title %}📋 Work Sheet{% endblock %}
+{% block page_title %}📋 HD Work Sheet{% endblock %}
+
+{% block content %}
+<style>
+.ws-header{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:12px 16px;margin-bottom:12px}
+.ws-header .patient-name{font-size:1.1rem;font-weight:700}
+.ws-header .meta{font-size:.78rem;color:var(--fg-muted);margin-top:2px}
+.ws-section{background:var(--card-bg);border:1px solid var(--border);border-radius:12px;padding:12px 16px;margin-bottom:10px}
+.ws-section h3{font-size:.88rem;font-weight:700;margin:0 0 8px;padding-bottom:4px;border-bottom:1px solid var(--border)}
+.ws-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px}
+.ws-grid.three{grid-template-columns:1fr 1fr 1fr}
+.ws-item{display:flex;align-items:center;gap:6px;padding:4px 0;font-size:.82rem;cursor:pointer;user-select:none}
+.ws-item input[type=checkbox]{width:18px;height:18px;accent-color:#0d6efd;cursor:pointer}
+.ws-item.checked{color:var(--success);font-weight:600}
+.ws-item.oy{color:var(--danger);font-weight:600}
+.ws-weight{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-top:6px}
+.ws-weight .wt-row{display:flex;align-items:center;gap:6px;font-size:.82rem}
+.ws-weight .wt-label{min-width:70px;color:var(--fg-muted)}
+.ws-weight .wt-val{font-weight:700;font-size:.9rem}
+.ws-rx-row{display:flex;justify-content:space-between;font-size:.82rem;padding:3px 0;border-bottom:1px dotted var(--border)}
+.ws-rx-row .label{color:var(--fg-muted)}
+.ws-rx-row .val{font-weight:600}
+.ws-textarea{width:100%;border:1px solid var(--border);border-radius:8px;padding:8px;font-size:.82rem;min-height:50px;resize:vertical;font-family:inherit}
+.ws-va-row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.ws-va-btn{padding:4px 12px;border:2px solid var(--border);border-radius:8px;font-size:.8rem;cursor:pointer;background:var(--card-bg)}
+.ws-va-btn.active{border-color:#0d6efd;background:#0d6efd22;color:#0d6efd;font-weight:700}
+.ws-actions{display:flex;gap:8px;margin-top:12px;position:sticky;bottom:0;background:var(--bg);padding:10px 0;z-index:10}
+.ws-actions button{flex:1;padding:12px;border:none;border-radius:10px;font-size:.95rem;font-weight:700;cursor:pointer}
+.btn-save{background:#0d6efd;color:#fff}
+.btn-pdf{background:#198754;color:#fff}
+.ws-status{text-align:center;font-size:.75rem;color:var(--fg-muted);margin-top:4px}
+.ws-toast{position:fixed;top:20px;left:50%;transform:translateX(-50%);padding:10px 24px;border-radius:10px;color:#fff;font-weight:600;font-size:.85rem;z-index:999;display:none}
+.ws-toast.success{background:#198754}
+.ws-toast.danger{background:#dc3545}
+.assess-toggle{display:flex;gap:2px;margin-left:auto}
+.assess-toggle button{padding:2px 8px;border:1px solid var(--border);border-radius:4px;font-size:.65rem;cursor:pointer;background:var(--card-bg)}
+.assess-toggle button.oy{background:#dc354522;color:var(--danger);border-color:var(--danger)}
+.assess-toggle button.on{background:#19875422;color:var(--success);border-color:var(--success)}
+.assess-toggle button.active{font-weight:800}
+</style>
+
+<div id="wsToast" class="ws-toast"></div>
+
+<!-- Patient Header (auto-fill) -->
+<div class="ws-header" id="wsHeader">
+  <div class="patient-name" id="ptName">กำลังโหลด...</div>
+  <div class="meta" id="ptMeta"></div>
+</div>
+
+<!-- Section 1: Pre-dialysis Assessment -->
+<div class="ws-section">
+  <h3>🩺 Pre-dialysis Assessment</h3>
+  <div class="ws-grid" id="assessGrid"></div>
+</div>
+
+<!-- Weight (auto-fill, read-only) -->
+<div class="ws-section">
+  <h3>⚖️ น้ำหนัก / UF</h3>
+  <div class="ws-weight" id="weightGrid"></div>
+</div>
+
+<!-- Section 2: Prescription (auto-fill) -->
+<div class="ws-section">
+  <h3>💊 Prescription</h3>
+  <div id="rxInfo"></div>
+</div>
+
+<!-- Section 3: Vascular Access -->
+<div class="ws-section">
+  <h3>🩸 Vascular Access</h3>
+  <div class="ws-va-row" id="vaTypes"></div>
+  <div style="display:flex;gap:12px;margin-top:8px">
+    <label class="ws-item"><input type="checkbox" id="vaThrill"> Thrill ดี</label>
+    <label class="ws-item"><input type="checkbox" id="vaBruit"> Bruit ดี</label>
+  </div>
+  <input type="text" id="vaSite" placeholder="ตำแหน่งแทงเข็ม..." style="margin-top:6px;width:100%;padding:6px 10px;border:1px solid var(--border);border-radius:8px;font-size:.82rem">
+</div>
+
+<!-- Section 4: Test Leak & Disinfectant -->
+<div class="ws-section">
+  <h3>🧪 Test Leak / Disinfectant</h3>
+  <div style="display:flex;gap:12px;flex-wrap:wrap">
+    <label class="ws-item"><input type="checkbox" id="testLeak"> Test Leak ผ่าน</label>
+  </div>
+  <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap" id="disinfectantRow"></div>
+</div>
+
+<!-- Section 5: Nursing Diagnosis -->
+<div class="ws-section">
+  <h3>📝 Nursing Diagnosis</h3>
+  <textarea class="ws-textarea" id="nursingDx" placeholder="ข้อวินิจฉัยการพยาบาล..."></textarea>
+</div>
+
+<!-- Section 6: Complications -->
+<div class="ws-section">
+  <h3>⚠️ Complication</h3>
+  <div class="ws-grid" id="compGrid"></div>
+</div>
+
+<div class="ws-section">
+  <h3>🔧 Technical Complication</h3>
+  <div class="ws-grid" id="techGrid"></div>
+</div>
+
+<!-- Section 7: Notes -->
+<div class="ws-section">
+  <h3>📋 Nursing Note</h3>
+  <textarea class="ws-textarea" id="nursingNote" placeholder="บันทึกทางการพยาบาล..."></textarea>
+</div>
+
+<div class="ws-section">
+  <h3>👨‍⚕️ Doctor's Order</h3>
+  <textarea class="ws-textarea" id="doctorOrder" placeholder="คำสั่งแพทย์..."></textarea>
+</div>
+
+<div class="ws-section">
+  <h3>📚 Health Education</h3>
+  <textarea class="ws-textarea" id="healthEd" placeholder="สุขศึกษา/คำแนะนำ..."></textarea>
+</div>
+
+<!-- Actions -->
+<div class="ws-actions">
+  <button class="btn-save" onclick="saveWorksheet()">💾 บันทึก</button>
+  <button class="btn-pdf" onclick="openPDF()">📄 PDF</button>
+</div>
+<div class="ws-status" id="wsStatus"></div>
+
+<script>
+const SID = {{ session_id }};
+let _sessionData = null;
+let _wsData = null;
+
+const ASSESS_ITEMS = [
+  {key:'assess_anxiety', label:'Anxiety'},
+  {key:'assess_sleep_disturbance', label:'Sleep disturbance'},
+  {key:'assess_dyspnea', label:'Dyspnea'},
+  {key:'assess_orthopnea', label:'Orthopnea'},
+  {key:'assess_crepitation', label:'Crepitation'},
+  {key:'assess_jvp_engorged', label:'JVP engorged'},
+  {key:'assess_arrhythmia', label:'Arrhythmia'},
+  {key:'assess_fever', label:'Fever'},
+  {key:'assess_headache', label:'Headache'},
+  {key:'assess_nausea_vomiting', label:'Nausea/Vomiting'},
+  {key:'assess_anorexia', label:'Anorexia'},
+  {key:'assess_weakness', label:'Weakness'},
+  {key:'assess_prolong_bleeding', label:'Prolong bleeding'},
+  {key:'assess_pale', label:'Pale'},
+  {key:'assess_edema', label:'Edema'},
+  {key:'assess_itching', label:'Itching'},
+  {key:'assess_constipation', label:'Constipation'},
+  {key:'assess_urine', label:'Urine'},
+];
+
+const COMP_ITEMS = [
+  {key:'comp_hypotension', label:'Hypotension'},
+  {key:'comp_hypertension', label:'Hypertension'},
+  {key:'comp_muscle_cramp', label:'Muscle cramp'},
+  {key:'comp_chest_pain', label:'Chest pain'},
+  {key:'comp_headache', label:'Headache'},
+  {key:'comp_fever_chill', label:'Fever/chill'},
+  {key:'comp_arrhythmia', label:'Arrhythmia'},
+  {key:'comp_va_problem', label:'VA problem'},
+  {key:'comp_dialyzer', label:'Dialyzer'},
+  {key:'comp_cardiac_arrest', label:'Cardiac arrest'},
+  {key:'comp_dds', label:'DDS'},
+  {key:'comp_air_embolism', label:'Air embolism'},
+  {key:'comp_no_complication', label:'No Complication'},
+];
+
+const TECH_ITEMS = [
+  {key:'tech_blood_leak', label:'Blood leak'},
+  {key:'tech_clot_dialyzer', label:'Clot dialyzer'},
+  {key:'tech_clotted_bloodline', label:'Clotted bloodline'},
+  {key:'tech_machine_problem', label:'Machine problem'},
+  {key:'tech_needle_gt2', label:'>2 needle'},
+  {key:'tech_no_complication', label:'No complication'},
+];
+
+const VA_OPTIONS = ['AVF','AVG','DLC','Perm Cath'];
+const DISINFECT_OPTIONS = ['Disinfectant','Paracetic acid','Formalin','Other'];
+
+function toast(msg, type){
+  const el = document.getElementById('wsToast');
+  el.textContent = msg; el.className = 'ws-toast ' + type; el.style.display = 'block';
+  setTimeout(()=>{ el.style.display='none'; }, 2500);
+}
+
+/* ── Build UI ── */
+function buildAssessGrid(){
+  const el = document.getElementById('assessGrid');
+  el.innerHTML = ASSESS_ITEMS.map(a => `
+    <div class="ws-item" id="ai_${a.key}">
+      <span style="flex:1">${a.label}</span>
+      <div class="assess-toggle">
+        <button class="oy" data-key="${a.key}" data-val="true" onclick="toggleAssess(this)">OY</button>
+        <button class="on" data-key="${a.key}" data-val="false" onclick="toggleAssess(this)">ON</button>
+      </div>
+    </div>
+  `).join('');
+}
+
+function toggleAssess(btn){
+  const key = btn.dataset.key;
+  const val = btn.dataset.val === 'true';
+  const row = document.getElementById('ai_'+key);
+  const btns = row.querySelectorAll('.assess-toggle button');
+  // Toggle: if already active, clear; else set
+  const wasActive = btn.classList.contains('active');
+  btns.forEach(b=>b.classList.remove('active'));
+  row.classList.remove('oy','checked');
+  if(!wasActive){
+    btn.classList.add('active');
+    row.classList.add(val ? 'oy' : 'checked');
+  }
+}
+
+function setAssessValue(key, val){
+  const row = document.getElementById('ai_'+key);
+  if(!row) return;
+  const btns = row.querySelectorAll('.assess-toggle button');
+  btns.forEach(b=>b.classList.remove('active'));
+  row.classList.remove('oy','checked');
+  if(val === true){
+    btns[0].classList.add('active'); // OY
+    row.classList.add('oy');
+  } else if(val === false){
+    btns[1].classList.add('active'); // ON
+    row.classList.add('checked');
+  }
+}
+
+function getAssessValue(key){
+  const row = document.getElementById('ai_'+key);
+  if(!row) return null;
+  const active = row.querySelector('.assess-toggle button.active');
+  if(!active) return null;
+  return active.dataset.val === 'true';
+}
+
+function buildCompGrid(items, elId){
+  const el = document.getElementById(elId);
+  el.innerHTML = items.map(a => `
+    <label class="ws-item"><input type="checkbox" id="${a.key}"> ${a.label}</label>
+  `).join('');
+}
+
+function buildVA(){
+  document.getElementById('vaTypes').innerHTML = VA_OPTIONS.map(v =>
+    `<div class="ws-va-btn" data-va="${v}" onclick="selectVA(this)">${v}</div>`
+  ).join('');
+  document.getElementById('disinfectantRow').innerHTML = DISINFECT_OPTIONS.map(v =>
+    `<div class="ws-va-btn" data-dis="${v}" onclick="selectDis(this)">${v}</div>`
+  ).join('');
+}
+
+function selectVA(btn){
+  document.querySelectorAll('#vaTypes .ws-va-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+}
+function selectDis(btn){
+  document.querySelectorAll('#disinfectantRow .ws-va-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+/* ── Load session data (auto-fill) ── */
+function loadSession(){
+  hdFetch('/hd/api/v1/sessions/'+SID).then(r=>r.json()).then(d=>{
+    _sessionData = d;
+    const s = d;  // session data is at top level
+    document.getElementById('ptName').textContent = `${s.patient_name||'—'}`;
+    document.getElementById('ptMeta').innerHTML =
+      `HN: ${s.patient_hn||s.hn||'—'} · Bed: ${s.bed_number||'—'} · ${s.shift||''} · ${s.session_date||''} `+
+      `<span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:700;`+
+      `background:${s.status==='completed'?'#19875422':'#ffc10722'};color:${s.status==='completed'?'var(--success)':'#856404'}">`+
+      `${s.status==='completed'?'✅ เสร็จสิ้น':'🔄 กำลังฟอก'}</span>`;
+
+    // Weight auto-fill
+    const pre = s.pre_weight, post = s.post_weight, dw = s.dry_weight;
+    const gain = pre&&dw ? (pre-dw).toFixed(1) : '—';
+    const lose = pre&&post ? (pre-post).toFixed(1) : '—';
+    document.getElementById('weightGrid').innerHTML = [
+      ['Pre BW', pre ? pre+' kg' : '—'], ['Dry BW', dw ? dw+' kg' : '—'],
+      ['Wt Gain', gain+' kg'], ['Target UF', s.uf_goal ? s.uf_goal+' ml' : '—'],
+      ['Post BW', post ? post+' kg' : '—'], ['Wt lose', lose+' kg'],
+    ].map(([l,v])=>`<div class="wt-row"><span class="wt-label">${l}</span><span class="wt-val">${v}</span></div>`).join('');
+
+    // Prescription auto-fill (extras merged at top level)
+    const mac = s.machine || {};
+    const hep = s.heparin || {};
+    document.getElementById('rxInfo').innerHTML = [
+      ['Machine', [mac.brand, mac.model].filter(Boolean).join(' ') || '—'],
+      ['Dialyzer', s.dialyzer_type || '—'],
+      ['Reuse No.', s.dialyzer_reuse || '—'],
+      ['Heparin', hep.protocol || '—'],
+      ['Bolus', hep.bolus || '—'],
+      ['Maintenance', hep.maintenance || '—'],
+      ['Duration', (s.duration_hours||4)+' hr'],
+    ].map(([l,v])=>`<div class="ws-rx-row"><span class="label">${l}</span><span class="val">${v}</span></div>`).join('');
+
+    // VA auto-fill from patient
+    const va = s.vascular_access || s.access_type || '';
+    if(va){
+      document.querySelectorAll('#vaTypes .ws-va-btn').forEach(b=>{
+        if(b.dataset.va.toLowerCase() === va.toLowerCase()) b.classList.add('active');
+      });
+    }
+  }).catch(e=>{
+    document.getElementById('ptName').textContent = 'โหลดข้อมูลไม่สำเร็จ';
+  });
+}
+
+/* ── Load saved worksheet data ── */
+function loadWorksheetData(){
+  hdFetch('/hd/api/v1/sessions/'+SID+'/worksheet-data').then(r=>r.json()).then(d=>{
+    if(!d.data) { document.getElementById('wsStatus').textContent='ยังไม่เคยบันทึก'; return; }
+    _wsData = d.data;
+    // Assessment
+    ASSESS_ITEMS.forEach(a=>{ if(d.data[a.key]!=null) setAssessValue(a.key, d.data[a.key]); });
+    // Complications
+    COMP_ITEMS.forEach(a=>{ if(d.data[a.key]) document.getElementById(a.key).checked=true; });
+    TECH_ITEMS.forEach(a=>{ if(d.data[a.key]) document.getElementById(a.key).checked=true; });
+    // VA
+    if(d.data.va_type){
+      document.querySelectorAll('#vaTypes .ws-va-btn').forEach(b=>{
+        if(b.dataset.va === d.data.va_type) { b.classList.remove('active'); b.classList.add('active'); }
+      });
+    }
+    if(d.data.va_thrill) document.getElementById('vaThrill').checked=true;
+    if(d.data.va_bruit) document.getElementById('vaBruit').checked=true;
+    if(d.data.va_site) document.getElementById('vaSite').value=d.data.va_site;
+    // Test leak & disinfectant
+    if(d.data.test_leak) document.getElementById('testLeak').checked=true;
+    if(d.data.disinfectant){
+      document.querySelectorAll('#disinfectantRow .ws-va-btn').forEach(b=>{
+        if(b.dataset.dis === d.data.disinfectant) b.classList.add('active');
+      });
+    }
+    // Text fields
+    if(d.data.nursing_dx) document.getElementById('nursingDx').value=d.data.nursing_dx;
+    if(d.data.nursing_note) document.getElementById('nursingNote').value=d.data.nursing_note;
+    if(d.data.doctor_order) document.getElementById('doctorOrder').value=d.data.doctor_order;
+    if(d.data.health_ed) document.getElementById('healthEd').value=d.data.health_ed;
+    document.getElementById('wsStatus').textContent='บันทึกล่าสุด: '+(d.data.updated_at||'');
+  });
+}
+
+/* ── Save ── */
+function saveWorksheet(){
+  const body = {};
+  ASSESS_ITEMS.forEach(a=>{ body[a.key] = getAssessValue(a.key); });
+  COMP_ITEMS.forEach(a=>{ body[a.key] = document.getElementById(a.key).checked; });
+  TECH_ITEMS.forEach(a=>{ body[a.key] = document.getElementById(a.key).checked; });
+  // VA
+  const vaActive = document.querySelector('#vaTypes .ws-va-btn.active');
+  body.va_type = vaActive ? vaActive.dataset.va : null;
+  body.va_thrill = document.getElementById('vaThrill').checked;
+  body.va_bruit = document.getElementById('vaBruit').checked;
+  body.va_site = document.getElementById('vaSite').value || null;
+  // Test leak & disinfectant
+  body.test_leak = document.getElementById('testLeak').checked;
+  const disActive = document.querySelector('#disinfectantRow .ws-va-btn.active');
+  body.disinfectant = disActive ? disActive.dataset.dis : null;
+  // Text
+  body.nursing_dx = document.getElementById('nursingDx').value || null;
+  body.nursing_note = document.getElementById('nursingNote').value || null;
+  body.doctor_order = document.getElementById('doctorOrder').value || null;
+  body.health_ed = document.getElementById('healthEd').value || null;
+
+  hdFetch('/hd/api/v1/sessions/'+SID+'/worksheet-data',{
+    method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){toast(d.error,'danger');return}
+    toast('✅ บันทึกสำเร็จ','success');
+    document.getElementById('wsStatus').textContent='บันทึกล่าสุด: '+new Date().toLocaleString('th-TH');
+  }).catch(()=>toast('บันทึกล้มเหลว','danger'));
+}
+
+function openPDF(){
+  window.open('/hd/api/v1/sessions/'+SID+'/worksheet.pdf?token='+encodeURIComponent(getHdToken()||''),'_blank');
+}
+
+/* ── Init ── */
+buildAssessGrid();
+buildCompGrid(COMP_ITEMS, 'compGrid');
+buildCompGrid(TECH_ITEMS, 'techGrid');
+buildVA();
+loadSession();
+loadWorksheetData();
+</script>
+{% endblock %}

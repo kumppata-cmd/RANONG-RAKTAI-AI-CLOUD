@@ -2318,7 +2318,7 @@ function exportPDF(){
 
 function openWorkSheet(){
   if(!sessionData.session_id){ showToast('ยังไม่มี session','warning'); return; }
-  window.open('/hd/api/v1/sessions/'+sessionData.session_id+'/worksheet.pdf?token='+encodeURIComponent(getHdToken()||''),'_blank');
+  window.location.href='/hd/worksheet/'+sessionData.session_id;
 }
 </script>
 {% endblock %}

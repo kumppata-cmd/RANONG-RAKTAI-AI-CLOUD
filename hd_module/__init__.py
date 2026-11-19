@@ -196,6 +196,34 @@ def _run_hd_migrations():
                 """INSERT INTO hd_settings (key, value, description, updated_at)
                     VALUES ('alert_recipients', 'U1b1068cde88a06e88e53c014d1b83824', 'LINE userId แพทย์', NOW())
                     ON CONFLICT (key) DO NOTHING""",
+                # F22: HD Work Sheet Interactive Data
+                """CREATE TABLE IF NOT EXISTS hd_worksheet_data (
+                    id SERIAL PRIMARY KEY,
+                    session_id INTEGER NOT NULL UNIQUE REFERENCES hd_sessions(id),
+                    assess_anxiety BOOLEAN, assess_sleep_disturbance BOOLEAN,
+                    assess_dyspnea BOOLEAN, assess_orthopnea BOOLEAN,
+                    assess_crepitation BOOLEAN, assess_jvp_engorged BOOLEAN,
+                    assess_arrhythmia BOOLEAN, assess_fever BOOLEAN,
+                    assess_headache BOOLEAN, assess_nausea_vomiting BOOLEAN,
+                    assess_anorexia BOOLEAN, assess_weakness BOOLEAN,
+                    assess_prolong_bleeding BOOLEAN, assess_pale BOOLEAN,
+                    assess_edema BOOLEAN, assess_itching BOOLEAN,
+                    assess_constipation BOOLEAN, assess_urine BOOLEAN,
+                    test_leak BOOLEAN, disinfectant VARCHAR(30),
+                    va_type VARCHAR(20), va_thrill BOOLEAN, va_bruit BOOLEAN, va_site VARCHAR(50),
+                    nursing_dx TEXT,
+                    comp_hypotension BOOLEAN, comp_hypertension BOOLEAN, comp_muscle_cramp BOOLEAN,
+                    comp_chest_pain BOOLEAN, comp_headache BOOLEAN, comp_fever_chill BOOLEAN,
+                    comp_arrhythmia BOOLEAN, comp_va_problem BOOLEAN, comp_dialyzer BOOLEAN,
+                    comp_cardiac_arrest BOOLEAN, comp_dds BOOLEAN, comp_air_embolism BOOLEAN,
+                    comp_no_complication BOOLEAN,
+                    tech_blood_leak BOOLEAN, tech_clot_dialyzer BOOLEAN, tech_clotted_bloodline BOOLEAN,
+                    tech_machine_problem BOOLEAN, tech_needle_gt2 BOOLEAN, tech_no_complication BOOLEAN,
+                    nursing_note TEXT, doctor_order TEXT, health_ed TEXT,
+                    nurse_start_id INTEGER, nurse_end_id INTEGER,
+                    created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW(),
+                    updated_by INTEGER
+                )""",
             ]
             ok = 0
             for sql in fixes:

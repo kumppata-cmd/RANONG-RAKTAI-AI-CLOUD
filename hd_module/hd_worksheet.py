@@ -136,13 +136,14 @@ def _label_value(c, x, y, label, value, label_w=60, val_w=60, size=7):
 
 # ── main builder ─────────────────────────────────────────
 
-def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รักษ์ไต"):
+def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รักษ์ไต", ws_data=None):
     """Build HD Work Sheet PDF — แบบ B: วาด layout เหมือนฟอร์มกระดาษจริง 100%.
 
     ข้อมูลตรงช่องทุกจุดเพราะช่องกับตัวเลขสร้างพร้อมกัน
-    v10: +Health Education, +Nursing Dx, +full Complication, +checkbox ☑,
-         +HD No.ใหญ่, +ชื่อแพทย์, +QR Code
+    v11: +Interactive checklist from hd_worksheet_data (ws_data)
+         Pre-dialysis OY/ON, Complications, Nursing Dx, Notes
     """
+    ws = ws_data or {}
     _register_fonts()
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas as canvasmod
@@ -275,13 +276,30 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     wt_val_x = wt_lbl_x + 50  # weight value
     kg_x = wt_val_x + 32  # kg
 
+    # Map assessment item names → ws_data keys
+    _ASSESS_KEY_MAP = {
+        "Anxiety": "assess_anxiety", "Sleep disturbance": "assess_sleep_disturbance",
+        "Dyspnea": "assess_dyspnea", "Orthopnea": "assess_orthopnea",
+        "Crepitation": "assess_crepitation", "JVP engorged": "assess_jvp_engorged",
+        "Arrhythmia": "assess_arrhythmia", "Fever": "assess_fever",
+        "Headache": "assess_headache", "Nausea/Vomiting": "assess_nausea_vomiting",
+        "Anorexia": "assess_anorexia", "Weakness": "assess_weakness",
+        "Prolong bleeding": "assess_prolong_bleeding", "Pale": "assess_pale",
+        "Edema": "assess_edema", "Itching": "assess_itching",
+        "constipation": "assess_constipation", "Urine": "assess_urine",
+    }
+
     for i, item in enumerate(_PRE_DX_ITEMS):
         iy = top_y - i * RH
         # Assessment name
         cell(assess_x, iy - RH, 70, RH, item, sz=5.5)
-        # OY / ON
-        cell(oy_x, iy - RH, 18, RH, "OY", sz=5, align="center")
-        cell(on_x, iy - RH, 18, RH, "ON", sz=5, align="center")
+        # OY / ON — fill from ws_data if available
+        ws_key = _ASSESS_KEY_MAP.get(item)
+        ws_val = ws.get(ws_key) if ws_key else None
+        oy_mark = "☑" if ws_val is True else "OY"
+        on_mark = "☑" if ws_val is False else "ON"
+        cell(oy_x, iy - RH, 18, RH, oy_mark, sz=5, align="center")
+        cell(on_x, iy - RH, 18, RH, on_mark, sz=5, align="center")
         # Weight field
         wf = weight_map.get(i)
         if wf:
@@ -558,13 +576,29 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     cell(LM + 2 * q, y_bot, q, 10, "Nursing managment", sz=6, bold=True, align="center", bg=GRAY)
     cell(LM + 3 * q, y_bot, q, 10, "Docter note", sz=6, bold=True, align="center", bg=GRAY)
 
+    # Complication items + ws_data key mapping
     comp_items = ["Hypotenstion", "Hypertension", "Muscle cramp", "Chest pain",
                   "Headache", "Fever/chill", "Arrhythmia", "VA problem",
                   "Dialyzer", "Cardiac arrest", "DDS", "Air embolism",
                   "No Complication", "other"]
+    _COMP_KEY_MAP = {
+        "Hypotenstion": "comp_hypotension", "Hypertension": "comp_hypertension",
+        "Muscle cramp": "comp_muscle_cramp", "Chest pain": "comp_chest_pain",
+        "Headache": "comp_headache", "Fever/chill": "comp_fever_chill",
+        "Arrhythmia": "comp_arrhythmia", "VA problem": "comp_va_problem",
+        "Dialyzer": "comp_dialyzer", "Cardiac arrest": "comp_cardiac_arrest",
+        "DDS": "comp_dds", "Air embolism": "comp_air_embolism",
+        "No Complication": "comp_no_complication",
+    }
     # ข้อ 3: Technical complication ครบ + ข้อ 1: Health Education
     tech_items = ["Blood leak", "Clot dialyzer", "clotted bloodline",
                   "machine problem", ">2 needle", "No complication"]
+    _TECH_KEY_MAP = {
+        "Blood leak": "tech_blood_leak", "Clot dialyzer": "tech_clot_dialyzer",
+        "clotted bloodline": "tech_clotted_bloodline",
+        "machine problem": "tech_machine_problem", ">2 needle": "tech_needle_gt2",
+        "No complication": "tech_no_complication",
+    }
     health_ed = ["Nutrition", "Vascular access", "Exercise",
                  "Personal hygiene", "Medication", "Fluid control", "KT", "Other"]
     nurs_items = ["Monitor V/S", "Psycho support", "Oxygen therapy",
@@ -577,12 +611,18 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     max_rows = max(len(comp_items), len(nurs_items))
     for r in range(max_rows):
         ry = y_bot - (r + 1) * 8
-        # Complication
-        txt_c = f"☐ {comp_items[r]}" if r < len(comp_items) else ""
-        cell(LM, ry, q, 8, txt_c, sz=5)
-        # Technical + Health Education
+        # Complication — check from ws_data
+        if r < len(comp_items):
+            ck = _COMP_KEY_MAP.get(comp_items[r])
+            mark = "☑" if ck and ws.get(ck) else "☐"
+            cell(LM, ry, q, 8, f"{mark} {comp_items[r]}", sz=5)
+        else:
+            cell(LM, ry, q, 8, "", sz=5)
+        # Technical + Health Education — check from ws_data
         if r < len(tech_items):
-            cell(LM + q, ry, q, 8, f"☐ {tech_items[r]}", sz=5)
+            tk = _TECH_KEY_MAP.get(tech_items[r])
+            mark = "☑" if tk and ws.get(tk) else "☐"
+            cell(LM + q, ry, q, 8, f"{mark} {tech_items[r]}", sz=5)
         elif r == len(tech_items):
             cell(LM + q, ry, q, 8, "Health Education", sz=5.5, bold=True, bg=GRAY)
         elif r - len(tech_items) - 1 < len(health_ed):
@@ -990,6 +1030,7 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
 
     # Load extras (dialyzer, heparin, VA, nurse name, pre/post vitals, machine)
     extras = {}
+    ws_data = {}  # Interactive checklist data
     try:
         with conn.cursor() as cur:
             pid = rec.get("patient_id")
@@ -999,6 +1040,15 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
                 pid = pid_row[0] if pid_row else None
             if pid:
                 extras = _session_record_extras(cur, session_id, pid)
+            # Load interactive worksheet data
+            try:
+                cur.execute("SELECT * FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
+                ws_row = cur.fetchone()
+                if ws_row:
+                    col_names = [desc[0] for desc in cur.description]
+                    ws_data = dict(zip(col_names, ws_row))
+            except Exception:
+                pass  # table may not exist yet
     except Exception as e:
         logger.warning("hd_worksheet extras: %s", e)
 
@@ -1007,9 +1057,9 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
             pdf = build_overlay_pdf(rec, extras)
         except Exception as e:
             logger.warning("overlay PDF failed (%s) — fallback to draw mode", e)
-            pdf = build_worksheet_pdf(rec, extras, clinic_name)
+            pdf = build_worksheet_pdf(rec, extras, clinic_name, ws_data)
     else:
-        pdf = build_worksheet_pdf(rec, extras, clinic_name)
+        pdf = build_worksheet_pdf(rec, extras, clinic_name, ws_data)
 
     shift_th = SHIFT_TH.get(rec["shift"], rec["shift"])
     fname = f"HD-WorkSheet-{safe_name(rec['hn'], 12)}-{safe_name(rec['name'])}-{rec['date'].isoformat()}-{shift_th}.pdf"
