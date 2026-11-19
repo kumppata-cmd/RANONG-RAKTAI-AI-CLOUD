@@ -1,0 +1,77 @@
+{% extends "hd_base.html" %}
+{% block title %}🔬 Lab ผลเลือด{% endblock %}
+{% block nav_labs %}active{% endblock %}
+{% block page_title %}🔬 Lab ผลเลือด{% endblock %}
+
+{% block content %}
+<style>
+.lab-search { max-width: 400px; margin: 0 auto 16px; }
+.lab-search input { width: 100%; padding: 10px 14px; border: 2px solid var(--border); border-radius: 10px; font-size: 1rem; }
+.patient-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+.patient-card { background: var(--card-bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; cursor: pointer; transition: box-shadow .2s; }
+.patient-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,.12); }
+.patient-card .hn { font-size: .8rem; color: var(--fg-muted); }
+.patient-card .name { font-weight: 700; font-size: .95rem; margin-top: 2px; }
+.patient-card .lab-status { font-size: .75rem; margin-top: 6px; }
+.lab-ok { color: var(--success); }
+.lab-warn { color: var(--warning); }
+.lab-none { color: var(--fg-dim); }
+.add-lab-btn { display: inline-block; margin-top: 8px; padding: 4px 10px; border-radius: 6px; background: #0d6efd; color: #fff; font-size: .75rem; text-decoration: none; }
+</style>
+
+<div class="lab-search">
+  <input type="text" id="searchBox" placeholder="🔍 ค้นหา HN หรือชื่อ..." oninput="filterPatients()">
+</div>
+
+<div class="patient-list" id="patientList">
+  <div style="text-align:center;color:var(--fg-muted);grid-column:1/-1;">กำลังโหลด...</div>
+</div>
+
+<script>
+let _patients = [];
+function getHdToken(){ try{return localStorage.getItem('hd_token')||''}catch(e){return ''} }
+
+(function loadPatients(){
+  const token = getHdToken();
+  const headers = token ? {'Authorization':'Bearer '+token} : {};
+  fetch('/hd/api/v1/patients', {headers})
+    .then(r => r.json())
+    .then(data => {
+      _patients = data.patients || data || [];
+      renderPatients(_patients);
+    })
+    .catch(() => {
+      document.getElementById('patientList').innerHTML = '<div style="text-align:center;color:var(--danger)">ไม่สามารถโหลดรายชื่อได้</div>';
+    });
+})();
+
+function renderPatients(list){
+  const el = document.getElementById('patientList');
+  if(!list.length){ el.innerHTML = '<div style="text-align:center;color:var(--fg-muted);grid-column:1/-1;">ไม่พบผู้ป่วย</div>'; return; }
+  el.innerHTML = list.map(p => {
+    const hn = p.hn || p.patient_hn || '';
+    const name = p.name || p.patient_name || '';
+    const hasLab = p.latest_lab_date || p.lab_count;
+    const labInfo = hasLab
+      ? `<span class="lab-ok">✅ Lab ล่าสุด: ${p.latest_lab_date || 'มี'}</span>`
+      : `<span class="lab-none">ยังไม่มีผล Lab</span>`;
+    return `<div class="patient-card" onclick="window.location.href='/hd/labs/${hn}'">
+      <div class="hn">HN: ${hn}</div>
+      <div class="name">${name}</div>
+      <div class="lab-status">${labInfo}</div>
+      <a class="add-lab-btn" href="/hd/labs/${hn}" onclick="event.stopPropagation()">🔬 ดู/เพิ่ม Lab</a>
+    </div>`;
+  }).join('');
+}
+
+function filterPatients(){
+  const q = document.getElementById('searchBox').value.toLowerCase();
+  if(!q){ renderPatients(_patients); return; }
+  renderPatients(_patients.filter(p => {
+    const hn = (p.hn || p.patient_hn || '').toLowerCase();
+    const name = (p.name || p.patient_name || '').toLowerCase();
+    return hn.includes(q) || name.includes(q);
+  }));
+}
+</script>
+{% endblock %}

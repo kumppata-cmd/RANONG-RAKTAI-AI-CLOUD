@@ -242,6 +242,12 @@ def hd_settings_page():
     return render_template("hd_settings.html")
 
 
+@hd_web.route("/labs")
+def hd_labs_index():
+    """Lab Results — หน้ารวมเลือกคนไข้."""
+    return render_template("hd_labs_index.html")
+
+
 @hd_web.route("/labs/<hn>")
 def hd_labs_page(hn):
     """Lab Results page for a patient."""
