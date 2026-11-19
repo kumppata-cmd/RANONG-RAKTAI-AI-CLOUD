@@ -302,6 +302,12 @@ def water_ro_page():
     return render_template("hd_water_ro.html")
 
 
+@hd_web.route("/handover")
+def hd_handover_page():
+    """Shift Handover — สรุปส่งต่อเวรดิจิทัล."""
+    return render_template("hd_handover.html")
+
+
 @hd_web.route("/radar")
 def hd_radar_page():
     """ข้อ 5 (17 พ.ย. 2569): เรดาร์หัวหน้าเวร — ทุกเตียงเรียงตามความเร่งด่วน"""
@@ -814,48 +820,6 @@ def save_worksheet_data(session_id):
         return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
-
-
-@hd_bp.route("/sessions/<int:session_id>/worksheet-debug", methods=["GET"])
-@require_role("physician", "admin")
-def worksheet_debug(session_id):
-    """DEBUG: ตรวจสอบว่า worksheet data ถูกบันทึกและอ่านได้จริง."""
-    import os, psycopg2
-    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    result = {"session_id": session_id, "db_url_set": bool(db_url)}
-    try:
-        conn = psycopg2.connect(db_url, connect_timeout=5)
-        conn.autocommit = True
-        with conn.cursor() as cur:
-            # 1. Table exists?
-            cur.execute("SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name='hd_worksheet_data')")
-            result["table_exists"] = cur.fetchone()[0]
-
-            # 2. Row exists?
-            if result["table_exists"]:
-                cur.execute("SELECT COUNT(*) FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
-                result["row_count"] = cur.fetchone()[0]
-
-                # 3. Actual data
-                cur.execute("SELECT * FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
-                row = cur.fetchone()
-                if row:
-                    col_names = [desc[0] for desc in cur.description]
-                    data = dict(zip(col_names, row))
-                    # แสดงเฉพาะ fields ที่มีค่า
-                    result["non_null_fields"] = {k: v for k, v in data.items()
-                                                  if v is not None and k not in ('id', 'created_at', 'updated_at', 'updated_by')}
-                    result["all_fields_count"] = len(col_names)
-                else:
-                    result["row_data"] = None
-
-                # 4. All rows in table
-                cur.execute("SELECT session_id, assess_anxiety, comp_no_complication, updated_at FROM hd_worksheet_data ORDER BY id DESC LIMIT 5")
-                result["recent_rows"] = [{"session_id": r[0], "assess_anxiety": r[1], "comp_no_comp": r[2], "updated": str(r[3])} for r in cur.fetchall()]
-        conn.close()
-    except Exception as e:
-        result["error"] = str(e)
-    return jsonify(result)
 
 
 @hd_bp.route("/sessions/<int:session_id>/worksheet.pdf", methods=["GET"])
@@ -3156,87 +3120,6 @@ def hd_force_reset():
         return jsonify({"error": str(e)}), 500
 
 
-@hd_bp.route("/auth/test-login", methods=["GET"])
-def hd_test_login():
-    """Debug login — test each step individually."""
-    import os, psycopg2, traceback
-    secret = request.args.get("secret", "")
-    real_secret = os.environ.get("ADMIN_SECRET", "changeme")
-    if not secret or secret != real_secret:
-        return jsonify({"error": "Invalid secret"}), 403
-    username = request.args.get("user", "hd_admin")
-    password = request.args.get("pw", "admin1234")
-    steps = []
-    try:
-        # Step 1: DB connect
-        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-        steps.append({"step": "db_url", "ok": bool(db_url), "len": len(db_url)})
-        conn = psycopg2.connect(db_url, connect_timeout=5)
-        steps.append({"step": "db_connect", "ok": True})
-
-        # Step 2: Find user
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, username, password_hash, full_name, role, is_active, failed_attempts, locked_until FROM hd_users WHERE username = %s", (username,))
-            row = cur.fetchone()
-        steps.append({"step": "find_user", "ok": bool(row), "found": bool(row)})
-        if not row:
-            conn.close()
-            return jsonify({"steps": steps, "result": "user_not_found"})
-
-        user_id, uname, pw_hash, full_name, role, is_active, failed_attempts, locked_until = row
-        steps.append({"step": "user_info", "id": user_id, "role": role, "active": is_active,
-                       "failed": failed_attempts, "locked": str(locked_until) if locked_until else None,
-                       "hash_type": "bcrypt" if pw_hash.startswith("$2") else "sha256"})
-
-        # Step 3: Verify password
-        from .auth import verify_password
-        pw_ok = verify_password(password, pw_hash)
-        steps.append({"step": "verify_password", "ok": pw_ok})
-
-        # Step 4: Create token
-        from .auth import create_token
-        token = create_token(user_id, uname, role)
-        steps.append({"step": "create_token", "ok": bool(token), "token_prefix": token[:20] + "..."})
-
-        # Step 5: log_action
-        try:
-            log_action(user_id=user_id, action="test_login", resource_type="auth", ip_address="test")
-            steps.append({"step": "log_action", "ok": True})
-        except Exception as e2:
-            steps.append({"step": "log_action", "ok": False, "error": str(e2)})
-
-        conn.close()
-        return jsonify({"steps": steps, "result": "all_ok" if pw_ok else "wrong_password"})
-    except Exception as e:
-        steps.append({"step": "EXCEPTION", "error": str(e), "tb": traceback.format_exc()[-500:]})
-        return jsonify({"steps": steps, "result": "error"}), 500
-
-
-@hd_bp.route("/auth/debug-users", methods=["GET"])
-def hd_debug_users():
-    """Debug: list users + hash type (requires ADMIN_SECRET)."""
-    import os, psycopg2
-    secret = request.args.get("secret", "")
-    real_secret = os.environ.get("ADMIN_SECRET", "changeme")
-    if not secret or secret != real_secret:
-        return jsonify({"error": "Invalid secret"}), 403
-    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        return jsonify({"error": "No DATABASE_URL", "db_url": "empty"}), 503
-    try:
-        conn = psycopg2.connect(db_url, connect_timeout=5)
-        with conn.cursor() as cur:
-            cur.execute("SELECT id, username, role, is_active, failed_attempts, locked_until, substring(password_hash,1,10) as hash_prefix FROM hd_users ORDER BY id")
-            rows = cur.fetchall()
-        conn.close()
-        users = [{"id": r[0], "username": r[1], "role": r[2], "active": r[3],
-                  "failed": r[4], "locked": str(r[5]) if r[5] else None,
-                  "hash_prefix": r[6]} for r in rows]
-        return jsonify({"users": users, "db_ok": True, "count": len(users)})
-    except Exception as e:
-        return jsonify({"error": str(e), "db_url_len": len(db_url)}), 500
-
-
 @hd_bp.route("/auth/set-pin", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def hd_set_pin():
@@ -4124,8 +4007,72 @@ def update_session(session_id):
                 result["patient_summary"] = send_patient_summary(session_id, trigger="auto")
         except Exception as e:
             logger.warning("patient summary: %s", e)
+        # Auto Kt/V calculation if pre/post BUN available
+        try:
+            result["kt_v"] = _auto_kt_v_on_complete(session_id)
+        except Exception as e:
+            logger.warning("auto kt_v: %s", e)
 
     return jsonify(result)
+
+
+def _auto_kt_v_on_complete(session_id):
+    """Auto-calculate Kt/V when session completes and BUN data available."""
+    import os, psycopg2
+    from .kt_v_calculator import calculate_kt_v
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return None
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT s.pre_weight, s.post_weight, s.patient_id,
+                                  s.started_at, s.ended_at
+                           FROM hd_sessions s WHERE s.id = %s""", (session_id,))
+            s = cur.fetchone()
+            if not s or not s[0] or not s[1]:
+                return None
+            pre_w, post_w, pid = float(s[0]), float(s[1]), s[2]
+            # Calculate duration
+            duration = 4.0  # default
+            if s[3] and s[4]:
+                dur = (s[4] - s[3]).total_seconds() / 3600
+                if 1 <= dur <= 8:
+                    duration = round(dur, 1)
+            # Look for pre/post BUN in hd_lab_results (same day)
+            cur.execute("""SELECT bun FROM hd_lab_results
+                           WHERE patient_id = %s AND lab_type = 'pre_hd'
+                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+            pre_bun_row = cur.fetchone()
+            cur.execute("""SELECT bun FROM hd_lab_results
+                           WHERE patient_id = %s AND lab_type = 'post_hd'
+                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+            post_bun_row = cur.fetchone()
+            if not pre_bun_row or not post_bun_row or not pre_bun_row[0] or not post_bun_row[0]:
+                return {"skipped": "no pre/post BUN data"}
+            result = calculate_kt_v(
+                pre_bun=float(pre_bun_row[0]),
+                post_bun=float(post_bun_row[0]),
+                duration_hours=duration,
+                pre_weight=pre_w,
+                post_weight=post_w,
+            )
+            if result.get("kt_v"):
+                # Save to session
+                cur.execute("SAVEPOINT sp_ktv")
+                try:
+                    cur.execute("""UPDATE hd_sessions SET kt_v = %s, urr = %s WHERE id = %s""",
+                                (result["kt_v"], result.get("urr"), session_id))
+                    cur.execute("RELEASE SAVEPOINT sp_ktv")
+                except Exception:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_ktv")
+            conn.commit()
+            return result
+    except Exception as e:
+        logger.warning("auto_kt_v error: %s", e)
+        return None
+    finally:
+        conn.close()
 
 
 def _auto_worksheet_on_complete(session_id):
@@ -5891,7 +5838,8 @@ def get_patient(hn):
                 SELECT id, hn, hospital_hn, patient_name, date_of_birth,
                        gender, blood_type, allergies, vascular_access,
                        dry_weight, schedule_days, esa_drug, esa_dose,
-                       primary_diagnosis, is_active, created_at
+                       primary_diagnosis, is_active, created_at,
+                       COALESCE(bfr, 0) as bfr
                 FROM hd_patient_mapping WHERE hn = %s
             """, (hn,))
             row = cur.fetchone()
@@ -5926,6 +5874,7 @@ def get_patient(hn):
             "schedule_days": row[10], "esa_drug": row[11], "esa_dose": row[12],
             "primary_diagnosis": row[13], "is_active": row[14],
             "created_at": row[15].isoformat() if row[15] else None,
+            "bfr": row[16] if row[16] else None,
             "serology": sero,
             "default_shift": dshift,
         })
@@ -6010,6 +5959,43 @@ def get_patient_last_clinical(hn):
             except Exception as e:
                 cur.execute("ROLLBACK TO SAVEPOINT sp_lc_va")
                 logger.debug("last-clinical va: %s", e)
+
+            # BFR default from patient mapping
+            cur.execute("SAVEPOINT sp_lc_bfr")
+            try:
+                cur.execute("SELECT bfr FROM hd_patient_mapping WHERE id = %s", (pid,))
+                bfr_row = cur.fetchone()
+                if bfr_row and bfr_row[0]:
+                    result["default_bfr"] = bfr_row[0]
+                cur.execute("RELEASE SAVEPOINT sp_lc_bfr")
+            except Exception:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_lc_bfr")
+
+            # Dialysate defaults from latest prescription
+            cur.execute("SAVEPOINT sp_lc_rx")
+            try:
+                cur.execute("""SELECT duration_hours, dialysate_k, dialysate_ca, dialysate_hco3,
+                                      dialysate_na, dialysate_temp, dialysate_flow, blood_flow
+                               FROM hd_prescriptions
+                               WHERE patient_id = %s AND is_active = TRUE
+                               ORDER BY prescribed_date DESC LIMIT 1""", (pid,))
+                rx = cur.fetchone()
+                if rx:
+                    result["rx_duration"] = float(rx[0]) if rx[0] else None
+                    result["rx_dialysate_k"] = float(rx[1]) if rx[1] else None
+                    result["rx_dialysate_ca"] = float(rx[2]) if rx[2] else None
+                    result["rx_dialysate_hco3"] = float(rx[3]) if rx[3] else None
+                    result["rx_dialysate_na"] = float(rx[4]) if rx[4] else None
+                    result["rx_dialysate_temp"] = float(rx[5]) if rx[5] else None
+                    result["rx_dialysate_flow"] = float(rx[6]) if rx[6] else None
+                    result["rx_blood_flow"] = float(rx[7]) if rx[7] else None
+                    # Use rx blood_flow as BFR default if patient mapping BFR is empty
+                    if not result.get("default_bfr") and rx[7]:
+                        result["default_bfr"] = int(rx[7])
+                cur.execute("RELEASE SAVEPOINT sp_lc_rx")
+            except Exception as rx_e:
+                cur.execute("ROLLBACK TO SAVEPOINT sp_lc_rx")
+                logger.debug("last-clinical rx: %s", rx_e)
 
             # เครื่องฟอก (Machine) ที่ผูกเตียง — ดึงจาก bed_number ล่าสุดหรือเตียงที่เลือก
             cur.execute("SAVEPOINT sp_lc_machine")
@@ -6508,59 +6494,36 @@ def bed_dashboard():
     })
 
 
-@hd_bp.route("/debug/sessions-today", methods=["GET"])
-@require_role("physician", "admin")
-def debug_sessions_today():
-    """DEBUG: Show all sessions for today with shift info — for troubleshooting."""
-    import os, psycopg2
+
+# ── Shift Handover ────────────────────────────────────────
+
+@hd_bp.route("/handover", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def handover_summary():
+    """สรุปส่งต่อเวร — ข้อมูลทุกเตียง + alerts."""
+    import os
+    from .shift_handover import generate_handover_summary
+    shift = request.args.get("shift", "morning")
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    if not db_url:
-        return jsonify({"error": "no DB", "sessions": []})
-    try:
-        conn = psycopg2.connect(db_url, connect_timeout=5)
-        today = _thai_today()
-        sessions = []
-        with conn.cursor() as cur:
-            # Get ALL sessions for today — no shift filter
-            cur.execute("""
-                SELECT s.id, s.bed_number, s.status, s.shift,
-                       s.session_date, s.started_at, s.ended_at,
-                       p.hn, p.patient_name, s.uf_goal, s.pre_weight
-                FROM hd_sessions s
-                LEFT JOIN hd_patient_mapping p ON p.id = s.patient_id
-                WHERE s.session_date = %s
-                ORDER BY s.id DESC
-            """, (today.isoformat(),))
-            for r in cur.fetchall():
-                sessions.append({
-                    "session_id": r[0], "bed": r[1], "status": r[2],
-                    "shift": r[3], "shift_is_null": r[3] is None,
-                    "session_date": r[4].isoformat() if r[4] else None,
-                    "started_at": (r[5].isoformat() + "Z") if r[5] else None,
-                    "ended_at": (r[6].isoformat() + "Z") if r[6] else None,
-                    "hn": r[7], "patient_name": r[8],
-                    "uf_goal": r[9], "pre_weight": float(r[10]) if r[10] else None,
-                })
-            # Also check: what does the dashboard query return for each shift?
-            shifts_debug = {}
-            for shift in ["morning", "afternoon", "evening"]:
-                cur.execute("""
-                    SELECT COUNT(*) FROM hd_sessions s
-                    WHERE s.status IN ('scheduled', 'in_progress', 'completed')
-                      AND s.session_date = %s
-                      AND (s.shift = %s OR (s.shift IS NULL AND %s = 'morning'))
-                """, (today.isoformat(), shift, shift))
-                shifts_debug[shift] = cur.fetchone()[0]
-        conn.close()
-        return jsonify({
-            "today": today.isoformat(),
-            "thai_now": _thai_now().isoformat(),
-            "total_sessions_today": len(sessions),
-            "dashboard_would_show": shifts_debug,
-            "sessions": sessions,
-        })
-    except Exception as e:
-        return jsonify({"error": str(e), "sessions": []})
+    result = generate_handover_summary(db_url, shift)
+    return jsonify(result)
+
+
+@hd_bp.route("/handover/push", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def handover_push():
+    """ส่งสรุปส่งต่อเวรผ่าน LINE."""
+    import os
+    from .shift_handover import generate_handover_summary
+    data = request.get_json(silent=True) or {}
+    shift = data.get("shift", "morning")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    result = generate_handover_summary(db_url, shift)
+    msg = result.get("line_message", "")
+    if msg:
+        r = push_nurse_group(msg)
+        result["line_sent"] = r.get("ok", False) if isinstance(r, dict) else bool(r)
+    return jsonify(result)
 
 
 # ── KPI Dashboard ─────────────────────────────────────────

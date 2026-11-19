@@ -1,0 +1,104 @@
+{% extends "hd_base.html" %}
+{% block title %}ส่งต่อเวร — รักษ์ไต{% endblock %}
+{% block content %}
+<div style="max-width:800px;margin:0 auto;padding:12px">
+<h2 style="text-align:center;margin-bottom:12px">📋 สรุปส่งต่อเวร</h2>
+
+<div style="display:flex;gap:8px;justify-content:center;margin-bottom:16px">
+  <button class="btn" id="btnMorn" onclick="loadShift('morning')" style="padding:8px 16px">🌅 เช้า</button>
+  <button class="btn" id="btnAftn" onclick="loadShift('afternoon')" style="padding:8px 16px">☀️ บ่าย</button>
+  <button class="btn" id="btnEve" onclick="loadShift('evening')" style="padding:8px 16px">🌙 ค่ำ</button>
+</div>
+
+<div id="handoverContent" style="font-size:.9rem">กำลังโหลด...</div>
+
+<div style="text-align:center;margin-top:16px">
+  <button class="btn btn-primary" onclick="pushHandover()" style="padding:10px 24px">📱 ส่ง LINE กลุ่มพยาบาล</button>
+</div>
+<div id="pushStatus" style="text-align:center;margin-top:8px;font-size:.85rem"></div>
+</div>
+
+<script>
+let currentShift = 'morning';
+const shiftTh = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
+
+async function loadShift(shift){
+  currentShift = shift;
+  ['btnMorn','btnAftn','btnEve'].forEach(id=>{
+    document.getElementById(id).style.background = '';
+    document.getElementById(id).style.fontWeight = '';
+  });
+  const btnMap = {morning:'btnMorn', afternoon:'btnAftn', evening:'btnEve'};
+  const btn = document.getElementById(btnMap[shift]);
+  if(btn){btn.style.background='var(--primary,#2563eb)';btn.style.color='#fff';btn.style.fontWeight='700';}
+
+  const el = document.getElementById('handoverContent');
+  el.textContent = 'กำลังโหลด...';
+  try{
+    const r = await hdFetch('/hd/api/v1/handover?shift='+shift);
+    const d = await r.json();
+    if(d.error){el.textContent='❌ '+d.error;return;}
+    let h = '';
+
+    // Active beds
+    if(d.active_beds && d.active_beds.length){
+      h += `<div class="card" style="margin-bottom:12px;padding:12px"><h3 style="margin:0 0 8px">🟢 กำลังฟอก (${d.active_beds.length} เตียง)</h3>`;
+      h += '<table style="width:100%;border-collapse:collapse;font-size:.82rem">';
+      h += '<tr style="border-bottom:2px solid var(--border)"><th style="text-align:left;padding:4px">เตียง</th><th style="text-align:left;padding:4px">ชื่อ</th><th>BP</th><th>HR</th><th>เวลา</th></tr>';
+      d.active_beds.forEach(b=>{
+        h += `<tr style="border-bottom:1px solid var(--border,#eee)">
+          <td style="padding:4px;font-weight:700">${b.bed}</td>
+          <td style="padding:4px">${b.name}<br><span style="color:var(--fg-muted);font-size:.75rem">${b.hn}</span></td>
+          <td style="padding:4px;text-align:center">${b.last_bp}</td>
+          <td style="padding:4px;text-align:center">${b.last_hr}</td>
+          <td style="padding:4px;text-align:center">⏱${b.elapsed}</td>
+        </tr>`;
+      });
+      h += '</table></div>';
+    } else {
+      h += '<div class="card" style="padding:12px;text-align:center">🟢 ไม่มีเตียงกำลังฟอก</div>';
+    }
+
+    // Completed beds
+    if(d.completed_beds && d.completed_beds.length){
+      h += `<div class="card" style="margin-bottom:12px;padding:12px"><h3 style="margin:0 0 8px">✅ เสร็จแล้ว (${d.completed_beds.length})</h3>`;
+      d.completed_beds.forEach(b=>{
+        h += `<div style="padding:4px 0;border-bottom:1px solid var(--border,#eee)">เตียง ${b.bed}: ${b.name} (${b.hn}) — UF ${b.actual_uf||'-'} mL${b.notes?' · '+b.notes:''}</div>`;
+      });
+      h += '</div>';
+    }
+
+    // Pending alerts
+    if(d.pending_alerts && d.pending_alerts.length){
+      h += `<div class="card" style="margin-bottom:12px;padding:12px;border-left:4px solid var(--danger,red)"><h3 style="margin:0 0 8px">🚨 Alert ยังไม่ตอบรับ (${d.pending_alerts.length})</h3>`;
+      d.pending_alerts.forEach(a=>{
+        const em = a.severity==='critical'?'🔴':'⚠️';
+        h += `<div style="padding:4px 0">${em} ${a.title} — ${a.patient} เตียง ${a.bed}</div>`;
+      });
+      h += '</div>';
+    }
+
+    el.innerHTML = h || '<div style="text-align:center;color:var(--fg-muted)">ไม่มีข้อมูล</div>';
+  }catch(e){el.textContent='❌ โหลดไม่ได้: '+e.message;}
+}
+
+async function pushHandover(){
+  const el = document.getElementById('pushStatus');
+  el.textContent = 'กำลังส่ง...';
+  try{
+    const r = await hdFetch('/hd/api/v1/handover/push',{method:'POST',body:JSON.stringify({shift:currentShift})});
+    const d = await r.json();
+    if(d.line_sent) el.innerHTML='✅ ส่ง LINE สำเร็จ';
+    else el.innerHTML='⚠️ ส่งไม่สำเร็จ — ตรวจ nurse_group_id ใน Settings';
+    el.style.color = d.line_sent ? 'var(--success)' : 'var(--danger)';
+  }catch(e){el.textContent='❌ '+e.message;el.style.color='var(--danger)';}
+}
+
+document.addEventListener('DOMContentLoaded', ()=>{
+  const h = new Date().getHours();
+  if(h < 12) loadShift('morning');
+  else if(h < 18) loadShift('afternoon');
+  else loadShift('evening');
+});
+</script>
+{% endblock %}

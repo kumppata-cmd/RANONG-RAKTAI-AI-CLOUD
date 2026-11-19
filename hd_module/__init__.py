@@ -719,6 +719,23 @@ def _start_daily_reminder_scheduler(app):
                             from .blueprint import run_quality_report
                             res = ops.run_guarded("quality_report", run_quality_report, trigger="scheduled", timeout=600) or {}
                             logger.info("Quality report %s: drive=%s line=%s", res.get("month"), res.get("drive"), res.get("line_sent"))
+                    # Patient Education: weekly tips every Monday 10:00
+                    if now.weekday() == 0 and now.hour == 10 and _claim_once(app, "patient_education", now.date()):
+                        with app.app_context():
+                            try:
+                                from .patient_education import run_weekly_tips
+                                from .blueprint import push_nurse_group, get_setting_value
+                                from flask import current_app
+                                _pe_push = current_app.config.get("LINE_PUSH_FN")
+                                _pe_db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+                                if _pe_db and _pe_push:
+                                    import psycopg2 as _pg
+                                    _pe_conn = _pg.connect(_pe_db, connect_timeout=10)
+                                    _pe_res = run_weekly_tips(_pe_conn, _pe_push, get_setting_value)
+                                    _pe_conn.close()
+                                    logger.info("Patient education tip: %s", _pe_res)
+                            except Exception as pe_err:
+                                logger.warning("Patient education: %s", pe_err)
             except Exception as e:
                 logger.error("Reminder scheduler error: %s", e)
             time.sleep(300)  # Check every 5 minutes
