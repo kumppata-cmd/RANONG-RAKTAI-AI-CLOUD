@@ -1221,8 +1221,11 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
         return None, None
 
     # Load extras (dialyzer, heparin, VA, nurse name, pre/post vitals, machine)
+    # _session_record_extras uses SAVEPOINTs which require autocommit=False
     extras = {}
     try:
+        was_ac = conn.autocommit
+        conn.autocommit = False  # SAVEPOINTs need transaction mode
         with conn.cursor() as cur:
             pid = rec.get("patient_id")
             if not pid:
@@ -1231,8 +1234,16 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
                 pid = pid_row[0] if pid_row else None
             if pid:
                 extras = _session_record_extras(cur, session_id, pid)
+        conn.commit()
+        conn.autocommit = was_ac
+        logger.info("hd_worksheet extras loaded: %s", [k for k in extras.keys() if extras.get(k)])
     except Exception as e:
-        logger.warning("hd_worksheet extras: %s", e)
+        logger.warning("hd_worksheet extras FAILED: %s", e)
+        try:
+            conn.rollback()
+            conn.autocommit = True
+        except Exception:
+            pass
 
     # Load interactive worksheet data — NEW connection to guarantee clean state
     ws_data = {}
