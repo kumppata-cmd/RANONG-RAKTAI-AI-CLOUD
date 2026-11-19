@@ -596,7 +596,7 @@ def session_worksheet_pdf(session_id):
     conn = psycopg2.connect(db_url, connect_timeout=5)
     conn.autocommit = True
     try:
-        mode = request.args.get("mode", "overlay")  # overlay=แบบA, draw=แบบB
+        mode = request.args.get("mode", "draw")  # draw=แบบB (default), overlay=แบบA
         data, fname = load_and_build(conn, session_id,
                                      get_setting_value("clinic_name", "") or "ระนอง รักษ์ไต",
                                      mode=mode)
@@ -7256,10 +7256,16 @@ _LAB_NORMAL_RANGES = {
 }
 
 
+@hd_bp.route("/patients/hn/<hn>/labs", methods=["GET"])
 @hd_bp.route("/patients/<hn>/labs", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def get_patient_labs(hn):
-    """Get lab results history with abnormal flags."""
+    """Get lab results history with abnormal flags.
+
+    Two URL patterns:
+      /patients/hn/<hn>/labs   — explicit HN lookup (preferred)
+      /patients/<hn>/labs      — legacy (caution: numeric HN may match <int:patient_id> route)
+    """
     import os
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not db_url:
@@ -7314,6 +7320,7 @@ def get_patient_labs(hn):
         return jsonify({"labs": [], "error": str(e)})
 
 
+@hd_bp.route("/patients/hn/<hn>/labs", methods=["POST"])
 @hd_bp.route("/patients/<hn>/labs", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def save_lab_result(hn):

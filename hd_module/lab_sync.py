@@ -201,23 +201,91 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
 
 
 def latest_for_patients(cur, patient_ids):
-    """{patient_id: {date, status, values…, flags[]}} for the newest lab row each."""
+    """{patient_id: {date, status, values…, flags[]}} for the newest lab row each.
+
+    Merges from TWO tables:
+      - hd_lab_docs   (OCR document pipeline — column names: hb, k, phos, …)
+      - hd_lab_results (manual HD Lab module  — column names: hemoglobin, potassium, …)
+    Returns whichever is newer per patient.
+    """
     if not patient_ids:
         return {}
-    cur.execute(f"""
-        SELECT DISTINCT ON (patient_id) patient_id, COALESCE(specimen_date, doc_date) AS d, status, doc_id,
-               {', '.join(NUMERIC_COLS + TEXT_COLS)}
-        FROM hd_lab_docs WHERE patient_id = ANY(%s)
-        ORDER BY patient_id, COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC
-    """, (list(patient_ids),))
     out = {}
-    for r in cur.fetchall():
-        row = dict(zip(NUMERIC_COLS + TEXT_COLS, r[4:]))
-        for c in NUMERIC_COLS:
-            if row[c] is not None:
-                row[c] = float(row[c])
-        row.update({"date": r[1].isoformat() if r[1] else None, "status": r[2], "doc_id": r[3],
-                    "age_days": (_thai_today() - r[1]).days if r[1] else None})
-        row["flags"] = flags_for(row)
-        out[r[0]] = row
+
+    # 1) From hd_lab_docs (OCR pipeline)
+    try:
+        cur.execute(f"""
+            SELECT DISTINCT ON (patient_id) patient_id, COALESCE(specimen_date, doc_date) AS d, status, doc_id,
+                   {', '.join(NUMERIC_COLS + TEXT_COLS)}
+            FROM hd_lab_docs WHERE patient_id = ANY(%s)
+            ORDER BY patient_id, COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC
+        """, (list(patient_ids),))
+        for r in cur.fetchall():
+            row = dict(zip(NUMERIC_COLS + TEXT_COLS, r[4:]))
+            for c in NUMERIC_COLS:
+                if row[c] is not None:
+                    row[c] = float(row[c])
+            row.update({"date": r[1].isoformat() if r[1] else None, "status": r[2], "doc_id": r[3],
+                        "age_days": (_thai_today() - r[1]).days if r[1] else None,
+                        "source": "ocr"})
+            row["flags"] = flags_for(row)
+            out[r[0]] = row
+    except Exception as e:
+        logger.warning("latest_for_patients hd_lab_docs: %s", e)
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT _lab_docs_sp")
+        except Exception:
+            pass
+
+    # 2) From hd_lab_results (manual entry) — column name mapping
+    _MANUAL_MAP = {
+        "hemoglobin": "hb", "hematocrit": "hct", "potassium": "k", "sodium": "na",
+        "calcium": "ca", "phosphate": "phos", "bun": "bun", "creatinine": "creatinine",
+        "albumin": "albumin", "ipth": "pth", "ferritin": "ferritin", "tsat": "tsat",
+        "kt_v": "ktv", "urr": "urr",
+    }
+    _MANUAL_TEXT_MAP = {"hepatitis_b": "hbsag", "hepatitis_c": "antihcv"}
+    manual_num_cols = list(_MANUAL_MAP.keys())
+    manual_text_cols = list(_MANUAL_TEXT_MAP.keys())
+    try:
+        cur.execute(f"""
+            SELECT DISTINCT ON (patient_id) patient_id, lab_date, source, id,
+                   {', '.join(manual_num_cols + manual_text_cols)}
+            FROM hd_lab_results WHERE patient_id = ANY(%s)
+            ORDER BY patient_id, lab_date DESC NULLS LAST, id DESC
+        """, (list(patient_ids),))
+        for r in cur.fetchall():
+            pid, lab_date, src, rid = r[0], r[1], r[2], r[3]
+            vals = r[4:]
+            row = {c: None for c in NUMERIC_COLS + TEXT_COLS}
+            # Map manual columns to standard names
+            for i, mc in enumerate(manual_num_cols):
+                std = _MANUAL_MAP[mc]
+                v = vals[i]
+                if v is not None:
+                    row[std] = float(v)
+            for i, mc in enumerate(manual_text_cols):
+                std = _MANUAL_TEXT_MAP[mc]
+                v = vals[len(manual_num_cols) + i]
+                if v:
+                    row[std] = "positive" if v.lower() in ("positive", "reactive", "+") else "negative"
+
+            d_iso = lab_date.isoformat() if lab_date else None
+            age = (_thai_today() - lab_date).days if lab_date else None
+            row.update({"date": d_iso, "status": "manual", "doc_id": f"manual-{rid}",
+                        "age_days": age, "source": "manual"})
+            row["flags"] = flags_for(row)
+
+            # Keep whichever is newer
+            existing = out.get(pid)
+            if existing:
+                ex_date = existing.get("date") or ""
+                new_date = d_iso or ""
+                if new_date > ex_date:
+                    out[pid] = row
+            else:
+                out[pid] = row
+    except Exception as e:
+        logger.warning("latest_for_patients hd_lab_results: %s", e)
+
     return out

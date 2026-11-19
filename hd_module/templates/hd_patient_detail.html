@@ -210,7 +210,7 @@ function renderSessions(sessions){
       <td>${preW} → ${postW}</td>
       <td>${uf}</td>
       <td style="max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${s.notes||'-'}</td>
-      <td><a href="/hd/api/v1/sessions/${s.id}/worksheet.pdf" target="_blank" onclick="event.stopPropagation()" style="font-size:.75rem;text-decoration:none;">📋</a></td>
+      <td><a href="/hd/api/v1/sessions/${s.id}/worksheet.pdf?token=${encodeURIComponent(getHdToken()||'')}" target="_blank" onclick="event.stopPropagation()" style="font-size:.75rem;text-decoration:none;">📋</a></td>
     </tr>`;
   }).join('');
 }

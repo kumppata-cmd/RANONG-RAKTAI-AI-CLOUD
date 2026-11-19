@@ -103,7 +103,7 @@ function flagClass(key,val){
 }
 
 function loadLabs(){
-  hdFetch('/hd/api/v1/patients/'+HN+'/labs').then(r=>r.json()).then(d=>{
+  hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs').then(r=>r.json()).then(d=>{
     if(d.error){document.getElementById('labPatient').textContent='Error: '+d.error;return}
     /* Latest lab cards */
     const latest=d.labs&&d.labs[0]?d.labs[0]:{};
@@ -151,7 +151,7 @@ function saveLab(){
     hepatitis_b:document.getElementById('lHbv').value||null,
     hepatitis_c:document.getElementById('lHcv').value||null,
   };
-  hdFetch('/hd/api/v1/patients/'+HN+'/labs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
+  hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
     .then(r=>r.json()).then(d=>{
       if(d.error){showToast(d.error,'danger');return}
       showToast('บันทึกผล Lab สำเร็จ','success');
