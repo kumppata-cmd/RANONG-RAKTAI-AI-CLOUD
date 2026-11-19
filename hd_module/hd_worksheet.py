@@ -346,9 +346,20 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     dialyzer = ex.get("dialyzer_type", "") or ""
     reuse = ex.get("dialyzer_reuse")
     hep = ex.get("heparin", {}) or {}
-    hep_bolus = hep.get("bolus", "")
-    hep_maint = hep.get("maintenance", "")
+    hep_bolus = hep.get("bolus", "") or ""
+    hep_maint = hep.get("maintenance", "") or ""
     hep_protocol = (hep.get("protocol", "") or "").lower()
+    # Fallback: parse heparin_dose from hd_sessions (e.g. "Heparin 1500/1500")
+    if not hep_bolus and not hep_maint:
+        import re as _re
+        _hd_raw = str(ex.get("heparin_dose") or rec.get("heparin_dose") or "")
+        _nums = _re.findall(r'(\d+)', _hd_raw)
+        if len(_nums) >= 2:
+            hep_bolus, hep_maint = _nums[0], _nums[1]
+        elif len(_nums) == 1:
+            hep_bolus = _nums[0]
+        if _nums and not hep_protocol:
+            hep_protocol = "heparin"
     duration = rec.get("duration_hr") or _DURATION_HR
 
     # Row definitions: (label, value, label2, value2)
@@ -397,7 +408,7 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     _lmwh_checked = (_lmwh_ck == _X)
     _free_checked = (_free_ck == _X)
     col2 = [
-        ("Anticoagulant", "", False),
+        ("Anticoagulant", "", None),  # header — no checkbox
         ("Heparin", "", _hep_checked),
         ("LMWH", "", _lmwh_checked),
         ("Other", "", False),
