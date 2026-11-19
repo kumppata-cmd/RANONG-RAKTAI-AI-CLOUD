@@ -603,6 +603,14 @@ _WS_BOOL_COLS = [
     "comp_dialyzer", "comp_cardiac_arrest", "comp_dds", "comp_air_embolism", "comp_no_complication",
     "tech_blood_leak", "tech_clot_dialyzer", "tech_clotted_bloodline",
     "tech_machine_problem", "tech_needle_gt2", "tech_no_complication",
+    # Nursing Management
+    "nm_monitor_vs", "nm_psycho_support", "nm_oxygen", "nm_trendelenburg",
+    "nm_decrease_ufr", "nm_decrease_bfr", "nm_hypertonic", "nm_access_flow",
+    "nm_hot_compress", "nm_cold_compress", "nm_aspirate",
+    "nm_chang_dialyzer", "nm_chang_bloodline", "nm_post_hd_care",
+    # Health Education
+    "he_nutrition", "he_vascular_access", "he_exercise", "he_personal_hygiene",
+    "he_medication", "he_fluid_control", "he_kt",
 ]
 _WS_TEXT_COLS = ["disinfectant", "va_type", "va_site", "nursing_dx",
                  "nursing_note", "doctor_order", "health_ed",
@@ -673,6 +681,7 @@ _WS_CREATE_SQL = """CREATE TABLE IF NOT EXISTS hd_worksheet_data (
 
 
 _WS_ALTER_SQLS = [
+    # Doctor Note
     "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_fever VARCHAR(10)",
     "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_dyspnea VARCHAR(10)",
     "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_chest_pain VARCHAR(10)",
@@ -684,6 +693,29 @@ _WS_ALTER_SQLS = [
     "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS discharge_mobility VARCHAR(20)",
     "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_sbp INTEGER",
     "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_dbp INTEGER",
+    # Nursing Management
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_monitor_vs BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_psycho_support BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_oxygen BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_trendelenburg BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_decrease_ufr BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_decrease_bfr BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_hypertonic BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_access_flow BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_hot_compress BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_cold_compress BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_aspirate BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_chang_dialyzer BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_chang_bloodline BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS nm_post_hd_care BOOLEAN",
+    # Health Education
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_nutrition BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_vascular_access BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_exercise BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_personal_hygiene BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_medication BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_fluid_control BOOLEAN",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS he_kt BOOLEAN",
 ]
 
 

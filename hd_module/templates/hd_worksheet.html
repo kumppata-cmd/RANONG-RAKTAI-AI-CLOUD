@@ -104,6 +104,16 @@
   <div class="ws-grid" id="techGrid"></div>
 </div>
 
+<div class="ws-section">
+  <h3>🏥 Nursing Management</h3>
+  <div class="ws-grid" id="nmGrid"></div>
+</div>
+
+<div class="ws-section">
+  <h3>📚 Health Education</h3>
+  <div class="ws-grid" id="heGrid"></div>
+</div>
+
 <!-- Section 7: Notes -->
 <div class="ws-section">
   <h3>📋 Nursing Note</h3>
@@ -207,6 +217,33 @@ const TECH_ITEMS = [
   {key:'tech_machine_problem', label:'Machine problem'},
   {key:'tech_needle_gt2', label:'>2 needle'},
   {key:'tech_no_complication', label:'No complication'},
+];
+
+const NM_ITEMS = [
+  {key:'nm_monitor_vs', label:'Monitor V/S'},
+  {key:'nm_psycho_support', label:'Psycho support'},
+  {key:'nm_oxygen', label:'Oxygen therapy'},
+  {key:'nm_trendelenburg', label:'Trendelenburg position'},
+  {key:'nm_decrease_ufr', label:'Decrease UFR'},
+  {key:'nm_decrease_bfr', label:'Decrease BFR'},
+  {key:'nm_hypertonic', label:'Hypertonic solution'},
+  {key:'nm_access_flow', label:'Monitor access flow'},
+  {key:'nm_hot_compress', label:'Hot compress'},
+  {key:'nm_cold_compress', label:'Cold compress'},
+  {key:'nm_aspirate', label:'Aware Aspirate'},
+  {key:'nm_chang_dialyzer', label:'Chang dialyzer'},
+  {key:'nm_chang_bloodline', label:'Chang bloodline'},
+  {key:'nm_post_hd_care', label:'Post HD care'},
+];
+
+const HE_ITEMS = [
+  {key:'he_nutrition', label:'Nutrition'},
+  {key:'he_vascular_access', label:'Vascular access'},
+  {key:'he_exercise', label:'Exercise'},
+  {key:'he_personal_hygiene', label:'Personal hygiene'},
+  {key:'he_medication', label:'Medication'},
+  {key:'he_fluid_control', label:'Fluid control'},
+  {key:'he_kt', label:'KT'},
 ];
 
 const VA_OPTIONS = ['AVF','AVG','DLC','Perm Cath'];
@@ -476,6 +513,8 @@ async function loadWorksheetData(){
     // Complications
     COMP_ITEMS.forEach(a=>{ if(d.data[a.key] === true) document.getElementById(a.key).checked=true; });
     TECH_ITEMS.forEach(a=>{ if(d.data[a.key] === true) document.getElementById(a.key).checked=true; });
+    NM_ITEMS.forEach(a=>{ if(d.data[a.key] === true) document.getElementById(a.key).checked=true; });
+    HE_ITEMS.forEach(a=>{ if(d.data[a.key] === true) document.getElementById(a.key).checked=true; });
     // VA
     if(d.data.va_type){
       document.querySelectorAll('#vaTypes .ws-va-btn').forEach(b=>{
@@ -530,6 +569,8 @@ function saveWorksheet(){
   ASSESS_ITEMS.forEach(a=>{ body[a.key] = getAssessValue(a.key); });
   COMP_ITEMS.forEach(a=>{ body[a.key] = document.getElementById(a.key).checked; });
   TECH_ITEMS.forEach(a=>{ body[a.key] = document.getElementById(a.key).checked; });
+  NM_ITEMS.forEach(a=>{ body[a.key] = document.getElementById(a.key).checked; });
+  HE_ITEMS.forEach(a=>{ body[a.key] = document.getElementById(a.key).checked; });
   // VA
   const vaActive = document.querySelector('#vaTypes .ws-va-btn.active');
   body.va_type = vaActive ? vaActive.dataset.va : null;
@@ -595,6 +636,8 @@ function _wsInit(){
   buildAssessGrid();
   buildCompGrid(COMP_ITEMS, 'compGrid');
   buildCompGrid(TECH_ITEMS, 'techGrid');
+  buildCompGrid(NM_ITEMS, 'nmGrid');
+  buildCompGrid(HE_ITEMS, 'heGrid');
   buildVA();
   buildDxGrid();
   loadSession();

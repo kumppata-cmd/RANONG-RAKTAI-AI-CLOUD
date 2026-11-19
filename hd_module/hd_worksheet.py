@@ -343,8 +343,11 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     machine = ex.get("machine", {}) or {}
     machine_label = f"{machine.get('brand', '')} {machine.get('model', '')}".strip() if machine else ""
     machine_sn = machine.get("serial", "") if machine else ""
-    dialyzer = ex.get("dialyzer_type", "") or ""
-    reuse = ex.get("dialyzer_reuse")
+    dialyzer = ex.get("dialyzer_type", "") or rec.get("dialyzer_type", "") or ""
+    reuse = ex.get("dialyzer_reuse") or rec.get("dialyzer_reuse")
+    # Fallback machine from rec if extras didn't have it
+    if not machine_label:
+        machine_label = ex.get("machine_name", "") or ""
     hep = ex.get("heparin", {}) or {}
     hep_bolus = hep.get("bolus", "") or ""
     hep_maint = hep.get("maintenance", "") or ""
@@ -721,11 +724,21 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     }
     health_ed = ["Nutrition", "Vascular access", "Exercise",
                  "Personal hygiene", "Medication", "Fluid control", "KT", "Other"]
+    _HE_KEY_MAP = {"Nutrition": "he_nutrition", "Vascular access": "he_vascular_access",
+                   "Exercise": "he_exercise", "Personal hygiene": "he_personal_hygiene",
+                   "Medication": "he_medication", "Fluid control": "he_fluid_control", "KT": "he_kt"}
     nurs_items = ["Monitor V/S", "Psycho support", "Oxygen therapy",
                   "Trendelenburg position", "Decrease UFR", "Decrease BFR",
                   "Hypertonic solution", "moniter access flow",
                   "Hot compress", "Cold compress", "Aware Aspirate",
                   "Chang dialyzer", "Chang bloodline", "Post HD care"]
+    _NM_KEY_MAP = {"Monitor V/S": "nm_monitor_vs", "Psycho support": "nm_psycho_support",
+                   "Oxygen therapy": "nm_oxygen", "Trendelenburg position": "nm_trendelenburg",
+                   "Decrease UFR": "nm_decrease_ufr", "Decrease BFR": "nm_decrease_bfr",
+                   "Hypertonic solution": "nm_hypertonic", "moniter access flow": "nm_access_flow",
+                   "Hot compress": "nm_hot_compress", "Cold compress": "nm_cold_compress",
+                   "Aware Aspirate": "nm_aspirate", "Chang dialyzer": "nm_chang_dialyzer",
+                   "Chang bloodline": "nm_chang_bloodline", "Post HD care": "nm_post_hd_care"}
     doctor_items = ["ไข้", "เหนื่อย", "แน่นหน้าอก", "ปวดหัว", "ตะคริว"]
     _DX_KEY_MAP = {"ไข้": "dx_fever", "เหนื่อย": "dx_dyspnea", "แน่นหน้าอก": "dx_chest_pain",
                     "ปวดหัว": "dx_headache", "ตะคริว": "dx_cramp"}
@@ -757,17 +770,22 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         elif r == len(tech_items):
             cell(LM + q, ry, q, 8, "Health Education", sz=5.5, bold=True, bg=GRAY)
         elif r - len(tech_items) - 1 < len(health_ed):
+            he_name = health_ed[r - len(tech_items) - 1]
+            hk = _HE_KEY_MAP.get(he_name)
+            is_hk = bool(hk and ws.get(hk))
             cell(LM + q, ry, q, 8)
-            draw_checkbox(LM + q + 2, ry + 1, checked=False, size=_cb_sz)
+            draw_checkbox(LM + q + 2, ry + 1, checked=is_hk, size=_cb_sz)
             c.setFont("Loma", 5)
             c.setFillColor(HexColor("#000000"))
-            c.drawString(LM + q + 9, ry + 2, health_ed[r - len(tech_items) - 1])
+            c.drawString(LM + q + 9, ry + 2, he_name)
         else:
             cell(LM + q, ry, q, 8)
-        # Nursing management — draw_checkbox
+        # Nursing management — draw_checkbox from ws_data
         if r < len(nurs_items):
+            nk = _NM_KEY_MAP.get(nurs_items[r])
+            is_nk = bool(nk and ws.get(nk))
             cell(LM + 2 * q, ry, q, 8)
-            draw_checkbox(LM + 2 * q + 2, ry + 1, checked=False, size=_cb_sz)
+            draw_checkbox(LM + 2 * q + 2, ry + 1, checked=is_nk, size=_cb_sz)
             c.setFont("Loma", 5)
             c.setFillColor(HexColor("#000000"))
             c.drawString(LM + 2 * q + 9, ry + 2, nurs_items[r])
