@@ -343,13 +343,19 @@
   </div>
 
   <!-- Action Buttons -->
-  <div class="grid-2" style="margin-bottom:16px;">
+  <div class="grid-2" style="margin-bottom:8px;">
     <button class="btn btn-primary btn-lg" onclick="openModal('vitalModal')">
       ❤️ บันทึก Vital Signs
     </button>
     <button class="btn btn-warning btn-lg" onclick="openUfModal()">
       💧 บันทึก UF
     </button>
+  </div>
+  <div style="text-align:center;margin-bottom:16px">
+    <button id="voiceBtn" onclick="toggleVoice()" class="btn" style="padding:10px 20px;border-radius:30px;background:linear-gradient(135deg,#7c3aed,#1e40af);color:#fff;font-size:.85rem">
+      🎤 สั่งด้วยเสียง
+    </button>
+    <div id="voiceStatus" style="font-size:.78rem;margin-top:4px;color:var(--fg-muted);display:none"></div>
   </div>
   <!-- HD Sheet link -->
   <a id="hdSheetLink" href="#" class="btn btn-outline" style="width:100%;text-align:center;margin-bottom:16px;padding:12px;font-size:.9rem;display:none;" onclick="return true;">
@@ -1567,6 +1573,108 @@ function loadIdhRisk(){
         recs.map(x=>`<div style="font-size:.78rem;padding:4px 8px;margin:3px 0;border-left:3px solid ${pri[x.priority]||'var(--border)'};background:var(--bg);border-radius:0 6px 6px 0">${x.icon} ${x.text}</div>`).join('');
     } else { recsEl.style.display = 'none'; }
   }).catch(()=>{});
+}
+
+/* ── Voice Command — สั่งด้วยเสียง ── */
+let voiceActive = false;
+let recognition = null;
+
+function toggleVoice(){
+  if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)){
+    showToast('เบราว์เซอร์ไม่รองรับ Voice — ใช้ Chrome หรือ Safari','danger');
+    return;
+  }
+  if(voiceActive){ stopVoice(); return; }
+  startVoice();
+}
+
+function startVoice(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  recognition = new SR();
+  recognition.lang = 'th-TH';
+  recognition.continuous = true;
+  recognition.interimResults = true;
+
+  const btn = document.getElementById('voiceBtn');
+  const st = document.getElementById('voiceStatus');
+  btn.style.background = '#dc2626';
+  btn.textContent = '🔴 กำลังฟัง... (กดหยุด)';
+  st.style.display = 'block';
+  st.textContent = 'พูด: "BP 130/80" หรือ "HR 88" หรือ "SPO2 99"';
+  voiceActive = true;
+
+  recognition.onresult = function(e){
+    let final = '';
+    for(let i = e.resultIndex; i < e.results.length; i++){
+      if(e.results[i].isFinal) final += e.results[i][0].transcript;
+    }
+    if(final) processVoice(final.trim());
+  };
+  recognition.onerror = function(e){
+    st.textContent = '❌ ' + (e.error === 'no-speech' ? 'ไม่ได้ยินเสียง — ลองพูดอีกครั้ง' : e.error);
+  };
+  recognition.onend = function(){
+    if(voiceActive) recognition.start(); // auto-restart
+  };
+  recognition.start();
+}
+
+function stopVoice(){
+  voiceActive = false;
+  if(recognition) recognition.stop();
+  document.getElementById('voiceBtn').style.background = 'linear-gradient(135deg,#7c3aed,#1e40af)';
+  document.getElementById('voiceBtn').textContent = '🎤 สั่งด้วยเสียง';
+  document.getElementById('voiceStatus').style.display = 'none';
+}
+
+function processVoice(text){
+  const st = document.getElementById('voiceStatus');
+  st.textContent = '🗣 "' + text + '"';
+
+  // Parse: "BP 130/80" or "BP 130 80" or "ความดัน 130/80"
+  let m = text.match(/(?:bp|บีพี|ความดัน|เลือด)\s*(\d{2,3})\s*[\/\s]\s*(\d{2,3})/i);
+  if(m){
+    const sbp = parseInt(m[1]), dbp = parseInt(m[2]);
+    if(sbp > 50 && sbp < 300 && dbp > 20 && dbp < 200){
+      document.getElementById('sbp').value = sbp;
+      document.getElementById('dbp').value = dbp;
+      st.innerHTML = `✅ BP ${sbp}/${dbp} — <b>กรอกแล้ว!</b>`;
+      showToast(`🎤 BP ${sbp}/${dbp} กรอกแล้ว`,'success');
+      return;
+    }
+  }
+
+  // Parse: "HR 88" or "ชีพจร 88"
+  m = text.match(/(?:hr|เอชอาร์|ชีพจร|หัวใจ|heart)\s*(\d{2,3})/i);
+  if(m){
+    const hr = parseInt(m[1]);
+    if(hr > 30 && hr < 250){
+      const el = document.getElementById('hr') || document.getElementById('heart_rate');
+      if(el){ el.value = hr; st.innerHTML = `✅ HR ${hr} — <b>กรอกแล้ว!</b>`; showToast(`🎤 HR ${hr} กรอกแล้ว`,'success'); return; }
+    }
+  }
+
+  // Parse: "SPO2 99" or "ออกซิเจน 99"
+  m = text.match(/(?:spo2|spo|ออกซิเจน|oxygen|แซท)\s*(\d{2,3})/i);
+  if(m){
+    const spo = parseInt(m[1]);
+    if(spo > 50 && spo <= 100){
+      const el = document.getElementById('spo2');
+      if(el){ el.value = spo; st.innerHTML = `✅ SpO2 ${spo}% — <b>กรอกแล้ว!</b>`; showToast(`🎤 SpO2 ${spo}% กรอกแล้ว`,'success'); return; }
+    }
+  }
+
+  // Parse: "อุณหภูมิ 36.5" or "temp 36.5"
+  m = text.match(/(?:temp|อุณหภูมิ|ไข้)\s*(\d{2,3}\.?\d?)/i);
+  if(m){
+    const t = parseFloat(m[1]);
+    if(t > 30 && t < 42){
+      const el = document.getElementById('temp') || document.getElementById('temperature');
+      if(el){ el.value = t; st.innerHTML = `✅ Temp ${t}°C — <b>กรอกแล้ว!</b>`; showToast(`🎤 Temp ${t}°C กรอกแล้ว`,'success'); return; }
+    }
+  }
+
+  st.textContent = '❓ ไม่เข้าใจ "' + text + '" — ลองพูด: BP 130/80, HR 88, SPO2 99';
 }
 
 /* ── WOW #4: AI UF Coach ── */

@@ -389,6 +389,12 @@ def scheduler_page():
     return render_template("hd_scheduler.html")
 
 
+@hd_web.route("/ai")
+def ai_chat_page():
+    """🤖 AI Assistant — ถามอะไรก็ตอบจากข้อมูลจริง."""
+    return render_template("hd_ai_chat.html")
+
+
 @hd_web.route("/srt-report")
 def srt_report_page():
     """ศ.ร.ต. Auto Report — รายงานคุณภาพรายเดือน."""
@@ -6679,6 +6685,281 @@ def session_uf_coach(session_id):
         })
     except Exception as e:
         logger.error("uf-coach error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── AI Dialysis Twin — ฝาแฝดดิจิทัล ─────────────────────
+
+@hd_bp.route("/patients/<hn>/twin", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patient_dialysis_twin(hn):
+    """AI Dialysis Twin — ทำนายจาก pattern ย้อนหลังของคนไข้คนนี้.
+
+    วิเคราะห์:
+    1. BP drop pattern — ชั่วโมงที่กี่มักตก + ปัจจัยเสี่ยง
+    2. IDWG pattern — น้ำหนักมักขึ้นเท่าไร
+    3. Best UF rate — อัตราที่ไม่เคย IDH
+    4. Optimal duration — เวลาที่ Kt/V ถึงเป้า
+    5. Risk prediction สำหรับรอบถัดไป
+    """
+    import os, psycopg2
+    from datetime import timedelta
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, patient_name, dry_weight, vascular_access FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            p = cur.fetchone()
+            if not p:
+                conn.close()
+                return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+            pid, name, dw, va = p
+
+            # Collect last 20 completed sessions
+            cur.execute("""SELECT s.id, s.session_date, s.pre_weight, s.post_weight,
+                                  s.actual_uf, s.started_at, s.ended_at, s.kt_v
+                           FROM hd_sessions s WHERE s.patient_id = %s AND s.status = 'completed'
+                           ORDER BY s.session_date DESC, s.id DESC LIMIT 20""", (pid,))
+            sessions = cur.fetchall()
+            n = len(sessions)
+
+            twin = {
+                "hn": hn, "name": name, "sessions_analyzed": n,
+                "predictions": [], "insights": [], "risk_score": 0,
+            }
+
+            if n < 3:
+                twin["message"] = f"ต้องมีข้อมูลอย่างน้อย 3 รอบ (มี {n} รอบ) เพื่อสร้าง Digital Twin"
+                conn.close()
+                return jsonify(twin)
+
+            # 1. IDWG Pattern
+            idwg_list = []
+            for s in sessions:
+                if s[2] and dw and dw > 0:
+                    idwg_kg = float(s[2]) - float(dw)
+                    idwg_pct = idwg_kg / float(dw) * 100
+                    idwg_list.append({"kg": round(idwg_kg, 1), "pct": round(idwg_pct, 1)})
+            if idwg_list:
+                avg_idwg = round(sum(x["kg"] for x in idwg_list) / len(idwg_list), 1)
+                max_idwg = max(x["kg"] for x in idwg_list)
+                twin["idwg_pattern"] = {
+                    "avg_kg": avg_idwg, "max_kg": max_idwg,
+                    "avg_pct": round(sum(x["pct"] for x in idwg_list) / len(idwg_list), 1),
+                    "over_5pct_count": sum(1 for x in idwg_list if x["pct"] > 5),
+                }
+                if avg_idwg > 3:
+                    twin["insights"].append({"icon": "⚖️", "text": f"น้ำหนักมักขึ้นเฉลี่ย {avg_idwg} kg — แนะนำควบคุมน้ำ/เกลือ"})
+                twin["predictions"].append({"icon": "⚖️", "label": "น้ำหนักรอบหน้า",
+                    "value": f"~{float(dw) + avg_idwg:.1f} kg (ขึ้น ~{avg_idwg} kg)", "confidence": min(n*5, 85)})
+
+            # 2. BP Drop Pattern
+            bp_drops = []
+            idh_sessions = 0
+            for s in sessions:
+                cur.execute("""SELECT sbp, dbp, recorded_at FROM hd_vital_signs
+                               WHERE session_id = %s AND sbp > 0 ORDER BY recorded_at""", (s[0],))
+                vitals = cur.fetchall()
+                if len(vitals) >= 2:
+                    first_sbp = vitals[0][0]
+                    min_sbp = min(v[0] for v in vitals)
+                    drop = first_sbp - min_sbp
+                    if drop > 20:
+                        # Find which hour the drop happened
+                        start = s[5]
+                        min_v = min(vitals, key=lambda v: v[0])
+                        if start and min_v[2]:
+                            hour = (min_v[2] - start).total_seconds() / 3600
+                            bp_drops.append({"drop": drop, "hour": round(hour, 1), "nadir": min_sbp})
+                    if min_sbp < 90:
+                        idh_sessions += 1
+
+            if bp_drops:
+                avg_hour = round(sum(d["hour"] for d in bp_drops) / len(bp_drops), 1)
+                avg_drop = round(sum(d["drop"] for d in bp_drops) / len(bp_drops))
+                twin["bp_pattern"] = {
+                    "drops_in_sessions": len(bp_drops), "total_sessions": n,
+                    "avg_drop_hour": avg_hour, "avg_drop_mmhg": avg_drop,
+                    "idh_sessions": idh_sessions, "idh_rate": round(idh_sessions/n*100, 1),
+                }
+                twin["predictions"].append({"icon": "💓", "label": "BP มักตก",
+                    "value": f"ชั่วโมงที่ {avg_hour} (ลง ~{avg_drop} mmHg)", "confidence": min(len(bp_drops)*10, 80)})
+                if idh_sessions > 0:
+                    twin["insights"].append({"icon": "🔴",
+                        "text": f"IDH เกิด {idh_sessions}/{n} รอบ ({round(idh_sessions/n*100)}%) — ระวังชั่วโมงที่ {avg_hour}"})
+
+            # 3. Best UF rate (rate ที่ไม่เคย IDH)
+            uf_rates = []
+            for s in sessions:
+                if s[4] and s[5] and s[6]:
+                    dur = (s[6] - s[5]).total_seconds() / 3600
+                    if dur > 0:
+                        rate = float(s[4]) / dur / 1000  # L/hr
+                        cur.execute("SELECT MIN(sbp) FROM hd_vital_signs WHERE session_id = %s AND sbp > 0", (s[0],))
+                        min_sbp = (cur.fetchone() or [None])[0]
+                        uf_rates.append({"rate": round(rate, 1), "min_sbp": min_sbp, "idh": min_sbp and min_sbp < 90})
+            safe_rates = [r["rate"] for r in uf_rates if not r["idh"]]
+            if safe_rates:
+                max_safe = max(safe_rates)
+                avg_safe = round(sum(safe_rates) / len(safe_rates), 1)
+                twin["uf_pattern"] = {"max_safe_rate": max_safe, "avg_safe_rate": avg_safe}
+                twin["predictions"].append({"icon": "💧", "label": "UF rate ปลอดภัย",
+                    "value": f"≤{max_safe} L/hr (เฉลี่ย {avg_safe})", "confidence": min(len(safe_rates)*8, 85)})
+
+            # 4. Kt/V pattern
+            ktvs = [float(s[7]) for s in sessions if s[7]]
+            if ktvs:
+                avg_ktv = round(sum(ktvs) / len(ktvs), 2)
+                twin["ktv_pattern"] = {"avg": avg_ktv, "min": round(min(ktvs), 2), "max": round(max(ktvs), 2)}
+                if avg_ktv < 1.2:
+                    twin["insights"].append({"icon": "🧮", "text": f"Kt/V เฉลี่ย {avg_ktv} (ต่ำกว่าเป้า 1.2) — พิจารณาเพิ่มเวลาฟอกหรือ BFR"})
+
+            # 5. Risk score (0-100)
+            risk = 0
+            if twin.get("bp_pattern", {}).get("idh_rate", 0) > 20:
+                risk += 30
+            elif twin.get("bp_pattern", {}).get("idh_rate", 0) > 10:
+                risk += 15
+            if twin.get("idwg_pattern", {}).get("avg_pct", 0) > 5:
+                risk += 20
+            elif twin.get("idwg_pattern", {}).get("avg_pct", 0) > 3:
+                risk += 10
+            if ktvs and sum(ktvs)/len(ktvs) < 1.0:
+                risk += 25
+            elif ktvs and sum(ktvs)/len(ktvs) < 1.2:
+                risk += 10
+            twin["risk_score"] = min(risk, 100)
+            twin["risk_level"] = "high" if risk >= 50 else ("moderate" if risk >= 25 else "low")
+
+            if not twin["insights"]:
+                twin["insights"].append({"icon": "✅", "text": "ผู้ป่วยรายนี้ฟอกสม่ำเสมอ ไม่มีปัญหาที่ต้องระวังเป็นพิเศษ"})
+
+        conn.close()
+        return jsonify(twin)
+    except Exception as e:
+        logger.error("twin error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── AI Assistant (Chat + LINE) ─────────────────────────────
+
+@hd_bp.route("/ai/ask", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def ai_assistant_ask():
+    """AI Assistant — ถามอะไรก็ตอบจาก DB (rule-based, no external AI).
+
+    รองรับ:
+    - สรุปคนไข้ HN/ชื่อ
+    - ใครKt/Vไม่ถึง / Hbต่ำ / ขาดนัด
+    - เตียงว่าง / วันนี้ / พรุ่งนี้
+    - เปรียบเทียบ / สถิติ
+    """
+    import os, psycopg2, re
+    from .group_assistant import answer as ga_answer, match as ga_match
+    data = request.get_json(silent=True) or {}
+    question = data.get("question", "").strip()
+    if not question:
+        return jsonify({"error": "กรุณาพิมพ์คำถาม"}), 400
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        # Try group_assistant first (handles: เตียง, วันนี้, alert, esa, น้ำ, HN/name)
+        reply = ga_answer(conn, question)
+
+        # Extended queries not in group_assistant
+        low = question.lower()
+        extended = None
+
+        if any(w in low for w in ("kt/v ไม่ถึง", "ktv ต่ำ", "adequacy", "ใครยัง")):
+            with conn.cursor() as cur:
+                cur.execute("""SELECT p.patient_name, p.hn, s.kt_v, s.session_date
+                               FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                               WHERE s.status = 'completed' AND s.kt_v IS NOT NULL AND s.kt_v < 1.2
+                               AND s.session_date >= CURRENT_DATE - INTERVAL '30 days'
+                               ORDER BY s.kt_v ASC LIMIT 15""")
+                rows = cur.fetchall()
+            if rows:
+                extended = f"🧮 Kt/V < 1.2 (30 วัน) — {len(rows)} คน:\n" + \
+                    "\n".join(f"• {r[0]} (HN {r[1]}) Kt/V={float(r[2]):.2f} ({r[3].strftime('%d/%m')})" for r in rows)
+            else:
+                extended = "✅ ทุกคน Kt/V ≥ 1.2 ใน 30 วันที่ผ่านมา"
+
+        elif any(w in low for w in ("hb ต่ำ", "ซีด", "anemia", "โลหิตจาง")):
+            with conn.cursor() as cur:
+                cur.execute("""SELECT p.patient_name, p.hn, l.hb, l.result_date
+                               FROM hd_lab_results l JOIN hd_patient_mapping p ON p.id = l.patient_id
+                               WHERE l.hb IS NOT NULL AND l.hb < 10
+                               AND l.result_date >= CURRENT_DATE - INTERVAL '60 days'
+                               ORDER BY l.hb ASC LIMIT 15""")
+                rows = cur.fetchall()
+            if rows:
+                extended = f"🩸 Hb < 10 (60 วัน) — {len(rows)} คน:\n" + \
+                    "\n".join(f"• {r[0]} (HN {r[1]}) Hb={float(r[2]):.1f} ({r[3].strftime('%d/%m')})" for r in rows)
+            else:
+                extended = "✅ ทุกคน Hb ≥ 10 ใน 60 วันที่ผ่านมา"
+
+        elif any(w in low for w in ("ขาดนัด", "ไม่มาฟอก", "no show", "miss")):
+            with conn.cursor() as cur:
+                cur.execute("""SELECT p.patient_name, p.hn, s.session_date
+                               FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                               WHERE s.status = 'cancelled'
+                               AND s.session_date >= CURRENT_DATE - INTERVAL '14 days'
+                               ORDER BY s.session_date DESC LIMIT 15""")
+                rows = cur.fetchall()
+            if rows:
+                extended = f"❌ ขาดนัด/ยกเลิก (14 วัน) — {len(rows)} รอบ:\n" + \
+                    "\n".join(f"• {r[0]} (HN {r[1]}) วันที่ {r[2].strftime('%d/%m')}" for r in rows)
+            else:
+                extended = "✅ ไม่มีผู้ขาดนัดใน 14 วัน"
+
+        elif any(w in low for w in ("สรุป", "สถิติ", "ภาพรวม", "overview", "summary")):
+            with conn.cursor() as cur:
+                cur.execute("SELECT COUNT(*) FROM hd_patient_mapping WHERE is_active = TRUE")
+                total = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM hd_sessions WHERE session_date = CURRENT_DATE")
+                today_sessions = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM hd_sessions WHERE status = 'in_progress'")
+                active = cur.fetchone()[0]
+                cur.execute("""SELECT COUNT(*) FROM hd_clinical_alerts a
+                               JOIN hd_sessions s ON s.id = a.session_id
+                               WHERE a.acknowledged = FALSE AND s.session_date >= CURRENT_DATE - INTERVAL '1 day'""")
+                alerts = cur.fetchone()[0]
+            extended = f"📊 สรุประบบ HD\n• ผู้ป่วยทั้งหมด: {total} ราย\n• รอบวันนี้: {today_sessions} รอบ\n• กำลังฟอก: {active} เตียง\n• Alert รอตอบรับ: {alerts} รายการ"
+
+        elif any(w in low for w in ("น้ำหนักเกิน", "idwg เกิน", "น้ำหนักขึ้นเกิน")):
+            with conn.cursor() as cur:
+                cur.execute("""SELECT p.patient_name, p.hn,
+                                      s.pre_weight, p.dry_weight,
+                                      ROUND(((s.pre_weight - p.dry_weight) / p.dry_weight * 100)::numeric, 1) as pct
+                               FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                               WHERE s.status = 'completed' AND s.pre_weight IS NOT NULL AND p.dry_weight > 0
+                                 AND s.session_date >= CURRENT_DATE - INTERVAL '7 days'
+                                 AND ((s.pre_weight - p.dry_weight) / p.dry_weight * 100) > 5
+                               ORDER BY pct DESC LIMIT 15""")
+                rows = cur.fetchall()
+            if rows:
+                extended = f"⚖️ IDWG > 5% (7 วัน) — {len(rows)} คน:\n" + \
+                    "\n".join(f"• {r[0]} (HN {r[1]}) {float(r[2]):.1f}/{float(r[3]):.1f} kg (+{r[4]}%)" for r in rows)
+            else:
+                extended = "✅ ไม่มีผู้ป่วย IDWG > 5% ใน 7 วัน"
+
+        conn.close()
+
+        if extended:
+            reply = extended
+
+        log_action(user_id=g.get("hd_user_id"), action="ai.ask", resource_type="ai_assistant",
+                   new_values={"q": question[:100]}, ip_address=request.remote_addr or "")
+
+        return jsonify({"question": question, "answer": reply, "source": "rule-based (no external AI)"})
+    except Exception as e:
+        logger.error("ai ask error: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
