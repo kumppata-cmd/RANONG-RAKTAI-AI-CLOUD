@@ -727,6 +727,8 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
                   "Hot compress", "Cold compress", "Aware Aspirate",
                   "Chang dialyzer", "Chang bloodline", "Post HD care"]
     doctor_items = ["ไข้", "เหนื่อย", "แน่นหน้าอก", "ปวดหัว", "ตะคริว"]
+    _DX_KEY_MAP = {"ไข้": "dx_fever", "เหนื่อย": "dx_dyspnea", "แน่นหน้าอก": "dx_chest_pain",
+                    "ปวดหัว": "dx_headache", "ตะคริว": "dx_cramp"}
 
     max_rows = max(len(comp_items), len(nurs_items))
     _cb_sz = 5  # checkbox size for bottom section
@@ -771,39 +773,56 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
             c.drawString(LM + 2 * q + 9, ry + 2, nurs_items[r])
         else:
             cell(LM + 2 * q, ry, q, 8)
-        # Doctor note
+        # Doctor note — ดึง ไม่มี/มี จาก ws_data
         if r < len(doctor_items):
+            dk = _DX_KEY_MAP.get(doctor_items[r])
+            dk_val = ws.get(dk) if dk else None  # "yes"/"no"/None
             cell(LM + 3 * q, ry, q, 8, f"- {doctor_items[r]}", sz=5)
-            # ไม่มี/มี checkboxes
-            draw_checkbox(LM + 3 * q + 50, ry + 1, checked=False, size=_cb_sz)
+            draw_checkbox(LM + 3 * q + 50, ry + 1, checked=(dk_val == "no"), size=_cb_sz)
             c.setFont("Loma", 4)
             c.drawString(LM + 3 * q + 57, ry + 2, "ไม่มี")
-            draw_checkbox(LM + 3 * q + 78, ry + 1, checked=False, size=_cb_sz)
+            draw_checkbox(LM + 3 * q + 78, ry + 1, checked=(dk_val == "yes"), size=_cb_sz)
             c.drawString(LM + 3 * q + 85, ry + 2, "มี")
         elif r == len(doctor_items):
             cell(LM + 3 * q, ry, q, 8, "Post HD note", sz=5.5, bold=True)
         elif r == len(doctor_items) + 1:
+            _pd = ws.get("post_dyspnea")
             cell(LM + 3 * q, ry, q, 8, "เหนื่อย", sz=5)
-            draw_checkbox(LM + 3 * q + 35, ry + 1, checked=False, size=_cb_sz)
+            draw_checkbox(LM + 3 * q + 35, ry + 1, checked=(_pd == "no"), size=_cb_sz)
             c.setFont("Loma", 4); c.drawString(LM + 3 * q + 42, ry + 2, "ไม่มี")
-            draw_checkbox(LM + 3 * q + 63, ry + 1, checked=False, size=_cb_sz)
+            draw_checkbox(LM + 3 * q + 63, ry + 1, checked=(_pd == "yes"), size=_cb_sz)
             c.drawString(LM + 3 * q + 70, ry + 2, "มี")
         elif r == len(doctor_items) + 2:
+            _pb = ws.get("post_bleeding")
             cell(LM + 3 * q, ry, q, 8, "เลือดออก", sz=5)
-            draw_checkbox(LM + 3 * q + 35, ry + 1, checked=False, size=_cb_sz)
+            draw_checkbox(LM + 3 * q + 35, ry + 1, checked=(_pb == "no"), size=_cb_sz)
             c.setFont("Loma", 4); c.drawString(LM + 3 * q + 42, ry + 2, "ไม่มี")
-            draw_checkbox(LM + 3 * q + 63, ry + 1, checked=False, size=_cb_sz)
+            draw_checkbox(LM + 3 * q + 63, ry + 1, checked=(_pb == "yes"), size=_cb_sz)
             c.drawString(LM + 3 * q + 70, ry + 2, "มี")
         elif r == len(doctor_items) + 4:
-            post_v = ex.get("post_vitals", {}) or {}
-            bp = f"{post_v['sbp']}/{post_v.get('dbp','')}" if post_v.get("sbp") else "____/____"
+            # BP ก่อนกลับ — from ws_data or post_vitals
+            _bp_sbp = ws.get("bp_discharge_sbp") or (ex.get("post_vitals", {}) or {}).get("sbp")
+            _bp_dbp = ws.get("bp_discharge_dbp") or (ex.get("post_vitals", {}) or {}).get("dbp")
+            bp = f"{_bp_sbp}/{_bp_dbp}" if _bp_sbp else "____/____"
             cell(LM + 3 * q, ry, q, 8, f"BP ก่อนกลับ  {bp}  mm/Hg", sz=6, bold=True)
         elif r == len(doctor_items) + 5:
             cell(LM + 3 * q, ry, q, 8, "Discharge by", sz=5.5, bold=True)
         elif r == len(doctor_items) + 6:
-            cell(LM + 3 * q, ry, q, 8, "( ) Home   ( ) Admit", sz=5.5)
+            _dt = ws.get("discharge_type") or ""
+            cell(LM + 3 * q, ry, q, 8)
+            draw_checkbox(LM + 3 * q + 2, ry + 1, checked=(_dt == "Home"), size=_cb_sz)
+            c.setFont("Loma", 5); c.drawString(LM + 3 * q + 9, ry + 2, "Home")
+            draw_checkbox(LM + 3 * q + 42, ry + 1, checked=(_dt == "Admit"), size=_cb_sz)
+            c.drawString(LM + 3 * q + 49, ry + 2, "Admit")
         elif r == len(doctor_items) + 7:
-            cell(LM + 3 * q, ry, q, 8, "( ) เดินกลับ ( ) รถเข็น ( ) เปลนอน", sz=5)
+            _dm = ws.get("discharge_mobility") or ""
+            cell(LM + 3 * q, ry, q, 8)
+            draw_checkbox(LM + 3 * q + 2, ry + 1, checked=("เดินกลับ" == _dm), size=_cb_sz)
+            c.setFont("Loma", 4.5); c.drawString(LM + 3 * q + 9, ry + 2, "เดินกลับ")
+            draw_checkbox(LM + 3 * q + 38, ry + 1, checked=("รถเข็น" == _dm), size=_cb_sz)
+            c.drawString(LM + 3 * q + 45, ry + 2, "รถเข็น")
+            draw_checkbox(LM + 3 * q + 70, ry + 1, checked=("เปลนอน" == _dm), size=_cb_sz)
+            c.drawString(LM + 3 * q + 77, ry + 2, "เปลนอน")
         else:
             cell(LM + 3 * q, ry, q, 8)
 

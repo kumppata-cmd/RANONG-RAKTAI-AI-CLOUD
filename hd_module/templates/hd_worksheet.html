@@ -111,6 +111,33 @@
 </div>
 
 <div class="ws-section">
+  <h3>👨‍⚕️ Doctor Note — อาการระหว่างฟอก</h3>
+  <div class="ws-grid" id="dxGrid"></div>
+</div>
+
+<div class="ws-section">
+  <h3>📋 Post HD Note</h3>
+  <div class="ws-grid" id="postHdGrid"></div>
+</div>
+
+<div class="ws-section">
+  <h3>🏥 Discharge</h3>
+  <div style="margin-bottom:8px">
+    <div style="font-size:.8rem;color:var(--fg-muted);margin-bottom:4px">BP ก่อนกลับ</div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="number" id="bpDischargeSbp" placeholder="SBP" style="width:70px;padding:6px;border:1px solid var(--border);border-radius:8px;font-size:.85rem">
+      <span>/</span>
+      <input type="number" id="bpDischargeDbp" placeholder="DBP" style="width:70px;padding:6px;border:1px solid var(--border);border-radius:8px;font-size:.85rem">
+      <span style="font-size:.8rem;color:var(--fg-muted)">mmHg</span>
+    </div>
+  </div>
+  <div style="font-size:.8rem;color:var(--fg-muted);margin-bottom:4px">ประเภท Discharge</div>
+  <div class="ws-va-row" id="dischargeType"></div>
+  <div style="font-size:.8rem;color:var(--fg-muted);margin:8px 0 4px">วิธีกลับ</div>
+  <div class="ws-va-row" id="dischargeMobility"></div>
+</div>
+
+<div class="ws-section">
   <h3>👨‍⚕️ Doctor's Order</h3>
   <textarea class="ws-textarea" id="doctorOrder" placeholder="คำสั่งแพทย์..."></textarea>
 </div>
@@ -185,6 +212,22 @@ const TECH_ITEMS = [
 const VA_OPTIONS = ['AVF','AVG','DLC','Perm Cath'];
 const DISINFECT_OPTIONS = ['Disinfectant','Paracetic acid','Formalin','Other'];
 
+// Doctor Note — อาการระหว่างฟอก (ไม่มี/มี)
+const DX_ITEMS = [
+  {key:'dx_fever', label:'ไข้'},
+  {key:'dx_dyspnea', label:'เหนื่อย'},
+  {key:'dx_chest_pain', label:'แน่นหน้าอก'},
+  {key:'dx_headache', label:'ปวดหัว'},
+  {key:'dx_cramp', label:'ตะคริว'},
+];
+// Post HD Note
+const POST_HD_ITEMS = [
+  {key:'post_dyspnea', label:'เหนื่อย'},
+  {key:'post_bleeding', label:'เลือดออก'},
+];
+const DISCHARGE_TYPES = ['Home','Admit'];
+const DISCHARGE_MOBILITY = ['เดินกลับ','รถเข็น','เปลนอน'];
+
 function toast(msg, type){
   const el = document.getElementById('wsToast');
   el.textContent = msg; el.className = 'ws-toast ' + type; el.style.display = 'block';
@@ -257,6 +300,77 @@ function buildVA(){
   document.getElementById('disinfectantRow').innerHTML = DISINFECT_OPTIONS.map(v =>
     `<div class="ws-va-btn" data-dis="${v}" onclick="selectDis(this)">${v}</div>`
   ).join('');
+}
+
+/* ── Doctor Note — ไม่มี/มี toggle ── */
+function buildDxGrid(){
+  // Doctor note items
+  document.getElementById('dxGrid').innerHTML = DX_ITEMS.map(a => `
+    <div class="ws-item" id="dx_${a.key}">
+      <span style="flex:1">${a.label}</span>
+      <div class="assess-toggle">
+        <button class="on" data-key="${a.key}" data-val="no" onclick="toggleDx(this)">ไม่มี</button>
+        <button class="oy" data-key="${a.key}" data-val="yes" onclick="toggleDx(this)">มี</button>
+      </div>
+    </div>
+  `).join('');
+  // Post HD items
+  document.getElementById('postHdGrid').innerHTML = POST_HD_ITEMS.map(a => `
+    <div class="ws-item" id="dx_${a.key}">
+      <span style="flex:1">${a.label}</span>
+      <div class="assess-toggle">
+        <button class="on" data-key="${a.key}" data-val="no" onclick="toggleDx(this)">ไม่มี</button>
+        <button class="oy" data-key="${a.key}" data-val="yes" onclick="toggleDx(this)">มี</button>
+      </div>
+    </div>
+  `).join('');
+  // Discharge type & mobility
+  document.getElementById('dischargeType').innerHTML = DISCHARGE_TYPES.map(v =>
+    `<div class="ws-va-btn" data-dt="${v}" onclick="selectGroup(this,'#dischargeType')">${v}</div>`
+  ).join('');
+  document.getElementById('dischargeMobility').innerHTML = DISCHARGE_MOBILITY.map(v =>
+    `<div class="ws-va-btn" data-dm="${v}" onclick="selectGroup(this,'#dischargeMobility')">${v}</div>`
+  ).join('');
+}
+
+function selectGroup(btn, parentSel){
+  document.querySelectorAll(parentSel+' .ws-va-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+function toggleDx(btn){
+  const key = btn.dataset.key;
+  const row = document.getElementById('dx_'+key);
+  const btns = row.querySelectorAll('.assess-toggle button');
+  const wasActive = btn.classList.contains('active');
+  btns.forEach(b=>b.classList.remove('active'));
+  row.classList.remove('oy','checked');
+  if(!wasActive){
+    btn.classList.add('active');
+    row.classList.add(btn.dataset.val === 'yes' ? 'oy' : 'checked');
+  }
+}
+
+function getDxValue(key){
+  const row = document.getElementById('dx_'+key);
+  if(!row) return null;
+  const active = row.querySelector('.assess-toggle button.active');
+  if(!active) return null;
+  return active.dataset.val;  // "yes" or "no"
+}
+
+function setDxValue(key, val){
+  const row = document.getElementById('dx_'+key);
+  if(!row || !val) return;
+  const btns = row.querySelectorAll('.assess-toggle button');
+  btns.forEach(b=>b.classList.remove('active'));
+  row.classList.remove('oy','checked');
+  btns.forEach(b=>{
+    if(b.dataset.val === val){
+      b.classList.add('active');
+      row.classList.add(val === 'yes' ? 'oy' : 'checked');
+    }
+  });
 }
 
 function selectVA(btn){
@@ -385,6 +499,24 @@ async function loadWorksheetData(){
     if(d.data.nursing_note) document.getElementById('nursingNote').value=d.data.nursing_note;
     if(d.data.doctor_order) document.getElementById('doctorOrder').value=d.data.doctor_order;
     if(d.data.health_ed) document.getElementById('healthEd').value=d.data.health_ed;
+    // Doctor Note
+    DX_ITEMS.forEach(a=>{ if(d.data[a.key]) setDxValue(a.key, d.data[a.key]); });
+    POST_HD_ITEMS.forEach(a=>{ if(d.data[a.key]) setDxValue(a.key, d.data[a.key]); });
+    // Discharge
+    if(d.data.discharge_type){
+      document.querySelectorAll('#dischargeType .ws-va-btn').forEach(b=>{
+        b.classList.remove('active');
+        if(b.dataset.dt === d.data.discharge_type) b.classList.add('active');
+      });
+    }
+    if(d.data.discharge_mobility){
+      document.querySelectorAll('#dischargeMobility .ws-va-btn').forEach(b=>{
+        b.classList.remove('active');
+        if(b.dataset.dm === d.data.discharge_mobility) b.classList.add('active');
+      });
+    }
+    if(d.data.bp_discharge_sbp) document.getElementById('bpDischargeSbp').value=d.data.bp_discharge_sbp;
+    if(d.data.bp_discharge_dbp) document.getElementById('bpDischargeDbp').value=d.data.bp_discharge_dbp;
     sEl.textContent='✅ โหลดข้อมูลบันทึกล่าสุด: '+(d.data.updated_at||'');
   } catch(e){
     console.error('loadWorksheetData error:', e);
@@ -413,6 +545,16 @@ function saveWorksheet(){
   body.nursing_note = document.getElementById('nursingNote').value || null;
   body.doctor_order = document.getElementById('doctorOrder').value || null;
   body.health_ed = document.getElementById('healthEd').value || null;
+  // Doctor Note
+  DX_ITEMS.forEach(a=>{ body[a.key] = getDxValue(a.key); });
+  POST_HD_ITEMS.forEach(a=>{ body[a.key] = getDxValue(a.key); });
+  // Discharge
+  const dtActive = document.querySelector('#dischargeType .ws-va-btn.active');
+  body.discharge_type = dtActive ? dtActive.dataset.dt : null;
+  const dmActive = document.querySelector('#dischargeMobility .ws-va-btn.active');
+  body.discharge_mobility = dmActive ? dmActive.dataset.dm : null;
+  body.bp_discharge_sbp = parseInt(document.getElementById('bpDischargeSbp').value) || null;
+  body.bp_discharge_dbp = parseInt(document.getElementById('bpDischargeDbp').value) || null;
 
   hdFetch('/hd/api/v1/sessions/'+SID+'/worksheet-data',{
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
@@ -454,6 +596,7 @@ function _wsInit(){
   buildCompGrid(COMP_ITEMS, 'compGrid');
   buildCompGrid(TECH_ITEMS, 'techGrid');
   buildVA();
+  buildDxGrid();
   loadSession();
   loadWorksheetData();
 }

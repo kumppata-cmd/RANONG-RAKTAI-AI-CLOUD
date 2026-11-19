@@ -605,8 +605,12 @@ _WS_BOOL_COLS = [
     "tech_machine_problem", "tech_needle_gt2", "tech_no_complication",
 ]
 _WS_TEXT_COLS = ["disinfectant", "va_type", "va_site", "nursing_dx",
-                 "nursing_note", "doctor_order", "health_ed"]
-_WS_INT_COLS = ["nurse_start_id", "nurse_end_id"]
+                 "nursing_note", "doctor_order", "health_ed",
+                 # Doctor Note interactive
+                 "dx_fever", "dx_dyspnea", "dx_chest_pain", "dx_headache", "dx_cramp",
+                 "post_dyspnea", "post_bleeding",
+                 "discharge_type", "discharge_mobility"]
+_WS_INT_COLS = ["nurse_start_id", "nurse_end_id", "bp_discharge_sbp", "bp_discharge_dbp"]
 _WS_ALL_COLS = _WS_BOOL_COLS + _WS_TEXT_COLS + _WS_INT_COLS
 
 
