@@ -64,7 +64,25 @@
     <a href="/hd/patient/{{ patient_hn }}/360" class="btn" style="flex:1;padding:12px;text-align:center;">🧭 Patient 360</a>
     <a href="/hd/patient/{{ patient_hn }}/trends" class="btn" style="flex:1;padding:12px;text-align:center;">📊 Trends</a>
   </div>
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <button onclick="sendPortalLink()" class="btn" style="flex:1;padding:10px;text-align:center;">📱 ส่งลิงก์ดูผลให้คนไข้</button>
+    <a href="/hd/patient/{{ patient_hn }}/card.pdf" target="_blank" class="btn" style="flex:1;padding:10px;text-align:center;">🪪 บัตรผู้ป่วย PDF</a>
+  </div>
+  <div id="portalLinkResult" style="margin-top:8px;font-size:.82rem;text-align:center"></div>
 </div>
+<script>
+async function sendPortalLink(){
+  const el = document.getElementById('portalLinkResult');
+  el.textContent = 'กำลังสร้างลิงก์...';
+  try{
+    const r = await hdFetch('/hd/api/v1/patients/{{ patient_hn }}/portal-link');
+    const d = await r.json();
+    if(d.url){
+      el.innerHTML = '✅ ลิงก์: <a href="'+d.url+'" target="_blank" style="word-break:break-all">'+d.url+'</a><br><span style="color:var(--fg-muted);font-size:.75rem">คัดลอกลิงก์นี้ส่งให้คนไข้ทาง LINE หรือพิมพ์ QR จากบัตรผู้ป่วย</span>';
+    } else { el.textContent = '❌ สร้างลิงก์ไม่สำเร็จ'; }
+  }catch(e){ el.textContent = '❌ '+e.message; }
+}
+</script>
 
 <!-- 17 พ.ย. 2569: UF & น้ำหนัก เฉพาะราย (ข้อ 1, 9, 10) -->
 <div class="card" style="margin-bottom:20px;" id="ufCoachCard">

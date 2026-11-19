@@ -6501,6 +6501,181 @@ def bed_dashboard():
 
 
 
+# ── AI UF Coach — Real-time Recommendation ───────────────
+
+@hd_bp.route("/sessions/<int:session_id>/uf-coach", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def session_uf_coach(session_id):
+    """AI UF Coach: วิเคราะห์ UF + BP trend → แนะนำปรับ UF rate.
+
+    ⚠️ ข้อเสนอแนะเท่านั้น — ไม่ปรับเครื่องอัตโนมัติ แพทย์ตัดสินใจ
+    """
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            # Session info
+            cur.execute("""SELECT s.patient_id, s.uf_goal, s.started_at, s.pre_weight, s.actual_uf,
+                                  p.dry_weight, p.hn, p.patient_name
+                           FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                           WHERE s.id = %s""", (session_id,))
+            s = cur.fetchone()
+            if not s:
+                conn.close()
+                return jsonify({"error": "Session not found"}), 404
+            pid, uf_goal, started, pre_w, actual_uf, dry_w, hn, name = s
+
+            # Latest vitals (last 3 readings)
+            cur.execute("""SELECT sbp, dbp, heart_rate, recorded_at
+                           FROM hd_vital_signs WHERE session_id = %s AND sbp > 0
+                           ORDER BY recorded_at DESC LIMIT 5""", (session_id,))
+            vitals = [{"sbp": r[0], "dbp": r[1], "hr": r[2],
+                       "time": r[3].strftime("%H:%M") if r[3] else ""} for r in cur.fetchall()]
+            vitals.reverse()  # oldest first
+
+            # Latest flowsheet UF
+            cur.execute("""SELECT bfr, ufr, total_uf, slot_time
+                           FROM hd_flowsheet WHERE session_id = %s
+                           ORDER BY recorded_at DESC LIMIT 1""", (session_id,))
+            flow = cur.fetchone()
+            current_bfr = flow[0] if flow else None
+            current_ufr = flow[1] if flow else None
+            current_total_uf = flow[2] if flow else actual_uf
+
+            # UF watch evaluation
+            try:
+                from .uf_watch import for_session
+                uf_eval = for_session(cur, session_id)
+            except Exception:
+                uf_eval = None
+
+            # IDH predictor
+            try:
+                from .idh_predictor import predict_idh_risk
+                idh = predict_idh_risk(cur, session_id)
+            except Exception:
+                idh = None
+
+            # Personal UF tolerance
+            tol = None
+            try:
+                from .uf_coach import sessions_for_tolerance, tolerance_from_sessions
+                _ss = sessions_for_tolerance(cur, hn)
+                if _ss:
+                    tol = tolerance_from_sessions(_ss)
+            except Exception:
+                pass
+
+        conn.close()
+
+        # === AI Analysis (rule-based, no external AI) ===
+        recommendations = []
+        risk_level = "normal"  # normal, caution, warning, danger
+
+        # 1. BP trend analysis
+        if len(vitals) >= 2:
+            latest_sbp = vitals[-1]["sbp"]
+            prev_sbp = vitals[-2]["sbp"]
+            sbp_drop = prev_sbp - latest_sbp
+
+            if latest_sbp < 90:
+                risk_level = "danger"
+                recommendations.append({
+                    "icon": "🔴", "priority": 1,
+                    "action": "ลด UF rate ทันที หรือหยุด UF ชั่วคราว",
+                    "reason": f"SBP ต่ำมาก ({latest_sbp} mmHg) — เสี่ยง IDH",
+                })
+            elif latest_sbp < 100 or sbp_drop > 30:
+                risk_level = "warning"
+                recommendations.append({
+                    "icon": "🟠", "priority": 2,
+                    "action": "ลด UF rate 200-300 mL/hr",
+                    "reason": f"SBP ลดลง {sbp_drop} mmHg ({prev_sbp}→{latest_sbp})",
+                })
+            elif sbp_drop > 20:
+                risk_level = "caution"
+                recommendations.append({
+                    "icon": "🟡", "priority": 3,
+                    "action": "เฝ้าระวัง — วัด BP ถี่ขึ้น ทุก 15 นาที",
+                    "reason": f"SBP ลดลง {sbp_drop} mmHg — แนวโน้มลดต่อ",
+                })
+
+        # 2. UF pace analysis
+        if uf_eval and isinstance(uf_eval, dict):
+            pace = uf_eval.get("pace")
+            if pace == "behind":
+                recommendations.append({
+                    "icon": "⏱", "priority": 4,
+                    "action": "เพิ่ม UF rate เล็กน้อย (ถ้า BP ยังดี)",
+                    "reason": "UF ช้ากว่ากำหนด — อาจดึงน้ำไม่ครบ",
+                })
+            elif pace == "ahead":
+                recommendations.append({
+                    "icon": "💧", "priority": 4,
+                    "action": "ลด UF rate ลงเล็กน้อย",
+                    "reason": "UF เร็วกว่ากำหนด — เสี่ยง IDH",
+                })
+
+        # 3. IDH risk
+        if idh and isinstance(idh, dict) and idh.get("score", 0) >= 60:
+            if risk_level == "normal":
+                risk_level = "caution"
+            recommendations.append({
+                "icon": "🩸", "priority": 2,
+                "action": "เตรียมพร้อม — เสี่ยงความดันตก",
+                "reason": f"IDH score {idh.get('score')}/100 ({idh.get('label', '')})",
+            })
+
+        # 4. Personal tolerance
+        if tol and isinstance(tol, dict) and tol.get("ceiling") and current_ufr:
+            try:
+                if float(current_ufr) > float(tol["ceiling"]) * 1000:
+                    recommendations.append({
+                        "icon": "⚡", "priority": 2,
+                        "action": f"UFR ปัจจุบันเกินเพดานส่วนตัว ({tol['ceiling']} L/hr)",
+                        "reason": "คนไข้คนนี้เคยความดันตกเมื่อ UFR สูงกว่านี้",
+                    })
+            except (ValueError, TypeError):
+                pass
+
+        # Default: all good
+        if not recommendations:
+            recommendations.append({
+                "icon": "✅", "priority": 10,
+                "action": "ทุกอย่างปกติ — ดำเนินการตามปกติ",
+                "reason": "BP คงที่, UF ตามเป้า",
+            })
+
+        recommendations.sort(key=lambda r: r["priority"])
+
+        return jsonify({
+            "session_id": session_id,
+            "patient": {"hn": hn, "name": name},
+            "risk_level": risk_level,
+            "recommendations": recommendations,
+            "vitals_summary": {
+                "latest_sbp": vitals[-1]["sbp"] if vitals else None,
+                "trend": "dropping" if len(vitals) >= 2 and vitals[-1]["sbp"] < vitals[-2]["sbp"] else "stable",
+                "readings": len(vitals),
+            },
+            "uf_summary": {
+                "goal": uf_goal,
+                "removed": current_total_uf,
+                "current_ufr": current_ufr,
+                "pace": uf_eval.get("pace") if isinstance(uf_eval, dict) else None,
+            },
+            "idh_score": idh.get("score") if isinstance(idh, dict) else None,
+            "tolerance": tol,
+            "disclaimer": "⚠️ ข้อเสนอแนะจาก AI เท่านั้น — แพทย์ตัดสินใจ ไม่ปรับเครื่องอัตโนมัติ",
+        })
+    except Exception as e:
+        logger.error("uf-coach error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ── Patient Trend Dashboard ───────────────────────────────
 
 @hd_bp.route("/patients/<hn>/trends", methods=["GET"])
