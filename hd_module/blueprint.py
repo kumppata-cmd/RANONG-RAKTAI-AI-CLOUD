@@ -3455,6 +3455,63 @@ def hd_create_user():
         return jsonify({"error": "สร้างบัญชีไม่สำเร็จ"}), 500
 
 
+@hd_bp.route("/auth/users/<int:user_id>/toggle", methods=["POST"])
+@require_role("admin")
+def hd_toggle_user(user_id):
+    """Admin ระงับ/เปิดบัญชีผู้ใช้."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT username, is_active FROM hd_users WHERE id = %s", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบผู้ใช้"}), 404
+            new_active = not row[1]
+            cur.execute("UPDATE hd_users SET is_active = %s WHERE id = %s", (new_active, user_id))
+            conn.commit()
+        conn.close()
+        status = "เปิดใช้งาน" if new_active else "ระงับ"
+        log_action(user_id=g.get("hd_user_id"), action="admin.toggle_user", resource_type="user",
+                   resource_id=user_id, new_values={"is_active": new_active},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "is_active": new_active, "message": f"{status}บัญชี '{row[0]}' แล้ว ✅"})
+    except Exception as e:
+        logger.error("toggle user error: %s", e)
+        return jsonify({"error": "ดำเนินการไม่สำเร็จ"}), 500
+
+
+@hd_bp.route("/auth/users/<int:user_id>", methods=["DELETE"])
+@require_role("admin")
+def hd_delete_user(user_id):
+    """Admin ลบบัญชีผู้ใช้ (ถาวร)."""
+    import os, psycopg2
+    admin_id = g.get("hd_user_id")
+    if user_id == admin_id:
+        return jsonify({"error": "ไม่สามารถลบบัญชีตัวเอง"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT username FROM hd_users WHERE id = %s", (user_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบผู้ใช้"}), 404
+            cur.execute("DELETE FROM hd_users WHERE id = %s", (user_id,))
+            conn.commit()
+        conn.close()
+        log_action(user_id=admin_id, action="admin.delete_user", resource_type="user",
+                   resource_id=user_id, new_values={"username": row[0]},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "message": f"ลบบัญชี '{row[0]}' แล้ว ✅"})
+    except Exception as e:
+        logger.error("delete user error: %s", e)
+        return jsonify({"error": "ลบไม่สำเร็จ"}), 500
+
+
 # ── Sessions ──────────────────────────────────────────────
 
 @hd_bp.route("/sessions", methods=["GET"])

@@ -592,10 +592,17 @@ async function loadUsers(){
       +'<th style="text-align:left;padding:4px">ตำแหน่ง</th><th style="text-align:left;padding:4px">สถานะ</th>'
       +'<th style="padding:4px">Reset</th></tr>';
     (d.users||[]).forEach(u=>{
+      const toggleBtn = u.is_active
+        ? `<button class="btn" style="font-size:.7rem;padding:2px 6px;color:var(--danger,red)" onclick="toggleUser(${u.id},'${u.username}',true)" title="ระงับ">⏸</button>`
+        : `<button class="btn" style="font-size:.7rem;padding:2px 6px;color:var(--success,green)" onclick="toggleUser(${u.id},'${u.username}',false)" title="เปิดใช้งาน">▶️</button>`;
       h+=`<tr style="border-bottom:1px solid var(--border,#eee)"><td style="padding:4px">${u.full_name}</td>`
         +`<td style="padding:4px">${u.username}</td><td style="padding:4px">${roleTh[u.role]||u.role}</td>`
         +`<td style="padding:4px">${u.is_active?'✅':'❌'}</td>`
-        +`<td style="padding:4px;text-align:center"><button class="btn" style="font-size:.75rem;padding:2px 8px" onclick="resetPw(${u.id},'${u.username}')">🔄</button></td></tr>`;
+        +`<td style="padding:4px;text-align:center;white-space:nowrap">`
+        +`<button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="resetPw(${u.id},'${u.username}')" title="Reset รหัส">🔄</button> `
+        +`${toggleBtn} `
+        +`<button class="btn" style="font-size:.7rem;padding:2px 6px;color:var(--danger,red)" onclick="deleteUser(${u.id},'${u.username}')" title="ลบ">🗑</button>`
+        +`</td></tr>`;
     });
     h+='</table>';
     el.innerHTML=h;
@@ -611,6 +618,26 @@ async function resetPw(uid,uname){
     if(d.ok) showToast(`✅ Reset รหัสผ่าน ${uname} สำเร็จ`,'success');
     else showToast(d.error||'ไม่สำเร็จ','danger');
   }catch(e){showToast('Reset ไม่สำเร็จ','danger');}
+}
+async function toggleUser(uid,uname,isActive){
+  const action = isActive ? 'ระงับ' : 'เปิดใช้งาน';
+  if(!confirm(`${action}บัญชี "${uname}" ?`)) return;
+  try{
+    const r = await hdFetch(`/hd/api/v1/auth/users/${uid}/toggle`,{method:'POST'});
+    const d = await r.json();
+    if(d.ok){showToast(d.message,'success');loadUsers();}
+    else showToast(d.error||'ไม่สำเร็จ','danger');
+  }catch(e){showToast('ดำเนินการไม่สำเร็จ','danger');}
+}
+async function deleteUser(uid,uname){
+  if(!confirm(`⚠️ ลบบัญชี "${uname}" ถาวร?\n\nข้อมูลจะหายไปไม่สามารถกู้คืนได้`)) return;
+  if(!confirm(`ยืนยันอีกครั้ง: ลบ "${uname}" จริงๆ?`)) return;
+  try{
+    const r = await hdFetch(`/hd/api/v1/auth/users/${uid}`,{method:'DELETE'});
+    const d = await r.json();
+    if(d.ok){showToast(d.message,'success');loadUsers();}
+    else showToast(d.error||'ไม่สำเร็จ','danger');
+  }catch(e){showToast('ลบไม่สำเร็จ','danger');}
 }
 function showAddUser(){document.getElementById('addUserForm').style.display='block';}
 async function createUser(){
