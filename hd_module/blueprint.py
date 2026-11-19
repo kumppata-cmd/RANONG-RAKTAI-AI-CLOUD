@@ -3104,18 +3104,28 @@ def hd_login():
         return jsonify({"error": "ระบบขัดข้อง กรุณาลองใหม่", "detail": str(e)}), 500
 
 
-@hd_bp.route("/auth/force-reset", methods=["POST"])
+@hd_bp.route("/auth/force-reset", methods=["GET", "POST"])
 def hd_force_reset():
-    """Force reset password — requires ADMIN_SECRET, no login needed."""
+    """Force reset password — requires ADMIN_SECRET, no login needed.
+    GET: /auth/force-reset?secret=XXX&user=hd_admin&pw=newpass
+    POST: JSON {admin_secret, username, new_password}
+    """
     import os, psycopg2
     from .auth import hash_password
-    data = request.get_json(silent=True) or {}
-    secret = data.get("admin_secret", "")
+    if request.method == "GET":
+        secret = request.args.get("secret", "")
+        username = request.args.get("user", "hd_admin")
+        new_pw = request.args.get("pw", "")
+    else:
+        data = request.get_json(silent=True) or {}
+        secret = data.get("admin_secret", "")
+        username = data.get("username", "hd_admin")
+        new_pw = data.get("new_password", "")
     real_secret = os.environ.get("ADMIN_SECRET", "changeme")
     if not secret or secret != real_secret:
         return jsonify({"error": "Invalid admin_secret"}), 403
-    username = data.get("username", "hd_admin")
-    new_pw = data.get("new_password", real_secret)
+    if not new_pw:
+        new_pw = real_secret
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     try:
         conn = psycopg2.connect(db_url, connect_timeout=5)
@@ -3131,6 +3141,31 @@ def hd_force_reset():
     except Exception as e:
         logger.error("force reset error: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/auth/debug-users", methods=["GET"])
+def hd_debug_users():
+    """Debug: list users + hash type (requires ADMIN_SECRET)."""
+    import os, psycopg2
+    secret = request.args.get("secret", "")
+    real_secret = os.environ.get("ADMIN_SECRET", "changeme")
+    if not secret or secret != real_secret:
+        return jsonify({"error": "Invalid secret"}), 403
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No DATABASE_URL", "db_url": "empty"}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, username, role, is_active, failed_attempts, locked_until, substring(password_hash,1,10) as hash_prefix FROM hd_users ORDER BY id")
+            rows = cur.fetchall()
+        conn.close()
+        users = [{"id": r[0], "username": r[1], "role": r[2], "active": r[3],
+                  "failed": r[4], "locked": str(r[5]) if r[5] else None,
+                  "hash_prefix": r[6]} for r in rows]
+        return jsonify({"users": users, "db_ok": True, "count": len(users)})
+    except Exception as e:
+        return jsonify({"error": str(e), "db_url_len": len(db_url)}), 500
 
 
 @hd_bp.route("/auth/set-pin", methods=["POST"])
