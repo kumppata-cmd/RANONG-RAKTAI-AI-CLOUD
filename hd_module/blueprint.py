@@ -4917,6 +4917,90 @@ def acknowledge_alert(alert_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ── Import DOB + BFR from Excel ────────────────────────────
+
+@hd_bp.route("/patients/import-dob-bfr", methods=["POST"])
+@require_role("physician", "admin")
+def import_dob_bfr():
+    """Batch update date_of_birth + bfr for patients from Excel data."""
+    import os, psycopg2
+    from datetime import date as _date
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "Database not configured"}), 500
+    body = request.get_json(silent=True) or {}
+    patients = body.get("patients", [])
+    if not patients:
+        return jsonify({"error": "No patients data"}), 400
+
+    conn = psycopg2.connect(db_url, connect_timeout=10)
+    conn.autocommit = True
+    updated = 0
+    skipped = 0
+    errors = []
+    try:
+        with conn.cursor() as cur:
+            # Ensure bfr column exists
+            try:
+                cur.execute("ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS bfr INTEGER DEFAULT 0")
+            except Exception:
+                pass
+            for p in patients:
+                hn = str(p.get("hn", "")).strip()
+                if not hn:
+                    skipped += 1
+                    continue
+                # Parse DOB: "18/08/2515" (Buddhist Era) → 1972-08-18
+                dob = None
+                dob_raw = str(p.get("dob", "")).strip()
+                if dob_raw:
+                    try:
+                        parts = dob_raw.split("/")
+                        if len(parts) == 3:
+                            d, m, y = int(parts[0]), int(parts[1]), int(parts[2])
+                            if y > 2400:
+                                y -= 543  # Buddhist Era → CE
+                            dob = _date(y, m, d)
+                    except Exception:
+                        pass
+                bfr = p.get("bfr")
+                if bfr:
+                    try:
+                        bfr = int(bfr)
+                    except Exception:
+                        bfr = None
+                try:
+                    sets = []
+                    vals = []
+                    if dob:
+                        sets.append("date_of_birth = %s")
+                        vals.append(dob)
+                    if bfr:
+                        sets.append("bfr = %s")
+                        vals.append(bfr)
+                    if not sets:
+                        skipped += 1
+                        continue
+                    vals.append(hn)
+                    cur.execute(f"UPDATE hd_patient_mapping SET {', '.join(sets)} WHERE hn = %s", vals)
+                    if cur.rowcount > 0:
+                        updated += 1
+                    else:
+                        skipped += 1
+                except Exception as e:
+                    errors.append(f"HN {hn}: {e}")
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        conn.close()
+
+    log_action(user_id=g.get("hd_user_id"), action="patients.import_dob_bfr",
+               resource_type="batch", resource_id=None,
+               ip_address=request.remote_addr or "",
+               details=f"updated={updated} skipped={skipped}")
+    return jsonify({"updated": updated, "skipped": skipped, "errors": errors[:10]})
+
+
 # ── Patients ──────────────────────────────────────────────
 
 @hd_bp.route("/patients", methods=["GET"])

@@ -247,6 +247,14 @@ def _run_hd_migrations():
                 except Exception as fix_err:
                     logger.warning("HD fix FAILED: %s | %s", one_line, " ".join(str(fix_err).split()))
             logger.info("HD fixes: %d/%d succeeded", ok, len(fixes))
+
+        # Import DOB + BFR from Excel data (safe to run repeatedly)
+        try:
+            from .patient_dob_bfr import apply_dob_bfr
+            apply_dob_bfr(conn)
+        except Exception as dob_err:
+            logger.warning("DOB/BFR import: %s", dob_err)
+
         conn.close()
         logger.info("HD post-migration fixes: done")
     except Exception as e:
