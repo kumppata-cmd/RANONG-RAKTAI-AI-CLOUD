@@ -266,48 +266,60 @@ function selectDis(btn){
 
 /* ── Load session data (auto-fill) ── */
 function loadSession(){
-  hdFetch('/hd/api/v1/sessions/'+SID).then(r=>r.json()).then(d=>{
+  hdFetch('/hd/api/v1/sessions/'+SID).then(r=>{
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.json();
+  }).then(d=>{
     _sessionData = d;
-    const s = d;  // session data is at top level
-    document.getElementById('ptName').textContent = `${s.patient_name||'—'}`;
-    document.getElementById('ptMeta').innerHTML =
-      `HN: ${s.patient_hn||s.hn||'—'} · Bed: ${s.bed_number||'—'} · ${s.shift||''} · ${s.session_date||''} `+
-      `<span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:700;`+
-      `background:${s.status==='completed'?'#19875422':'#ffc10722'};color:${s.status==='completed'?'var(--success)':'#856404'}">`+
-      `${s.status==='completed'?'✅ เสร็จสิ้น':'🔄 กำลังฟอก'}</span>`;
+    try {
+      const s = d;
+      document.getElementById('ptName').textContent = s.patient_name || s.name || '—';
+      document.getElementById('ptMeta').innerHTML =
+        `HN: ${s.patient_hn||s.hn||'—'} · Bed: ${s.bed_number||'—'} · ${s.shift||''} · ${s.session_date||''} `+
+        `<span style="display:inline-block;padding:2px 8px;border-radius:6px;font-size:.7rem;font-weight:700;`+
+        `background:${s.status==='completed'?'#19875422':'#ffc10722'};color:${s.status==='completed'?'var(--success)':'#856404'}">`+
+        `${s.status==='completed'?'✅ เสร็จสิ้น':'🔄 กำลังฟอก'}</span>`;
 
-    // Weight auto-fill
-    const pre = s.pre_weight, post = s.post_weight, dw = s.dry_weight;
-    const gain = pre&&dw ? (pre-dw).toFixed(1) : '—';
-    const lose = pre&&post ? (pre-post).toFixed(1) : '—';
-    document.getElementById('weightGrid').innerHTML = [
-      ['Pre BW', pre ? pre+' kg' : '—'], ['Dry BW', dw ? dw+' kg' : '—'],
-      ['Wt Gain', gain+' kg'], ['Target UF', s.uf_goal ? s.uf_goal+' ml' : '—'],
-      ['Post BW', post ? post+' kg' : '—'], ['Wt lose', lose+' kg'],
-    ].map(([l,v])=>`<div class="wt-row"><span class="wt-label">${l}</span><span class="wt-val">${v}</span></div>`).join('');
+      // Weight auto-fill
+      const pre = parseFloat(s.pre_weight)||null;
+      const post = parseFloat(s.post_weight)||null;
+      const dw = parseFloat(s.dry_weight)||null;
+      const gain = pre&&dw ? (pre-dw).toFixed(1) : '—';
+      const lose = pre&&post ? (pre-post).toFixed(1) : '—';
+      document.getElementById('weightGrid').innerHTML = [
+        ['Pre BW', pre ? pre+' kg' : '—'], ['Dry BW', dw ? dw+' kg' : '—'],
+        ['Wt Gain', gain+' kg'], ['Target UF', s.uf_goal ? s.uf_goal+' ml' : '—'],
+        ['Post BW', post ? post+' kg' : '—'], ['Wt lose', lose+' kg'],
+      ].map(([l,v])=>`<div class="wt-row"><span class="wt-label">${l}</span><span class="wt-val">${v}</span></div>`).join('');
 
-    // Prescription auto-fill (extras merged at top level)
-    const mac = s.machine || {};
-    const hep = s.heparin || {};
-    document.getElementById('rxInfo').innerHTML = [
-      ['Machine', [mac.brand, mac.model].filter(Boolean).join(' ') || '—'],
-      ['Dialyzer', s.dialyzer_type || '—'],
-      ['Reuse No.', s.dialyzer_reuse || '—'],
-      ['Heparin', hep.protocol || '—'],
-      ['Bolus', hep.bolus || '—'],
-      ['Maintenance', hep.maintenance || '—'],
-      ['Duration', (s.duration_hours||4)+' hr'],
-    ].map(([l,v])=>`<div class="ws-rx-row"><span class="label">${l}</span><span class="val">${v}</span></div>`).join('');
+      // Prescription auto-fill (extras merged at top level)
+      const mac = s.machine || {};
+      const hep = s.heparin || {};
+      document.getElementById('rxInfo').innerHTML = [
+        ['Machine', [mac.brand, mac.model].filter(Boolean).join(' ') || '—'],
+        ['Dialyzer', s.dialyzer_type || '—'],
+        ['Reuse No.', s.dialyzer_reuse || '—'],
+        ['Heparin', hep.protocol || '—'],
+        ['Bolus', hep.bolus || '—'],
+        ['Maintenance', hep.maintenance || '—'],
+        ['Duration', (s.duration_hours||4)+' hr'],
+      ].map(([l,v])=>`<div class="ws-rx-row"><span class="label">${l}</span><span class="val">${v}</span></div>`).join('');
 
-    // VA auto-fill from patient
-    const va = s.vascular_access || s.access_type || '';
-    if(va){
-      document.querySelectorAll('#vaTypes .ws-va-btn').forEach(b=>{
-        if(b.dataset.va.toLowerCase() === va.toLowerCase()) b.classList.add('active');
-      });
+      // VA auto-fill from patient
+      const va = s.vascular_access || s.access_type || '';
+      if(va){
+        document.querySelectorAll('#vaTypes .ws-va-btn').forEach(b=>{
+          if(b.dataset.va.toLowerCase() === va.toLowerCase()) b.classList.add('active');
+        });
+      }
+    } catch(renderErr) {
+      console.error('renderSession error:', renderErr);
+      document.getElementById('ptName').textContent = '⚠️ แสดงผลผิดพลาด: '+renderErr.message;
     }
   }).catch(e=>{
-    document.getElementById('ptName').textContent = 'โหลดข้อมูลไม่สำเร็จ';
+    console.error('loadSession error:', e);
+    document.getElementById('ptName').textContent = '❌ โหลดข้อมูล session ไม่สำเร็จ: '+e.message;
+    document.getElementById('ptMeta').textContent = 'Session ID: '+SID;
   });
 }
 

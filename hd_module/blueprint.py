@@ -619,10 +619,10 @@ def get_worksheet_data(session_id):
     if not db_url:
         return jsonify({"error": "Database not configured"}), 500
     conn = psycopg2.connect(db_url, connect_timeout=5)
-    conn.autocommit = True
     try:
+        _ensure_ws_table(conn)
+        conn.autocommit = True
         with conn.cursor() as cur:
-            _ensure_ws_table(cur)
             cur.execute(f"SELECT {', '.join(_WS_ALL_COLS)}, updated_at FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
             row = cur.fetchone()
             if not row:
@@ -668,12 +668,20 @@ _WS_CREATE_SQL = """CREATE TABLE IF NOT EXISTS hd_worksheet_data (
 )"""
 
 
-def _ensure_ws_table(cur):
-    """Ensure hd_worksheet_data table exists (safe to call every time)."""
+def _ensure_ws_table(conn):
+    """Ensure hd_worksheet_data table exists. Uses autocommit to avoid transaction issues."""
     try:
-        cur.execute(_WS_CREATE_SQL)
-    except Exception:
-        pass
+        old_ac = conn.autocommit
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(_WS_CREATE_SQL)
+        conn.autocommit = old_ac
+    except Exception as e:
+        logger.debug("_ensure_ws_table: %s (table likely exists)", e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
 
 
 @hd_bp.route("/sessions/<int:session_id>/worksheet-data", methods=["POST"])
@@ -687,10 +695,10 @@ def save_worksheet_data(session_id):
     body = request.get_json(silent=True) or {}
     conn = psycopg2.connect(db_url, connect_timeout=5)
     try:
-        with conn.cursor() as cur:
-            _ensure_ws_table(cur)
-            conn.commit()
+        # Ensure table exists (autocommit mode — won't break main transaction)
+        _ensure_ws_table(conn)
 
+        with conn.cursor() as cur:
             # Build values
             vals = {}
             for col in _WS_BOOL_COLS:
@@ -719,6 +727,10 @@ def save_worksheet_data(session_id):
         return jsonify({"id": rid, "saved": True}), 200
     except Exception as e:
         logger.error("save_worksheet_data: %s", e)
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         return jsonify({"error": str(e)}), 500
     finally:
         conn.close()
