@@ -426,12 +426,24 @@ function openPDF(){
   window.open('/hd/api/v1/sessions/'+SID+'/worksheet.pdf?token='+encodeURIComponent(getHdToken()||''),'_blank');
 }
 
-/* ── Init ── */
-buildAssessGrid();
-buildCompGrid(COMP_ITEMS, 'compGrid');
-buildCompGrid(TECH_ITEMS, 'techGrid');
-buildVA();
-loadSession();
-loadWorksheetData();
+/* ── Init — wait for base template scripts (hdFetch, getHdToken) ── */
+function _wsInit(){
+  if(typeof hdFetch === 'undefined'){
+    /* base script not loaded yet — retry */
+    setTimeout(_wsInit, 100);
+    return;
+  }
+  buildAssessGrid();
+  buildCompGrid(COMP_ITEMS, 'compGrid');
+  buildCompGrid(TECH_ITEMS, 'techGrid');
+  buildVA();
+  loadSession();
+  loadWorksheetData();
+}
+if(document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', _wsInit);
+} else {
+  _wsInit();
+}
 </script>
 {% endblock %}
