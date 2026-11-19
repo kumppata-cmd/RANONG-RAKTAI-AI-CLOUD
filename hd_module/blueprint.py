@@ -215,13 +215,13 @@ def hd_kpi_page():
 
 @hd_web.route("/checkin")
 def hd_checkin_page():
-    """QR Check-in handler — redirect to session."""
+    """QR Check-in V2 — auto-identify patient from schedule, show history, approve."""
     from .qr_checkin import verify_qr_token
     bed = request.args.get("bed", type=int)
     token = request.args.get("token", "")
-    if bed and token and verify_qr_token(bed, token):
-        return redirect(f"/hd/session/new?bed={bed}")
-    return "<h2>❌ QR Code ไม่ถูกต้องหรือหมดอายุ</h2><a href='/hd/dashboard'>กลับ Dashboard</a>", 400
+    if not bed or not token or not verify_qr_token(bed, token):
+        return "<h2>❌ QR Code ไม่ถูกต้องหรือหมดอายุ</h2><a href='/hd/dashboard'>กลับ Dashboard</a>", 400
+    return render_template("hd_checkin.html", bed_number=bed, qr_token=token)
 
 
 @hd_web.route("/calculator")
@@ -7955,6 +7955,113 @@ def qr_single_bed(bed_number):
     """สร้าง QR data สำหรับเตียงเดียว."""
     from .qr_checkin import generate_bed_qr_data
     return jsonify(generate_bed_qr_data(bed_number))
+
+
+@hd_bp.route("/qr/checkin-data/<int:bed_number>", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def qr_checkin_data(bed_number):
+    """QR Check-in V2: ดึงข้อมูลคนไข้ที่นัดเตียงนี้วันนี้ + ประวัติฟอกครั้งก่อน."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    today = _thai_today()
+    shift = request.args.get("shift", "")
+    if not shift:
+        h = _thai_now().hour
+        shift = "morning" if h < 12 else ("afternoon" if h < 18 else "evening")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        result = {"bed": bed_number, "today": today.isoformat(), "shift": shift, "patient": None, "last_session": None}
+        with conn.cursor() as cur:
+            # 1. Find scheduled/in_progress session for this bed today
+            cur.execute("""SELECT s.id, s.status, s.patient_id, p.hn, p.patient_name,
+                                  p.vascular_access, p.dry_weight, p.date_of_birth, p.schedule_days,
+                                  p.gender, p.allergies
+                           FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                           WHERE s.bed_number = %s AND s.session_date = %s
+                             AND (s.shift = %s OR s.shift IS NULL)
+                             AND s.status IN ('scheduled', 'in_progress')
+                           ORDER BY CASE s.status WHEN 'in_progress' THEN 0 ELSE 1 END
+                           LIMIT 1""", (bed_number, today.isoformat(), shift))
+            row = cur.fetchone()
+
+            if not row:
+                # Try any shift
+                cur.execute("""SELECT s.id, s.status, s.patient_id, p.hn, p.patient_name,
+                                      p.vascular_access, p.dry_weight, p.date_of_birth, p.schedule_days,
+                                      p.gender, p.allergies
+                               FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                               WHERE s.bed_number = %s AND s.session_date = %s
+                                 AND s.status IN ('scheduled', 'in_progress')
+                               LIMIT 1""", (bed_number, today.isoformat()))
+                row = cur.fetchone()
+
+            if row:
+                sid, status, pid, hn, name = row[0], row[1], row[2], row[3], row[4]
+                age = None
+                if row[7] and today:
+                    dob = row[7]
+                    age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+                result["patient"] = {
+                    "session_id": sid, "status": status, "hn": hn, "name": name,
+                    "va": row[5], "dry_weight": float(row[6]) if row[6] else None,
+                    "age": age, "gender": row[9], "schedule": row[8], "allergies": row[10],
+                }
+
+                # 2. Last completed session for this patient
+                cur.execute("""SELECT s.session_date, s.pre_weight, s.post_weight, s.actual_uf,
+                                      s.hb_value, s.kt_v, s.bed_number,
+                                      (SELECT sbp||'/'||dbp FROM hd_vital_signs
+                                       WHERE session_id=s.id AND phase='pre' AND sbp>0
+                                       ORDER BY recorded_at LIMIT 1) as pre_bp
+                               FROM hd_sessions s
+                               WHERE s.patient_id = %s AND s.status = 'completed'
+                               ORDER BY s.session_date DESC, s.id DESC LIMIT 1""", (pid,))
+                last = cur.fetchone()
+                if last:
+                    result["last_session"] = {
+                        "date": last[0].isoformat() if last[0] else None,
+                        "pre_weight": float(last[1]) if last[1] else None,
+                        "post_weight": float(last[2]) if last[2] else None,
+                        "actual_uf": last[3], "hb": float(last[4]) if last[4] else None,
+                        "kt_v": float(last[5]) if last[5] else None,
+                        "bed": last[6], "pre_bp": last[7],
+                    }
+
+                # 3. Active dialyzer
+                cur.execute("""SELECT dialyzer_type, reuse_count, max_reuse
+                               FROM hd_dialyzer_tracking
+                               WHERE patient_id = %s AND status = 'active'
+                               ORDER BY id DESC LIMIT 1""", (pid,))
+                dz = cur.fetchone()
+                if dz:
+                    result["dialyzer"] = {"type": dz[0], "reuse": dz[1], "max": dz[2]}
+
+                # 4. Last heparin
+                cur.execute("""SELECT a.protocol, a.loading_dose, a.maintenance_dose
+                               FROM hd_anticoagulation a
+                               JOIN hd_sessions s ON s.id = a.session_id
+                               WHERE s.patient_id = %s ORDER BY a.recorded_at DESC LIMIT 1""", (pid,))
+                hep = cur.fetchone()
+                if hep:
+                    result["heparin"] = {"protocol": hep[0], "loading": hep[1], "maintenance": hep[2]}
+
+                # 5. Machine on this bed
+                cur.execute("""SELECT brand, model, serial_number
+                               FROM hd_equipment WHERE bed_number = %s
+                                 AND equipment_type = 'dialysis_machine' AND status = 'active'
+                               LIMIT 1""", (bed_number,))
+                mc = cur.fetchone()
+                if mc:
+                    result["machine"] = {"brand": mc[0], "model": mc[1], "serial": mc[2]}
+
+        conn.close()
+        return jsonify(result)
+    except Exception as e:
+        logger.error("checkin-data error: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 # ── F8: Monthly Report ───────────────────────────────────

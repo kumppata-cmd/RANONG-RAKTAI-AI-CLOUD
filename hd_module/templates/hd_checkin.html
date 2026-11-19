@@ -1,0 +1,180 @@
+{% extends "hd_base.html" %}
+{% block title %}Check-in เตียง {{ bed_number }}{% endblock %}
+{% block content %}
+<div style="max-width:500px;margin:0 auto;padding:12px">
+
+<!-- Header -->
+<div style="text-align:center;margin-bottom:16px">
+  <div style="font-size:2.5rem">🏥</div>
+  <h2 style="margin:4px 0;color:var(--primary,#1e40af)">เตียง {{ bed_number }}</h2>
+  <div id="shiftLabel" style="font-size:.85rem;color:var(--fg-muted)"></div>
+</div>
+
+<!-- Loading -->
+<div id="loading" style="text-align:center;padding:40px">
+  <div style="font-size:2rem">⏳</div>
+  <p>กำลังตรวจสอบตารางนัด...</p>
+</div>
+
+<!-- Patient Found -->
+<div id="patientCard" style="display:none">
+  <div class="card" style="padding:16px;margin-bottom:12px;border-left:4px solid var(--primary,#1e40af)">
+    <div style="display:flex;align-items:center;gap:12px">
+      <div id="patAvatar" style="width:56px;height:56px;border-radius:50%;background:var(--primary,#1e40af);color:#fff;display:flex;align-items:center;justify-content:center;font-size:1.5rem;font-weight:800"></div>
+      <div style="flex:1">
+        <div id="patName" style="font-size:1.2rem;font-weight:800"></div>
+        <div id="patInfo" style="font-size:.82rem;color:var(--fg-muted)"></div>
+      </div>
+      <div id="patStatus" style="padding:4px 10px;border-radius:20px;font-size:.75rem;font-weight:700"></div>
+    </div>
+  </div>
+
+  <!-- Allergies warning -->
+  <div id="allergyBanner" style="display:none;padding:10px 14px;background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;margin-bottom:12px;color:#991b1b;font-weight:600">
+    ⚠️ แพ้: <span id="allergyText"></span>
+  </div>
+
+  <!-- Last Session Summary -->
+  <div class="card" style="padding:14px;margin-bottom:12px">
+    <h3 style="margin:0 0 8px;font-size:.9rem">📋 ครั้งก่อน</h3>
+    <div id="lastSession" style="font-size:.85rem">-</div>
+  </div>
+
+  <!-- Equipment -->
+  <div class="card" style="padding:14px;margin-bottom:12px">
+    <h3 style="margin:0 0 8px;font-size:.9rem">🔧 อุปกรณ์</h3>
+    <div id="equipment" style="font-size:.85rem">-</div>
+  </div>
+
+  <!-- Approve Button -->
+  <div style="text-align:center;margin-top:20px">
+    <button id="btnApprove" onclick="approveCheckin()" style="padding:16px 48px;font-size:1.2rem;font-weight:800;background:var(--primary,#1e40af);color:#fff;border:none;border-radius:14px;cursor:pointer;width:100%">
+      ✅ Approve — เริ่มฟอก
+    </button>
+    <div id="approveStatus" style="margin-top:8px;font-size:.85rem"></div>
+  </div>
+</div>
+
+<!-- No Patient -->
+<div id="noPatient" style="display:none;text-align:center;padding:30px">
+  <div style="font-size:3rem">🔍</div>
+  <h3 style="margin:12px 0 8px">ไม่พบคนไข้ที่นัดเตียง {{ bed_number }} วันนี้</h3>
+  <p style="color:var(--fg-muted);font-size:.85rem">กรุณาเลือกคนไข้ด้านล่าง หรือจัดเตียงในระบบก่อน</p>
+  <a href="/hd/session/new?bed={{ bed_number }}" class="btn btn-primary" style="display:inline-block;margin-top:12px;padding:12px 24px">📝 เปิด session ใหม่</a>
+</div>
+
+</div>
+
+<script>
+const BED = {{ bed_number }};
+let checkinData = null;
+
+async function loadCheckin(){
+  const el = document.getElementById('loading');
+  try{
+    const r = await hdFetch('/hd/api/v1/qr/checkin-data/'+BED);
+    const d = await r.json();
+    checkinData = d;
+    el.style.display = 'none';
+
+    const shiftTh = {morning:'🌅 เวรเช้า',afternoon:'☀️ เวรบ่าย',evening:'🌙 เวรค่ำ'};
+    document.getElementById('shiftLabel').textContent = (shiftTh[d.shift]||d.shift) + ' · ' + d.today;
+
+    if(!d.patient){
+      document.getElementById('noPatient').style.display = 'block';
+      return;
+    }
+
+    const p = d.patient;
+    document.getElementById('patientCard').style.display = 'block';
+    document.getElementById('patAvatar').textContent = (p.name||'?').charAt(0);
+    document.getElementById('patName').textContent = p.name;
+
+    let info = `HN: ${p.hn}`;
+    if(p.age) info += ` · อายุ ${p.age} ปี`;
+    if(p.va) info += ` · ${p.va}`;
+    if(p.dry_weight) info += ` · DW ${p.dry_weight} kg`;
+    document.getElementById('patInfo').textContent = info;
+
+    const statusEl = document.getElementById('patStatus');
+    if(p.status === 'in_progress'){
+      statusEl.textContent = '🟢 กำลังฟอก';
+      statusEl.style.background = '#dcfce7';
+      statusEl.style.color = '#166534';
+      document.getElementById('btnApprove').textContent = '📋 เปิด Session';
+    } else {
+      statusEl.textContent = '📅 นัดแล้ว';
+      statusEl.style.background = '#dbeafe';
+      statusEl.style.color = '#1e40af';
+    }
+
+    // Allergies
+    if(p.allergies){
+      document.getElementById('allergyBanner').style.display = 'block';
+      document.getElementById('allergyText').textContent = p.allergies;
+    }
+
+    // Last session
+    const ls = d.last_session;
+    if(ls){
+      let h = `<div style="display:grid;grid-template-columns:1fr 1fr;gap:6px">`;
+      h += `<div>📅 ${ls.date||'-'}</div><div>🛏 เตียง ${ls.bed||'-'}</div>`;
+      h += `<div>⚖️ Pre ${ls.pre_weight||'-'} kg</div><div>⚖️ Post ${ls.post_weight||'-'} kg</div>`;
+      h += `<div>💧 UF ${ls.actual_uf||'-'} mL</div><div>💓 BP ${ls.pre_bp||'-'}</div>`;
+      if(ls.hb) h += `<div>🩸 Hb ${ls.hb}</div>`;
+      if(ls.kt_v) h += `<div>🧮 Kt/V ${ls.kt_v}</div>`;
+      h += `</div>`;
+      document.getElementById('lastSession').innerHTML = h;
+    } else {
+      document.getElementById('lastSession').innerHTML = '<span style="color:var(--fg-muted)">ไม่มีประวัติฟอกก่อนหน้า</span>';
+    }
+
+    // Equipment
+    let eq = '';
+    if(d.machine) eq += `🖥 ${d.machine.brand} ${d.machine.model}<br>`;
+    if(d.dialyzer) eq += `💉 ${d.dialyzer.type} (ครั้งที่ ${d.dialyzer.reuse}/${d.dialyzer.max})<br>`;
+    if(d.heparin) eq += `💊 ${d.heparin.protocol||'Heparin'} Loading ${d.heparin.loading||'-'} Maint ${d.heparin.maintenance||'-'}`;
+    document.getElementById('equipment').innerHTML = eq || '<span style="color:var(--fg-muted)">-</span>';
+
+  }catch(e){
+    el.innerHTML = '❌ โหลดไม่ได้: '+e.message;
+  }
+}
+
+async function approveCheckin(){
+  if(!checkinData || !checkinData.patient) return;
+  const p = checkinData.patient;
+  const el = document.getElementById('approveStatus');
+
+  if(p.status === 'in_progress'){
+    // Already started — just go to session
+    window.location.href = '/hd/session/'+p.session_id;
+    return;
+  }
+
+  el.textContent = '⏳ กำลังเริ่มฟอก...';
+  document.getElementById('btnApprove').disabled = true;
+
+  try{
+    // Start the session (change status to in_progress)
+    const r = await hdFetch('/hd/api/v1/sessions/'+p.session_id, {
+      method: 'PATCH',
+      body: JSON.stringify({status: 'in_progress'})
+    });
+    const d = await r.json();
+    if(r.ok){
+      el.innerHTML = '✅ เริ่มฟอกสำเร็จ — กำลังเปิด session...';
+      setTimeout(()=>{ window.location.href = '/hd/session/'+p.session_id; }, 800);
+    } else {
+      el.innerHTML = '❌ '+(d.error||'ไม่สำเร็จ');
+      document.getElementById('btnApprove').disabled = false;
+    }
+  }catch(e){
+    el.innerHTML = '❌ '+e.message;
+    document.getElementById('btnApprove').disabled = false;
+  }
+}
+
+document.addEventListener('DOMContentLoaded', loadCheckin);
+</script>
+{% endblock %}
