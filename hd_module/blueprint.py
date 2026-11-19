@@ -672,16 +672,36 @@ _WS_CREATE_SQL = """CREATE TABLE IF NOT EXISTS hd_worksheet_data (
 )"""
 
 
+_WS_ALTER_SQLS = [
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_fever VARCHAR(10)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_dyspnea VARCHAR(10)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_chest_pain VARCHAR(10)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_headache VARCHAR(10)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS dx_cramp VARCHAR(10)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS post_dyspnea VARCHAR(10)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS post_bleeding VARCHAR(10)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS discharge_type VARCHAR(20)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS discharge_mobility VARCHAR(20)",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_sbp INTEGER",
+    "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_dbp INTEGER",
+]
+
+
 def _ensure_ws_table(conn):
-    """Ensure hd_worksheet_data table exists. Uses autocommit to avoid transaction issues."""
+    """Ensure hd_worksheet_data table + all columns exist."""
     try:
         old_ac = conn.autocommit
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(_WS_CREATE_SQL)
+            for sql in _WS_ALTER_SQLS:
+                try:
+                    cur.execute(sql)
+                except Exception:
+                    pass
         conn.autocommit = old_ac
     except Exception as e:
-        logger.debug("_ensure_ws_table: %s (table likely exists)", e)
+        logger.debug("_ensure_ws_table: %s", e)
         try:
             conn.rollback()
         except Exception:
