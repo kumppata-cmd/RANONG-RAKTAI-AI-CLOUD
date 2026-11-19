@@ -389,6 +389,12 @@ def scheduler_page():
     return render_template("hd_scheduler.html")
 
 
+@hd_web.route("/srt-report")
+def srt_report_page():
+    """ศ.ร.ต. Auto Report — รายงานคุณภาพรายเดือน."""
+    return render_template("hd_srt_report.html")
+
+
 @hd_web.route("/adequacy")
 def adequacy_page():
     """Adequacy Guardian — Kt/V per patient with levers to reach target."""
@@ -6673,6 +6679,119 @@ def session_uf_coach(session_id):
         })
     except Exception as e:
         logger.error("uf-coach error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Medication Reconciliation ─────────────────────────────
+
+@hd_bp.route("/patients/<hn>/med-check", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patient_med_check(hn):
+    """ตรวจยาคนไข้ไตเทียม — ยาที่ต้องปรับ/ห้าม/ระวัง."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, patient_name, vascular_access FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            p = cur.fetchone()
+            if not p:
+                conn.close()
+                return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+            pid, name = p[0], p[1]
+
+            # Get latest lab values
+            cur.execute("""SELECT potassium, creatinine, bun, hb, albumin
+                           FROM hd_lab_results WHERE patient_id = %s
+                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+            lab = cur.fetchone()
+            k_val = float(lab[0]) if lab and lab[0] else None
+            cr_val = float(lab[1]) if lab and lab[1] else None
+
+            # Get prescriptions/medications from notes
+            cur.execute("""SELECT notes FROM hd_sessions WHERE patient_id = %s
+                           AND notes IS NOT NULL AND notes != ''
+                           ORDER BY session_date DESC LIMIT 5""", (pid,))
+            notes = [r[0] for r in cur.fetchall()]
+
+            # Get ESA info
+            cur.execute("""SELECT esa_drug_given, esa_dose_given FROM hd_sessions
+                           WHERE patient_id = %s AND esa_given = TRUE
+                           ORDER BY session_date DESC LIMIT 1""", (pid,))
+            esa = cur.fetchone()
+
+            # Heparin info
+            cur.execute("""SELECT protocol, loading_dose, maintenance_dose
+                           FROM hd_anticoagulation a JOIN hd_sessions s ON s.id = a.session_id
+                           WHERE s.patient_id = %s ORDER BY a.recorded_at DESC LIMIT 1""", (pid,))
+            hep = cur.fetchone()
+
+        conn.close()
+
+        # HD-specific medication alerts (rule-based)
+        alerts = []
+
+        # 1. K+ related
+        if k_val:
+            if k_val > 6.0:
+                alerts.append({"level": "danger", "icon": "🔴", "drug": "Potassium",
+                    "message": f"K+ = {k_val} mEq/L (สูงมาก)",
+                    "action": "ห้าม KCl supplement, ระวัง ACEi/ARB/Spironolactone, แนะนำ Kayexalate"})
+            elif k_val > 5.5:
+                alerts.append({"level": "warning", "icon": "🟠", "drug": "Potassium",
+                    "message": f"K+ = {k_val} mEq/L (สูง)",
+                    "action": "ทบทวนยาที่เพิ่ม K+: ACEi, ARB, Spironolactone, NSAIDs"})
+
+        # 2. ESA check
+        if esa:
+            alerts.append({"level": "info", "icon": "💉", "drug": f"ESA ({esa[0] or 'EPO'})",
+                "message": f"Dose: {esa[1] or '-'}",
+                "action": "ให้หลังฟอก (ไม่ถูกดึงออก) · ตรวจ Hb ทุก 2-4 สัปดาห์"})
+
+        # 3. Heparin check
+        if hep:
+            proto = hep[0] or "Heparin"
+            alerts.append({"level": "info", "icon": "💊", "drug": proto,
+                "message": f"Loading {hep[1] or '-'} / Maint {hep[2] or '-'}",
+                "action": "หยุด Heparin 30 นาทีก่อนถอดเข็ม" + (" · ระวัง HIT" if "heparin" in proto.lower() else "")})
+
+        # 4. Dialysis-specific drug warnings
+        hd_drug_rules = [
+            {"drug": "NSAIDs (Ibuprofen, Diclofenac, Naproxen)", "level": "danger", "icon": "🔴",
+             "message": "ห้ามใช้ในคนไข้ไตเทียม", "action": "เปลี่ยนเป็น Paracetamol · NSAIDs ทำไตเสื่อมเพิ่ม + เลือดออก GI"},
+            {"drug": "Metformin", "level": "danger", "icon": "🔴",
+             "message": "ห้ามใช้ใน GFR <30 / ไตเทียม", "action": "เสี่ยง Lactic acidosis · ถูกดึงออกบางส่วนตอนฟอก"},
+            {"drug": "Gabapentin / Pregabalin", "level": "warning", "icon": "🟠",
+             "message": "ต้องลดขนาด 50-75%", "action": "ให้หลังฟอก (ถูกดึงออก) · Gabapentin 100-300mg หลังฟอก"},
+            {"drug": "Vancomycin", "level": "warning", "icon": "🟠",
+             "message": "ให้ระหว่างฟอกชั่วโมงสุดท้าย", "action": "ไม่ต้อง dose ทุกวัน · ตรวจ trough level ก่อนฟอกครั้งต่อไป"},
+            {"drug": "Gentamicin / Amikacin", "level": "warning", "icon": "🟠",
+             "message": "ให้หลังฟอก · ลดขนาด", "action": "ตรวจ level · ถูกดึงออกตอนฟอก"},
+            {"drug": "Enoxaparin (LMWH)", "level": "warning", "icon": "🟠",
+             "message": "ห้ามใช้ใน CrCl <30", "action": "ใช้ Unfractionated Heparin แทน · LMWH สะสมในไตวาย"},
+            {"drug": "Spironolactone", "level": "warning", "icon": "🟠",
+             "message": "ระวัง Hyperkalemia", "action": "ตรวจ K+ ทุกสัปดาห์ · หยุดถ้า K+ >5.5"},
+            {"drug": "ACEi / ARB", "level": "info", "icon": "🟡",
+             "message": "ใช้ได้แต่ระวัง K+ + ความดันตก", "action": "ไม่ให้ก่อนฟอก (เสี่ยง IDH) · ตรวจ K+ สม่ำเสมอ"},
+            {"drug": "Phosphate Binders (CaCO3, Sevelamer)", "level": "info", "icon": "💊",
+             "message": "ให้พร้อมอาหาร", "action": "CaCO3: ระวัง Ca สูง ถ้าใช้ Calcitriol ด้วย"},
+            {"drug": "Calcitriol / Alfacalcidol", "level": "info", "icon": "💊",
+             "message": "Vitamin D active form", "action": "ตรวจ Ca, PO4, iPTH ทุก 1-3 เดือน"},
+        ]
+        alerts.extend(hd_drug_rules)
+
+        return jsonify({
+            "hn": hn, "name": name,
+            "lab": {"k": k_val, "cr": cr_val, "hb": float(lab[3]) if lab and lab[3] else None} if lab else None,
+            "alerts": alerts,
+            "total_alerts": len(alerts),
+            "danger_count": sum(1 for a in alerts if a["level"] == "danger"),
+            "warning_count": sum(1 for a in alerts if a["level"] == "warning"),
+        })
+    except Exception as e:
+        logger.error("med-check error: %s", e)
         return jsonify({"error": str(e)}), 500
 
 

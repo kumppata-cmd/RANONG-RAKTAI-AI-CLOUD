@@ -1,0 +1,144 @@
+{% extends "hd_base.html" %}
+{% block title %}รายงาน ศ.ร.ต. — รักษ์ไต{% endblock %}
+{% block content %}
+<div style="max-width:800px;margin:0 auto;padding:12px">
+<h2 style="text-align:center">📊 รายงาน ศ.ร.ต. ประจำเดือน</h2>
+
+<div style="display:flex;gap:8px;justify-content:center;margin:12px 0;align-items:center">
+  <select id="selMonth" class="form-control" style="width:auto;padding:8px 12px"></select>
+  <button class="btn btn-primary" onclick="loadReport()" style="padding:8px 16px">📊 ดูรายงาน</button>
+  <a id="pdfLink" href="#" target="_blank" class="btn" style="padding:8px 16px;display:none">📄 PDF</a>
+  <button id="btnPush" onclick="pushReport()" class="btn" style="padding:8px 16px;display:none">📱 ส่ง LINE</button>
+</div>
+<div id="pushStatus" style="text-align:center;font-size:.82rem"></div>
+
+<div id="reportContent">เลือกเดือนแล้วกด "ดูรายงาน"</div>
+</div>
+
+<script>
+// Populate month selector (last 12 months)
+(function(){
+  const sel = document.getElementById('selMonth');
+  const now = new Date();
+  for(let i=0;i<12;i++){
+    const d = new Date(now.getFullYear(), now.getMonth()-i, 1);
+    const val = d.getFullYear()+'-'+(d.getMonth()+1).toString().padStart(2,'0');
+    const thMonth = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.','ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+    const be = d.getFullYear()+543;
+    sel.innerHTML += `<option value="${val}">${thMonth[d.getMonth()]} ${be}</option>`;
+  }
+})();
+
+function pct(n,d){ return d>0 ? (n/d*100).toFixed(1)+'%' : '-'; }
+function kpi(label, value, target, good){
+  const color = good ? 'var(--success,#16a34a)' : 'var(--danger,#dc2626)';
+  return `<div style="padding:12px;background:var(--bg);border-radius:10px;text-align:center;border-left:4px solid ${color}">
+    <div style="font-size:.75rem;color:var(--fg-muted)">${label}</div>
+    <div style="font-size:1.4rem;font-weight:800;color:${color}">${value}</div>
+    <div style="font-size:.7rem;color:var(--fg-muted)">เป้า: ${target}</div>
+  </div>`;
+}
+
+async function loadReport(){
+  const month = document.getElementById('selMonth').value;
+  const el = document.getElementById('reportContent');
+  el.innerHTML = '⏳ กำลังโหลด...';
+  try{
+    const r = await hdFetch('/hd/api/v1/quality-report?month='+month);
+    const D = await r.json();
+    if(D.error){el.innerHTML='❌ '+D.error;return;}
+
+    const s = D.sessions||{};
+    const a = D.anemia||{};
+    const ad = D.adequacy||{};
+    const ir = D.iron||{};
+    const w = D.water_daily||{};
+    const wl = D.water_lab||{};
+    const se = D.serology||{};
+    const eq = D.equipment||{};
+
+    // Rates
+    const hbRate = a.checked>0 ? (a.in_target/a.checked*100) : 0;
+    const ktvRate = ad.checked>0 ? (ad.adequate/ad.checked*100) : 0;
+    const idhRate = D.idh_rate || 0;
+    const waterPass = w.checks>0 ? (w.pass/w.checks*100) : 0;
+
+    let h = `<div class="card" style="padding:16px;margin-bottom:12px">
+      <h3 style="margin:0 0 12px">🏥 สรุปรายเดือน ${month} · คลินิกระนอง รักษ์ไต</h3>
+      <div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;font-size:.85rem">
+        <div>👥 ผู้ป่วยทั้งหมด: <b>${D.active_patients||0}</b> ราย</div>
+        <div>🔄 รอบฟอก: <b>${s.completed||0}</b> รอบ (ยกเลิก ${s.cancelled||0})</div>
+        <div>🌅 เวรเช้า: ${s.morning||0} · ☀️ บ่าย: ${s.afternoon||0} · 🌙 ค่ำ: ${s.evening||0}</div>
+      </div>
+    </div>`;
+
+    // KPI Cards
+    h += `<div style="display:grid;grid-template-columns:repeat(2,1fr);gap:8px;margin-bottom:12px">
+      ${kpi('🩸 Hb in Target (10-12)', pct(a.in_target,a.checked), '≥80%', hbRate>=80)}
+      ${kpi('🧮 Kt/V Adequate (≥1.2)', pct(ad.adequate,ad.checked), '≥80%', ktvRate>=80)}
+      ${kpi('⚠️ IDH Rate', (idhRate||0)+'%', '<10%', idhRate<10)}
+      ${kpi('💧 Water RO Pass', pct(w.pass,w.checks), '100%', waterPass>=95)}
+    </div>`;
+
+    // Details
+    h += `<div class="card" style="padding:14px;margin-bottom:12px">
+      <h3 style="margin:0 0 8px">🩸 Anemia Management</h3>
+      <div style="font-size:.85rem">
+        ตรวจ Hb: ${a.checked||0} ราย · ในเป้า (10-12): ${a.in_target||0} (${pct(a.in_target,a.checked)})<br>
+        Iron deficiency: ${ir.deficient||0}/${ir.checked||0} ราย<br>
+        ESA: ให้ ${(D.esa||{}).given||0}/${(D.esa||{}).sessions||0} รอบ
+      </div>
+    </div>`;
+
+    h += `<div class="card" style="padding:14px;margin-bottom:12px">
+      <h3 style="margin:0 0 8px">🔬 Vascular Access</h3>
+      <div style="font-size:.85rem">`;
+    const acc = D.access||{};
+    Object.entries(acc).forEach(([k,v])=>{ h += `${k}: ${v} ราย · `; });
+    h += `</div></div>`;
+
+    h += `<div class="card" style="padding:14px;margin-bottom:12px">
+      <h3 style="margin:0 0 8px">💧 Water Quality</h3>
+      <div style="font-size:.85rem">
+        ตรวจประจำวัน: ${w.checks||0} ครั้ง · ผ่าน ${w.pass||0} · ไม่ผ่าน ${w.fail||0}<br>
+        ตรวจ Lab น้ำ: ${(wl.tests||0)} ครั้ง · ผ่าน ${wl.pass||0}
+      </div>
+    </div>`;
+
+    h += `<div class="card" style="padding:14px;margin-bottom:12px">
+      <h3 style="margin:0 0 8px">🛡 Serology Screening</h3>
+      <div style="font-size:.85rem">
+        ตรวจ: ${se.screened||0}/${se.total||0} ราย · HBsAg+: ${se.hbsag_pos||0} · Anti-HCV+: ${se.antihcv_pos||0}
+      </div>
+    </div>`;
+
+    h += `<div class="card" style="padding:14px;margin-bottom:12px">
+      <h3 style="margin:0 0 8px">🔧 Equipment</h3>
+      <div style="font-size:.85rem">
+        เครื่องฟอก: ${eq.total||0} เครื่อง · หมดอายุ: ${eq.expired||0} · ใกล้หมด: ${eq.expiring_soon||0}<br>
+        Dialyzer: ${(D.dialyzer||{}).active||0} ตัว · เฉลี่ย reuse ${(D.dialyzer||{}).avg_reuse||'-'} ครั้ง
+      </div>
+    </div>`;
+
+    el.innerHTML = h;
+
+    // Show PDF + LINE buttons
+    document.getElementById('pdfLink').style.display = '';
+    document.getElementById('pdfLink').href = '/hd/api/v1/quality-report.pdf?month='+month;
+    document.getElementById('btnPush').style.display = '';
+  }catch(e){el.innerHTML='❌ '+e.message;}
+}
+
+async function pushReport(){
+  const month = document.getElementById('selMonth').value;
+  const el = document.getElementById('pushStatus');
+  el.textContent = '⏳ กำลังส่ง...';
+  try{
+    const r = await hdFetch('/hd/api/v1/quality-report/send',{method:'POST',body:JSON.stringify({month})});
+    const d = await r.json();
+    el.innerHTML = d.line_sent>0 ? `✅ ส่ง LINE สำเร็จ (${d.line_sent} คน)` : '⚠️ ส่งไม่สำเร็จ — ตรวจ alert_recipients';
+    el.style.color = d.line_sent>0 ? 'var(--success)' : 'var(--danger)';
+  }catch(e){el.textContent='❌ '+e.message; el.style.color='var(--danger)';}
+}
+</script>
+{% endblock %}
