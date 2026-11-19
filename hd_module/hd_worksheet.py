@@ -333,10 +333,22 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     dur_x = RX_X + RX_W - dur_w
     anti_x = RX_X + rx_mid  # Anticoagulant column
 
-    # ข้อ 7: Checkbox ☑
-    _hep_ck = "☑" if "heparin" in hep_protocol and "free" not in hep_protocol else "☐"
+    # ข้อ 7: Checkbox ☑ — Heparin/LMWH/Free
+    # ถ้ามี heparin data จาก anticoagulation table → ☑ Heparin
+    _has_hep = bool(hep_bolus or hep_maint or hep_protocol)
+    _hep_ck = "☑" if (_has_hep and "free" not in hep_protocol and "lmwh" not in hep_protocol) else "☐"
     _lmwh_ck = "☑" if "lmwh" in hep_protocol else "☐"
     _free_ck = "☑" if "free" in hep_protocol else "☐"
+    # ถ้าไม่มี protocol แต่มี bolus/maint → default = Heparin
+    if not hep_protocol and _has_hep:
+        _hep_ck = "☑"
+
+    # Test Leak จาก ws_data
+    _tl = ws.get("test_leak")
+    _tl_txt = f"Tesk leak  {'☑ Y  ☐ N' if _tl is True else ('☐ Y  ☑ N' if _tl is False else 'O Y  O N')}"
+    # Disinfectant จาก ws_data
+    _dis = (ws.get("disinfectant") or "").lower()
+    _dis_ck = lambda k: "☑" if k in _dis else "☐"
 
     # Column 1: Machine/Dialyzer/Tesk leak
     col1 = [
@@ -346,9 +358,9 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         ("Use No.", str(reuse) if reuse else ""),
         ("Last TCV", ""),
         ("เปิดใช้เมื่อ", ""),
-        ("Tesk leak  O Y  O N", ""),
-        ("☐ Disinfectant ☐ Paracetic", ""),
-        ("☐ Formalin ☐ Other", ""),
+        (_tl_txt, ""),
+        (f"{_dis_ck('disinfect')} Disinfectant {_dis_ck('paracetic')} Paracetic", ""),
+        (f"{_dis_ck('formalin')} Formalin {_dis_ck('other')} Other", ""),
     ]
     # Column 2: Anticoagulant / Heparin
     col2 = [
@@ -363,14 +375,17 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         ("☐ Flush Nss   cc q   min", ""),
     ]
     # Column 3: Duration / Time / BT / Hct / Hb
+    # Hb/Hct: ดึงจาก session → extras → rec (ทุกทาง)
+    _hct = _f(ex.get("hct_value") or rec.get("hct"))
+    _hb = _f(ex.get("hb_value") or rec.get("hb"))
     col3 = [
         f"Duration  {duration}  hr",
         f"Time start  {_thai_time(rec.get('started_at'))}",
         f"Time off  {_thai_time(rec.get('ended_at'))}",
         "O2 sat              %",
         f"BT  {_f(rec.get('bt') or ex.get('bt_value'))}  'C",
-        f"Hct=  {_f(rec.get('hct') or ex.get('hct_value'))}  %",
-        f"Hb =  {_f(rec.get('hb') or ex.get('hb_value'))}  g/dl",
+        f"Hct=  {_hct}  %",
+        f"Hb =  {_hb}  g/dl",
     ]
 
     n_rx = max(len(col1), len(col2), len(col3))
@@ -398,13 +413,15 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     rx_bottom = ry - n_rx * RH
 
     # Vascular access — อยู่ฝั่งซ้าย ใต้ Pre-dialysis assessment
-    va = (rec.get("va", "") or "").upper()
+    # ดึงจาก ws_data (interactive) ก่อน, fallback ไป rec (patient mapping)
+    va = (ws.get("va_type") or rec.get("va", "") or ex.get("access_type", "") or "").upper()
     va_y = left_bottom  # เริ่มต่อจาก assessment items
     cell(LM, va_y - RH, LEFT_W, RH, "Vascular access", sz=6, bold=True, align="center", bg=GRAY)
     # 2 คอลัมน์: ซ้าย-ขวา
+    def _va_ck(key): return "☑" if key.upper() in va else "☐"
     va_rows = [
-        (f"{'☑' if 'AVF' in va else '☐'} AVF", f"{'☑' if 'AVG' in va else '☐'} AVG"),
-        (f"{'☑' if 'DLC' in va else '☐'} DLC", f"{'☑' if 'PERM' in va else '☐'} Perm Cath"),
+        (f"{_va_ck('AVF')} AVF", f"{_va_ck('AVG')} AVG"),
+        (f"{_va_ck('DLC')} DLC", f"{_va_ck('PERM')} Perm Cath"),
         ("☐ Subclavian", "☐ jugular"),
         ("☐ Femoral", ""),
     ]
@@ -428,11 +445,18 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     med_x = RX_X + RX_W * 0.55
     med_w = RX_W * 0.45
     cell(med_x, dial_y - 2 * RH, med_w, RH, "Medication", sz=6, bold=True, align="center", bg=GRAY)
-    esa_drug = ex.get("esa_drug_given") or rec.get("esa_drug") or ""
+    esa_drug = ex.get("esa_drug_given") or rec.get("esa_drug") or rec.get("esa_rx") or ""
+    esa_dose = ex.get("esa_dose_given") or rec.get("esa_dose") or ""
     esa_route = ex.get("esa_route") or rec.get("esa_route") or ""
-    cell(med_x, dial_y - 3 * RH, med_w, RH, f"EPO  {esa_drug}", sz=5.5)
+    esa_given = rec.get("esa_given")
+    esa_txt = f"EPO  {esa_drug}" + (f"  {esa_dose}" if esa_dose else "")
+    if esa_given is False:
+        esa_txt += "  (งด)"
+    cell(med_x, dial_y - 3 * RH, med_w, RH, esa_txt, sz=5.5)
     cell(med_x, dial_y - 4 * RH, med_w, RH, "Route  Time", sz=5.5, bold=True)
-    cell(med_x, dial_y - 5 * RH, med_w, RH, f"IV  SC  {esa_route}", sz=5.5)
+    _iv_ck = "☑" if esa_route and "iv" in esa_route.lower() else "☐"
+    _sc_ck = "☑" if esa_route and "sc" in esa_route.lower() else "☐"
+    cell(med_x, dial_y - 5 * RH, med_w, RH, f"{_iv_ck} IV  {_sc_ck} SC", sz=5.5)
     cell(med_x, dial_y - 6 * RH, med_w, RH, "Signature", sz=5.5)
 
     # ════════════════════════════════════════════════════════════
@@ -1042,21 +1066,26 @@ def load_and_build(conn, session_id, clinic_name="ระนอง รักษ�
     except Exception as e:
         logger.warning("hd_worksheet extras: %s", e)
 
-    # Load interactive worksheet data — SEPARATE connection to avoid transaction issues
+    # Load interactive worksheet data — NEW connection to guarantee clean state
     ws_data = {}
     try:
-        conn.autocommit = True  # ensure clean state
-        with conn.cursor() as cur2:
+        import psycopg2 as _pg2
+        db_url2 = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        conn2 = _pg2.connect(db_url2, connect_timeout=5)
+        conn2.autocommit = True
+        with conn2.cursor() as cur2:
             cur2.execute("SELECT * FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
             ws_row = cur2.fetchone()
             if ws_row:
                 col_names = [desc[0] for desc in cur2.description]
                 ws_data = dict(zip(col_names, ws_row))
-                logger.info("hd_worksheet: loaded ws_data for session %s (%d fields)", session_id, len(ws_data))
+                logger.info("hd_worksheet: loaded ws_data for session %s — keys: %s", session_id,
+                            [k for k, v in ws_data.items() if v is not None and k not in ('id','session_id','created_at','updated_at','updated_by')])
             else:
-                logger.info("hd_worksheet: no ws_data for session %s", session_id)
+                logger.info("hd_worksheet: no ws_data found for session %s", session_id)
+        conn2.close()
     except Exception as ws_err:
-        logger.warning("hd_worksheet ws_data: %s", ws_err)
+        logger.warning("hd_worksheet ws_data FAILED: %s", ws_err)
 
     if mode == "overlay" and os.path.exists(_TEMPLATE_PATH):
         try:
