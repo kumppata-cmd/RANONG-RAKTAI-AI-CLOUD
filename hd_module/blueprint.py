@@ -3143,6 +3143,62 @@ def hd_force_reset():
         return jsonify({"error": str(e)}), 500
 
 
+@hd_bp.route("/auth/test-login", methods=["GET"])
+def hd_test_login():
+    """Debug login — test each step individually."""
+    import os, psycopg2, traceback
+    secret = request.args.get("secret", "")
+    real_secret = os.environ.get("ADMIN_SECRET", "changeme")
+    if not secret or secret != real_secret:
+        return jsonify({"error": "Invalid secret"}), 403
+    username = request.args.get("user", "hd_admin")
+    password = request.args.get("pw", "admin1234")
+    steps = []
+    try:
+        # Step 1: DB connect
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        steps.append({"step": "db_url", "ok": bool(db_url), "len": len(db_url)})
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        steps.append({"step": "db_connect", "ok": True})
+
+        # Step 2: Find user
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, username, password_hash, full_name, role, is_active, failed_attempts, locked_until FROM hd_users WHERE username = %s", (username,))
+            row = cur.fetchone()
+        steps.append({"step": "find_user", "ok": bool(row), "found": bool(row)})
+        if not row:
+            conn.close()
+            return jsonify({"steps": steps, "result": "user_not_found"})
+
+        user_id, uname, pw_hash, full_name, role, is_active, failed_attempts, locked_until = row
+        steps.append({"step": "user_info", "id": user_id, "role": role, "active": is_active,
+                       "failed": failed_attempts, "locked": str(locked_until) if locked_until else None,
+                       "hash_type": "bcrypt" if pw_hash.startswith("$2") else "sha256"})
+
+        # Step 3: Verify password
+        from .auth import verify_password
+        pw_ok = verify_password(password, pw_hash)
+        steps.append({"step": "verify_password", "ok": pw_ok})
+
+        # Step 4: Create token
+        from .auth import create_token
+        token = create_token(user_id, uname, role)
+        steps.append({"step": "create_token", "ok": bool(token), "token_prefix": token[:20] + "..."})
+
+        # Step 5: log_action
+        try:
+            log_action(user_id=user_id, action="test_login", resource_type="auth", ip_address="test")
+            steps.append({"step": "log_action", "ok": True})
+        except Exception as e2:
+            steps.append({"step": "log_action", "ok": False, "error": str(e2)})
+
+        conn.close()
+        return jsonify({"steps": steps, "result": "all_ok" if pw_ok else "wrong_password"})
+    except Exception as e:
+        steps.append({"step": "EXCEPTION", "error": str(e), "tb": traceback.format_exc()[-500:]})
+        return jsonify({"steps": steps, "result": "error"}), 500
+
+
 @hd_bp.route("/auth/debug-users", methods=["GET"])
 def hd_debug_users():
     """Debug: list users + hash type (requires ADMIN_SECRET)."""
