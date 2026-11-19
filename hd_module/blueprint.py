@@ -389,6 +389,12 @@ def scheduler_page():
     return render_template("hd_scheduler.html")
 
 
+@hd_web.route("/clinic-pulse")
+def clinic_pulse_page():
+    """🫀 Live Clinic Pulse — ชีพจรคลินิก real-time."""
+    return render_template("hd_clinic_pulse.html")
+
+
 @hd_web.route("/ai")
 def ai_chat_page():
     """🤖 AI Assistant — ถามอะไรก็ตอบจากข้อมูลจริง."""
@@ -6960,6 +6966,325 @@ def ai_assistant_ask():
         return jsonify({"question": question, "answer": reply, "source": "rule-based (no external AI)"})
     except Exception as e:
         logger.error("ai ask error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── ทีเด็ด #1: AI Clinical Narrator — เล่าเรื่องคนไข้ ──
+
+@hd_bp.route("/patients/<hn>/narrator", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patient_narrator(hn):
+    """AI Clinical Narrator — สรุปสถานะคนไข้เป็น 'เรื่องเล่า' ภาษาไทย.
+
+    ไม่ใช่แค่ตัวเลข — เขียนเป็นข้อความที่หมออ่านแล้วเข้าใจทันที 1 นาที
+    เหมือนมีแพทย์ประจำบ้านสรุปให้ทุกเช้า
+
+    Rule-based narrative generation (no external AI).
+    """
+    import os, psycopg2
+    from datetime import timedelta
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        today = _thai_today()
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, patient_name, hn, dry_weight, vascular_access, schedule_days,
+                                  esa_drug, esa_dose, date_of_birth, gender, allergies
+                           FROM hd_patient_mapping WHERE hn = %s""", (hn,))
+            p = cur.fetchone()
+            if not p:
+                conn.close()
+                return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+            pid, name, _, dw, va, sched, esa_drug, esa_dose, dob, gender, allergies = p
+            age = None
+            if dob:
+                age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+            # Collect data
+            # Last 5 sessions
+            cur.execute("""SELECT session_date, pre_weight, post_weight, actual_uf, kt_v,
+                                  started_at, ended_at, hb_value
+                           FROM hd_sessions WHERE patient_id = %s AND status = 'completed'
+                           ORDER BY session_date DESC, id DESC LIMIT 5""", (pid,))
+            sessions = cur.fetchall()
+
+            # Latest labs
+            cur.execute("""SELECT hb, hct, bun, creatinine, potassium, albumin, result_date
+                           FROM hd_lab_results WHERE patient_id = %s
+                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+            lab = cur.fetchone()
+
+            # Unack alerts
+            cur.execute("""SELECT COUNT(*) FROM hd_clinical_alerts a
+                           JOIN hd_sessions s ON s.id = a.session_id
+                           WHERE s.patient_id = %s AND a.acknowledged = FALSE""", (pid,))
+            alert_count = cur.fetchone()[0]
+
+            # ESA proposals pending
+            cur.execute("""SELECT action, proposed_dose FROM hd_esa_proposals
+                           WHERE patient_id = %s AND status = 'pending' LIMIT 1""", (pid,))
+            esa_pending = cur.fetchone()
+
+            # BP trend (last 5 sessions pre-HD)
+            bp_list = []
+            for s in sessions[:5]:
+                cur.execute("""SELECT sbp, dbp FROM hd_vital_signs
+                               WHERE session_id IN (SELECT id FROM hd_sessions WHERE patient_id = %s AND session_date = %s LIMIT 1)
+                               AND phase = 'pre' AND sbp > 0 ORDER BY recorded_at LIMIT 1""",
+                            (pid, s[0].isoformat() if s[0] else today.isoformat()))
+                bp = cur.fetchone()
+                if bp:
+                    bp_list.append({"sbp": bp[0], "dbp": bp[1]})
+
+        conn.close()
+
+        # === Generate Narrative ===
+        paras = []
+        emoji_risk = "🟢"
+
+        # Opening
+        gender_th = "ผู้ป่วยหญิง" if gender == "F" else "ผู้ป่วยชาย" if gender == "M" else "ผู้ป่วย"
+        opening = f"{gender_th} {name}"
+        if age:
+            opening += f" อายุ {age} ปี"
+        if va:
+            opening += f" เส้นฟอก {va}"
+        if sched:
+            opening += f" ฟอกวัน {sched}"
+        paras.append(opening)
+
+        # Sessions summary
+        if sessions:
+            n = len(sessions)
+            last_date = sessions[0][0]
+            days_ago = (today - last_date).days if last_date else None
+            if days_ago is not None:
+                if days_ago == 0:
+                    paras.append(f"ฟอกครั้งล่าสุด: วันนี้")
+                elif days_ago == 1:
+                    paras.append(f"ฟอกครั้งล่าสุด: เมื่อวาน")
+                elif days_ago > 7:
+                    paras.append(f"⚠️ ฟอกครั้งล่าสุด {days_ago} วันก่อน — ห่างเกินไป")
+                    emoji_risk = "🟡"
+                else:
+                    paras.append(f"ฟอกครั้งล่าสุด: {days_ago} วันก่อน")
+
+            # Weight & UF
+            weights = [float(s[1]) for s in sessions if s[1]]
+            post_weights = [float(s[2]) for s in sessions if s[2]]
+            if weights and dw:
+                avg_pre = round(sum(weights)/len(weights), 1)
+                avg_idwg = round(avg_pre - float(dw), 1)
+                idwg_pct = round(avg_idwg / float(dw) * 100, 1)
+                txt = f"น้ำหนักก่อนฟอกเฉลี่ย {avg_pre} kg (DW {dw} kg, IDWG เฉลี่ย {avg_idwg} kg = {idwg_pct}%)"
+                if idwg_pct > 5:
+                    txt += " — ⚠️ เกิน 5% ควรแนะนำควบคุมน้ำ/เกลือ"
+                    emoji_risk = "🟡"
+                elif idwg_pct > 3:
+                    txt += " — อยู่ในเกณฑ์ที่ต้องเฝ้าระวัง"
+                else:
+                    txt += " — ✅ อยู่ในเกณฑ์ดี"
+                paras.append(txt)
+
+            # Kt/V
+            ktvs = [float(s[4]) for s in sessions if s[4]]
+            if ktvs:
+                avg_ktv = round(sum(ktvs)/len(ktvs), 2)
+                if avg_ktv >= 1.2:
+                    paras.append(f"Kt/V เฉลี่ย {avg_ktv} — ✅ ประสิทธิภาพการฟอกเพียงพอ (เป้า ≥1.2)")
+                else:
+                    paras.append(f"Kt/V เฉลี่ย {avg_ktv} — ❌ ไม่ถึงเป้า 1.2 ควรพิจารณาเพิ่ม BFR หรือเวลาฟอก")
+                    emoji_risk = "🔴"
+        else:
+            paras.append("ยังไม่มีประวัติฟอกในระบบ")
+
+        # Lab interpretation
+        if lab:
+            hb, hct, bun, cr, k, alb, lab_date = lab
+            lab_parts = []
+            if hb is not None:
+                hb = float(hb)
+                if hb < 10:
+                    lab_parts.append(f"Hb {hb:.1f} ⬇️ (ต่ำกว่าเป้า 10-12)")
+                    emoji_risk = "🟡" if emoji_risk == "🟢" else emoji_risk
+                elif hb > 13:
+                    lab_parts.append(f"Hb {hb:.1f} ⬆️ (สูงเกิน — พิจารณาลด/งด ESA)")
+                else:
+                    lab_parts.append(f"Hb {hb:.1f} ✅")
+            if k is not None:
+                k = float(k)
+                if k > 5.5:
+                    lab_parts.append(f"K+ {k:.1f} ⬆️ (สูง — ระวังหัวใจเต้นผิดจังหวะ)")
+                    emoji_risk = "🔴"
+                elif k < 3.5:
+                    lab_parts.append(f"K+ {k:.1f} ⬇️ (ต่ำ)")
+                else:
+                    lab_parts.append(f"K+ {k:.1f} ✅")
+            if alb is not None:
+                alb = float(alb)
+                if alb < 3.5:
+                    lab_parts.append(f"Albumin {alb:.1f} ⬇️ (ภาวะโภชนาการบกพร่อง)")
+                else:
+                    lab_parts.append(f"Albumin {alb:.1f} ✅")
+            if lab_parts:
+                days = (today - lab_date).days if lab_date else None
+                prefix = f"ผลเลือดล่าสุด"
+                if days is not None:
+                    prefix += f" ({days} วันก่อน)"
+                    if days > 30:
+                        prefix += " ⚠️ เก่าเกิน 1 เดือน"
+                paras.append(prefix + ": " + " · ".join(lab_parts))
+
+        # BP
+        if bp_list:
+            avg_sbp = round(sum(b["sbp"] for b in bp_list) / len(bp_list))
+            avg_dbp = round(sum(b["dbp"] for b in bp_list) / len(bp_list))
+            bp_txt = f"BP ก่อนฟอกเฉลี่ย {avg_sbp}/{avg_dbp} mmHg"
+            if avg_sbp > 160:
+                bp_txt += " — ⚠️ ความดันสูง ควรทบทวนยาลดความดัน"
+            elif avg_sbp < 100:
+                bp_txt += " — ⚠️ ความดันต่ำ ระวัง IDH"
+            else:
+                bp_txt += " — อยู่ในเกณฑ์"
+            paras.append(bp_txt)
+
+        # ESA
+        if esa_drug:
+            esa_txt = f"ยา ESA: {esa_drug} {esa_dose or ''}"
+            if esa_pending:
+                act = {"increase": "เพิ่มขนาด", "decrease": "ลดขนาด", "hold": "งดชั่วคราว", "resume": "กลับมาให้"}.get(esa_pending[0], esa_pending[0])
+                esa_txt += f" — 💊 รออนุมัติ: {act} {esa_pending[1] or ''}"
+            paras.append(esa_txt)
+
+        # Allergies
+        if allergies:
+            paras.append(f"⚠️ แพ้: {allergies}")
+
+        # Alerts
+        if alert_count > 0:
+            paras.append(f"🚨 มี {alert_count} alert ที่ยังไม่ได้ตอบรับ")
+            emoji_risk = "🔴" if alert_count >= 3 else ("🟡" if emoji_risk == "🟢" else emoji_risk)
+
+        # Closing recommendation
+        if emoji_risk == "🔴":
+            paras.append("\n📌 สรุป: ต้องเฝ้าระวังใกล้ชิด — มีประเด็นที่ต้องแก้ไข")
+        elif emoji_risk == "🟡":
+            paras.append("\n📌 สรุป: มีบางจุดที่ต้องติดตาม แต่ภาพรวมยังไม่วิกฤต")
+        else:
+            paras.append("\n📌 สรุป: สถานะดี ฟอกสม่ำเสมอ ค่าแล็บอยู่ในเกณฑ์")
+
+        narrative = "\n\n".join(paras)
+
+        return jsonify({
+            "hn": hn, "name": name,
+            "risk_emoji": emoji_risk,
+            "narrative": narrative,
+            "generated_at": _thai_now().strftime("%d/%m/%Y %H:%M"),
+            "disclaimer": "สร้างจากข้อมูลในระบบ — ไม่ใช่การวินิจฉัย",
+        })
+    except Exception as e:
+        logger.error("narrator error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── ทีเด็ด #2: Live Clinic Pulse — ชีพจรคลินิก real-time ──
+
+@hd_bp.route("/clinic-pulse", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def clinic_pulse():
+    """Live Clinic Pulse — สถานะทุกอย่างในคลินิกแบบ real-time snapshot."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    today = _thai_today()
+    now = _thai_now()
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        pulse = {"timestamp": now.strftime("%H:%M:%S"), "date": today.isoformat()}
+        with conn.cursor() as cur:
+            # Active beds
+            cur.execute("""SELECT s.bed_number, p.patient_name, p.hn, s.started_at, s.uf_goal, s.actual_uf,
+                                  s.id as session_id
+                           FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                           WHERE s.status = 'in_progress' ORDER BY s.bed_number""")
+            active_beds = []
+            critical_beds = []
+            for r in cur.fetchall():
+                bed = {"bed": r[0], "name": r[1], "hn": r[2], "session_id": r[6]}
+                # Elapsed time
+                if r[3]:
+                    mins = (now.replace(tzinfo=None) - r[3].replace(tzinfo=None)).total_seconds() / 60
+                    bed["elapsed_min"] = int(mins)
+                    bed["elapsed"] = f"{int(mins//60)}:{int(mins%60):02d}"
+                # UF progress
+                bed["uf_goal"] = r[4]
+                bed["uf_removed"] = r[5] or 0
+                if r[4] and r[4] > 0:
+                    bed["uf_pct"] = round((r[5] or 0) / r[4] * 100)
+                # Latest BP
+                cur.execute("""SELECT sbp, dbp, heart_rate, recorded_at
+                               FROM hd_vital_signs WHERE session_id = %s AND sbp > 0
+                               ORDER BY recorded_at DESC LIMIT 1""", (r[6],))
+                bp = cur.fetchone()
+                if bp:
+                    bed["sbp"] = bp[0]
+                    bed["dbp"] = bp[1]
+                    bed["hr"] = bp[2]
+                    bp_age = (now.replace(tzinfo=None) - bp[3].replace(tzinfo=None)).total_seconds() / 60 if bp[3] else 999
+                    bed["bp_age_min"] = int(bp_age)
+                    # Critical detection
+                    if bp[0] < 90:
+                        bed["critical"] = "🔴 SBP < 90"
+                        critical_beds.append(bed)
+                    elif bp[0] < 100:
+                        bed["warning"] = "🟠 SBP < 100"
+                    if bp_age > 45:
+                        bed["stale_bp"] = True  # BP ไม่ได้วัดเกิน 45 นาที
+
+                active_beds.append(bed)
+
+            pulse["active_beds"] = active_beds
+            pulse["active_count"] = len(active_beds)
+            pulse["critical_beds"] = critical_beds
+            pulse["critical_count"] = len(critical_beds)
+
+            # Stale BP (ไม่ได้วัดเกิน 30 นาที)
+            pulse["stale_bp_count"] = sum(1 for b in active_beds if b.get("stale_bp"))
+
+            # Today stats
+            cur.execute("""SELECT
+                COUNT(*) FILTER (WHERE status = 'completed'),
+                COUNT(*) FILTER (WHERE status = 'scheduled'),
+                COUNT(*) FILTER (WHERE status = 'cancelled')
+                FROM hd_sessions WHERE session_date = %s""", (today.isoformat(),))
+            st = cur.fetchone()
+            pulse["today"] = {"completed": st[0], "scheduled": st[1], "cancelled": st[2]}
+
+            # Unack alerts
+            cur.execute("""SELECT COUNT(*), COUNT(*) FILTER (WHERE a.severity::text = 'critical')
+                           FROM hd_clinical_alerts a JOIN hd_sessions s ON s.id = a.session_id
+                           WHERE s.session_date = %s AND a.acknowledged = FALSE""", (today.isoformat(),))
+            al = cur.fetchone()
+            pulse["alerts"] = {"unack": al[0], "critical_unack": al[1]}
+
+            # Overall health score
+            score = 100
+            if len(critical_beds) > 0:
+                score -= 30 * len(critical_beds)
+            if pulse["stale_bp_count"] > 0:
+                score -= 10 * pulse["stale_bp_count"]
+            if al[1] > 0:
+                score -= 20
+            pulse["health_score"] = max(0, min(100, score))
+            pulse["health_level"] = "critical" if score < 40 else ("warning" if score < 70 else "healthy")
+
+        conn.close()
+        return jsonify(pulse)
+    except Exception as e:
+        logger.error("clinic pulse error: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
