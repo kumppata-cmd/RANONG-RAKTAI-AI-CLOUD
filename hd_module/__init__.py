@@ -369,24 +369,30 @@ def create_default_hd_users():
             cur.execute("SELECT COUNT(*) FROM hd_users")
             count = cur.fetchone()[0]
             if count > 0:
-                # Sync passwords from ENV on every boot (in case ENV changed)
-                admin_secret = os.environ.get("ADMIN_SECRET", "changeme")
-                sync_map = {
-                    "dr.kamphon": os.environ.get("HD_PHYSICIAN_PW", admin_secret),
-                    "nurse1": os.environ.get("HD_NURSE_PW", admin_secret),
-                    "hd_admin": os.environ.get("HD_ADMIN_PW", admin_secret),
-                }
-                synced = 0
-                for uname, pw in sync_map.items():
-                    pw_hash = hash_password(pw)
-                    cur.execute("UPDATE hd_users SET password_hash = %s, failed_attempts = 0, locked_until = NULL WHERE username = %s",
-                                (pw_hash, uname))
-                    synced += cur.rowcount
-                conn.commit()
-                if synced:
-                    logger.info("HD users: synced %d passwords from ENV", synced)
+                # One-time password reset migration (v13): reset default accounts
+                # to known passwords so login works after bcrypt hash mismatch fix
+                cur.execute("SELECT 1 FROM hd_settings WHERE key = 'pw_reset_v13'")
+                if not cur.fetchone():
+                    logger.info("HD users: one-time password reset (v13)")
+                    reset_map = {
+                        "dr.kamphon": os.environ.get("HD_PHYSICIAN_PW", "1234"),
+                        "nurse1": os.environ.get("HD_NURSE_PW", "1234"),
+                        "hd_admin": os.environ.get("HD_ADMIN_PW", "admin1234"),
+                    }
+                    for uname, pw in reset_map.items():
+                        cur.execute("UPDATE hd_users SET password_hash = %s, failed_attempts = 0, locked_until = NULL WHERE username = %s",
+                                    (hash_password(pw), uname))
+                    try:
+                        cur.execute("INSERT INTO hd_settings (key, value) VALUES ('pw_reset_v13', 'done') ON CONFLICT DO NOTHING")
+                    except Exception:
+                        pass  # hd_settings might not exist yet
+                    conn.commit()
+                    logger.info("HD users: passwords reset to defaults")
                 else:
-                    logger.info("HD users: %d exist, passwords up to date", count)
+                    # Normal boot — just clear lockouts
+                    cur.execute("UPDATE hd_users SET failed_attempts = 0, locked_until = NULL WHERE failed_attempts > 0 OR locked_until IS NOT NULL")
+                    conn.commit()
+                logger.info("HD users: %d exist", count)
                 conn.close()
                 return
 
@@ -395,21 +401,21 @@ def create_default_hd_users():
         default_users = [
             {
                 "username": "dr.kamphon",
-                "password": os.environ.get("HD_PHYSICIAN_PW", admin_secret),
-                "full_name": "นพ.กัมพล แพทย์โรคไต",
+                "password": os.environ.get("HD_PHYSICIAN_PW", "1234"),
+                "full_name": "นพ.กัมพล พัฒนสมบัติสกุล",
                 "role": "physician",
-                "license_number": "ว.XXXXX",
+                "license_number": "ว.26015",
             },
             {
                 "username": "nurse1",
-                "password": os.environ.get("HD_NURSE_PW", admin_secret),
+                "password": os.environ.get("HD_NURSE_PW", "1234"),
                 "full_name": "พยาบาลไตเทียม 1",
                 "role": "nurse",
                 "license_number": "",
             },
             {
                 "username": "hd_admin",
-                "password": os.environ.get("HD_ADMIN_PW", admin_secret),
+                "password": os.environ.get("HD_ADMIN_PW", "admin1234"),
                 "full_name": "ผู้ดูแลระบบ HD",
                 "role": "admin",
                 "license_number": "",
