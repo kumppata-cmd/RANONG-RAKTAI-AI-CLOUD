@@ -30,6 +30,27 @@
   .fluid-fill{height:100%;border-radius:6px;transition:width .3s}
   .footer{text-align:center;font-size:.72rem;color:var(--muted);margin-top:20px;padding:12px}
   .footer a{color:var(--accent)}
+  /* AI Health Coach Chat */
+  .chat-fab{position:fixed;bottom:20px;right:20px;width:56px;height:56px;border-radius:50%;background:linear-gradient(135deg,#2980b9,#27ae60);color:#fff;border:none;font-size:1.6rem;box-shadow:0 4px 16px rgba(0,0,0,.25);cursor:pointer;z-index:1000;display:flex;align-items:center;justify-content:center;transition:transform .2s}
+  .chat-fab:active{transform:scale(.92)}
+  .chat-panel{position:fixed;bottom:0;left:0;right:0;top:0;background:var(--bg);z-index:1001;display:none;flex-direction:column;max-width:480px;margin:0 auto}
+  .chat-panel.open{display:flex}
+  .chat-header{background:linear-gradient(135deg,#2980b9,#27ae60);color:#fff;padding:14px 16px;display:flex;align-items:center;gap:10px;flex-shrink:0}
+  .chat-header h3{font-size:1rem;font-weight:700;flex:1}.chat-close{background:none;border:none;color:#fff;font-size:1.4rem;cursor:pointer;padding:4px 8px}
+  .chat-msgs{flex:1;overflow-y:auto;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
+  .chat-msg{max-width:85%;padding:10px 14px;border-radius:16px;font-size:.88rem;line-height:1.5;white-space:pre-wrap;word-break:break-word}
+  .chat-msg.bot{align-self:flex-start;background:var(--card);border:1px solid var(--border);border-bottom-left-radius:4px}
+  .chat-msg.user{align-self:flex-end;background:var(--accent);color:#fff;border-bottom-right-radius:4px}
+  .chat-input-wrap{display:flex;gap:8px;padding:10px 12px;background:var(--card);border-top:1px solid var(--border);flex-shrink:0}
+  .chat-input{flex:1;border:1px solid var(--border);border-radius:20px;padding:10px 16px;font-size:.9rem;background:var(--bg);color:var(--text);outline:none}
+  .chat-send{width:40px;height:40px;border-radius:50%;background:var(--accent);color:#fff;border:none;font-size:1.1rem;cursor:pointer;display:flex;align-items:center;justify-content:center}
+  .chat-send:disabled{opacity:.4}
+  .quick-btns{display:flex;flex-wrap:wrap;gap:6px;padding:4px 0}
+  .quick-btn{background:rgba(41,128,185,.08);border:1px solid var(--accent);color:var(--accent);border-radius:16px;padding:6px 12px;font-size:.78rem;cursor:pointer;white-space:nowrap}
+  .typing{display:flex;gap:4px;padding:8px 14px;align-self:flex-start}
+  .typing span{width:7px;height:7px;border-radius:50%;background:var(--muted);animation:bounce .6s infinite alternate}
+  .typing span:nth-child(2){animation-delay:.15s}.typing span:nth-child(3){animation-delay:.3s}
+  @keyframes bounce{to{transform:translateY(-6px);opacity:.4}}
   .badge{display:inline-block;padding:2px 8px;border-radius:8px;font-size:.72rem;font-weight:700}
   .badge.green{background:rgba(39,174,96,.15);color:var(--success)}.badge.red{background:rgba(231,76,60,.15);color:var(--danger)}
   .badge.yellow{background:rgba(243,156,18,.15);color:var(--warn)}
@@ -191,6 +212,89 @@ function svgChart(pts, minY, maxY, targetLow, targetHigh, label){
 }
 
 load();
+
+/* ── AI Health Coach Chat ── */
+const quickQs = [
+  {icon:'📅',text:'นัดฟอก'},{icon:'🩺',text:'ผลเลือด'},{icon:'⚖️',text:'น้ำหนัก'},
+  {icon:'💧',text:'ดื่มน้ำเท่าไหร่'},{icon:'🍽️',text:'กินอะไรดี'},{icon:'💊',text:'ยาของฉัน'},
+  {icon:'🏃',text:'ออกกำลังกาย'},{icon:'📋',text:'ผลฟอกล่าสุด'},{icon:'🩸',text:'ดูแลเส้นฟอก'}
+];
+
+function openChat(){
+  document.getElementById('chatPanel').classList.add('open');
+  const msgs = document.getElementById('chatMsgs');
+  if(!msgs.children.length){
+    addBotMsg('สวัสดีค่ะ 😊 ฉันคือ AI Health Coach\nถามเรื่องสุขภาพได้เลยค่ะ');
+    const qw = document.createElement('div'); qw.className='quick-btns';
+    quickQs.forEach(q=>{
+      const b = document.createElement('button'); b.className='quick-btn';
+      b.textContent=q.icon+' '+q.text;
+      b.onclick=()=>sendMsg(q.text);
+      qw.appendChild(b);
+    });
+    msgs.appendChild(qw);
+  }
+  setTimeout(()=>document.getElementById('chatInput').focus(),300);
+}
+function closeChat(){ document.getElementById('chatPanel').classList.remove('open'); }
+
+function addBotMsg(text){
+  const d=document.createElement('div'); d.className='chat-msg bot'; d.textContent=text;
+  document.getElementById('chatMsgs').appendChild(d);
+  d.scrollIntoView({behavior:'smooth',block:'end'});
+}
+function addUserMsg(text){
+  const d=document.createElement('div'); d.className='chat-msg user'; d.textContent=text;
+  document.getElementById('chatMsgs').appendChild(d);
+  d.scrollIntoView({behavior:'smooth',block:'end'});
+}
+function showTyping(){
+  const t=document.createElement('div'); t.className='typing'; t.id='typingInd';
+  t.innerHTML='<span></span><span></span><span></span>';
+  document.getElementById('chatMsgs').appendChild(t);
+  t.scrollIntoView({behavior:'smooth',block:'end'});
+}
+function hideTyping(){ const t=document.getElementById('typingInd'); if(t) t.remove(); }
+
+async function sendMsg(text){
+  if(!text) return;
+  addUserMsg(text);
+  document.getElementById('chatInput').value='';
+  document.getElementById('chatSend').disabled=true;
+  showTyping();
+  try{
+    const r = await fetch('/hd/api/v1/my/'+TOKEN+'/ask', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({question:text})
+    });
+    const d = await r.json();
+    hideTyping();
+    addBotMsg(d.answer||'ขออภัย ตอบไม่ได้ชั่วคราวค่ะ');
+  }catch(e){
+    hideTyping();
+    addBotMsg('ระบบขัดข้อง กรุณาลองใหม่ค่ะ');
+  }
+  document.getElementById('chatSend').disabled=false;
+}
+
+function handleChatKey(e){ if(e.key==='Enter'){ e.preventDefault(); sendMsg(document.getElementById('chatInput').value.trim()); }}
 </script>
+
+<!-- Chat FAB -->
+<button class="chat-fab" onclick="openChat()" title="AI Health Coach">🤖</button>
+
+<!-- Chat Panel -->
+<div id="chatPanel" class="chat-panel">
+  <div class="chat-header">
+    <span style="font-size:1.3rem">🤖</span>
+    <h3>AI Health Coach</h3>
+    <button class="chat-close" onclick="closeChat()">✕</button>
+  </div>
+  <div id="chatMsgs" class="chat-msgs"></div>
+  <div class="chat-input-wrap">
+    <input id="chatInput" class="chat-input" placeholder="ถามเรื่องสุขภาพ..." onkeydown="handleChatKey(event)">
+    <button id="chatSend" class="chat-send" onclick="sendMsg(document.getElementById('chatInput').value.trim())">➤</button>
+  </div>
+</div>
 </body>
 </html>

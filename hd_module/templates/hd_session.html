@@ -307,6 +307,16 @@
     <div style="font-size:.65rem;color:var(--fg-muted);margin-top:6px">⚠️ ข้อเสนอแนะจาก AI เท่านั้น — แพทย์ตัดสินใจ ไม่ปรับเครื่องอัตโนมัติ</div>
   </div>
 
+  <!-- Upgrade #3: AI Predictive Alert -->
+  <div class="card" id="predictPanel" style="display:none;margin-bottom:12px;">
+    <div class="card-header">
+      <span>🔮 AI Predictive Alert</span>
+      <span id="predictRisk" style="font-weight:800;font-size:.85rem"></span>
+    </div>
+    <div id="predictContent" style="font-size:.85rem;margin-top:6px"></div>
+    <div style="font-size:.6rem;color:var(--fg-muted);margin-top:6px">ทำนายจาก BP trend + Digital Twin pattern — เตือนก่อนเกิด 15-30 นาที</div>
+  </div>
+
   <!-- B6: latest labs from the document system -->
   <div class="card" id="labsPanel" style="display:none;margin-bottom:12px;">
     <div class="card-header"><span>🧪 ผลแล็บล่าสุด <span id="labsDate" style="font-weight:400;font-size:.75rem;color:var(--fg-muted)"></span></span>
@@ -1257,6 +1267,7 @@ function loadExistingSession(sid){
       loadLabs();
       loadIdhRisk();
       loadUfCoach();
+      loadPredictAlert();
       sessionData.pre_weight = d.pre_weight || 0;
       sessionData.dry_weight = d.dry_weight || 0;
       /* Fill header */
@@ -1574,6 +1585,29 @@ function loadIdhRisk(){
     } else { recsEl.style.display = 'none'; }
   }).catch(()=>{});
 }
+
+/* ── Upgrade #3: Predictive Alert ── */
+function loadPredictAlert(){
+  if(!sessionData.session_id) return;
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/predict-alert').then(r=>r.json()).then(d=>{
+    const p = document.getElementById('predictPanel'); if(!d || d.error) return;
+    p.style.display = 'block';
+    const riskMap = {critical:'🔴 วิกฤต!',warning:'🟠 เตือน',safe:'✅ ปลอดภัย'};
+    const riskColor = {critical:'var(--danger)',warning:'#f59e0b',safe:'var(--success)'};
+    document.getElementById('predictRisk').innerHTML = `<span style="color:${riskColor[d.risk]||''}">${riskMap[d.risk]||d.risk}</span>`;
+    let h = '';
+    (d.predictions||[]).forEach(pr=>{
+      const bg = pr.type==='critical'?'#fef2f2':(pr.type==='warning'?'#fffbeb':'var(--bg)');
+      h += `<div style="padding:8px 10px;margin:4px 0;background:${bg};border-radius:8px;border-left:3px solid ${riskColor[pr.type]||'var(--border)'}">
+        <div style="font-weight:600">${pr.icon} ${pr.message}</div>
+        ${pr.action?`<div style="font-size:.78rem;color:var(--fg-muted);margin-top:2px">💡 ${pr.action}</div>`:''}
+        ${pr.predicted_sbp?`<div style="font-size:.75rem;color:var(--fg-muted)">ทำนาย SBP: ${pr.predicted_sbp} mmHg</div>`:''}
+      </div>`;
+    });
+    document.getElementById('predictContent').innerHTML = h;
+  }).catch(()=>{});
+}
+setInterval(loadPredictAlert, 60000); // refresh every 1 min
 
 /* ── Voice Command — สั่งด้วยเสียง ── */
 let voiceActive = false;

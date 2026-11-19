@@ -871,13 +871,15 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         c.drawString(LM + CW * 0.42 + 32, sig_y, nurse_end)
     c.line(LM + CW * 0.42 + 32, sig_y - 1, RM - 55, sig_y - 1)
 
-    # ข้อ 8: QR Code — link กลับไปหน้า session
+    # ข้อ 8: QR Code — Smart QR: สแกนแล้วเปิด interactive session + trend + twin
     try:
         import qrcode as _qr
         session_id = rec.get("session_id") or rec.get("id")
+        hn = rec.get("hn") or ""
         if session_id:
             base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://ranong-raktai-ai-cloud.onrender.com")
-            qr_url = f"{base_url}/hd/sessions/{session_id}"
+            # Smart URL: session page with patient context
+            qr_url = f"{base_url}/hd/session/{session_id}"
             qr_img = _qr.make(qr_url, box_size=2, border=1)
             qr_buf = io.BytesIO()
             qr_img.save(qr_buf, format="PNG")
@@ -885,7 +887,7 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
             from reportlab.lib.utils import ImageReader
             c.drawImage(ImageReader(qr_buf), RM - 50, sig_y - 8, width=42, height=42)
             c.setFont("Loma", 3.5)
-            c.drawCentredString(RM - 29, sig_y - 11, "สแกนดูข้อมูล")
+            c.drawCentredString(RM - 29, sig_y - 11, "สแกนดู Real-time")
     except ImportError:
         pass  # qrcode not installed — skip silently
 

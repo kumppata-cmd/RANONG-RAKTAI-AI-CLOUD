@@ -142,6 +142,12 @@ def hd_dashboard_page():
     return resp
 
 
+@hd_web.route("/bedmap")
+def hd_bedmap_page():
+    """Smart Bed Map — แผนผังห้องฟอกจริง."""
+    return render_template("hd_bedmap.html", total_beds=HdConfig.TOTAL_BEDS)
+
+
 @hd_web.route("/session/new")
 def hd_session_new():
     """Render new HD session form (Pre/Intra/Post tabs)."""
@@ -6694,6 +6700,156 @@ def session_uf_coach(session_id):
         return jsonify({"error": str(e)}), 500
 
 
+# ── Upgrade #3: AI Predictive Alert — เตือนก่อนเกิด ───────
+
+@hd_bp.route("/sessions/<int:session_id>/predict-alert", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def predict_alert(session_id):
+    """AI Predictive Alert — ทำนาย BP drop ก่อนเกิด 15-30 นาที.
+
+    วิเคราะห์ BP trend ของ session ปัจจุบัน + pattern จาก Digital Twin
+    → แจ้งเตือน BEFORE the event, not after.
+    """
+    import os, psycopg2
+    from datetime import timedelta
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        predictions = []
+        with conn.cursor() as cur:
+            cur.execute("""SELECT s.patient_id, s.started_at, s.uf_goal, s.pre_weight,
+                                  p.dry_weight, p.hn
+                           FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                           WHERE s.id = %s""", (session_id,))
+            s = cur.fetchone()
+            if not s:
+                conn.close()
+                return jsonify({"predictions": [], "risk": "unknown"})
+            pid, started, uf_goal, pre_w, dw, hn = s
+
+            # Current session vitals (chronological)
+            cur.execute("""SELECT sbp, dbp, heart_rate, recorded_at
+                           FROM hd_vital_signs WHERE session_id = %s AND sbp > 0
+                           ORDER BY recorded_at ASC""", (session_id,))
+            vitals = cur.fetchall()
+
+            if len(vitals) < 2:
+                conn.close()
+                return jsonify({"predictions": [{"type": "info", "icon": "ℹ️",
+                    "message": "ต้องมี vital signs อย่างน้อย 2 ครั้งเพื่อทำนาย"}], "risk": "insufficient_data"})
+
+            now = _thai_now()
+            elapsed_min = (now.replace(tzinfo=None) - started.replace(tzinfo=None)).total_seconds() / 60 if started else 0
+
+            # 1. LINEAR TREND: extrapolate SBP 15-30 min ahead
+            sbps = [(v[3], v[0]) for v in vitals]
+            recent = sbps[-3:]  # last 3 readings
+            if len(recent) >= 2:
+                # Simple linear regression on last readings
+                times = [(r[0] - recent[0][0]).total_seconds() / 60 for r in recent]
+                vals = [r[1] for r in recent]
+                n = len(times)
+                if n >= 2 and (max(times) - min(times)) > 0:
+                    x_mean = sum(times) / n
+                    y_mean = sum(vals) / n
+                    num = sum((times[i] - x_mean) * (vals[i] - y_mean) for i in range(n))
+                    den = sum((times[i] - x_mean) ** 2 for i in range(n))
+                    if den > 0:
+                        slope = num / den  # mmHg per minute
+                        current_sbp = vals[-1]
+
+                        # Predict 15 and 30 min ahead
+                        pred_15 = round(current_sbp + slope * 15)
+                        pred_30 = round(current_sbp + slope * 30)
+
+                        if pred_15 < 90:
+                            predictions.append({"type": "critical", "icon": "🔴",
+                                "time": "15 นาที", "predicted_sbp": pred_15,
+                                "message": f"⚠️ คาดว่า SBP จะลงถึง {pred_15} mmHg ใน 15 นาที",
+                                "action": "ลด UF rate ทันที / เตรียม NSS / วัด BP ทุก 5 นาที",
+                                "slope": round(slope, 2)})
+                        elif pred_15 < 100:
+                            predictions.append({"type": "warning", "icon": "🟠",
+                                "time": "15 นาที", "predicted_sbp": pred_15,
+                                "message": f"แนวโน้ม SBP จะลงถึง {pred_15} mmHg ใน 15 นาที",
+                                "action": "เฝ้าระวังใกล้ชิด วัด BP ทุก 10 นาที",
+                                "slope": round(slope, 2)})
+
+                        if pred_30 < 90 and pred_15 >= 90:
+                            predictions.append({"type": "warning", "icon": "🟡",
+                                "time": "30 นาที", "predicted_sbp": pred_30,
+                                "message": f"แนวโน้ม SBP จะลงถึง {pred_30} mmHg ใน 30 นาที",
+                                "action": "พิจารณาลด UF rate ล่วงหน้า",
+                                "slope": round(slope, 2)})
+
+            # 2. PATTERN MATCH: Digital Twin — ชั่วโมงนี้คนไข้คนนี้เคย BP ตกไหม
+            if started and elapsed_min > 30:
+                cur.execute("""SELECT s.id FROM hd_sessions s
+                               WHERE s.patient_id = %s AND s.status = 'completed' AND s.id != %s
+                               ORDER BY s.session_date DESC LIMIT 10""", (pid, session_id))
+                past_ids = [r[0] for r in cur.fetchall()]
+                drop_at_this_hour = 0
+                total_past = len(past_ids)
+                current_hour = elapsed_min / 60
+
+                for psid in past_ids:
+                    cur.execute("""SELECT sbp, recorded_at FROM hd_vital_signs
+                                   WHERE session_id = %s AND sbp > 0 ORDER BY recorded_at""", (psid,))
+                    pvitals = cur.fetchall()
+                    if len(pvitals) < 3:
+                        continue
+                    # Find if BP dropped below 100 at similar elapsed time
+                    cur.execute("SELECT started_at FROM hd_sessions WHERE id = %s", (psid,))
+                    ps = cur.fetchone()
+                    if not ps or not ps[0]:
+                        continue
+                    for pv in pvitals:
+                        pv_elapsed = (pv[1] - ps[0]).total_seconds() / 3600
+                        if abs(pv_elapsed - current_hour) < 0.5 and pv[0] < 100:
+                            drop_at_this_hour += 1
+                            break
+
+                if total_past >= 3 and drop_at_this_hour > 0:
+                    pct = round(drop_at_this_hour / total_past * 100)
+                    if pct >= 50:
+                        predictions.append({"type": "pattern", "icon": "🧬",
+                            "message": f"Digital Twin: คนไข้คนนี้เคย BP ตก ณ ชั่วโมงที่ {current_hour:.1f} ใน {pct}% ของรอบที่ผ่านมา ({drop_at_this_hour}/{total_past})",
+                            "action": "เตรียมพร้อม — pattern ซ้ำจากประวัติ",
+                            "confidence": pct})
+
+            # 3. HR TREND: ถ้า HR เพิ่มขึ้นเร็ว → compensatory → BP กำลังจะตก
+            hrs = [v[2] for v in vitals if v[2] and v[2] > 0]
+            if len(hrs) >= 3:
+                hr_rise = hrs[-1] - hrs[-3]
+                if hr_rise > 15:
+                    predictions.append({"type": "warning", "icon": "💓",
+                        "message": f"HR เพิ่มขึ้น {hr_rise} bpm ใน 3 readings ({hrs[-3]}→{hrs[-1]}) — ร่างกายชดเชยความดันตก",
+                        "action": "ตรวจ BP ทันที — HR สูงขึ้นมักนำหน้า BP drop"})
+
+        conn.close()
+
+        if not predictions:
+            predictions.append({"type": "safe", "icon": "✅",
+                "message": "ไม่พบสัญญาณเตือน — BP trend คงที่"})
+
+        risk = "critical" if any(p["type"] == "critical" for p in predictions) else \
+               "warning" if any(p["type"] in ("warning", "pattern") for p in predictions) else "safe"
+
+        return jsonify({
+            "session_id": session_id,
+            "predictions": predictions,
+            "risk": risk,
+            "analyzed_at": now.strftime("%H:%M:%S"),
+            "vitals_count": len(vitals),
+            "elapsed_min": round(elapsed_min),
+        })
+    except Exception as e:
+        logger.error("predict-alert error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ── AI Dialysis Twin — ฝาแฝดดิจิทัล ─────────────────────
 
 @hd_bp.route("/patients/<hn>/twin", methods=["GET"])
@@ -7398,6 +7554,191 @@ def patient_med_check(hn):
         })
     except Exception as e:
         logger.error("med-check error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── Upgrade #4: AI Drug Advisor — ครบทุกยาไต ─────────────
+
+@hd_bp.route("/patients/<hn>/drug-advisor", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patient_drug_advisor(hn):
+    """AI Drug Advisor — วิเคราะห์ยาครบทุกตัวสำหรับคนไข้ไตเทียม.
+
+    ใช้ lab จริง (Hb, Ferritin, TSAT, iPTH, PO4, Ca, K+, Alb) + prescription
+    → แนะนำ: ESA, IV Iron, Phosphate binder, Calcitriol, Anti-HT, Anti-K+
+    """
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, patient_name FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            p = cur.fetchone()
+            if not p:
+                conn.close()
+                return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+            pid, name = p
+
+            # Latest labs
+            cur.execute("""SELECT hb, hct, potassium, phosphorus, calcium, albumin,
+                                  ferritin, tsat, pth, result_date
+                           FROM hd_lab_results WHERE patient_id = %s
+                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+            lab = cur.fetchone()
+
+            # ESA info
+            cur.execute("""SELECT esa_drug_given, esa_dose_given FROM hd_sessions
+                           WHERE patient_id = %s AND esa_given = TRUE
+                           ORDER BY session_date DESC LIMIT 1""", (pid,))
+            esa = cur.fetchone()
+
+        conn.close()
+
+        advisories = []
+        if not lab:
+            return jsonify({"hn": hn, "name": name, "advisories": [
+                {"category": "info", "icon": "ℹ️", "drug": "Lab", "message": "ยังไม่มีผลเลือด — ต้องมี lab ก่อนแนะนำยา"}
+            ]})
+
+        hb = float(lab[0]) if lab[0] else None
+        k = float(lab[2]) if lab[2] else None
+        po4 = float(lab[3]) if lab[3] else None
+        ca = float(lab[4]) if lab[4] else None
+        alb = float(lab[5]) if lab[5] else None
+        ferritin = float(lab[6]) if lab[6] else None
+        tsat = float(lab[7]) if lab[7] else None
+        pth = float(lab[8]) if lab[8] else None
+        lab_date = lab[9]
+        lab_age = (_thai_today() - lab_date).days if lab_date else None
+
+        # === 1. ESA (EPO/Darbepoetin) ===
+        if hb is not None:
+            if hb < 10:
+                dose_txt = "เริ่ม/เพิ่ม ESA"
+                if esa:
+                    advisories.append({"category": "esa", "icon": "💉", "drug": f"ESA ({esa[0] or 'EPO'})",
+                        "current": f"Dose {esa[1] or '-'}", "lab": f"Hb {hb:.1f}",
+                        "advice": "⬆️ เพิ่มขนาด 25% (Hb ต่ำกว่าเป้า 10-12)",
+                        "target": "Hb 10-12 g/dL", "priority": "high"})
+                else:
+                    advisories.append({"category": "esa", "icon": "💉", "drug": "ESA",
+                        "advice": "🆕 เริ่มให้ ESA — Hb ต่ำ ({:.1f})".format(hb),
+                        "target": "Hb 10-12 g/dL", "priority": "high"})
+            elif hb > 13:
+                advisories.append({"category": "esa", "icon": "💉", "drug": "ESA",
+                    "lab": f"Hb {hb:.1f}", "advice": "⏸ งด ESA ชั่วคราว (Hb > 13)",
+                    "target": "กลับมาให้เมื่อ Hb < 11", "priority": "high"})
+            elif hb >= 10:
+                advisories.append({"category": "esa", "icon": "💉", "drug": "ESA",
+                    "lab": f"Hb {hb:.1f}", "advice": "✅ Hb ในเป้า — คงขนาด ESA เดิม",
+                    "priority": "low"})
+
+        # === 2. IV Iron ===
+        if ferritin is not None or tsat is not None:
+            iron_needed = False
+            reason = []
+            if ferritin is not None and ferritin < 200:
+                iron_needed = True
+                reason.append(f"Ferritin {ferritin:.0f} (ต่ำ <200)")
+            if tsat is not None and tsat < 20:
+                iron_needed = True
+                reason.append(f"TSAT {tsat:.0f}% (ต่ำ <20%)")
+            if iron_needed:
+                advisories.append({"category": "iron", "icon": "🩸", "drug": "IV Iron (Ferric carboxymaltose / Iron sucrose)",
+                    "lab": " · ".join(reason),
+                    "advice": "💊 ให้ IV Iron — KDIGO: Ferritin 200-500, TSAT 20-30%",
+                    "dosing": "Iron sucrose 100mg IV ระหว่างฟอกชั่วโมงสุดท้าย × 10 ครั้ง หรือ Ferinject 500-1000mg",
+                    "priority": "high"})
+            elif ferritin and ferritin > 800:
+                advisories.append({"category": "iron", "icon": "🩸", "drug": "IV Iron",
+                    "lab": f"Ferritin {ferritin:.0f}",
+                    "advice": "⏸ งด IV Iron — Ferritin สูง >800 (เสี่ยง Iron overload)",
+                    "priority": "medium"})
+            else:
+                advisories.append({"category": "iron", "icon": "🩸", "drug": "IV Iron",
+                    "lab": f"Ferritin {ferritin or '-'} · TSAT {tsat or '-'}%",
+                    "advice": "✅ เหล็กเพียงพอ — ตรวจซ้ำ 3 เดือน",
+                    "priority": "low"})
+
+        # === 3. Phosphate Binder ===
+        if po4 is not None:
+            if po4 > 5.5:
+                advisories.append({"category": "phosphate", "icon": "💊", "drug": "Phosphate Binder",
+                    "lab": f"PO4 {po4:.1f} mg/dL (สูง)",
+                    "advice": "⬆️ เพิ่ม/เริ่ม Phosphate binder — กินพร้อมอาหารทุกมื้อ",
+                    "options": "CaCO3 500-1000mg หรือ Sevelamer 800mg ก่อนอาหาร" + (" · ⚠️ ระวัง Ca สูงถ้าใช้ CaCO3 + Calcitriol" if ca and ca > 10 else ""),
+                    "target": "PO4 3.5-5.5 mg/dL", "priority": "high"})
+            elif po4 < 3.5:
+                advisories.append({"category": "phosphate", "icon": "💊", "drug": "Phosphate Binder",
+                    "lab": f"PO4 {po4:.1f}", "advice": "⬇️ ลด/หยุด Phosphate binder — PO4 ต่ำ",
+                    "priority": "medium"})
+            else:
+                advisories.append({"category": "phosphate", "icon": "💊", "drug": "Phosphate",
+                    "lab": f"PO4 {po4:.1f}", "advice": "✅ PO4 ในเป้า",
+                    "priority": "low"})
+
+        # === 4. Calcitriol / Vitamin D ===
+        if pth is not None:
+            if pth > 600:
+                advisories.append({"category": "vitd", "icon": "☀️", "drug": "Calcitriol",
+                    "lab": f"iPTH {pth:.0f} pg/mL (สูงมาก)",
+                    "advice": "⬆️ เพิ่ม Calcitriol 0.25-0.5 mcg/วัน หรือหลังฟอก",
+                    "target": "iPTH 150-600 pg/mL (KDIGO)" + (f" · ⚠️ Ca {ca:.1f} สูง — ใช้ Cinacalcet แทน" if ca and ca > 10.2 else ""),
+                    "priority": "high"})
+            elif pth > 300:
+                advisories.append({"category": "vitd", "icon": "☀️", "drug": "Calcitriol",
+                    "lab": f"iPTH {pth:.0f}", "advice": "คงขนาด Calcitriol — iPTH อยู่ในเกณฑ์สูง",
+                    "priority": "medium"})
+            elif pth < 150:
+                advisories.append({"category": "vitd", "icon": "☀️", "drug": "Calcitriol",
+                    "lab": f"iPTH {pth:.0f}", "advice": "⬇️ ลด/หยุด Calcitriol — iPTH ต่ำ (เสี่ยง Adynamic bone)",
+                    "priority": "medium"})
+
+        # === 5. Potassium Management ===
+        if k is not None:
+            if k > 6.0:
+                advisories.append({"category": "potassium", "icon": "⚡", "drug": "K+ Management",
+                    "lab": f"K+ {k:.1f} mEq/L (อันตราย!)",
+                    "advice": "🚨 K+ สูงมาก — Kayexalate 15-30g + ตรวจ ECG + ฟอก urgent",
+                    "priority": "critical"})
+            elif k > 5.5:
+                advisories.append({"category": "potassium", "icon": "⚡", "drug": "K+ Management",
+                    "lab": f"K+ {k:.1f}", "advice": "⬆️ Kayexalate + ทบทวนยาที่เพิ่ม K+ (ACEi/ARB/Spironolactone)",
+                    "priority": "high"})
+
+        # === 6. Albumin / Nutrition ===
+        if alb is not None and alb < 3.5:
+            advisories.append({"category": "nutrition", "icon": "🥩", "drug": "Nutrition",
+                "lab": f"Albumin {alb:.1f} g/dL (ต่ำ)",
+                "advice": "แนะนำเพิ่มโปรตีน 1.0-1.2 g/kg/วัน · พิจารณา Oral supplement",
+                "priority": "medium"})
+
+        # Lab age warning
+        if lab_age and lab_age > 30:
+            advisories.append({"category": "info", "icon": "⏰", "drug": "Lab",
+                "advice": f"ผลเลือดเก่า {lab_age} วัน — ควรตรวจซ้ำเพื่อปรับยาให้แม่นยำ",
+                "priority": "medium"})
+
+        # Sort by priority
+        pri_order = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        advisories.sort(key=lambda a: pri_order.get(a.get("priority", "low"), 9))
+
+        return jsonify({
+            "hn": hn, "name": name,
+            "advisories": advisories,
+            "lab_summary": {
+                "hb": hb, "ferritin": ferritin, "tsat": tsat, "pth": pth,
+                "po4": po4, "ca": ca, "k": k, "alb": alb,
+                "date": lab_date.isoformat() if lab_date else None, "age_days": lab_age,
+            },
+            "total": len(advisories),
+            "critical_count": sum(1 for a in advisories if a.get("priority") == "critical"),
+            "high_count": sum(1 for a in advisories if a.get("priority") == "high"),
+        })
+    except Exception as e:
+        logger.error("drug-advisor error: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -10087,6 +10428,202 @@ def patient_portal_api(token):
     except Exception as e:
         logger.error("patient_portal_api: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+# ── Upgrade #5: AI Health Coach — Patient Chat API ───────────
+
+@hd_bp.route("/my/<token>/ask", methods=["POST"])
+def patient_health_coach(token):
+    """AI Health Coach — ผู้ป่วยถามเรื่องสุขภาพผ่าน Portal.
+
+    Rule-based (ไม่ใช้ External AI): วิเคราะห์จาก lab + sessions + profile
+    ตอบเป็นภาษาไทยง่ายๆ ไม่เปิดเผยข้อมูลทางการแพทย์ที่ซับซ้อน
+    """
+    import os, psycopg2
+    from datetime import datetime, timedelta, timezone
+
+    hn = _portal_hn_from_token(token)
+    if not hn:
+        return jsonify({"error": "ลิงก์ไม่ถูกต้อง"}), 404
+
+    data = request.get_json(silent=True) or {}
+    question = (data.get("question") or "").strip()
+    if not question or len(question) > 500:
+        return jsonify({"answer": "กรุณาพิมพ์คำถามสั้นๆ (ไม่เกิน 500 ตัวอักษร) ค่ะ"})
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"answer": "ระบบไม่พร้อมชั่วคราว กรุณาลองใหม่ค่ะ"})
+
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        from .patient_portal import portal_data
+        pd = portal_data(conn, hn)
+        conn.close()
+        if not pd:
+            return jsonify({"answer": "ไม่พบข้อมูลของท่านในระบบค่ะ"})
+
+        answer = _health_coach_answer(question, pd)
+        return jsonify({"answer": answer})
+    except Exception as e:
+        logger.error("health-coach: %s", e)
+        return jsonify({"answer": "ขออภัย ระบบขัดข้องชั่วคราว กรุณาลองใหม่ค่ะ"})
+
+
+def _health_coach_answer(q, pd):
+    """Rule-based AI Health Coach — ตอบคำถามผู้ป่วยจาก portal data."""
+    q_lower = q.lower().replace(" ", "")
+    profile = pd.get("profile", {})
+    latest = pd.get("latest", {})
+    interp = pd.get("interpretations", {})
+    sessions = pd.get("sessions", [])
+    tips = pd.get("tips", [])
+    fluid = pd.get("fluid")
+    idwg_list = pd.get("idwg", [])
+    name = profile.get("name", "คุณ")
+    # Short name
+    short = name.split(" ")[0] if name else "คุณ"
+
+    # ── Category: นัดฟอก / ตารางฟอก ──
+    if any(k in q_lower for k in ["นัด", "ฟอกครั้งถัดไป", "ฟอกวันไหน", "ตารางฟอก", "วันฟอก", "รอบฟอก", "เมื่อไหร่"]):
+        nd = profile.get("next_dialysis")
+        sched = profile.get("schedule") or "-"
+        shift = profile.get("shift") or ""
+        if nd:
+            return (f"📅 นัดฟอกครั้งถัดไปของ{short}: {nd['text']}\n"
+                    f"ตารางประจำ: {sched} {shift}\n\n"
+                    f"💡 ก่อนฟอก: จำกัดน้ำ, หลีกเลี่ยงเกลือ\n"
+                    f"อย่าลืมชั่งน้ำหนักก่อนมาฟอกด้วยนะคะ")
+        return f"ตารางฟอกของ{short}: {sched} {shift}"
+
+    # ── Category: ผลเลือด / lab / เลือดจาง / Hb ──
+    if any(k in q_lower for k in ["ผลเลือด", "แล็บ", "lab", "เลือดจาง", "hb", "hemoglobin", "ค่าเลือด", "โลหิตจาง"]):
+        parts = []
+        if "hb" in interp:
+            parts.append(interp["hb"]["text"])
+        if "ktv" in interp:
+            parts.append(interp["ktv"]["text"])
+        if "ferritin" in interp:
+            parts.append(interp["ferritin"]["text"])
+        if parts:
+            header = f"🩺 สรุปผลเลือดล่าสุดของ{short}:\n\n"
+            return header + "\n".join(f"• {p}" for p in parts) + "\n\n💡 ถ้ามีข้อสงสัย แจ้งแพทย์ในรอบฟอกถัดไปได้เลยค่ะ"
+        return "ยังไม่มีผลเลือดในระบบค่ะ แจ้งเจ้าหน้าที่เพื่อบันทึกผลเลือดได้"
+
+    # ── Category: น้ำหนัก / IDWG / DW ──
+    if any(k in q_lower for k in ["น้ำหนัก", "idwg", "dw", "น้ำหนักแห้ง", "น้ำหนักขึ้น", "อ้วน", "ผอม"]):
+        dw = profile.get("dry_weight")
+        if idwg_list:
+            last_idwg = idwg_list[-1]
+            msg = f"⚖️ น้ำหนักแห้ง (DW) ของ{short}: {dw:.1f} kg\n\n" if dw else ""
+            msg += f"น้ำหนักที่ขึ้นระหว่างรอบฟอกล่าสุด: {last_idwg['kg']:.1f} kg"
+            if last_idwg.get("pct") is not None:
+                msg += f" ({last_idwg['pct']:.0f}% ของ DW)"
+                if last_idwg["pct"] > 5:
+                    msg += "\n\n⚠️ เกินเป้า 5% — ควรจำกัดน้ำ < 1 ลิตร/วัน ลดเกลือ และหลีกเลี่ยงผลไม้ที่มีน้ำมาก"
+                elif last_idwg["pct"] <= 3:
+                    msg += "\n\n✅ ดีมาก! ควบคุมน้ำได้ดี"
+                else:
+                    msg += "\n\n👍 อยู่ในเกณฑ์ — พยายามรักษาไว้นะคะ"
+            return msg
+        if dw:
+            return f"⚖️ น้ำหนักแห้ง (DW) ของ{short}: {dw:.1f} kg\nยังไม่มีข้อมูล IDWG ค่ะ"
+        return "ยังไม่มีข้อมูลน้ำหนักในระบบค่ะ"
+
+    # ── Category: น้ำ / สารน้ำ / BCM / บวม ──
+    if any(k in q_lower for k in ["น้ำ", "สารน้ำ", "bcm", "บวม", "fluid", "ดื่มน้ำ", "กินน้ำ"]):
+        if fluid:
+            oh = fluid.get("oh", 0)
+            msg = f"💧 สถานะน้ำในร่างกายของ{short}:\n{fluid['text']}\n(OH {'+' if oh>0 else ''}{oh:.1f} L)\n\n"
+            if oh > 2:
+                msg += "⚠️ มีน้ำเกินมาก:\n• จำกัดน้ำ < 500-750 mL/วัน\n• ลดเกลือให้มากที่สุด\n• อมน้ำแข็งแทนดื่มน้ำ"
+            elif oh > 1:
+                msg += "คำแนะนำ:\n• จำกัดน้ำ < 1 ลิตร/วัน\n• ลดเกลือ, หลีกเลี่ยงน้ำจิ้ม, ของหมักดอง"
+            else:
+                msg += "✅ น้ำในร่างกายอยู่ในเกณฑ์ดี — รักษาระดับนี้ไว้นะคะ"
+            return msg
+        return "💧 คำแนะนำทั่วไป:\n• จำกัดน้ำ < 1 ลิตร/วัน ในวันหยุดฟอก\n• ลดเกลือช่วยลดการกระหายน้ำ\n• อมน้ำแข็งก้อนเล็กแทนดื่มน้ำ\n• ชั่งน้ำหนักทุกวันเช้า"
+
+    # ── Category: อาหาร / กิน / ทาน / diet ──
+    if any(k in q_lower for k in ["อาหาร", "กิน", "ทาน", "diet", "โปรตีน", "ผลไม้", "ห้ามกิน", "กินอะไร"]):
+        msg = f"🍽️ คำแนะนำอาหารสำหรับ{short}:\n\n"
+        msg += "✅ ควรทาน:\n• โปรตีนสูง: ไข่ขาว, เนื้อปลา, อกไก่\n• ผักต้ม: ผักบุ้ง, แตงกวา, ฟักทอง\n\n"
+        msg += "❌ หลีกเลี่ยง:\n• ผลไม้โพแทสเซียมสูง: กล้วย, ส้ม, มะละกอ, ทุเรียน\n• ของเค็ม: ปลาเค็ม, น้ำปลา, ซีอิ๊ว\n• ถั่ว, ช็อกโกแลต, โกโก้ (ฟอสฟอรัสสูง)\n"
+        # Personalize from labs
+        if latest.get("hb") and float(latest["hb"]) < 10:
+            msg += "\n💡 Hb ต่ำ: เพิ่มเนื้อแดง, ตับ เพื่อเสริมธาตุเหล็ก"
+        return msg
+
+    # ── Category: ยา / ESA / เม็ดเลือด ──
+    if any(k in q_lower for k in ["ยา", "esa", "epo", "เม็ดเลือด", "ฉีดยา", "เสริมเหล็ก", "iron"]):
+        esa_drug = profile.get("esa_drug") or "-"
+        esa_dose = profile.get("esa_dose") or ""
+        msg = f"💊 ยาของ{short}:\n• กระตุ้นเม็ดเลือดแดง: {esa_drug} {esa_dose}\n\n"
+        msg += "⚠️ สิ่งสำคัญ:\n• ฉีดยาตามแพทย์สั่ง อย่าปรับขนาดเอง\n• ถ้ามีอาการข้างเคียง (ปวดหัว, ความดันสูง) แจ้งแพทย์\n"
+        msg += "• ไม่ควรหยุดยาเองเพราะอาจทำให้เลือดจางกลับมา"
+        return msg
+
+    # ── Category: ออกกำลังกาย ──
+    if any(k in q_lower for k in ["ออกกำลัง", "exercise", "เดิน", "วิ่ง", "กีฬา", "สุขภาพ"]):
+        return (f"🏃 การออกกำลังกายสำหรับผู้ป่วยฟอกเลือดอย่าง{short}:\n\n"
+                "✅ แนะนำ:\n• เดินเร็ว 20-30 นาที/วัน ในวันที่ไม่ฟอก\n• ยืดเหยียดกล้ามเนื้อ\n• ปั่นจักรยาน (เบาๆ)\n\n"
+                "❌ หลีกเลี่ยง:\n• ออกกำลังกายหนักในวันฟอก\n• ยกน้ำหนักด้วยแขนที่มี AVF/AVG\n• ว่ายน้ำถ้ายังมีสายฟอก (catheter)\n\n"
+                "💡 เริ่มจากน้อยๆ เพิ่มทีละนิด สม่ำเสมอดีกว่าหนักแล้วหยุด")
+
+    # ── Category: ผลฟอก / session ──
+    if any(k in q_lower for k in ["ผลฟอก", "รอบฟอก", "session", "ฟอกล่าสุด", "ครั้งล่าสุด"]):
+        if sessions:
+            s = sessions[0]
+            msg = f"📋 ผลฟอกล่าสุดของ{short} ({s['date']}):\n\n"
+            if s.get("pre_weight"):
+                msg += f"• น้ำหนักก่อนฟอก: {s['pre_weight']:.1f} kg\n"
+            if s.get("post_weight"):
+                msg += f"• น้ำหนักหลังฟอก: {s['post_weight']:.1f} kg\n"
+            if s.get("uf"):
+                msg += f"• UF (น้ำที่ดึงออก): {s['uf']:.0f} mL\n"
+            if s.get("duration"):
+                msg += f"• เวลาฟอก: {s['duration']:.1f} ชั่วโมง\n"
+            msg += f"\nรวมฟอกในระบบ: {len(sessions)} รอบล่าสุด"
+            return msg
+        return "ยังไม่มีข้อมูลผลฟอกในระบบค่ะ"
+
+    # ── Category: เส้นฟอก / AVF / catheter ──
+    if any(k in q_lower for k in ["เส้นฟอก", "avf", "avg", "catheter", "สายฟอก", "เส้นเลือด", "fistula"]):
+        va = profile.get("va") or "ไม่ระบุ"
+        msg = f"🩸 เส้นฟอกเลือดของ{short}: {va}\n\n"
+        if "avf" in va.lower() or "fistula" in va.lower():
+            msg += "ดูแล AVF:\n• คลำ thrill (สั่น) ทุกวัน\n• ไม่วัดความดัน/เจาะเลือดแขนข้างนี้\n• ไม่สวมนาฬิกา/สร้อยรัด\n• ถ้าเลือดไม่หยุดหลังฟอก กดนาน 15 นาที"
+        elif "catheter" in va.lower() or "perm" in va.lower():
+            msg += "ดูแลสายฟอก:\n• อย่าเปิดผ้าปิดแผลเอง\n• ไม่แช่น้ำ/ว่ายน้ำ\n• ถ้าปวด บวม แดง มีไข้ แจ้งทันที"
+        return msg
+
+    # ── Category: สวัสดี / ทักทาย ──
+    if any(k in q_lower for k in ["สวัสดี", "หวัดดี", "hello", "hi", "ดีจ้า", "สวัสดีค่ะ", "สวัสดีครับ"]):
+        nd = profile.get("next_dialysis")
+        greeting = f"สวัสดีค่ะ {short} 😊\n\n"
+        if nd:
+            greeting += f"📅 นัดฟอกถัดไป: {nd['text']}\n"
+        if tips:
+            greeting += f"\n💡 {tips[0].get('text', '')}"
+        greeting += "\n\nพิมพ์ถามได้เลยค่ะ เช่น:\n• ผลเลือด\n• นัดฟอก\n• น้ำหนัก\n• อาหาร\n• ออกกำลังกาย"
+        return greeting
+
+    # ── Category: ขอบคุณ ──
+    if any(k in q_lower for k in ["ขอบคุณ", "ขอบใจ", "thankyou", "thanks"]):
+        return f"ยินดีค่ะ {short} 😊 ถ้ามีอะไรสงสัยถามได้ตลอดนะคะ ดูแลสุขภาพด้วยค่ะ 💪"
+
+    # ── Default: แนะนำสิ่งที่ถามได้ ──
+    return (f"ขอโทษค่ะ {short} ไม่แน่ใจว่าถามเรื่องอะไร 😅\n\n"
+            "ลองถามเรื่องเหล่านี้ได้ค่ะ:\n"
+            "📅 \"นัดฟอกครั้งถัดไป\"\n"
+            "🩺 \"ผลเลือดล่าสุด\"\n"
+            "⚖️ \"น้ำหนักของฉัน\"\n"
+            "💧 \"ดื่มน้ำเท่าไหร่\"\n"
+            "🍽️ \"กินอะไรดี\"\n"
+            "💊 \"ยาของฉัน\"\n"
+            "🏃 \"ออกกำลังกาย\"\n"
+            "📋 \"ผลฟอกล่าสุด\"\n"
+            "🩸 \"ดูแลเส้นฟอก\"")
 
 
 @hd_bp.route("/my-results/<token>", methods=["GET"])

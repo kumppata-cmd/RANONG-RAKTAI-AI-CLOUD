@@ -1,0 +1,158 @@
+{% extends "hd_base.html" %}
+{% block title %}Smart Bed Map — รักษ์ไต{% endblock %}
+{% block content %}
+<div style="max-width:1000px;margin:0 auto;padding:8px">
+<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+  <h2 style="margin:0">🗺 Smart Bed Map</h2>
+  <div style="display:flex;gap:8px;align-items:center">
+    <span id="mapTime" style="font-size:.75rem;color:var(--fg-muted)"></span>
+    <select id="shiftSel" onchange="loadMap()" class="form-control" style="width:auto;padding:4px 8px;font-size:.8rem">
+      <option value="morning">🌅 เช้า</option>
+      <option value="afternoon">☀️ บ่าย</option>
+      <option value="evening">🌙 ค่ำ</option>
+    </select>
+  </div>
+</div>
+
+<!-- Legend -->
+<div style="display:flex;gap:12px;font-size:.72rem;margin-bottom:8px;flex-wrap:wrap">
+  <span>🟢 ปกติ (SBP ≥120)</span>
+  <span>🟡 ระวัง (SBP 100-119)</span>
+  <span>🟠 เตือน (SBP 90-99)</span>
+  <span>🔴 วิกฤต (SBP <90)</span>
+  <span>⬜ ว่าง</span>
+  <span>🔵 รอเริ่ม</span>
+  <span>✅ เสร็จ</span>
+</div>
+
+<!-- Bed Map Grid -->
+<div id="bedMap" style="display:grid;grid-template-columns:repeat(7,1fr);gap:6px"></div>
+
+<!-- Popup -->
+<div id="bedPopup" style="display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+  background:var(--card,#fff);border-radius:16px;padding:20px;box-shadow:0 8px 32px rgba(0,0,0,.2);
+  z-index:1000;max-width:360px;width:90%">
+  <button onclick="document.getElementById('bedPopup').style.display='none'" style="position:absolute;top:8px;right:12px;border:none;background:none;font-size:1.2rem;cursor:pointer">✕</button>
+  <div id="popupContent"></div>
+</div>
+<div id="bedOverlay" onclick="document.getElementById('bedPopup').style.display='none';this.style.display='none'"
+  style="display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.3);z-index:999"></div>
+</div>
+
+<style>
+.bed-tile{border-radius:12px;padding:10px 8px;text-align:center;cursor:pointer;transition:all .3s;border:2px solid transparent;min-height:90px;display:flex;flex-direction:column;justify-content:center}
+.bed-tile:active{transform:scale(.95)}
+.bed-tile .bed-no{font-size:1.1rem;font-weight:800}
+.bed-tile .bed-name{font-size:.65rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+.bed-tile .bed-bp{font-size:.9rem;font-weight:700;margin-top:4px}
+.bed-tile .bed-uf{font-size:.6rem;margin-top:2px}
+.bed-tile.empty{background:var(--bg-secondary,#f3f4f6);color:var(--fg-muted)}
+.bed-tile.scheduled{background:#dbeafe;border-color:#93c5fd;color:#1e40af}
+.bed-tile.completed{background:#dcfce7;border-color:#86efac;color:#166534}
+.bed-tile.normal{background:#ecfdf5;border-color:#6ee7b7}
+.bed-tile.caution{background:#fefce8;border-color:#fde047;animation:glow-y 2s infinite}
+.bed-tile.warning{background:#fff7ed;border-color:#fb923c;animation:glow-o 1.5s infinite}
+.bed-tile.critical{background:#fef2f2;border-color:#f87171;animation:glow-r 1s infinite}
+@keyframes glow-y{0%,100%{box-shadow:0 0 8px rgba(234,179,8,.3)}50%{box-shadow:0 0 16px rgba(234,179,8,.6)}}
+@keyframes glow-o{0%,100%{box-shadow:0 0 8px rgba(249,115,22,.3)}50%{box-shadow:0 0 16px rgba(249,115,22,.6)}}
+@keyframes glow-r{0%,100%{box-shadow:0 0 10px rgba(239,68,68,.4)}50%{box-shadow:0 0 24px rgba(239,68,68,.8)}}
+@media(max-width:600px){#bedMap{grid-template-columns:repeat(4,1fr)}}
+</style>
+
+<script>
+const TOTAL = {{ total_beds }};
+let mapData = {};
+
+function autoShift(){
+  const h = new Date().getHours();
+  document.getElementById('shiftSel').value = h < 12 ? 'morning' : (h < 18 ? 'afternoon' : 'evening');
+}
+
+async function loadMap(){
+  const shift = document.getElementById('shiftSel').value;
+  try{
+    const r = await hdFetch(`/hd/api/v1/dashboard?shift=${shift}`);
+    const d = await r.json();
+    mapData = {};
+    (d.beds||[]).forEach(b=>{ mapData[b.bed_number] = b; });
+    document.getElementById('mapTime').textContent = new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+    renderMap();
+  }catch(e){console.error(e);}
+}
+
+function bpClass(sbp){
+  if(!sbp) return 'empty';
+  if(sbp < 90) return 'critical';
+  if(sbp < 100) return 'warning';
+  if(sbp < 120) return 'caution';
+  return 'normal';
+}
+
+function renderMap(){
+  const grid = document.getElementById('bedMap');
+  let h = '';
+  for(let i = 1; i <= TOTAL; i++){
+    const b = mapData[i];
+    if(!b || !b.patient_name){
+      h += `<div class="bed-tile empty"><div class="bed-no">${i}</div><div class="bed-name">ว่าง</div></div>`;
+      continue;
+    }
+    const st = b.status;
+    if(st === 'completed'){
+      h += `<div class="bed-tile completed" onclick="showPopup(${i})"><div class="bed-no">${i}</div><div class="bed-name">${b.patient_name||''}</div><div style="font-size:.7rem">✅ เสร็จ</div></div>`;
+      continue;
+    }
+    if(st === 'scheduled'){
+      h += `<div class="bed-tile scheduled" onclick="showPopup(${i})"><div class="bed-no">${i}</div><div class="bed-name">${b.patient_name||''}</div><div style="font-size:.7rem">🔵 รอเริ่ม</div></div>`;
+      continue;
+    }
+    // in_progress
+    const sbp = b.latest_sbp || b.sbp;
+    const dbp = b.latest_dbp || b.dbp;
+    const cls = bpClass(sbp);
+    const ufPct = (b.uf_goal && b.uf_goal > 0) ? Math.round((b.actual_uf||0)/b.uf_goal*100) : 0;
+    h += `<div class="bed-tile ${cls}" onclick="showPopup(${i})">
+      <div class="bed-no">${i}</div>
+      <div class="bed-name">${b.patient_name||''}</div>
+      <div class="bed-bp">${sbp||'-'}/${dbp||'-'}</div>
+      <div class="bed-uf">UF ${ufPct}%${b.elapsed?' · '+b.elapsed:''}</div>
+    </div>`;
+  }
+  grid.innerHTML = h;
+}
+
+function showPopup(bed){
+  const b = mapData[bed];
+  const pop = document.getElementById('bedPopup');
+  const ov = document.getElementById('bedOverlay');
+  const el = document.getElementById('popupContent');
+  if(!b || !b.patient_name){
+    el.innerHTML = `<h3>🛏 เตียง ${bed}</h3><p style="color:var(--fg-muted)">ว่าง</p>`;
+  } else {
+    const sbp = b.latest_sbp || b.sbp;
+    const dbp = b.latest_dbp || b.dbp;
+    const ufPct = (b.uf_goal && b.uf_goal > 0) ? Math.round((b.actual_uf||0)/b.uf_goal*100) : 0;
+    el.innerHTML = `<h3 style="margin:0 0 8px">🛏 เตียง ${bed}</h3>
+      <div style="font-size:1.1rem;font-weight:700;margin-bottom:8px">${b.patient_name} <span style="font-size:.8rem;color:var(--fg-muted)">(HN ${b.hn||'-'})</span></div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;font-size:.88rem">
+        <div>💓 BP: <b>${sbp||'-'}/${dbp||'-'}</b></div>
+        <div>❤️ HR: <b>${b.hr||'-'}</b></div>
+        <div>💧 UF: <b>${b.actual_uf||0}/${b.uf_goal||0}</b> (${ufPct}%)</div>
+        <div>⏱ เวลา: <b>${b.elapsed||'-'}</b></div>
+        <div>⚖️ Pre: <b>${b.pre_weight||'-'}</b> kg</div>
+        <div>🩺 VA: <b>${b.vascular_access||'-'}</b></div>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:8px">
+        <a href="/hd/session/${b.session_id}" class="btn btn-primary" style="flex:1;text-align:center;padding:10px">📋 เปิด Session</a>
+        <a href="/hd/patient/${b.hn}/trends" class="btn" style="flex:1;text-align:center;padding:10px">📊 Trends</a>
+      </div>`;
+  }
+  pop.style.display = 'block';
+  ov.style.display = 'block';
+}
+
+autoShift();
+loadMap();
+setInterval(loadMap, 15000);
+</script>
+{% endblock %}
