@@ -313,27 +313,36 @@ function loadSession(){
 
 /* ── Load saved worksheet data ── */
 function loadWorksheetData(){
-  hdFetch('/hd/api/v1/sessions/'+SID+'/worksheet-data').then(r=>r.json()).then(d=>{
-    if(!d.data) { document.getElementById('wsStatus').textContent='ยังไม่เคยบันทึก'; return; }
+  hdFetch('/hd/api/v1/sessions/'+SID+'/worksheet-data').then(r=>{
+    if(!r.ok) return r.text().then(t=>{ throw new Error('HTTP '+r.status); });
+    return r.json();
+  }).then(d=>{
+    if(d.error) { document.getElementById('wsStatus').textContent='❌ '+d.error; return; }
+    if(!d.data) { document.getElementById('wsStatus').textContent='📝 ยังไม่เคยบันทึก — กรอกแล้วกด 💾 บันทึก'; return; }
     _wsData = d.data;
-    // Assessment
-    ASSESS_ITEMS.forEach(a=>{ if(d.data[a.key]!=null) setAssessValue(a.key, d.data[a.key]); });
+    // Assessment — restore OY/ON state
+    ASSESS_ITEMS.forEach(a=>{
+      const v = d.data[a.key];
+      if(v === true || v === false) setAssessValue(a.key, v);
+    });
     // Complications
-    COMP_ITEMS.forEach(a=>{ if(d.data[a.key]) document.getElementById(a.key).checked=true; });
-    TECH_ITEMS.forEach(a=>{ if(d.data[a.key]) document.getElementById(a.key).checked=true; });
+    COMP_ITEMS.forEach(a=>{ if(d.data[a.key] === true) document.getElementById(a.key).checked=true; });
+    TECH_ITEMS.forEach(a=>{ if(d.data[a.key] === true) document.getElementById(a.key).checked=true; });
     // VA
     if(d.data.va_type){
       document.querySelectorAll('#vaTypes .ws-va-btn').forEach(b=>{
-        if(b.dataset.va === d.data.va_type) { b.classList.remove('active'); b.classList.add('active'); }
+        b.classList.remove('active');
+        if(b.dataset.va === d.data.va_type) b.classList.add('active');
       });
     }
-    if(d.data.va_thrill) document.getElementById('vaThrill').checked=true;
-    if(d.data.va_bruit) document.getElementById('vaBruit').checked=true;
+    if(d.data.va_thrill === true) document.getElementById('vaThrill').checked=true;
+    if(d.data.va_bruit === true) document.getElementById('vaBruit').checked=true;
     if(d.data.va_site) document.getElementById('vaSite').value=d.data.va_site;
     // Test leak & disinfectant
-    if(d.data.test_leak) document.getElementById('testLeak').checked=true;
+    if(d.data.test_leak === true) document.getElementById('testLeak').checked=true;
     if(d.data.disinfectant){
       document.querySelectorAll('#disinfectantRow .ws-va-btn').forEach(b=>{
+        b.classList.remove('active');
         if(b.dataset.dis === d.data.disinfectant) b.classList.add('active');
       });
     }
@@ -342,7 +351,10 @@ function loadWorksheetData(){
     if(d.data.nursing_note) document.getElementById('nursingNote').value=d.data.nursing_note;
     if(d.data.doctor_order) document.getElementById('doctorOrder').value=d.data.doctor_order;
     if(d.data.health_ed) document.getElementById('healthEd').value=d.data.health_ed;
-    document.getElementById('wsStatus').textContent='บันทึกล่าสุด: '+(d.data.updated_at||'');
+    document.getElementById('wsStatus').textContent='✅ โหลดข้อมูลบันทึกล่าสุด: '+(d.data.updated_at||'');
+  }).catch(e=>{
+    console.error('loadWorksheetData error:', e);
+    document.getElementById('wsStatus').textContent='⚠️ โหลดข้อมูลไม่สำเร็จ: '+e.message;
   });
 }
 
@@ -370,11 +382,14 @@ function saveWorksheet(){
 
   hdFetch('/hd/api/v1/sessions/'+SID+'/worksheet-data',{
     method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)
-  }).then(r=>r.json()).then(d=>{
-    if(d.error){toast(d.error,'danger');return}
+  }).then(r=>{
+    if(!r.ok) return r.text().then(t=>{ throw new Error('HTTP '+r.status+': '+(t||'').substring(0,120)); });
+    return r.json();
+  }).then(d=>{
+    if(d.error){toast('❌ '+d.error,'danger');return}
     toast('✅ บันทึกสำเร็จ','success');
     document.getElementById('wsStatus').textContent='บันทึกล่าสุด: '+new Date().toLocaleString('th-TH');
-  }).catch(()=>toast('บันทึกล้มเหลว','danger'));
+  }).catch(e=>toast('❌ '+e.message,'danger'));
 }
 
 function openPDF(){

@@ -622,6 +622,7 @@ def get_worksheet_data(session_id):
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
+            _ensure_ws_table(cur)
             cur.execute(f"SELECT {', '.join(_WS_ALL_COLS)}, updated_at FROM hd_worksheet_data WHERE session_id = %s", (session_id,))
             row = cur.fetchone()
             if not row:
@@ -638,6 +639,43 @@ def get_worksheet_data(session_id):
         conn.close()
 
 
+_WS_CREATE_SQL = """CREATE TABLE IF NOT EXISTS hd_worksheet_data (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER NOT NULL UNIQUE REFERENCES hd_sessions(id),
+    assess_anxiety BOOLEAN, assess_sleep_disturbance BOOLEAN,
+    assess_dyspnea BOOLEAN, assess_orthopnea BOOLEAN,
+    assess_crepitation BOOLEAN, assess_jvp_engorged BOOLEAN,
+    assess_arrhythmia BOOLEAN, assess_fever BOOLEAN,
+    assess_headache BOOLEAN, assess_nausea_vomiting BOOLEAN,
+    assess_anorexia BOOLEAN, assess_weakness BOOLEAN,
+    assess_prolong_bleeding BOOLEAN, assess_pale BOOLEAN,
+    assess_edema BOOLEAN, assess_itching BOOLEAN,
+    assess_constipation BOOLEAN, assess_urine BOOLEAN,
+    test_leak BOOLEAN, disinfectant VARCHAR(30),
+    va_type VARCHAR(20), va_thrill BOOLEAN, va_bruit BOOLEAN, va_site VARCHAR(50),
+    nursing_dx TEXT,
+    comp_hypotension BOOLEAN, comp_hypertension BOOLEAN, comp_muscle_cramp BOOLEAN,
+    comp_chest_pain BOOLEAN, comp_headache BOOLEAN, comp_fever_chill BOOLEAN,
+    comp_arrhythmia BOOLEAN, comp_va_problem BOOLEAN, comp_dialyzer BOOLEAN,
+    comp_cardiac_arrest BOOLEAN, comp_dds BOOLEAN, comp_air_embolism BOOLEAN,
+    comp_no_complication BOOLEAN,
+    tech_blood_leak BOOLEAN, tech_clot_dialyzer BOOLEAN, tech_clotted_bloodline BOOLEAN,
+    tech_machine_problem BOOLEAN, tech_needle_gt2 BOOLEAN, tech_no_complication BOOLEAN,
+    nursing_note TEXT, doctor_order TEXT, health_ed TEXT,
+    nurse_start_id INTEGER, nurse_end_id INTEGER,
+    created_at TIMESTAMP DEFAULT NOW(), updated_at TIMESTAMP DEFAULT NOW(),
+    updated_by INTEGER
+)"""
+
+
+def _ensure_ws_table(cur):
+    """Ensure hd_worksheet_data table exists (safe to call every time)."""
+    try:
+        cur.execute(_WS_CREATE_SQL)
+    except Exception:
+        pass
+
+
 @hd_bp.route("/sessions/<int:session_id>/worksheet-data", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def save_worksheet_data(session_id):
@@ -650,6 +688,9 @@ def save_worksheet_data(session_id):
     conn = psycopg2.connect(db_url, connect_timeout=5)
     try:
         with conn.cursor() as cur:
+            _ensure_ws_table(cur)
+            conn.commit()
+
             # Build values
             vals = {}
             for col in _WS_BOOL_COLS:
