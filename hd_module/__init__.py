@@ -369,7 +369,24 @@ def create_default_hd_users():
             cur.execute("SELECT COUNT(*) FROM hd_users")
             count = cur.fetchone()[0]
             if count > 0:
-                logger.info("HD users: skipped — %d users already exist", count)
+                # Sync passwords from ENV on every boot (in case ENV changed)
+                admin_secret = os.environ.get("ADMIN_SECRET", "changeme")
+                sync_map = {
+                    "dr.kamphon": os.environ.get("HD_PHYSICIAN_PW", admin_secret),
+                    "nurse1": os.environ.get("HD_NURSE_PW", admin_secret),
+                    "hd_admin": os.environ.get("HD_ADMIN_PW", admin_secret),
+                }
+                synced = 0
+                for uname, pw in sync_map.items():
+                    pw_hash = hash_password(pw)
+                    cur.execute("UPDATE hd_users SET password_hash = %s WHERE username = %s AND password_hash != %s",
+                                (pw_hash, uname, pw_hash))
+                    synced += cur.rowcount
+                conn.commit()
+                if synced:
+                    logger.info("HD users: synced %d passwords from ENV", synced)
+                else:
+                    logger.info("HD users: %d exist, passwords up to date", count)
                 conn.close()
                 return
 
