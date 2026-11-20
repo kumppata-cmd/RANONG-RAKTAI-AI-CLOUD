@@ -231,12 +231,12 @@ def collect_month(conn, year, month):
                        FROM hd_fluid_assessments WHERE assessed_at BETWEEN %s AND %s""", (f, l))
         D["fluid"] = {"assessed": r[0][0], "oh_high": r[0][1], "oh_low": r[0][2], "mean_oh": float(r[0][3]) if r[0][3] else None} if r else {}
         # Serology screening coverage
-        r = _q(cur, """SELECT COUNT(*) FILTER (WHERE hepatitis_b IS NOT NULL OR hepatitis_c IS NOT NULL),
-                              COUNT(*) FILTER (WHERE hepatitis_b = 'positive'),
-                              COUNT(*) FILTER (WHERE hepatitis_c = 'positive')
-                       FROM (SELECT DISTINCT ON (patient_id) patient_id, hepatitis_b, hepatitis_c FROM hd_lab_results
+        r = _q(cur, """SELECT COUNT(*) FILTER (WHERE hbsag IS NOT NULL OR antihcv IS NOT NULL),
+                              COUNT(*) FILTER (WHERE hbsag = 'positive'),
+                              COUNT(*) FILTER (WHERE antihcv = 'positive')
+                       FROM (SELECT DISTINCT ON (patient_id) patient_id, hbsag, antihcv FROM hd_labs
                              WHERE patient_id IN (SELECT id FROM hd_patient_mapping WHERE is_active = TRUE)
-                               AND (hepatitis_b IS NOT NULL OR hepatitis_c IS NOT NULL) ORDER BY patient_id, lab_date DESC) sub""")
+                               AND (hbsag IS NOT NULL OR antihcv IS NOT NULL) ORDER BY patient_id, lab_date DESC) sub""")
         D["serology"] = {"screened": r[0][0], "hbsag_pos": r[0][1], "antihcv_pos": r[0][2]} if r else {}
         D["serology"]["total"] = D["active_patients"]
         # IDWG: % of sessions with IDWG > 5% DW
