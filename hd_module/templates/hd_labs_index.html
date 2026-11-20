@@ -50,6 +50,17 @@
   <button class="btn-inactive" onclick="showInactive()">📦 ที่ระงับ</button>
 </div>
 
+<!-- History date picker (ดูผล Lab ย้อนหลัง) -->
+<div class="top-bar" style="margin-top:-4px">
+  <span style="font-size:.85rem;font-weight:600;color:var(--fg-muted)">📅 ดูผล ณ วันที่:</span>
+  <input type="date" id="snapDate" style="flex:0 1 170px;min-width:150px;padding:8px 10px;border:2px solid var(--border);border-radius:10px;font-size:.9rem;background:var(--card-bg);color:var(--fg)" onchange="viewSnapshot(this.value)">
+  <select id="snapDates" style="flex:0 1 170px;min-width:150px;padding:8px 10px;border:2px solid var(--border);border-radius:10px;font-size:.9rem;background:var(--card-bg);color:var(--fg)" onchange="if(this.value)viewSnapshot(this.value)">
+    <option value="">— วันที่ที่มีผล Lab —</option>
+  </select>
+  <button class="btn-inactive" id="snapReset" style="display:none;background:#0d6efd;color:#fff" onclick="resetSnapshot()">↩️ กลับไปดูล่าสุด</button>
+</div>
+<div id="snapBanner" style="display:none;margin-bottom:10px;padding:8px 14px;border-radius:10px;background:rgba(13,110,253,.1);color:#0d6efd;font-size:.85rem;font-weight:600"></div>
+
 <!-- Patient List -->
 <div class="patient-list" id="patientList">
   <div style="text-align:center;color:var(--fg-muted);grid-column:1/-1;">กำลังโหลด...</div>
@@ -345,6 +356,43 @@ function commitImport(){
     setTimeout(()=>{closeModal('importModal');loadPatients();},1500);
   }).catch(e=>{document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">❌ '+e.message+'</span>';});
 }
+
+/* ── ดูผล Lab ย้อนหลัง (snapshot ณ วันที่เลือก) ── */
+function _fillSnapDates(dates){
+  const sel = document.getElementById('snapDates');
+  if(!sel || !dates || !dates.length) return;
+  sel.innerHTML = '<option value="">— วันที่ที่มีผล Lab —</option>' +
+    dates.map(d=>`<option value="${d}">${d}</option>`).join('');
+}
+function viewSnapshot(dateStr){
+  if(!dateStr) return;
+  document.getElementById('snapBanner').style.display='block';
+  document.getElementById('snapBanner').textContent='⏳ กำลังโหลดผล ณ วันที่ '+dateStr+'...';
+  hdFetch('/hd/api/v1/labs/snapshot?date='+encodeURIComponent(dateStr)).then(r=>r.json()).then(d=>{
+    if(d.error){ document.getElementById('snapBanner').textContent='❌ '+d.error; return; }
+    _fillSnapDates(d.dates);
+    const snap = (d.patients||[]).map(p=>({
+      hn:p.hn, patient_name:p.patient_name, vascular_access:p.vascular_access,
+      schedule_days:p.schedule_days, default_shift:null,
+      hb:p.hb, k:p.k, ktv:p.ktv, lab_date:p.lab_date, lab_age_days:p.lab_age_days
+    }));
+    renderPatients(snap);
+    const withLab = snap.filter(p=>p.lab_date).length;
+    document.getElementById('snapBanner').textContent='📅 แสดงผล Lab ณ วันที่ '+(d.as_of||dateStr)+' — มีผล '+withLab+'/'+snap.length+' คน (ค่าล่าสุดที่ไม่เกินวันนั้น)';
+    document.getElementById('snapReset').style.display='';
+  }).catch(e=>{ document.getElementById('snapBanner').textContent='❌ โหลดไม่สำเร็จ: '+(e.message||e); });
+}
+function resetSnapshot(){
+  document.getElementById('snapBanner').style.display='none';
+  document.getElementById('snapReset').style.display='none';
+  document.getElementById('snapDate').value='';
+  document.getElementById('snapDates').value='';
+  renderStats(); renderPatients(_patients);
+}
+/* เติม dropdown วันที่ตอนเปิดหน้า (ไม่กระทบการแสดงผลล่าสุด) */
+try{
+  hdFetch('/hd/api/v1/labs/snapshot').then(r=>r.ok?r.json():null).then(d=>{ if(d) _fillSnapDates(d.dates); }).catch(()=>{});
+}catch(e){}
 
 loadPatients();
 </script>

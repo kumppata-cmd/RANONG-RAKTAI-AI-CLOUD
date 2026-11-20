@@ -5713,6 +5713,62 @@ def patients_with_lab_summary():
         return jsonify({"patients": [], "error": str(e)})
 
 
+@hd_bp.route("/labs/snapshot", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def labs_snapshot():
+    """ผล Lab ของทุกคน ณ วันที่เลือก (?date=YYYY-MM-DD) — ค่า Lab ล่าสุดที่ไม่เกินวันนั้น
+    + รายการวันที่ที่มีผล Lab (สำหรับ dropdown เลือกย้อนหลัง). NEW endpoint — ไม่แตะของเดิม."""
+    import os, psycopg2
+    from datetime import date as _date
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"patients": [], "dates": []})
+    q_date = (request.args.get("date") or "").strip()
+    try:
+        as_of = _date.fromisoformat(q_date) if q_date else _thai_today()
+    except ValueError:
+        return jsonify({"error": f"รูปแบบวันที่ไม่ถูกต้อง: {q_date} (ใช้ YYYY-MM-DD)"}), 400
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        dates, rows = [], []
+        with conn.cursor() as cur:
+            try:
+                cur.execute("""SELECT DISTINCT lab_date FROM hd_labs
+                               WHERE lab_date IS NOT NULL ORDER BY lab_date DESC LIMIT 48""")
+                dates = [r[0].isoformat() for r in cur.fetchall()]
+            except Exception as e:
+                logger.warning("labs_snapshot dates: %s", e)
+            try:
+                cur.execute("""SELECT p.hn, p.patient_name, p.vascular_access, p.schedule_days,
+                                      lb.lab_date, lb.hb, lb.k, lb.ktv
+                               FROM hd_patient_mapping p
+                               LEFT JOIN LATERAL (
+                                   SELECT lab_date, hb, k, ktv FROM hd_labs
+                                   WHERE patient_id = p.id AND lab_date <= %s
+                                   ORDER BY lab_date DESC NULLS LAST LIMIT 1
+                               ) lb ON TRUE
+                               WHERE p.is_active = TRUE
+                               ORDER BY p.patient_name""", (as_of,))
+                rows = cur.fetchall()
+            except Exception as e:
+                logger.error("labs_snapshot query: %s", e)
+        conn.close()
+        patients = [{
+            "hn": r[0], "patient_name": r[1], "vascular_access": r[2], "schedule_days": r[3],
+            "lab_date": r[4].isoformat() if r[4] else None,
+            "lab_age_days": (as_of - r[4]).days if r[4] else None,
+            "hb": float(r[5]) if r[5] is not None else None,
+            "k": float(r[6]) if r[6] is not None else None,
+            "ktv": float(r[7]) if r[7] is not None else None,
+        } for r in rows]
+        return jsonify({"as_of": as_of.isoformat(), "patients": patients,
+                        "total": len(patients), "dates": dates})
+    except Exception as e:
+        logger.error("labs_snapshot: %s", e)
+        return jsonify({"patients": [], "dates": [], "error": str(e)})
+
+
 WEEK_DAYS = ["จ", "อ", "พ", "พฤ", "ศ", "ส", "อา"]
 SHIFT_ORDER = ["morning", "afternoon", "evening"]
 
