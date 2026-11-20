@@ -814,9 +814,7 @@ if(params.get('bed')) document.getElementById('bedSelect').value = params.get('b
 
 /* Load patients + auto-select from URL */
 (function loadPatients(){
-  const token = getHdToken();
-  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
-  fetch('/hd/api/v1/patients', {headers})
+  hdFetch('/hd/api/v1/patients')
     .then(r=>{
       if(!r.ok) throw new Error('API '+r.status);
       return r.json();
@@ -855,9 +853,7 @@ function onPatientSelect(){
   const hn = document.getElementById('patientSelect').value;
   if(!hn) return;
   loadUfCoach(hn);
-  const token = getHdToken();
-  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
-  fetch('/hd/api/v1/patients/'+hn, {headers}).then(r=>r.ok?r.json():Promise.reject()).then(p=>{
+  hdFetch('/hd/api/v1/patients/'+hn).then(r=>r.ok?r.json():Promise.reject()).then(p=>{
     document.getElementById('patientName').textContent = p.patient_name || p.name || 'HN '+hn;
     document.getElementById('patientInfo').textContent = 'HN: '+hn+' | ตาราง: '+(p.schedule_days||'-')+' | Access: '+(p.vascular_access||'-');
     _showSero(p.serology);
@@ -1251,12 +1247,8 @@ function cancelSession(){
 
 /* Load existing session when coming from dashboard */
 function loadExistingSession(sid){
-  const token = getHdToken();
-  const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
-  fetch('/hd/api/v1/sessions/'+sid+'/detail', {headers})
+  hdFetch('/hd/api/v1/sessions/'+sid+'/detail')
     .then(r=>{
-      /* 17 พ.ย. 2569: เปิดจากลิงก์ใน LINE (เบราว์เซอร์ใน LINE ไม่มี/หมดอายุ token) เดิมเงียบ → หน้าว่าง */
-      if(r.status===401){ try{ localStorage.removeItem('hd_token'); sessionStorage.removeItem('hd_token'); }catch(e){} hdGoLogin(); return Promise.reject('auth'); }
       if(!r.ok) return Promise.reject(r.status);
       return r.json();
     })
@@ -1344,7 +1336,7 @@ function loadExistingSession(sid){
 /* ═══ โหลดบันทึกของรอบ (ใช้ทั้งรอบที่กำลังฟอกและรอบย้อนหลัง) ═══ */
 function _tsOf(iso){ const t = iso ? (hdParseUtc(iso) || new Date(iso)) : null; return t && !isNaN(t) ? t.getTime() : 0; }
 function loadSessionRecords(sid, headers, live){
-  fetch('/hd/api/v1/sessions/'+sid+'/vitals', {headers})
+  hdFetch('/hd/api/v1/sessions/'+sid+'/vitals')
     .then(r=>r.ok?r.json():Promise.reject())
     .then(vd=>{
       (vd.vitals||[]).forEach(v=>{
@@ -1354,7 +1346,7 @@ function loadSessionRecords(sid, headers, live){
       renderTimeline();
       try{ drawUfChart(); }catch(e){}
     }).catch(()=>{});
-  fetch('/hd/api/v1/sessions/'+sid+'/uf', {headers})
+  hdFetch('/hd/api/v1/sessions/'+sid+'/uf')
     .then(r=>r.ok?r.json():Promise.reject())
     .then(ud=>{
       if(ud.uf_goal) document.getElementById('ufGoal').textContent = ud.uf_goal;
@@ -1523,12 +1515,10 @@ function saveIntraVital(){
   showToast('บันทึก Vital Signs สำเร็จ','success');
   ['modalSbp','modalDbp','modalHr','modalTemp','modalSpo2'].forEach(id=>{document.getElementById(id).value='';});
 
-  /* POST to API (non-blocking, don't redirect on fail) */
+  /* POST to API — ใช้ hdFetch เพื่อจัดการ token + 401 */
   if(sessionData.session_id){
-    const token = getHdToken();
-    const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {'Content-Type':'application/json'};
-    fetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
-      method:'POST', headers,
+    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
+      method:'POST',
       body:JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null, temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null})
     }).then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(e)))
     .then(d=>{
@@ -2091,10 +2081,8 @@ function saveUfRecord(){
   bar.style.width = pct+'%'; bar.textContent = pct+'%';
   bar.style.background = pct > 90 ? 'var(--warning)' : 'var(--success)';
 
-  /* POST UF to API (non-blocking) */
+  /* POST UF to API — ใช้ hdFetch เพื่อจัดการ token + 401 */
   if(sessionData.session_id){
-    const token = getHdToken();
-    const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {'Content-Type':'application/json'};
     const now = new Date();
     const slotTime = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
     const ufPayload = {uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0, slot_time:slotTime};
@@ -2106,24 +2094,32 @@ function saveUfRecord(){
     if(_ufPending.extend) _ufAdj.extend = _ufPending.extend;
     if(rv > _lastUfRemoved) _lastUfRemoved = rv;
     const ufBody = JSON.stringify(ufPayload);
+    /* อัปเดต UI ทันที (optimistic) แต่แจ้งสถานะ DB ชัดเจน */
     _ufRecords.push({t:new Date().toISOString(), removed:parseInt(removed)||0}); drawUfChart();
-    fetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
-      method:'POST', headers, body:ufBody
-    }).then(r=>r.json()).then(d=>{
-      if(d.uf_recorded) showToast('💧 UF บันทึกลง DB สำเร็จ','info');
+    timeline.push({time: now.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}), type:'uf', removed, remaining, rate});
+    renderTimeline();
+    closeModal('ufModal');
+    showToast('💧 กำลังบันทึก UF...','info');
+    hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
+      method:'POST', body:ufBody
+    }).then(r=>{
+      if(!r.ok) throw new Error('API '+r.status);
+      return r.json();
+    }).then(d=>{
+      if(d.uf_recorded) showToast('✅ UF บันทึกลง DB สำเร็จ','success');
+      else showToast('⚠️ UF API ตอบกลับไม่สมบูรณ์','warning');
       if(d.watch) showUfWatch(d.watch);
-      if(d.idh_alert_sent) showToast('🚨 แจ้งหัวหน้าเวรแล้ว: อัตรา UF ที่ต้องใช้เกินเพดาน + เสี่ยง IDH สูง','danger');
+      if(d.idh_alert_sent) showToast('🚨 แจ้งหัวหน้าเวรแล้ว: อัตรา UF เกินเพดาน + เสี่ยง IDH สูง','danger');
     }).catch(e=>{
-      console.warn('UF API:', e);
+      console.warn('UF API error:', e);
       _pushOffline('/hd/api/v1/sessions/'+sessionData.session_id+'/uf', 'POST', ufBody);
-      showToast('UF บันทึก offline — จะ sync เมื่อ online','warning');
+      _updateOfflineBadge();
+      showToast('⚠️ UF บันทึก offline — จะส่งอัตโนมัติเมื่อเน็ตกลับ','warning');
     });
+  } else {
+    closeModal('ufModal');
+    showToast('❌ ไม่มี session — เริ่มฟอกก่อนบันทึก UF','danger');
   }
-
-  timeline.push({time: new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}), type:'uf', removed, remaining, rate});
-  renderTimeline();
-  closeModal('ufModal');
-  showToast('บันทึก UF สำเร็จ','success');
 }
 
 /* บันทึกระหว่างฟอก — แยก 2 กลุ่ม: ❤️ Vital Signs และ 💧 UF (ใหม่ → เก่า) */
