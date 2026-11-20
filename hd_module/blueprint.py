@@ -3933,24 +3933,31 @@ def create_session():
                 except Exception:
                     cur.execute("ROLLBACK TO SAVEPOINT sp_eq_lookup")
 
-            cur.execute(f"""
-                INSERT INTO hd_sessions
-                    (patient_id, bed_number, session_date, status,
-                     pre_weight, post_weight, uf_goal,
-                     started_at, nurse_id, shift, equipment_id)
-                VALUES (%s, %s, %s, '{init_status}',
-                        %s, NULL, %s,
-                        {started}, %s, %s, %s)
-                RETURNING id
-            """, (
-                patient_id, bed,
-                sess_day.isoformat(),
-                pre_w,
-                uf_goal,
-                g.get("hd_user_id"),
-                shift,
-                _eq_id,
-            ))
+            try:
+                cur.execute(f"""
+                    INSERT INTO hd_sessions
+                        (patient_id, bed_number, session_date, status,
+                         pre_weight, post_weight, uf_goal,
+                         started_at, nurse_id, shift, equipment_id)
+                    VALUES (%s, %s, %s, '{init_status}',
+                            %s, NULL, %s,
+                            {started}, %s, %s, %s)
+                    RETURNING id
+                """, (
+                    patient_id, bed,
+                    sess_day.isoformat(),
+                    pre_w,
+                    uf_goal,
+                    g.get("hd_user_id"),
+                    shift,
+                    _eq_id,
+                ))
+            except Exception as ins_err:
+                # unique index ux_hd_sessions_bed_active: 2 คนกดลงเตียงเดียวกันพร้อมกันเป๊ะ
+                if "ux_hd_sessions_bed_active" in str(ins_err) or "duplicate key" in str(ins_err).lower():
+                    conn.close()
+                    return jsonify({"error": f"เตียง {bed} ถูกจองพร้อมกันโดยผู้ใช้อีกคน — รีเฟรช dashboard แล้วเลือกเตียงใหม่"}), 409
+                raise
             session_id = cur.fetchone()[0]
 
             # Save Dialyzer tracking (upsert active dialyzer).

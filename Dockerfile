@@ -127,4 +127,5 @@ USER appuser
 EXPOSE 10000
 
 # รัน Gunicorn (ใช้ PORT จาก Render ENV, fallback 10000)
-CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --timeout 120 --access-logfile -
+# --threads 4: รองรับพยาบาลหลายคนพร้อมกัน — งานช้า (OCR รูป) ไม่บล็อกคำขออื่น
+CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --threads 4 --timeout 120 --access-logfile -

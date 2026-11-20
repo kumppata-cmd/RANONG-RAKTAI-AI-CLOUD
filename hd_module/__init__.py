@@ -237,6 +237,13 @@ def _run_hd_migrations():
                 "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_sbp INTEGER",
                 "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_dbp INTEGER",
             ]
+            # ── กันเตียงซ้อนระดับ DB: 1 เตียง/วัน/รอบ มี session ทำงานได้ 1 เดียว ──
+            # (ปิดช่องโหว่ 2 คนกด submit พร้อมกันเสี้ยววินาที — app เช็คอยู่แล้ว นี่คือชั้นสุดท้าย)
+            fixes.append("""
+                CREATE UNIQUE INDEX IF NOT EXISTS ux_hd_sessions_bed_active
+                ON hd_sessions (bed_number, session_date, COALESCE(shift, 'morning'))
+                WHERE status IN ('scheduled', 'in_progress')
+            """)
             # ── Unified Lab VIEW: hd_labs ──────────────────────────
             # Merge hd_lab_results (manual) + hd_lab_docs (OCR) into one VIEW
             # with standardised column names so every query uses one source.
