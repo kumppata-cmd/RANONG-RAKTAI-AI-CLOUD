@@ -106,46 +106,50 @@ let _patients = [];
 const ROLE = (function(){ try{const t=localStorage.getItem('hd_token');if(!t)return '';const p=JSON.parse(atob(t.split('.')[1]));return p.role||''}catch(e){return ''} })();
 const isAdmin = ROLE === 'admin' || ROLE === 'physician';
 
+/* ข้อมูลจาก server (ไม่ต้องพึ่ง API/token) */
+const _serverPatients = {{ server_patients | default('[]') | safe }};
+
 function loadPatients(){
-  /* ลอง 3 ระดับ: with-lab-summary → /patients → /patients/simple */
-  hdFetch('/hd/api/v1/patients/with-lab-summary').then(r=>{
-    if(!r.ok) throw new Error('API '+r.status);
-    return r.json();
-  }).then(data=>{
-    _patients = data.patients || [];
-    if(_patients.length){ renderStats(); renderPatients(_patients); }
-    else { _loadFallback1(); }
-  }).catch(e=>{
-    console.warn('with-lab-summary failed:', e);
-    _loadFallback1();
-  });
-}
-function _loadFallback1(){
-  hdFetch('/hd/api/v1/patients').then(r=>r.ok?r.json():Promise.reject()).then(data=>{
-    _patients = (data.patients||[]).map(p=>({
-      hn: p.hn, patient_name: p.patient_name, vascular_access: p.vascular_access,
-      schedule_days: p.schedule_days, default_shift: p.default_shift,
-      hb: null, k: null, ktv: null, lab_date: null, lab_age_days: null
-    }));
-    if(_patients.length){ renderStats(); renderPatients(_patients); }
-    else { _loadFallback2(); }
-  }).catch(e=>{
-    console.warn('/patients failed:', e);
-    _loadFallback2();
-  });
-}
-function _loadFallback2(){
-  /* สุดท้าย: ใช้ simple endpoint ที่ไม่มี JOIN */
-  hdFetch('/hd/api/v1/patients/simple-list').then(r=>r.ok?r.json():Promise.reject()).then(data=>{
-    _patients = (data.patients||[]).map(p=>({
+  /* ใช้ server data ก่อน (แสดงทันที ไม่ต้องรอ API) */
+  if(_serverPatients.length){
+    _patients = _serverPatients.map(p=>({
       hn: p.hn, patient_name: p.name, vascular_access: p.va,
       schedule_days: p.sched, default_shift: null,
       hb: null, k: null, ktv: null, lab_date: null, lab_age_days: null
     }));
     renderStats(); renderPatients(_patients);
-  }).catch(()=>{
-    document.getElementById('patientList').innerHTML='<div style="text-align:center;color:var(--danger);grid-column:1/-1;">⚠️ โหลดข้อมูลไม่ได้ — ลอง refresh หรือ login ใหม่</div>';
-  });
+  }
+  /* แล้ว upgrade ด้วย lab data จาก API (ถ้ามี token) */
+  try {
+    hdFetch('/hd/api/v1/patients/with-lab-summary').then(r=>{
+      if(!r.ok) throw new Error('API '+r.status);
+      return r.json();
+    }).then(data=>{
+      if(data.patients && data.patients.length){
+        _patients = data.patients;
+        renderStats(); renderPatients(_patients);
+      }
+    }).catch(e=>{
+      console.info('Lab summary API unavailable:', e.message || e);
+      /* ไม่เป็นไร — ใช้ server data ที่แสดงอยู่แล้ว */
+    });
+  } catch(e){
+    /* hdFetch reject (no token) — ไม่เป็นไร server data แสดงอยู่แล้ว */
+  }
+  /* ถ้า server ไม่ส่งข้อมูลมาด้วย (เก่ายังไม่ deploy) → fallback API */
+  if(!_serverPatients.length){
+    document.getElementById('patientList').innerHTML='<div style="text-align:center;color:var(--fg-muted);grid-column:1/-1;">กำลังโหลดจาก API...</div>';
+    hdFetch('/hd/api/v1/patients/simple-list').then(r=>r.ok?r.json():Promise.reject()).then(data=>{
+      _patients = (data.patients||[]).map(p=>({
+        hn: p.hn, patient_name: p.name, vascular_access: p.va,
+        schedule_days: p.sched, default_shift: null,
+        hb: null, k: null, ktv: null, lab_date: null, lab_age_days: null
+      }));
+      renderStats(); renderPatients(_patients);
+    }).catch(()=>{
+      document.getElementById('patientList').innerHTML='<div style="text-align:center;color:var(--danger);grid-column:1/-1;">⚠️ โหลดข้อมูลไม่ได้ — ลอง <a href="/hd/login">login ใหม่</a></div>';
+    });
+  }
 }
 
 function renderStats(){

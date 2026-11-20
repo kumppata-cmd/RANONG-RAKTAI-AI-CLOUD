@@ -251,7 +251,23 @@ def hd_settings_page():
 @hd_web.route("/labs")
 def hd_labs_index():
     """Lab Results — หน้ารวมเลือกคนไข้."""
-    return render_template("hd_labs_index.html")
+    # Pre-load patients server-side — ไม่ต้องพึ่ง API + token
+    patients = []
+    try:
+        import os, psycopg2
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        if db_url:
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("SELECT hn, patient_name, vascular_access, schedule_days FROM hd_patient_mapping WHERE is_active = TRUE ORDER BY patient_name LIMIT 300")
+                patients = [{"hn": r[0], "name": r[1] or "", "va": r[2] or "", "sched": r[3] or ""} for r in cur.fetchall()]
+            conn.close()
+    except Exception as e:
+        logger.warning("labs_index preload: %s", e)
+    import json
+    resp = make_response(render_template("hd_labs_index.html", server_patients=json.dumps(patients, ensure_ascii=False)))
+    resp.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return resp
 
 
 @hd_web.route("/labs/<hn>")
