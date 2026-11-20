@@ -3719,9 +3719,12 @@ def create_session():
                 _save_pre_hd(cur, session_id, data)
 
             # Update VA + VA Location on patient record if provided
+            # ⚠️ MUST use SAVEPOINT: if va_location column doesn't exist, a bare
+            # UPDATE would abort the entire transaction and roll back the session INSERT.
             va = data.get("vascular_access")
             va_loc = data.get("va_location")
             if va or va_loc:
+                cur.execute("SAVEPOINT sp_va_update")
                 try:
                     updates = []
                     params = []
@@ -3736,8 +3739,10 @@ def create_session():
                         UPDATE hd_patient_mapping
                         SET {', '.join(updates)} WHERE id = %s
                     """, params)
+                    cur.execute("RELEASE SAVEPOINT sp_va_update")
                 except Exception as e:
-                    logger.warning("VA update error: %s", e)
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_va_update")
+                    logger.warning("VA update error (rolled back savepoint): %s", e)
 
         conn.commit()
         conn.close()
@@ -3751,11 +3756,26 @@ def create_session():
             ip_address=request.remote_addr or "",
         )
 
+        # Fetch ESA drug for the UI session page
+        _esa_drug = None
+        try:
+            import psycopg2 as _pg2
+            _ec = _pg2.connect(db_url, connect_timeout=3)
+            with _ec.cursor() as _ecur:
+                _ecur.execute("SELECT esa_drug FROM hd_patient_mapping WHERE id = %s", (patient_id,))
+                _er = _ecur.fetchone()
+                if _er:
+                    _esa_drug = _er[0]
+            _ec.close()
+        except Exception:
+            pass
+
         return jsonify({
             "status": "created",
             "session_id": session_id,
             "bed_number": bed,
             "patient_hn": data["patient_hn"],
+            "esa_drug": _esa_drug,
         }), 201
 
     except Exception as e:
@@ -6361,6 +6381,7 @@ def bed_dashboard():
         })
 
     # Fill beds from active sessions
+    _dash_error = ""
     if db_url:
         try:
             import psycopg2
@@ -6374,7 +6395,20 @@ def bed_dashboard():
                 # overwrites in the loop — last write wins
                 # Query sessions: match shift exactly, OR include NULL-shift
                 # sessions when viewing morning (legacy sessions before shift feature)
-                cur.execute("""
+                # -- Safe column check: some columns may not exist in older schemas
+                _extra_patient_cols = ""
+                try:
+                    cur.execute("""SELECT column_name FROM information_schema.columns
+                                   WHERE table_name = 'hd_patient_mapping'
+                                     AND column_name IN ('default_shift', 'schedule_days', 'esa_dose')""")
+                    _has_cols = {r[0] for r in cur.fetchall()}
+                except Exception:
+                    _has_cols = set()
+                _p_default_shift = "p.default_shift" if "default_shift" in _has_cols else "NULL::VARCHAR"
+                _p_schedule_days = "p.schedule_days" if "schedule_days" in _has_cols else "NULL::VARCHAR"
+                _p_esa_dose = "p.esa_dose" if "esa_dose" in _has_cols else "NULL::VARCHAR"
+
+                cur.execute(f"""
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
                            p.dry_weight, p.esa_drug,
@@ -6383,7 +6417,9 @@ def bed_dashboard():
                            s.shift as saved_shift,
                            s.ended_at, s.pre_weight, s.post_weight, s.actual_uf,
                            (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id) AS n_alerts,
-                           p.default_shift, p.schedule_days, p.esa_dose
+                           {_p_default_shift} AS default_shift,
+                           {_p_schedule_days} AS schedule_days,
+                           {_p_esa_dose} AS esa_dose
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.status IN ('scheduled', 'in_progress', 'completed')
@@ -6655,6 +6691,7 @@ def bed_dashboard():
             conn.close()
         except Exception as e:
             import traceback
+            _dash_error = f"DB: {e}"
             logger.error("bed_dashboard DB error: %s\n%s", e, traceback.format_exc())
 
     # Get today's scheduled patients from DB
@@ -6732,6 +6769,7 @@ def bed_dashboard():
         "today_patients": today_patients,
         "_debug_sessions_today": debug_total,
         "_debug_detail": debug_detail,
+        "_debug_error": _dash_error,
     })
 
 

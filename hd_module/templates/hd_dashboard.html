@@ -709,11 +709,13 @@ function fetchBeds(){
       const activeCount = data.active_in_shift || 0;
       const dbTotal = data._debug_sessions_today || 0;
       const dbDetail = data._debug_detail || '-';
+      const dbErr = data._debug_error || '';
       document.getElementById('lastUpdated').textContent =
         new Date().toLocaleTimeString('th-TH') +
         ' | รอบ' + (shiftNames[data.shift]||data.shift) +
         ' | ฟอก ' + activeCount +
-        ' | DB: ' + dbTotal + ' sessions [' + dbDetail + ']';
+        ' | DB: ' + dbTotal + ' sessions [' + dbDetail + ']' +
+        (dbErr ? ' ⚠️ ' + dbErr : '');
       if(data.today_scheduled !== undefined) document.getElementById('statScheduled').textContent = data.today_scheduled;
       /* Show today's scheduled patients */
       if(data.today_patients && data.today_patients.length){
@@ -1041,5 +1043,18 @@ const _origFetchBeds = fetchBeds;
 initDayButtons();
 if(_viewMode === 'all') fetchAllRounds(); else fetchBeds();
 setInterval(()=>{ if(_viewMode==='all') fetchAllRounds(); else fetchBeds(); }, 30000);
+
+/* Force refresh when page restored from bfcache (back/forward navigation) */
+window.addEventListener('pageshow', function(e) {
+  if (e.persisted) {
+    if(_viewMode === 'all') fetchAllRounds(); else fetchBeds();
+  }
+});
+/* Also refresh on visibility change (tab switch, screen unlock) */
+document.addEventListener('visibilitychange', function() {
+  if (document.visibilityState === 'visible') {
+    if(_viewMode === 'all') fetchAllRounds(); else fetchBeds();
+  }
+});
 </script>
 {% endblock %}
