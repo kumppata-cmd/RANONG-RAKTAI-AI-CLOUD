@@ -185,8 +185,8 @@ def _patient(cur, key, today):
         d, st, b, post, pre = last[0]
         w = f" · น้ำหนัก {pre or '-'}→{post or '-'}" if (pre or post) else ""
         L.append(f"ฟอกล่าสุด {d.day}/{d.month}/{d.year + 543} เตียง {b} ({ST_TH.get(st, st)}){w}")
-    lab = _q(cur, """SELECT COALESCE(specimen_date, doc_date), hb, k, phos, ca, albumin, ktv FROM hd_lab_docs
-                     WHERE patient_id = %s ORDER BY 1 DESC NULLS LAST, id DESC LIMIT 1""", (pid,))
+    lab = _q(cur, """SELECT lab_date, hb, k, phos, ca, albumin, ktv FROM hd_labs
+                     WHERE patient_id = %s ORDER BY lab_date DESC NULLS LAST LIMIT 1""", (pid,))
     if lab:
         d, hb, k, p, ca, alb, ktv = lab[0]
         vals = [f"Hb {float(hb):.1f}" if hb is not None else None, f"K {float(k):.1f}" if k is not None else None,

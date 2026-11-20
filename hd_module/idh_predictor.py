@@ -145,8 +145,8 @@ def features_for(cur, session_id):
             ORDER BY session_date DESC, id DESC LIMIT 10)""", (pid, session_id))
     f["idh_history"] = cur.fetchone()[0]
     try:
-        cur.execute("""SELECT hb, albumin FROM hd_lab_docs WHERE patient_id = %s
-                       ORDER BY COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC LIMIT 1""", (pid,))
+        cur.execute("""SELECT hb, albumin FROM hd_labs WHERE patient_id = %s
+                       ORDER BY lab_date DESC NULLS LAST LIMIT 1""", (pid,))
         lab = cur.fetchone()
         if lab:
             f["hb"], f["albumin"] = lab[0], lab[1]

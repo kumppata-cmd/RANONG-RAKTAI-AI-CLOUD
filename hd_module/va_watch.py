@@ -114,9 +114,9 @@ def collect(conn, days=120):
         labs = {}
         try:
             cur.execute("SAVEPOINT va_lab")
-            cur.execute("""SELECT DISTINCT ON (patient_id) patient_id, ktv, urr, COALESCE(specimen_date, doc_date)
-                           FROM hd_lab_docs WHERE patient_id = ANY(%s)
-                           ORDER BY patient_id, COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC""", (list(per.keys()),))
+            cur.execute("""SELECT DISTINCT ON (patient_id) patient_id, ktv, urr, lab_date
+                           FROM hd_labs WHERE patient_id = ANY(%s)
+                           ORDER BY patient_id, lab_date DESC NULLS LAST""", (list(per.keys()),))
             labs = {r[0]: (r[1], r[2], r[3]) for r in cur.fetchall()}
             cur.execute("RELEASE SAVEPOINT va_lab")
         except Exception:

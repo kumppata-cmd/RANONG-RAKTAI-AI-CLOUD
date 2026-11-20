@@ -88,10 +88,10 @@ def collect_monthly_data(conn, year, month):
         for pid, hn, name, dw, goal in patients:
             # This month's labs (latest per field)
             cur.execute("""
-                SELECT hemoglobin, hematocrit, ferritin, ipth, kt_v, lab_date
-                FROM hd_lab_results
+                SELECT hb, hct, ferritin, pth, ktv, lab_date
+                FROM hd_labs
                 WHERE patient_id = %s AND lab_date BETWEEN %s AND %s
-                ORDER BY lab_date DESC, id DESC LIMIT 5
+                ORDER BY lab_date DESC LIMIT 5
             """, (pid, first_day, last_day))
             rows = cur.fetchall()
             if not rows:
@@ -107,10 +107,10 @@ def collect_monthly_data(conn, year, month):
 
             # Previous month's labs for trend
             cur.execute("""
-                SELECT hemoglobin, hematocrit, ferritin, ipth, kt_v
-                FROM hd_lab_results
+                SELECT hb, hct, ferritin, pth, ktv
+                FROM hd_labs
                 WHERE patient_id = %s AND lab_date BETWEEN %s AND %s
-                ORDER BY lab_date DESC, id DESC LIMIT 5
+                ORDER BY lab_date DESC LIMIT 5
             """, (pid, prev_first, prev_last))
             prev_rows = cur.fetchall()
             prev = {}

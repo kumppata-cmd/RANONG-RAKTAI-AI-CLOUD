@@ -59,12 +59,9 @@ def latest_for(cur, patient_ids):
             rec[field], rec[field + "_date"] = v, d_iso
 
     queries = (
-        ("""SELECT patient_id, hepatitis_b, hepatitis_c, lab_date FROM hd_lab_results
-            WHERE patient_id = ANY(%s) AND (hepatitis_b IS NOT NULL OR hepatitis_c IS NOT NULL)
-            ORDER BY lab_date DESC, id DESC""", "sero1"),
-        ("""SELECT patient_id, hbsag, antihcv, COALESCE(specimen_date, doc_date) FROM hd_lab_docs
+        ("""SELECT patient_id, hbsag, antihcv, lab_date FROM hd_labs
             WHERE patient_id = ANY(%s) AND (hbsag IS NOT NULL OR antihcv IS NOT NULL)
-            ORDER BY COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC""", "sero2"),
+            ORDER BY lab_date DESC NULLS LAST""", "sero1"),
     )
     for sql, sp in queries:
         try:

@@ -84,12 +84,9 @@ def load_context(conn, total_beds, hbv_beds="", hcv_beds=""):
                     u["bed"][bed] += 1
         # infection status
         inf = {}
-        for sql in ("""SELECT DISTINCT ON (patient_id) patient_id, hbsag, antihcv FROM hd_lab_docs
+        for sql in ("""SELECT DISTINCT ON (patient_id) patient_id, hbsag, antihcv FROM hd_labs
                        WHERE patient_id = ANY(%s) AND (hbsag IS NOT NULL OR antihcv IS NOT NULL)
-                       ORDER BY patient_id, COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC""",
-                    """SELECT DISTINCT ON (patient_id) patient_id, hepatitis_b, hepatitis_c FROM hd_lab_results
-                       WHERE patient_id = ANY(%s) AND (hepatitis_b IS NOT NULL OR hepatitis_c IS NOT NULL)
-                       ORDER BY patient_id, lab_date DESC, id DESC"""):
+                       ORDER BY patient_id, lab_date DESC NULLS LAST""",):
             try:
                 cur.execute("SAVEPOINT bs")
                 cur.execute(sql, (ids,))

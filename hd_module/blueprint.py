@@ -4069,14 +4069,13 @@ def _auto_kt_v_on_complete(session_id):
                 dur = (s[4] - s[3]).total_seconds() / 3600
                 if 1 <= dur <= 8:
                     duration = round(dur, 1)
-            # Look for pre/post BUN in hd_lab_results (same day)
-            cur.execute("""SELECT bun FROM hd_lab_results
-                           WHERE patient_id = %s
+            # Look for latest BUN from unified lab VIEW
+            cur.execute("""SELECT bun FROM hd_labs
+                           WHERE patient_id = %s AND bun IS NOT NULL
                            ORDER BY lab_date DESC LIMIT 1""", (pid,))
             pre_bun_row = cur.fetchone()
-            # Note: hd_lab_results has no lab_type column — post BUN not stored separately
-            post_bun_row = None  # Kt/V auto-calc needs pre+post BUN; skip if no post
-            post_bun_row = cur.fetchone()
+            # Post-HD BUN not stored separately — Kt/V auto-calc skips
+            post_bun_row = None
             if not pre_bun_row or not post_bun_row or not pre_bun_row[0] or not post_bun_row[0]:
                 return {"skipped": "no pre/post BUN data"}
             result = calculate_kt_v(
@@ -7053,11 +7052,11 @@ def ai_assistant_ask():
 
         elif any(w in low for w in ("hb ต่ำ", "ซีด", "anemia", "โลหิตจาง")):
             with conn.cursor() as cur:
-                cur.execute("""SELECT p.patient_name, p.hn, l.hemoglobin, l.lab_date
-                               FROM hd_lab_results l JOIN hd_patient_mapping p ON p.id = l.patient_id
-                               WHERE l.hemoglobin IS NOT NULL AND l.hemoglobin < 10
+                cur.execute("""SELECT p.patient_name, p.hn, l.hb, l.lab_date
+                               FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
+                               WHERE l.hb IS NOT NULL AND l.hb < 10
                                AND l.lab_date >= CURRENT_DATE - INTERVAL '60 days'
-                               ORDER BY l.hemoglobin ASC LIMIT 15""")
+                               ORDER BY l.hb ASC LIMIT 15""")
                 rows = cur.fetchall()
             if rows:
                 extended = f"🩸 Hb < 10 (60 วัน) — {len(rows)} คน:\n" + \
@@ -7166,8 +7165,8 @@ def patient_narrator(hn):
             sessions = cur.fetchall()
 
             # Latest labs
-            cur.execute("""SELECT hemoglobin, hematocrit, bun, creatinine, potassium, albumin, lab_date
-                           FROM hd_lab_results WHERE patient_id = %s
+            cur.execute("""SELECT hb, hct, bun, creatinine, k, albumin, lab_date
+                           FROM hd_labs WHERE patient_id = %s
                            ORDER BY lab_date DESC LIMIT 1""", (pid,))
             lab = cur.fetchone()
 
@@ -7464,8 +7463,8 @@ def patient_med_check(hn):
             pid, name = p[0], p[1]
 
             # Get latest lab values
-            cur.execute("""SELECT potassium, creatinine, bun, hemoglobin, albumin
-                           FROM hd_lab_results WHERE patient_id = %s
+            cur.execute("""SELECT k, creatinine, bun, hb, albumin
+                           FROM hd_labs WHERE patient_id = %s
                            ORDER BY lab_date DESC LIMIT 1""", (pid,))
             lab = cur.fetchone()
             k_val = float(lab[0]) if lab and lab[0] else None
@@ -7581,9 +7580,9 @@ def patient_drug_advisor(hn):
             pid, name = p
 
             # Latest labs
-            cur.execute("""SELECT hemoglobin, hematocrit, potassium, phosphate, calcium, albumin,
-                                  ferritin, tsat, ipth, lab_date
-                           FROM hd_lab_results WHERE patient_id = %s
+            cur.execute("""SELECT hb, hct, k, phos, ca, albumin,
+                                  ferritin, tsat, pth, lab_date
+                           FROM hd_labs WHERE patient_id = %s
                            ORDER BY lab_date DESC LIMIT 1""", (pid,))
             lab = cur.fetchone()
 
@@ -7791,8 +7790,8 @@ def patient_trends(hn):
                        for r in cur.fetchall()]
 
             # Lab trends: Hb, Hct, BUN, Cr, K, Albumin
-            cur.execute("""SELECT lab_date, hemoglobin, hematocrit, bun, creatinine, potassium, albumin
-                           FROM hd_lab_results WHERE patient_id = %s AND lab_date >= %s
+            cur.execute("""SELECT lab_date, hb, hct, bun, creatinine, k, albumin
+                           FROM hd_labs WHERE patient_id = %s AND lab_date >= %s
                            ORDER BY lab_date""", (pid, cutoff))
             labs = [{"date": r[0].isoformat() if r[0] else None,
                      "hb": float(r[1]) if r[1] else None,

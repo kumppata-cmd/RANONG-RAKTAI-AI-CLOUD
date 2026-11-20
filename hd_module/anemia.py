@@ -166,10 +166,8 @@ def collect(conn, limits=None, days=90):
         # Hb points from all sources
         hbp = {}
         for sql in (
-            """SELECT patient_id, COALESCE(specimen_date, doc_date), hb FROM hd_lab_docs
-               WHERE patient_id = ANY(%s) AND hb IS NOT NULL AND COALESCE(specimen_date, doc_date) >= %s""",
-            """SELECT patient_id, lab_date, hemoglobin FROM hd_lab_results
-               WHERE patient_id = ANY(%s) AND hemoglobin IS NOT NULL AND lab_date >= %s""",
+            """SELECT patient_id, lab_date, hb FROM hd_labs
+               WHERE patient_id = ANY(%s) AND hb IS NOT NULL AND lab_date >= %s""",
             """SELECT patient_id, session_date, hb_value FROM hd_sessions
                WHERE patient_id = ANY(%s) AND hb_value IS NOT NULL AND session_date >= %s"""):
             try:
@@ -185,12 +183,9 @@ def collect(conn, limits=None, days=90):
         # iron studies (newest)
         iron = {}
         for sql in (
-            """SELECT DISTINCT ON (patient_id) patient_id, COALESCE(specimen_date, doc_date), ferritin, tsat FROM hd_lab_docs
+            """SELECT DISTINCT ON (patient_id) patient_id, lab_date, ferritin, tsat FROM hd_labs
                WHERE patient_id = ANY(%s) AND (ferritin IS NOT NULL OR tsat IS NOT NULL)
-               ORDER BY patient_id, COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC""",
-            """SELECT DISTINCT ON (patient_id) patient_id, lab_date, ferritin, tsat FROM hd_lab_results
-               WHERE patient_id = ANY(%s) AND (ferritin IS NOT NULL OR tsat IS NOT NULL)
-               ORDER BY patient_id, lab_date DESC, id DESC"""):
+               ORDER BY patient_id, lab_date DESC NULLS LAST""",):
             try:
                 cur.execute("SAVEPOINT an2")
                 cur.execute(sql, (ids,))
@@ -274,11 +269,9 @@ def iron_status_for(cur, patient_id, limits=None):
     lim = dict(DEFAULTS, **(limits or {}))
     best = (None, None, None)
     for sql in (
-        """SELECT COALESCE(specimen_date, doc_date), ferritin, tsat FROM hd_lab_docs
+        """SELECT lab_date, ferritin, tsat FROM hd_labs
            WHERE patient_id = %s AND (ferritin IS NOT NULL OR tsat IS NOT NULL)
-           ORDER BY COALESCE(specimen_date, doc_date) DESC NULLS LAST, id DESC LIMIT 1""",
-        """SELECT lab_date, ferritin, tsat FROM hd_lab_results WHERE patient_id = %s AND (ferritin IS NOT NULL OR tsat IS NOT NULL)
-           ORDER BY lab_date DESC, id DESC LIMIT 1"""):
+           ORDER BY lab_date DESC NULLS LAST LIMIT 1""",):
         try:
             cur.execute("SAVEPOINT ir")
             cur.execute(sql, (patient_id,))

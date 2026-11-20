@@ -114,8 +114,8 @@ def generate(conn, protocol=None, lookback_days=60):
         # newest Hb per patient: lab documents and session entries
         cur.execute("""
             WITH src AS (
-                SELECT patient_id, hb, COALESCE(specimen_date, doc_date) AS d, 'doc:' || doc_id AS src
-                FROM hd_lab_docs WHERE hb IS NOT NULL AND COALESCE(specimen_date, doc_date) >= %s
+                SELECT patient_id, hb, lab_date AS d, 'lab' AS src
+                FROM hd_labs WHERE hb IS NOT NULL AND lab_date >= %s
                 UNION ALL
                 SELECT patient_id, hb_value, session_date, 'session:' || id FROM hd_sessions
                 WHERE hb_value IS NOT NULL AND session_date >= %s

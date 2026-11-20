@@ -98,12 +98,10 @@ def adequacy(conn, days=90):
                           WHERE p.is_active = TRUE ORDER BY p.patient_name""")
         ids = [p[0] for p in pats]
         meas = {}
-        for sql in ("""SELECT patient_id, COALESCE(specimen_date, doc_date), ktv, urr FROM hd_lab_docs
-                       WHERE patient_id = ANY(%s) AND (ktv IS NOT NULL OR urr IS NOT NULL) AND COALESCE(specimen_date, doc_date) >= %s""",
+        for sql in ("""SELECT patient_id, lab_date, ktv, urr FROM hd_labs
+                       WHERE patient_id = ANY(%s) AND (ktv IS NOT NULL OR urr IS NOT NULL) AND lab_date >= %s""",
                     """SELECT patient_id, session_date, kt_v, urr FROM hd_sessions
-                       WHERE patient_id = ANY(%s) AND (kt_v IS NOT NULL OR urr IS NOT NULL) AND session_date >= %s""",
-                    """SELECT patient_id, lab_date, kt_v, urr FROM hd_lab_results
-                       WHERE patient_id = ANY(%s) AND (kt_v IS NOT NULL OR urr IS NOT NULL) AND lab_date >= %s"""):
+                       WHERE patient_id = ANY(%s) AND (kt_v IS NOT NULL OR urr IS NOT NULL) AND session_date >= %s"""):
             for pid, d, k, u in _q(cur, sql, (ids, since)):
                 cur_d = meas.get(pid, (None,))[0]
                 if d and (cur_d is None or d > cur_d):
@@ -171,8 +169,7 @@ def collect_month(conn, year, month):
         D["alerts"] = dict(zip(("total", "critical", "with_order", "pending"), r[0])) if r else {}
         # anemia: latest Hb per patient inside the month (all sources)
         hb = {}
-        for sql in ("""SELECT patient_id, COALESCE(specimen_date, doc_date), hb FROM hd_lab_docs WHERE hb IS NOT NULL AND COALESCE(specimen_date, doc_date) BETWEEN %s AND %s""",
-                    """SELECT patient_id, lab_date, hemoglobin FROM hd_lab_results WHERE hemoglobin IS NOT NULL AND lab_date BETWEEN %s AND %s""",
+        for sql in ("""SELECT patient_id, lab_date, hb FROM hd_labs WHERE hb IS NOT NULL AND lab_date BETWEEN %s AND %s""",
                     """SELECT patient_id, session_date, hb_value FROM hd_sessions WHERE hb_value IS NOT NULL AND session_date BETWEEN %s AND %s"""):
             for pid, d, v in _q(cur, sql, (f, l)):
                 if d and (pid not in hb or d > hb[pid][0]):
@@ -183,13 +180,12 @@ def collect_month(conn, year, month):
                        "mean": round(sum(vals) / len(vals), 1) if vals else None}
         # iron studies in month
         r = _q(cur, """SELECT COUNT(DISTINCT patient_id), COUNT(*) FILTER (WHERE ferritin < 200 OR tsat < 20)
-                       FROM hd_lab_docs WHERE (ferritin IS NOT NULL OR tsat IS NOT NULL) AND COALESCE(specimen_date, doc_date) BETWEEN %s AND %s""", (f, l))
+                       FROM hd_labs WHERE (ferritin IS NOT NULL OR tsat IS NOT NULL) AND lab_date BETWEEN %s AND %s""", (f, l))
         D["iron"] = {"checked": r[0][0], "deficient": r[0][1]} if r else {}
         # adequacy in month
         kt = {}
-        for sql in ("""SELECT patient_id, COALESCE(specimen_date, doc_date), ktv, urr FROM hd_lab_docs WHERE (ktv IS NOT NULL OR urr IS NOT NULL) AND COALESCE(specimen_date, doc_date) BETWEEN %s AND %s""",
-                    """SELECT patient_id, session_date, kt_v, urr FROM hd_sessions WHERE (kt_v IS NOT NULL OR urr IS NOT NULL) AND session_date BETWEEN %s AND %s""",
-                    """SELECT patient_id, lab_date, kt_v, urr FROM hd_lab_results WHERE (kt_v IS NOT NULL OR urr IS NOT NULL) AND lab_date BETWEEN %s AND %s"""):
+        for sql in ("""SELECT patient_id, lab_date, ktv, urr FROM hd_labs WHERE (ktv IS NOT NULL OR urr IS NOT NULL) AND lab_date BETWEEN %s AND %s""",
+                    """SELECT patient_id, session_date, kt_v, urr FROM hd_sessions WHERE (kt_v IS NOT NULL OR urr IS NOT NULL) AND session_date BETWEEN %s AND %s"""):
             for pid, d, k, u in _q(cur, sql, (f, l)):
                 if d and (pid not in kt or d > kt[pid][0]):
                     kt[pid] = (d, _f(k), _f(u))

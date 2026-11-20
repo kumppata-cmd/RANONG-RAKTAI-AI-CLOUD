@@ -78,10 +78,10 @@ def collect(conn, today=None):
         out["lab_flags"] = []
         for r in _q(cur, """
             SELECT DISTINCT ON (l.patient_id) p.patient_name, p.hn, l.hb, l.k, l.phos, l.ca, l.hbsag,
-                   COALESCE(l.specimen_date, l.doc_date)
-            FROM hd_lab_docs l JOIN hd_patient_mapping p ON p.id = l.patient_id
-            WHERE COALESCE(l.specimen_date, l.doc_date) >= %s
-            ORDER BY l.patient_id, COALESCE(l.specimen_date, l.doc_date) DESC, l.id DESC""",
+                   l.lab_date
+            FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
+            WHERE l.lab_date >= %s
+            ORDER BY l.patient_id, l.lab_date DESC""",
                      ((today - timedelta(days=60)).isoformat(),)):
             from .lab_sync import flags_for
             fl = flags_for({"hb": r[2], "k": r[3], "phos": r[4], "ca": r[5], "hbsag": r[6]})

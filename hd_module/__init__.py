@@ -237,6 +237,38 @@ def _run_hd_migrations():
                 "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_sbp INTEGER",
                 "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_dbp INTEGER",
             ]
+            # ── Unified Lab VIEW: hd_labs ──────────────────────────
+            # Merge hd_lab_results (manual) + hd_lab_docs (OCR) into one VIEW
+            # with standardised column names so every query uses one source.
+            fixes.append("""
+                CREATE OR REPLACE VIEW hd_labs AS
+                SELECT patient_id, lab_date,
+                       hemoglobin AS hb, hematocrit AS hct,
+                       potassium AS k, sodium AS na,
+                       calcium AS ca, phosphate AS phos,
+                       albumin, ipth AS pth,
+                       ferritin, tsat,
+                       kt_v AS ktv, urr,
+                       bun, creatinine,
+                       NULL::NUMERIC AS glucose,
+                       hepatitis_b AS hbsag, hepatitis_c AS antihcv, NULL::VARCHAR AS antihbs,
+                       source, 'lab_results' AS _table
+                FROM hd_lab_results
+                UNION ALL
+                SELECT patient_id, COALESCE(specimen_date, doc_date) AS lab_date,
+                       hb, hct,
+                       k, na,
+                       ca, phos,
+                       albumin, pth,
+                       ferritin, tsat,
+                       ktv, urr,
+                       bun, creatinine,
+                       glucose,
+                       hbsag, antihcv, antihbs,
+                       'ocr' AS source, 'lab_docs' AS _table
+                FROM hd_lab_docs
+            """)
+
             ok = 0
             for sql in fixes:
                 one_line = " ".join(sql.split())[:70]

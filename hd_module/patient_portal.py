@@ -131,9 +131,9 @@ def portal_data(conn, hn):
 
         # Lab trends (last 12 months, newest first)
         labs = []
-        cur.execute("""SELECT lab_date, hemoglobin, hematocrit, ferritin, ipth, kt_v
-                       FROM hd_lab_results WHERE patient_id = %s AND lab_date >= CURRENT_DATE - 365
-                       ORDER BY lab_date DESC, id DESC LIMIT 20""", (pid,))
+        cur.execute("""SELECT lab_date, hb, hct, ferritin, pth, ktv
+                       FROM hd_labs WHERE patient_id = %s AND lab_date >= CURRENT_DATE - 365
+                       ORDER BY lab_date DESC LIMIT 20""", (pid,))
         for r in cur.fetchall():
             labs.append({"date": r[0].isoformat(), "hb": _f(r[1]), "hct": _f(r[2]),
                          "ferritin": _f(r[3]), "ipth": _f(r[4]), "ktv": _f(r[5])})
