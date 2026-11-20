@@ -3203,6 +3203,49 @@ def hd_force_reset():
         return jsonify({"error": str(e)}), 500
 
 
+@hd_bp.route("/auth/debug-login", methods=["GET"])
+def hd_debug_login():
+    """Diagnostic: hd_admin account state. Requires ?secret=ADMIN_SECRET (same guard as force-reset)."""
+    import os, psycopg2
+    real_secret = os.environ.get("ADMIN_SECRET", "")
+    if not real_secret or request.args.get("secret", "") != real_secret:
+        return jsonify({"error": "Invalid admin_secret"}), 403
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No DB configured", "HD_DATABASE_URL": bool(os.environ.get("HD_DATABASE_URL")),
+                        "DATABASE_URL": bool(os.environ.get("DATABASE_URL"))}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT id, username, role, is_active, failed_attempts, locked_until,
+                           last_login, password_hash IS NOT NULL as has_pw,
+                           LENGTH(password_hash) as pw_len
+                           FROM hd_users WHERE username = 'hd_admin'""")
+            row = cur.fetchone()
+            if not row:
+                # Check if any users exist
+                cur.execute("SELECT username, role, is_active FROM hd_users LIMIT 10")
+                users = [{"u": r[0], "role": r[1], "active": r[2]} for r in cur.fetchall()]
+                conn.close()
+                return jsonify({"error": "hd_admin NOT FOUND", "existing_users": users,
+                                "admin_secret_set": bool(os.environ.get("ADMIN_SECRET"))})
+            conn.close()
+            from datetime import datetime, timezone
+            locked = row[5] and row[5] > datetime.now(timezone.utc)
+            return jsonify({
+                "user_id": row[0], "username": row[1], "role": row[2],
+                "is_active": row[3], "failed_attempts": row[4],
+                "locked_until": str(row[5]) if row[5] else None,
+                "is_locked_now": locked,
+                "last_login": str(row[6]) if row[6] else None,
+                "has_password": row[7], "pw_hash_len": row[8],
+                "admin_secret_set": bool(os.environ.get("ADMIN_SECRET")),
+                "jwt_secret_set": bool(os.environ.get("HD_JWT_SECRET")),
+            })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/auth/set-pin", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def hd_set_pin():
