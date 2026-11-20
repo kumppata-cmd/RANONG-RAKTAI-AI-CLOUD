@@ -429,7 +429,7 @@
     <div id="esaLastInfo" style="display:none;padding:8px 12px;background:rgba(52,152,219,.06);border-radius:var(--radius-sm);margin-bottom:12px;font-size:.85rem;"></div>
     <!-- ESA Toggle -->
     <div style="display:flex;gap:8px;margin-bottom:12px;">
-      <button type="button" class="btn" id="esaYesBtn" onclick="setEsaGiven(true)" style="flex:1;padding:12px;font-size:.95rem;">💉 ฉีด ESA</button>
+      <button type="button" class="btn" id="esaYesBtn" onclick="setEsaGiven(true, true)" style="flex:1;padding:12px;font-size:.95rem;">💉 ฉีด ESA</button>
       <button type="button" class="btn" id="esaNoBtn" onclick="setEsaGiven(false)" style="flex:1;padding:12px;font-size:.95rem;">❌ ไม่ฉีด</button>
     </div>
     <!-- ESA Given Details -->
@@ -2439,7 +2439,13 @@ let _esaGiven = null; /* null=not set, true=given, false=skipped */
 let _openAlertCount = 0;   /* for the end-of-session gate */
 let _lastUfRemoved = 0;
 
-function setEsaGiven(val){
+function setEsaGiven(val, fromUser){
+  /* เตือนฉีดถี่เกิน — เฉพาะตอนพยาบาลกดปุ่มเอง (ไม่เด้งตอนโหลด session เก่า) */
+  if(val === true && fromUser && sessionData.esaRecentGiven && !sessionData._esaWarnAck){
+    const rg = sessionData.esaRecentGiven;
+    if(!confirm('⚠️ คนไข้เพิ่งได้ ESA เมื่อ ' + rg.date + (rg.days===0?' (วันนี้)':' ('+rg.days+' วันก่อน)') + '\n\nปกติไม่ฉีดถี่กว่า 2 วัน — ยืนยันว่าจะฉีดอีกครั้ง?')) return;
+    sessionData._esaWarnAck = true;
+  }
   _esaGiven = val;
   const yesBtn = document.getElementById('esaYesBtn');
   const noBtn = document.getElementById('esaNoBtn');
@@ -2579,6 +2585,32 @@ function loadEsaHistory(){
 
       /* ── จำค่าครั้งก่อนของคนไข้คนเดิม → auto-fill (แก้ไขได้ตลอด) ── */
       const lastGiven = (d.records||[]).find(r=>r.esa_given===true) || {};
+
+      /* 🤖 ข้อเสนอจาก ESA Autopilot (pending) — คำแนะนำเท่านั้น หมอตัดสินใจ */
+      if(d.pending_proposal){
+        const pp = d.pending_proposal;
+        const actTh = {increase:'เพิ่มเป็น', decrease:'ลดเป็น', hold:'งดชั่วคราว', resume:'กลับมาฉีด', review:'ทบทวน'}[pp.action] || pp.action;
+        const info4 = document.getElementById('esaLastInfo');
+        info4.innerHTML += '<div style="margin-top:6px;padding:6px 10px;border-radius:8px;background:rgba(243,156,18,.12);color:#b36b00;font-weight:600">'
+          + '🤖 Autopilot เสนอ: ' + actTh + (pp.proposed_dose ? ' ' + pp.proposed_dose : '')
+          + (pp.current_dose ? ' (ปัจจุบัน ' + pp.current_dose + ')' : '')
+          + (pp.hb != null ? ' — Hb ' + pp.hb + (pp.hb_date ? ' (' + pp.hb_date + ')' : '') : '')
+          + (pp.rationale ? '<br><span style="font-weight:400;font-size:.8rem">' + pp.rationale + '</span>' : '')
+          + '<br><span style="font-weight:400;font-size:.78rem">คำแนะนำเท่านั้น — อนุมัติ/ปฏิเสธที่หน้า ESA Autopilot</span></div>';
+        info4.style.display = 'block';
+      }
+
+      /* ⚠️ เตือนฉีดถี่เกิน: ครั้งล่าสุดไม่ถึง 2 วัน */
+      sessionData.esaRecentGiven = null;
+      if(lastGiven.date){
+        const days = Math.floor((new Date().setHours(0,0,0,0) - new Date(lastGiven.date).setHours(0,0,0,0)) / 864e5);
+        if(days >= 0 && days < 2){
+          sessionData.esaRecentGiven = {date: lastGiven.date, days: days};
+          const info5 = document.getElementById('esaLastInfo');
+          info5.innerHTML += '<div style="margin-top:6px;color:var(--danger);font-weight:700">⚠️ เพิ่งได้ ESA เมื่อ ' + lastGiven.date + (days===0?' (วันนี้)':' ('+days+' วันก่อน)') + ' — ระวังฉีดซ้ำ</div>';
+          info5.style.display = 'block';
+        }
+      }
       sessionData.esaDefaults = {
         dose: lastGiven.esa_dose || d.prescribed?.esa_dose || null,
         route: lastGiven.esa_route || null,

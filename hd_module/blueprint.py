@@ -9281,6 +9281,22 @@ def patient_esa_history(hn):
                                   "hct": float(lr[2]) if lr[2] is not None else None}
             except Exception as _ll_err:
                 logger.warning("esa-history latest_lab: %s", _ll_err)
+
+            # ข้อเสนอปรับ dose ที่ค้างอยู่จาก ESA Autopilot (additive — ล้มได้ไม่กระทบของเดิม)
+            pending_proposal = None
+            try:
+                cur.execute("""SELECT e.action, e.proposed_dose, e.current_dose, e.rationale, e.hb, e.hb_date
+                               FROM hd_esa_proposals e JOIN hd_patient_mapping p ON p.id = e.patient_id
+                               WHERE p.hn = %s AND e.status = 'pending'
+                               ORDER BY e.created_at DESC LIMIT 1""", (hn,))
+                pp = cur.fetchone()
+                if pp:
+                    pending_proposal = {"action": pp[0], "proposed_dose": pp[1], "current_dose": pp[2],
+                                        "rationale": pp[3],
+                                        "hb": float(pp[4]) if pp[4] is not None else None,
+                                        "hb_date": pp[5].isoformat() if pp[5] else None}
+            except Exception as _pp_err:
+                logger.warning("esa-history pending_proposal: %s", _pp_err)
         conn.close()
 
         records = []
@@ -9294,7 +9310,8 @@ def patient_esa_history(hn):
                 "hct": float(r[7]) if r[7] else None,
                 "shift": r[8],
             })
-        return jsonify({"records": records, "prescribed": prescribed, "latest_lab": latest_lab})
+        return jsonify({"records": records, "prescribed": prescribed, "latest_lab": latest_lab,
+                        "pending_proposal": pending_proposal})
     except Exception as e:
         logger.error("patient_esa_history error: %s", e)
         return jsonify({"records": [], "prescribed": {}, "error": str(e)})

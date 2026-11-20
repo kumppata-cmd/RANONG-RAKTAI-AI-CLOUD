@@ -73,6 +73,37 @@ function buildHbChart(hbTrend){
   </svg>`;
 }
 
+/* 💉 ESA Dose Timeline — step chart ของขนาดยาที่ฉีดจริง คู่กับ Hb chart ด้านบน */
+function buildDoseChart(esa){
+  const given = (esa||[]).filter(e=>e.given && e.dose).map(e=>{
+    const m = String(e.dose).replace(/,/g,'').match(/\d+(\.\d+)?/);
+    return m ? {date: e.date, dose: parseFloat(m[0]), raw: e.dose} : null;
+  }).filter(Boolean);
+  if(given.length < 2) return '<p style="color:var(--fg-muted);text-align:center;padding:16px;">ข้อมูล dose ยังน้อยเกินกว่าจะวาดกราฟ</p>';
+  const W=640,H=150,ml=46,mr=10,mt=14,mb=26,pw=W-ml-mr,ph=H-mt-mb;
+  const vals=given.map(d=>d.dose), minV=Math.min(...vals)*0.85, maxV=Math.max(...vals)*1.1, rng=(maxV-minV)||1;
+  let path='', marks='';
+  given.forEach((d,i)=>{
+    const x = ml + (i/Math.max(given.length-1,1))*pw;
+    const y = mt + ph - ((d.dose-minV)/rng*ph);
+    /* step line: แนวนอนจากจุดก่อนหน้า แล้วหักขึ้น/ลง */
+    path += i===0 ? `M ${x.toFixed(1)} ${y.toFixed(1)}` : ` H ${x.toFixed(1)} V ${y.toFixed(1)}`;
+    const changed = i>0 && given[i-1].dose !== d.dose;
+    const col = !changed ? 'var(--accent)' : (d.dose > given[i-1].dose ? '#e67e22' : '#16a085');
+    marks += `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${changed?5:3}" fill="${col}"/>`;
+    if(changed || i===0 || i===given.length-1){
+      marks += `<text x="${x.toFixed(1)}" y="${(y-9).toFixed(1)}" text-anchor="middle" font-size="9" font-weight="700" fill="${col}">${d.dose>=1000?(d.dose/1000)+'k':d.dose}</text>`;
+      marks += `<text x="${x.toFixed(1)}" y="${H-8}" text-anchor="middle" font-size="7.5" fill="var(--fg-muted)">${(d.date||'').slice(5)}</text>`;
+    }
+  });
+  return `<svg viewBox="0 0 ${W} ${H}" style="width:100%;height:auto;">
+    <path d="${path}" fill="none" stroke="var(--accent)" stroke-width="2" opacity=".65"/>
+    ${marks}
+    <text x="4" y="${mt+6}" font-size="8" fill="var(--fg-muted)">IU/mcg</text>
+  </svg>
+  <div style="font-size:.72rem;color:var(--fg-muted);text-align:center">🟠 ปรับเพิ่ม · 🟢 ปรับลด — ดูคู่กับ Hb Trend ด้านบนเพื่อประเมินการตอบสนอง</div>`;
+}
+
 function loadEpoDashboard(){
   hdFetch('/hd/api/v1/epo/dashboard/'+HN)
     .then(r=>r.json())
@@ -118,6 +149,11 @@ function loadEpoDashboard(){
         <div class="epo-card">
           <h4 style="margin:0 0 8px;">📈 Hb Trend (6 เดือน)</h4>
           ${buildHbChart(d.hb_trend||[])}
+        </div>
+
+        <div class="epo-card">
+          <h4 style="margin:0 0 8px;">💉 ESA Dose Timeline (6 เดือน)</h4>
+          ${buildDoseChart(d.esa_history||[])}
         </div>
 
         <div class="epo-card">
