@@ -1304,7 +1304,7 @@ function loadExistingSession(sid){
         const sl = document.getElementById('hdSheetLink');
         sl.href = '/hd/sheet/'+sid;
         sl.style.display = 'block';
-        loadSessionRecords(sid, headers, true);
+        loadSessionRecords(sid, {}, true);
         fillPreHd(d);
         lockPreHd('✅ ข้อมูลก่อนฟอกบันทึกแล้วตอนเริ่มฟอก (ดูอย่างเดียว)');
       } else if(d.status==='scheduled'){
@@ -1314,7 +1314,7 @@ function loadExistingSession(sid){
         if(d.vascular_access) _selectVal('vaSelect', String(d.vascular_access).toUpperCase().includes('AVF') ? 'AVF' : d.vascular_access);
         fillLastClinical(d.patient_hn);
       } else if(d.status==='completed' || d.status==='cancelled'){
-        showSessionHistory(d, sid, headers);
+        showSessionHistory(d, sid, {});
       }
       /* ลิงก์ '#alerts' จาก LINE → เปิดแท็บ Intra-HD แล้วเลื่อนไปที่การแจ้งเตือน & คำสั่งแพทย์ */
       if(window.location.hash === '#alerts'){
