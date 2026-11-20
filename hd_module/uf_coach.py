@@ -51,8 +51,20 @@ def idwg(weight_now, prev_post_weight, dry_weight, pct):
 # ═══════════════════════ 9 — Home-weight coach ═══════════════════════
 
 def _norm_thai(s):
-    """Normalize Thai ◌ํ◌า → ◌ำ (some LINE keyboards send decomposed form)."""
-    return (s or "").replace("ํา", "ำ")
+    """Normalize Thai text from LINE keyboards.
+
+    1. ◌ํ◌า → ◌ำ (decomposed sara am)
+    2. Strip zero-width spaces (ZWSP U+200B) — LINE inserts between Thai words
+    3. Strip other invisible chars that LINE may add
+    """
+    if not s:
+        return s
+    s = s.replace("​", "")   # zero-width space (ZWSP)
+    s = s.replace("‌", "")   # zero-width non-joiner
+    s = s.replace("‍", "")   # zero-width joiner
+    s = s.replace("﻿", "")   # BOM / zero-width no-break space
+    s = s.replace("ํา", "ำ")     # decomposed → composed sara am
+    return s
 
 _WEIGHT_RE = re.compile(r"^\s*(?:น้ำหนัก|นน\.?|ชั่งน้ำหนัก|weight|wt\.?)\s*[:=]?\s*(\d{2,3}(?:[.,]\d{1,2})?)\s*(?:กก\.?|กิโล(?:กรัม)?|kg\.?)?\s*$",
                         re.IGNORECASE)
