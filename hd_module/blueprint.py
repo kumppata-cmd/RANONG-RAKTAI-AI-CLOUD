@@ -2991,14 +2991,20 @@ def get_patient_labs_unified(hn):
         conn = psycopg2.connect(db_url, connect_timeout=5)
         conn.autocommit = True
         with conn.cursor() as cur:
+            # _table DESC → lab_results (กรอกมือ) มาก่อน lab_docs (รูปถ่าย) ในวันเดียวกัน
             cur.execute(f"""SELECT l.lab_date, l._table, l.source, {', '.join('l.' + c for c in _UNIFIED_COLS)}
                             FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
                             WHERE p.hn = %s AND l.lab_date IS NOT NULL
-                            ORDER BY l.lab_date DESC LIMIT 24""", (hn,))
+                            ORDER BY l.lab_date DESC, l._table DESC LIMIT 80""", (hn,))
             rows = cur.fetchall()
         conn.close()
-        labs = []
+        labs, seen = [], set()
         for r in rows:
+            # ยุบแถวซ้ำ: วันที่ + ค่าทุกตัวเหมือนกัน → แสดงครั้งเดียว (เช่น กดบันทึกซ้ำ / รูปถ่ายของชุดเดียวกัน)
+            key = (r[0],) + tuple(str(v) for v in r[3:])
+            if key in seen:
+                continue
+            seen.add(key)
             entry = {"date": r[0].isoformat() if r[0] else None,
                      "source_type": "photo" if r[1] == "lab_docs" else "manual",
                      "source": r[2] or ""}
@@ -3006,6 +3012,8 @@ def get_patient_labs_unified(hn):
                 v = r[3 + i]
                 entry[_UNIFIED_TO_TEMPLATE[c]] = (float(v) if v is not None and c not in ("hbsag", "antihcv") else v)
             labs.append(entry)
+            if len(labs) >= 24:
+                break
         return jsonify({"labs": labs, "total": len(labs)})
     except Exception as e:
         logger.error("labs-unified: %s", e)
