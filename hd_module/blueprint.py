@@ -4071,12 +4071,11 @@ def _auto_kt_v_on_complete(session_id):
                     duration = round(dur, 1)
             # Look for pre/post BUN in hd_lab_results (same day)
             cur.execute("""SELECT bun FROM hd_lab_results
-                           WHERE patient_id = %s AND lab_type = 'pre_hd'
-                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+                           WHERE patient_id = %s
+                           ORDER BY lab_date DESC LIMIT 1""", (pid,))
             pre_bun_row = cur.fetchone()
-            cur.execute("""SELECT bun FROM hd_lab_results
-                           WHERE patient_id = %s AND lab_type = 'post_hd'
-                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+            # Note: hd_lab_results has no lab_type column — post BUN not stored separately
+            post_bun_row = None  # Kt/V auto-calc needs pre+post BUN; skip if no post
             post_bun_row = cur.fetchone()
             if not pre_bun_row or not post_bun_row or not pre_bun_row[0] or not post_bun_row[0]:
                 return {"skipped": "no pre/post BUN data"}
@@ -7054,11 +7053,11 @@ def ai_assistant_ask():
 
         elif any(w in low for w in ("hb ต่ำ", "ซีด", "anemia", "โลหิตจาง")):
             with conn.cursor() as cur:
-                cur.execute("""SELECT p.patient_name, p.hn, l.hb, l.result_date
+                cur.execute("""SELECT p.patient_name, p.hn, l.hemoglobin, l.lab_date
                                FROM hd_lab_results l JOIN hd_patient_mapping p ON p.id = l.patient_id
-                               WHERE l.hb IS NOT NULL AND l.hb < 10
-                               AND l.result_date >= CURRENT_DATE - INTERVAL '60 days'
-                               ORDER BY l.hb ASC LIMIT 15""")
+                               WHERE l.hemoglobin IS NOT NULL AND l.hemoglobin < 10
+                               AND l.lab_date >= CURRENT_DATE - INTERVAL '60 days'
+                               ORDER BY l.hemoglobin ASC LIMIT 15""")
                 rows = cur.fetchall()
             if rows:
                 extended = f"🩸 Hb < 10 (60 วัน) — {len(rows)} คน:\n" + \
@@ -7167,9 +7166,9 @@ def patient_narrator(hn):
             sessions = cur.fetchall()
 
             # Latest labs
-            cur.execute("""SELECT hb, hct, bun, creatinine, potassium, albumin, result_date
+            cur.execute("""SELECT hemoglobin, hematocrit, bun, creatinine, potassium, albumin, lab_date
                            FROM hd_lab_results WHERE patient_id = %s
-                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+                           ORDER BY lab_date DESC LIMIT 1""", (pid,))
             lab = cur.fetchone()
 
             # Unack alerts
@@ -7465,9 +7464,9 @@ def patient_med_check(hn):
             pid, name = p[0], p[1]
 
             # Get latest lab values
-            cur.execute("""SELECT potassium, creatinine, bun, hb, albumin
+            cur.execute("""SELECT potassium, creatinine, bun, hemoglobin, albumin
                            FROM hd_lab_results WHERE patient_id = %s
-                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+                           ORDER BY lab_date DESC LIMIT 1""", (pid,))
             lab = cur.fetchone()
             k_val = float(lab[0]) if lab and lab[0] else None
             cr_val = float(lab[1]) if lab and lab[1] else None
@@ -7792,9 +7791,9 @@ def patient_trends(hn):
                        for r in cur.fetchall()]
 
             # Lab trends: Hb, Hct, BUN, Cr, K, Albumin
-            cur.execute("""SELECT result_date, hb, hct, bun, creatinine, potassium, albumin
-                           FROM hd_lab_results WHERE patient_id = %s AND result_date >= %s
-                           ORDER BY result_date""", (pid, cutoff))
+            cur.execute("""SELECT lab_date, hemoglobin, hematocrit, bun, creatinine, potassium, albumin
+                           FROM hd_lab_results WHERE patient_id = %s AND lab_date >= %s
+                           ORDER BY lab_date""", (pid, cutoff))
             labs = [{"date": r[0].isoformat() if r[0] else None,
                      "hb": float(r[1]) if r[1] else None,
                      "hct": float(r[2]) if r[2] else None,
