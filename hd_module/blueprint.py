@@ -5192,7 +5192,7 @@ def physician_order(alert_id):
         return jsonify({"error": str(e)}), 500
 
 @hd_bp.route("/alerts/<int:alert_id>/acknowledge", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def acknowledge_alert(alert_id):
     """Acknowledge a clinical alert — update DB."""
     import os
