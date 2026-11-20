@@ -3587,20 +3587,24 @@ def create_session():
                     conn.close()
                     sn = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}.get(dup[1], dup[1])
                     return jsonify({"error": f"ผู้ป่วยมีรอบวันที่ {sess_day.strftime('%d/%m')} แล้ว (เตียง {dup[0]} รอบ{sn})"}), 409
+            # ⚠️ ป้องกันเตียงซ้อน:
+            # 1. in_progress: เช็คทุกรอบ — เตียงยังไม่ว่างจนกว่าจะฟอกเสร็จ
+            # 2. scheduled: เช็คเฉพาะรอบเดียวกัน
             cur.execute("""
-                SELECT id, status FROM hd_sessions
+                SELECT id, status, shift FROM hd_sessions
                 WHERE bed_number = %s
                   AND session_date = %s
-                  AND (shift = %s OR (shift IS NULL AND %s = 'morning'))
                   AND status IN ('scheduled', 'in_progress')
                 ORDER BY status
-            """, (bed, sess_day.isoformat(), shift, shift))
+            """, (bed, sess_day.isoformat()))
             existing = cur.fetchall()
-            for ex_id, ex_status in existing:
-                if init_status == "in_progress" and ex_status == "in_progress":
+            for ex_id, ex_status, ex_shift in existing:
+                if ex_status == "in_progress":
+                    # เตียงมีคนฟอกอยู่ — ห้ามเริ่มรอบใหม่ ไม่ว่าจะรอบไหน
+                    sn = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}.get(ex_shift, ex_shift or "")
                     conn.close()
-                    return jsonify({"error": f"เตียง {bed} มีคนไข้กำลังฟอกอยู่"}), 409
-                if init_status == "scheduled" and ex_status == "scheduled":
+                    return jsonify({"error": f"เตียง {bed} มีคนไข้กำลังฟอกอยู่ (รอบ{sn})"}), 409
+                if init_status == "scheduled" and ex_status == "scheduled" and (ex_shift == shift or (ex_shift is None and shift == 'morning')):
                     conn.close()
                     return jsonify({"error": f"เตียง {bed} วันที่ {sess_day.strftime('%d/%m')} รอบนี้มีคนจองแล้ว"}), 409
 
@@ -6408,6 +6412,9 @@ def bed_dashboard():
             with conn.cursor() as cur:
                 # Show ALL active sessions (in_progress, scheduled, completed)
                 # Priority: in_progress > completed > scheduled on same bed
+                # ⚠️ กฎสำคัญ: session ที่ in_progress แสดงเสมอ ไม่ว่าจะดูรอบไหน
+                # เพราะเตียงยังถูกใช้อยู่จนกว่าจะฟอกเสร็จ
+                # scheduled/completed กรองตาม shift ปกติ
                 cur.execute("""
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
@@ -6420,9 +6427,16 @@ def bed_dashboard():
                            p.default_shift, p.schedule_days, p.esa_dose
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
-                    WHERE s.status IN ('scheduled', 'in_progress', 'completed')
-                      AND s.session_date = %s
-                      AND (s.shift = %s OR (s.shift IS NULL AND %s = 'morning'))
+                    WHERE s.session_date = %s
+                      AND (
+                        -- in_progress: แสดงเสมอ (เตียงยังไม่ว่าง)
+                        s.status = 'in_progress'
+                        OR (
+                          -- scheduled/completed: กรองตาม shift
+                          s.status IN ('scheduled', 'completed')
+                          AND (s.shift = %s OR (s.shift IS NULL AND %s = 'morning'))
+                        )
+                      )
                     ORDER BY s.bed_number,
                              CASE s.status
                                WHEN 'scheduled' THEN 0
