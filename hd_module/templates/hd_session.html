@@ -1090,14 +1090,18 @@ function startSession(){
   };
   sessionData.hn = hn;
   hdFetch('/hd/api/v1/sessions',{method:'POST',body:JSON.stringify(data)})
-    .then(r=>r.json())
+    .then(r=>{
+      if(!r.ok) return r.json().then(d=>Promise.reject(d.error || 'API error '+r.status));
+      return r.json();
+    })
     .then(d=>{
-      sessionData.session_id = d.session_id || 1;
+      if(!d.session_id){ showToast('❌ ไม่ได้ session_id — ลองใหม่','danger'); return; }
+      sessionData.session_id = d.session_id;
       if(d.esa_drug) sessionData.esa_drug = d.esa_drug;
       document.getElementById('bedDisplay').textContent = bed;
       document.getElementById('sessionStatus').textContent = 'กำลังฟอก';
       document.getElementById('sessionStatus').className = 'badge badge-success';
-      showToast('เริ่มฟอกเลือดสำเร็จ','success');
+      showToast('✅ เริ่มฟอกเลือดสำเร็จ (รอบ #'+d.session_id+')','success');
       startTimer();
       switchTab('session','intra');
       document.getElementById('cancelBtn').style.display = 'inline-flex';
@@ -1107,7 +1111,10 @@ function startSession(){
       sheetLink.href = '/hd/sheet/'+d.session_id;
       sheetLink.style.display = 'block';
     })
-    .catch(()=>showToast('ไม่สามารถเริ่มรอบฟอกได้','danger'));
+    .catch(e=>{
+      const msg = typeof e === 'string' ? e : (e && e.message ? e.message : 'ไม่สามารถเริ่มรอบฟอกได้');
+      showToast('❌ '+msg, 'danger');
+    });
 }
 
 
