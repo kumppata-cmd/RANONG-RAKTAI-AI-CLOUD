@@ -50,6 +50,10 @@ def idwg(weight_now, prev_post_weight, dry_weight, pct):
 
 # ═══════════════════════ 9 — Home-weight coach ═══════════════════════
 
+def _norm_thai(s):
+    """Normalize Thai ◌ํ◌า → ◌ำ (some LINE keyboards send decomposed form)."""
+    return (s or "").replace("ํา", "ำ")
+
 _WEIGHT_RE = re.compile(r"^\s*(?:น้ำหนัก|นน\.?|ชั่งน้ำหนัก|weight|wt\.?)\s*[:=]?\s*(\d{2,3}(?:[.,]\d{1,2})?)\s*(?:กก\.?|กิโล(?:กรัม)?|kg\.?)?\s*$",
                         re.IGNORECASE)
 
@@ -65,7 +69,7 @@ DEFAULT_WEIGHT_TEMPLATE = (
 
 def parse_weight_message(text):
     """'น้ำหนัก 62.4' / 'นน 62,4 กก' → 62.4 (30–250 kg) หรือ None"""
-    m = _WEIGHT_RE.match(text or "")
+    m = _WEIGHT_RE.match(_norm_thai(text) or "")
     if not m:
         return None
     v = float(m.group(1).replace(",", "."))
