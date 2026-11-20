@@ -450,7 +450,20 @@
         </div>
         <div class="vital-input">
           <label>ขนาดยา (IU/mcg)</label>
-          <input type="text" class="form-control" id="esaDose" placeholder="เช่น 4000 IU" inputmode="text">
+          <select class="form-control" id="esaDose" onchange="document.getElementById('esaDoseCustomWrap').style.display=this.value==='other'?'block':'none'">
+            <option value="">เลือกขนาด...</option>
+            <option value="2000">2000 IU</option>
+            <option value="3000">3000 IU</option>
+            <option value="4000">4000 IU</option>
+            <option value="5000">5000 IU</option>
+            <option value="6000">6000 IU</option>
+            <option value="8000">8000 IU</option>
+            <option value="10000">10000 IU</option>
+            <option value="other">อื่นๆ (ระบุเอง)...</option>
+          </select>
+          <div id="esaDoseCustomWrap" style="display:none;margin-top:6px;">
+            <input type="text" class="form-control" id="esaDoseCustom" placeholder="เช่น 40 mcg" inputmode="text">
+          </div>
         </div>
       </div>
       <div style="margin-top:8px;">
@@ -1463,7 +1476,7 @@ function showSessionHistory(d, sid, headers){
   if(ps && d.patient_hn && ps.value !== d.patient_hn){
     const o = document.createElement('option'); o.value = d.patient_hn; o.textContent = d.patient_hn+' — '+(d.patient_name||''); ps.appendChild(o); ps.value = d.patient_hn;
   }
-  if(d.esa_given === true){ try{ setEsaGiven(true); }catch(e){} _setSelect('esaDrug', d.esa_drug_given); _setVal('esaDose', d.esa_dose_given);
+  if(d.esa_given === true){ try{ setEsaGiven(true); }catch(e){} _setSelect('esaDrug', d.esa_drug_given); try{ setEsaDoseValue(d.esa_dose_given); }catch(e){ _setVal('esaDose', d.esa_dose_given); }
     if(d.esa_route){ const r = document.querySelector(`input[name="esaRoute"][value="${d.esa_route}"]`); if(r) r.checked = true; } }
   else if(d.esa_given === false){ try{ setEsaGiven(false); }catch(e){} _setSelect('esaSkipReason', d.esa_skip_reason); }
 
@@ -2445,6 +2458,13 @@ function setEsaGiven(val){
         }
       }
     }
+    /* Auto-fill dose + route จากครั้งก่อนของคนไข้คนเดิม (แก้ไขได้ตลอด) */
+    const _def = sessionData.esaDefaults || {};
+    if(_def.dose && !document.getElementById('esaDose').value){ setEsaDoseValue(_def.dose); }
+    if(_def.route && !sessionData._esaRouteTouched){
+      const r = document.querySelector(`input[name="esaRoute"][value="${_def.route}"]`);
+      if(r) r.checked = true;
+    }
   } else {
     noBtn.style.background = 'var(--danger)'; noBtn.style.color = '#fff';
     yesBtn.style.background = ''; yesBtn.style.color = '';
@@ -2456,6 +2476,24 @@ function toggleSkipOther(){
   const sel = document.getElementById('esaSkipReason');
   document.getElementById('esaSkipOtherWrap').style.display = sel.value === 'other' ? 'block' : 'none';
 }
+
+/* ตั้งค่า dose ใน dropdown — รองรับค่าเก่าแบบข้อความ เช่น "4000 IU" / "40 mcg" */
+function setEsaDoseValue(v){
+  const sel = document.getElementById('esaDose');
+  const wrap = document.getElementById('esaDoseCustomWrap');
+  if(v==null || v===''){ return; }
+  const num = String(v).replace(/[^0-9]/g,'');
+  for(let i=0;i<sel.options.length;i++){
+    if(sel.options[i].value && sel.options[i].value === num){
+      sel.value = num; wrap.style.display='none'; return;
+    }
+  }
+  sel.value = 'other';
+  wrap.style.display = 'block';
+  document.getElementById('esaDoseCustom').value = v;
+}
+/* จำว่าผู้ใช้แตะ route เองแล้ว — auto-fill จะไม่ทับ */
+document.querySelectorAll('input[name="esaRoute"]').forEach(r=>r.addEventListener('change',()=>{ sessionData._esaRouteTouched = true; }));
 
 function autoCalcHct(){
   const hb = parseFloat(document.getElementById('hbValue').value);
@@ -2487,7 +2525,8 @@ function getEsaData(){
   data.esa_given = _esaGiven;
   if(_esaGiven){
     data.esa_drug_given = document.getElementById('esaDrug').value;
-    data.esa_dose_given = document.getElementById('esaDose').value;
+    const _doseSel = document.getElementById('esaDose').value;
+    data.esa_dose_given = _doseSel === 'other' ? (document.getElementById('esaDoseCustom').value || '') : _doseSel;
     const routeEl = document.querySelector('input[name="esaRoute"]:checked');
     data.esa_route = routeEl ? routeEl.value : 'SC';
   } else {
@@ -2536,6 +2575,34 @@ function loadEsaHistory(){
         info2.innerHTML = '💊 <strong>ESA สั่ง: ' + d.prescribed.esa_drug + (d.prescribed.esa_dose ? ' ' + d.prescribed.esa_dose : '') + '</strong>' +
           (existing ? '<br>' + existing : '');
         info2.style.display = 'block';
+      }
+
+      /* ── จำค่าครั้งก่อนของคนไข้คนเดิม → auto-fill (แก้ไขได้ตลอด) ── */
+      const lastGiven = (d.records||[]).find(r=>r.esa_given===true) || {};
+      sessionData.esaDefaults = {
+        dose: lastGiven.esa_dose || d.prescribed?.esa_dose || null,
+        route: lastGiven.esa_route || null,
+        drug: lastGiven.esa_drug || d.prescribed?.esa_drug || null
+      };
+      if(sessionData.esaDefaults.drug && !sessionData.esa_drug) sessionData.esa_drug = sessionData.esaDefaults.drug;
+      /* ถ้ากดฉีด ESA ไว้แล้วก่อนข้อมูลมาถึง → เติมให้เลย */
+      if(_esaGiven === true){
+        if(sessionData.esaDefaults.dose && !document.getElementById('esaDose').value) setEsaDoseValue(sessionData.esaDefaults.dose);
+        if(sessionData.esaDefaults.route && !sessionData._esaRouteTouched){
+          const r = document.querySelector(`input[name="esaRoute"][value="${sessionData.esaDefaults.route}"]`);
+          if(r) r.checked = true;
+        }
+      }
+      /* Hb/Hct: ใช้ค่าแล็บล่าสุดจากระบบ (ทุกแหล่ง) ถ้าช่องยังว่าง — แก้ไขได้ตลอด */
+      const lab = d.latest_lab || {};
+      const hbEl = document.getElementById('hbValue'), hctEl = document.getElementById('hctValue');
+      let labSrcNote = '';
+      if(lab.hb != null && hbEl && !hbEl.value){ hbEl.value = lab.hb; try{ assessHb(lab.hb); }catch(e){} labSrcNote = lab.date || ''; }
+      if(lab.hct != null && hctEl && !hctEl.value){ hctEl.value = lab.hct; labSrcNote = labSrcNote || (lab.date || ''); }
+      if(labSrcNote){
+        const info3 = document.getElementById('esaLastInfo');
+        info3.innerHTML += '<br>🔬 Hb/Hct เติมจากแล็บล่าสุด (' + labSrcNote + ') — แก้ไขได้';
+        info3.style.display = 'block';
       }
     })
     .catch(()=>{});

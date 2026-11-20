@@ -9266,6 +9266,21 @@ def patient_esa_history(hn):
                 LIMIT 10
             """, (hn,))
             rows = cur.fetchall()
+
+            # Hb/Hct ล่าสุดจากระบบแล็บรวมทุกแหล่ง (hd_labs VIEW) — สำหรับ auto-fill (additive, ล้มได้ไม่กระทบของเดิม)
+            latest_lab = None
+            try:
+                cur.execute("""SELECT l.lab_date, l.hb, l.hct
+                               FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
+                               WHERE p.hn = %s AND (l.hb IS NOT NULL OR l.hct IS NOT NULL)
+                               ORDER BY l.lab_date DESC NULLS LAST LIMIT 1""", (hn,))
+                lr = cur.fetchone()
+                if lr:
+                    latest_lab = {"date": lr[0].isoformat() if lr[0] else None,
+                                  "hb": float(lr[1]) if lr[1] is not None else None,
+                                  "hct": float(lr[2]) if lr[2] is not None else None}
+            except Exception as _ll_err:
+                logger.warning("esa-history latest_lab: %s", _ll_err)
         conn.close()
 
         records = []
@@ -9279,7 +9294,7 @@ def patient_esa_history(hn):
                 "hct": float(r[7]) if r[7] else None,
                 "shift": r[8],
             })
-        return jsonify({"records": records, "prescribed": prescribed})
+        return jsonify({"records": records, "prescribed": prescribed, "latest_lab": latest_lab})
     except Exception as e:
         logger.error("patient_esa_history error: %s", e)
         return jsonify({"records": [], "prescribed": {}, "error": str(e)})
