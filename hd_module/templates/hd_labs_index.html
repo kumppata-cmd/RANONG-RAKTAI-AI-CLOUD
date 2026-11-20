@@ -46,6 +46,7 @@
 <div class="top-bar">
   <input type="text" id="searchBox" placeholder="🔍 ค้นหา HN หรือชื่อ..." oninput="filterPatients()">
   <button class="btn-add" onclick="openAddModal()">➕ เพิ่มคนไข้</button>
+  <button class="btn-add" style="background:#198754" onclick="openImportModal()">📥 นำเข้า Excel</button>
   <button class="btn-inactive" onclick="showInactive()">📦 ที่ระงับ</button>
 </div>
 
@@ -88,6 +89,22 @@
     <div class="btn-row">
       <button class="btn-cancel" onclick="closeModal('editModal')">ยกเลิก</button>
       <button class="btn-primary" onclick="submitEdit()">บันทึก</button>
+    </div>
+  </div>
+</div>
+
+<!-- Import Excel Modal -->
+<div class="modal-bg" id="importModal">
+  <div class="modal">
+    <h3>📥 นำเข้าผล Lab จาก Excel</h3>
+    <p style="font-size:.8rem;color:var(--fg-muted);margin:0 0 10px">อัปโหลดไฟล์ .xlsx หรือ .csv ที่มีคอลัมน์ HN, วันที่, Hb, Hct, K, Na ฯลฯ<br>ระบบจะจับคู่ HN อัตโนมัติ — แสดงตัวอย่างก่อนบันทึก</p>
+    <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;font-size:.85rem;background:var(--bg);color:var(--fg)">
+    <div id="importStatus" style="font-size:.8rem;margin-top:8px;min-height:20px"></div>
+    <div id="importPreview" style="font-size:.78rem;max-height:200px;overflow-y:auto;margin-top:8px;display:none"></div>
+    <div class="btn-row">
+      <button class="btn-cancel" onclick="closeModal('importModal')">ยกเลิก</button>
+      <button class="btn-primary" id="btnImportPreview" onclick="previewImport()">ดูตัวอย่าง</button>
+      <button class="btn-primary" id="btnImportCommit" onclick="commitImport()" style="display:none;background:#198754">✅ บันทึก</button>
     </div>
   </div>
 </div>
@@ -287,6 +304,46 @@ function restorePatient(hn){
     if(d.error){alert(d.error);return;}
     showInactive(); loadPatients();
   });
+}
+
+/* ── Import Excel ── */
+let _importData = null;
+function openImportModal(){ _importData=null; document.getElementById('importFile').value=''; document.getElementById('importStatus').innerHTML=''; document.getElementById('importPreview').style.display='none'; document.getElementById('btnImportCommit').style.display='none'; document.getElementById('btnImportPreview').style.display=''; document.getElementById('importModal').classList.add('open'); }
+function previewImport(){
+  const file = document.getElementById('importFile').files[0];
+  if(!file){document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">เลือกไฟล์ก่อน</span>';return;}
+  const fd = new FormData(); fd.append('file', file);
+  document.getElementById('importStatus').innerHTML='<span style="color:var(--accent)">⏳ กำลังวิเคราะห์...</span>';
+  hdFetch('/hd/api/v1/labs/import/preview',{method:'POST',body:fd}).then(r=>r.json()).then(d=>{
+    if(d.error){document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">❌ '+d.error+'</span>';return;}
+    _importData = {rows: d.matched, filename: d.filename, fields: d.fields};
+    const dup = d.duplicates||0;
+    const ok = (d.matched||[]).filter(r=>!r.duplicate).length;
+    document.getElementById('importStatus').innerHTML=
+      `<span style="color:var(--success)">✅ พบ ${d.matched.length} แถว — บันทึกได้ ${ok} (ซ้ำ ${dup})</span>` +
+      (d.unmatched&&d.unmatched.length ? `<br><span style="color:#e67e22">⚠️ จับคู่ไม่ได้ ${d.unmatched.length} แถว</span>` : '') +
+      (d.errors&&d.errors.length ? `<br><span style="color:var(--danger)">${d.errors.join('; ')}</span>` : '');
+    // Show preview table
+    const prev = document.getElementById('importPreview');
+    if(d.matched&&d.matched.length){
+      prev.style.display='block';
+      prev.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:.72rem"><thead><tr><th>HN</th><th>ชื่อ</th><th>วันที่</th><th>Hb</th><th>K</th><th>สถานะ</th></tr></thead><tbody>' +
+        d.matched.slice(0,20).map(r=>`<tr style="border-bottom:1px solid var(--border)"><td>${r.hn||''}</td><td>${r.name||''}</td><td>${r.lab_date||''}</td><td>${r.hemoglobin||'-'}</td><td>${r.potassium||'-'}</td><td>${r.duplicate?'<span style="color:#e67e22">ซ้ำ</span>':'<span style="color:var(--success)">ใหม่</span>'}</td></tr>`).join('') +
+        '</tbody></table>' + (d.matched.length>20?`<div style="color:var(--fg-muted);margin-top:4px">...และอีก ${d.matched.length-20} แถว</div>`:'');
+    }
+    if(ok>0){document.getElementById('btnImportCommit').style.display='';document.getElementById('btnImportPreview').style.display='none';}
+  }).catch(e=>{document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">❌ '+e.message+'</span>';});
+}
+function commitImport(){
+  if(!_importData||!_importData.rows){return;}
+  document.getElementById('importStatus').innerHTML='<span style="color:var(--accent)">⏳ กำลังบันทึก...</span>';
+  hdFetch('/hd/api/v1/labs/import/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_importData)}).then(r=>r.json()).then(d=>{
+    if(d.error){document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">❌ '+d.error+'</span>';return;}
+    document.getElementById('importStatus').innerHTML=`<span style="color:var(--success)">✅ บันทึกสำเร็จ ${d.inserted||0} รายการ (ข้าม ${d.skipped||0})</span>`;
+    document.getElementById('btnImportCommit').style.display='none';
+    _importData=null;
+    setTimeout(()=>{closeModal('importModal');loadPatients();},1500);
+  }).catch(e=>{document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">❌ '+e.message+'</span>';});
 }
 
 loadPatients();

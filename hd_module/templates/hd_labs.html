@@ -41,6 +41,26 @@
 
 <div id="latestCards" class="lab-cards"></div>
 
+<!-- Lab Trend Chart -->
+<div id="trendSection" style="margin-bottom:16px;display:none">
+  <h4 style="margin:0 0 8px;font-size:.9rem">📈 Lab Trend</h4>
+  <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
+    <button class="btn btn-sm" onclick="drawTrend('hemoglobin','Hb','g/dL')" style="font-size:.75rem;padding:4px 10px">Hb</button>
+    <button class="btn btn-sm" onclick="drawTrend('potassium','K','mEq/L')" style="font-size:.75rem;padding:4px 10px">K</button>
+    <button class="btn btn-sm" onclick="drawTrend('kt_v','Kt/V','')" style="font-size:.75rem;padding:4px 10px">Kt/V</button>
+    <button class="btn btn-sm" onclick="drawTrend('phosphate','PO4','mg/dL')" style="font-size:.75rem;padding:4px 10px">PO4</button>
+    <button class="btn btn-sm" onclick="drawTrend('ipth','iPTH','pg/mL')" style="font-size:.75rem;padding:4px 10px">iPTH</button>
+    <button class="btn btn-sm" onclick="drawTrend('ferritin','Ferritin','ng/mL')" style="font-size:.75rem;padding:4px 10px">Ferritin</button>
+  </div>
+  <canvas id="trendCanvas" width="700" height="220" style="width:100%;max-width:700px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px"></canvas>
+</div>
+
+<!-- Lab Compare (Latest vs Previous) -->
+<div id="compareSection" style="margin-bottom:16px;display:none">
+  <h4 style="margin:0 0 8px;font-size:.9rem">🔄 เปรียบเทียบ Lab ล่าสุด</h4>
+  <div id="compareGrid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:6px;font-size:.78rem"></div>
+</div>
+
 <div class="lab-history">
   <h4 style="margin:0 0 8px;font-size:.9rem">📋 ประวัติ Lab</h4>
   <table class="lab-tbl">
@@ -102,29 +122,7 @@ function flagClass(key,val){
   return 'normal';
 }
 
-function loadLabs(){
-  hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs').then(r=>r.json()).then(d=>{
-    if(d.error){document.getElementById('labPatient').textContent='Error: '+d.error;return}
-    /* Latest lab cards */
-    const latest=d.labs&&d.labs[0]?d.labs[0]:{};
-    document.getElementById('labPatient').textContent='HN '+HN+' — ผล Lab ล่าสุด '+(latest.date||'-');
-    const cards=document.getElementById('latestCards');
-    cards.innerHTML='';
-    for(const[k,label] of Object.entries(LABELS)){
-      const v=latest[k];
-      const cls=flagClass(k,v);
-      const r=RANGES[k];
-      cards.innerHTML+=`<div class="lab-card ${cls}"><div class="name">${label}</div><div class="val">${v!=null?v:'—'}</div><div class="unit">${UNITS[k]||''}</div><div class="range">${r?r[0]+'-'+r[1]:''}</div></div>`;
-    }
-    /* History table */
-    const tbody=document.getElementById('labHistoryBody');
-    if(!d.labs||!d.labs.length){tbody.innerHTML='<tr><td colspan="11" style="color:var(--fg-muted)">ยังไม่มีผล Lab</td></tr>';return}
-    tbody.innerHTML=d.labs.map(l=>{
-      function cell(k){const v=l[k];if(v==null)return'<td>—</td>';const c=flagClass(k,v);return'<td class="'+(c==='high'?'flag-high':c==='low'?'flag-low':'')+'">'+v+'</td>'}
-      return'<tr><td>'+l.date+'</td>'+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('ferritin')+cell('ipth')+cell('kt_v')+'<td>'+(l.hep_b?(l.hep_b==='positive'?'<span style="color:var(--danger);font-weight:700">+</span>':'−'):'')+'</td></tr>';
-    }).join('');
-  }).catch(()=>{document.getElementById('labPatient').textContent='โหลดไม่สำเร็จ'});
-}
+function loadLabs(){/* replaced below with enhanced version that adds trend + compare */}
 
 function openAddLab(){
   document.getElementById('labDate').value=new Date().toISOString().split('T')[0];
@@ -158,6 +156,105 @@ function saveLab(){
       closeAddLab();loadLabs();
     }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
 }
+/* ── Trend Chart (pure Canvas — no external library) ── */
+let _labHistory = [];
+const _origLoadLabs = loadLabs;
+loadLabs = function(){
+  hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs').then(r=>r.json()).then(d=>{
+    if(d.error){document.getElementById('labPatient').textContent='Error: '+d.error;return}
+    const latest=d.labs&&d.labs[0]?d.labs[0]:{};
+    document.getElementById('labPatient').textContent='HN '+HN+' — ผล Lab ล่าสุด '+(latest.date||'-');
+    const cards=document.getElementById('latestCards');
+    cards.innerHTML='';
+    for(const[k,label] of Object.entries(LABELS)){
+      const v=latest[k]; const cls=flagClass(k,v); const r=RANGES[k];
+      cards.innerHTML+=`<div class="lab-card ${cls}"><div class="name">${label}</div><div class="val">${v!=null?v:'—'}</div><div class="unit">${UNITS[k]||''}</div><div class="range">${r?r[0]+'-'+r[1]:''}</div></div>`;
+    }
+    const tbody=document.getElementById('labHistoryBody');
+    if(!d.labs||!d.labs.length){tbody.innerHTML='<tr><td colspan="11" style="color:var(--fg-muted)">ยังไม่มีผล Lab</td></tr>';return}
+    tbody.innerHTML=d.labs.map(l=>{
+      function cell(k){const v=l[k];if(v==null)return'<td>—</td>';const c=flagClass(k,v);return'<td class="'+(c==='high'?'flag-high':c==='low'?'flag-low':'')+'">'+v+'</td>'}
+      return'<tr><td>'+l.date+'</td>'+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('ferritin')+cell('ipth')+cell('kt_v')+'<td>'+(l.hep_b?(l.hep_b==='positive'?'<span style="color:var(--danger);font-weight:700">+</span>':'−'):'')+'</td></tr>';
+    }).join('');
+    /* Store for trend + compare */
+    _labHistory = (d.labs||[]).slice().reverse(); // oldest first for chart
+    if(_labHistory.length>=1){
+      document.getElementById('trendSection').style.display='block';
+      drawTrend('hemoglobin','Hb','g/dL');
+    }
+    if(d.labs&&d.labs.length>=2){
+      document.getElementById('compareSection').style.display='block';
+      renderCompare(d.labs[0], d.labs[1]);
+    }
+  }).catch(()=>{document.getElementById('labPatient').textContent='โหลดไม่สำเร็จ'});
+};
+
+function drawTrend(key, label, unit){
+  const pts = _labHistory.filter(l=>l[key]!=null).map(l=>({d:l.date, v:l[key]}));
+  if(!pts.length) return;
+  const c = document.getElementById('trendCanvas');
+  const ctx = c.getContext('2d');
+  const W=c.width, H=c.height, pad={l:50,r:20,t:30,b:40};
+  ctx.clearRect(0,0,W,H);
+  ctx.fillStyle=getComputedStyle(document.body).getPropertyValue('--bg-card')||'#fff'; ctx.fillRect(0,0,W,H);
+  const vals=pts.map(p=>p.v), mn=Math.min(...vals), mx=Math.max(...vals);
+  const range=mx-mn||1, yMin=mn-range*0.1, yMax=mx+range*0.1;
+  const xStep=(W-pad.l-pad.r)/(pts.length-1||1);
+  // Target range
+  if(RANGES[key]){
+    const rLo=RANGES[key][0], rHi=RANGES[key][1];
+    const y1=H-pad.b-(rHi-yMin)/(yMax-yMin)*(H-pad.t-pad.b);
+    const y2=H-pad.b-(rLo-yMin)/(yMax-yMin)*(H-pad.t-pad.b);
+    ctx.fillStyle='rgba(39,174,96,.08)'; ctx.fillRect(pad.l,Math.max(y1,pad.t),W-pad.l-pad.r,Math.min(y2-y1,H-pad.t-pad.b));
+    ctx.strokeStyle='rgba(39,174,96,.3)'; ctx.setLineDash([4,4]);
+    [rLo,rHi].forEach(rv=>{const y=H-pad.b-(rv-yMin)/(yMax-yMin)*(H-pad.t-pad.b); ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(W-pad.r,y);ctx.stroke()});
+    ctx.setLineDash([]);
+  }
+  // Line
+  ctx.strokeStyle='#0d6efd'; ctx.lineWidth=2.5; ctx.beginPath();
+  pts.forEach((p,i)=>{
+    const x=pad.l+i*xStep, y=H-pad.b-(p.v-yMin)/(yMax-yMin)*(H-pad.t-pad.b);
+    i===0?ctx.moveTo(x,y):ctx.lineTo(x,y);
+  }); ctx.stroke();
+  // Dots + labels
+  ctx.fillStyle='#0d6efd';
+  pts.forEach((p,i)=>{
+    const x=pad.l+i*xStep, y=H-pad.b-(p.v-yMin)/(yMax-yMin)*(H-pad.t-pad.b);
+    ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle=getComputedStyle(document.body).getPropertyValue('--fg')||'#333'; ctx.font='10px sans-serif'; ctx.textAlign='center';
+    ctx.fillText(p.v.toFixed(1), x, y-8);
+    ctx.fillStyle='#0d6efd';
+  });
+  // X labels (dates)
+  ctx.fillStyle=getComputedStyle(document.body).getPropertyValue('--fg-muted')||'#999'; ctx.font='9px sans-serif'; ctx.textAlign='center';
+  pts.forEach((p,i)=>{
+    if(pts.length<=8 || i%Math.ceil(pts.length/8)===0){
+      const x=pad.l+i*xStep; ctx.fillText(p.d.slice(5),x,H-pad.b+14);
+    }
+  });
+  // Title
+  ctx.fillStyle=getComputedStyle(document.body).getPropertyValue('--fg')||'#333'; ctx.font='bold 12px sans-serif'; ctx.textAlign='left';
+  ctx.fillText(`${label} ${unit?'('+unit+')':''}`, pad.l, 16);
+}
+
+function renderCompare(latest, prev){
+  const grid = document.getElementById('compareGrid');
+  const keys = Object.keys(LABELS);
+  grid.innerHTML = keys.map(k=>{
+    const cur=latest[k], old=prev[k];
+    if(cur==null&&old==null) return '';
+    const arrow = (cur!=null&&old!=null) ? (cur>old?'↑':'↓') : '';
+    const diff = (cur!=null&&old!=null) ? (cur-old).toFixed(1) : '';
+    const cls = flagClass(k,cur);
+    const color = cls==='high'?'var(--danger)':cls==='low'?'var(--warning)':'var(--success)';
+    return `<div style="background:var(--bg-card);border:1px solid var(--border);border-radius:8px;padding:8px;text-align:center">
+      <div style="font-size:.68rem;color:var(--fg-muted)">${LABELS[k]}</div>
+      <div style="font-size:1.1rem;font-weight:800;color:${color}">${cur!=null?cur:'—'}</div>
+      <div style="font-size:.7rem;color:var(--fg-muted)">${old!=null?'ก่อน: '+old:''} ${arrow} ${diff?'('+diff+')':''}</div>
+    </div>`;
+  }).join('');
+}
+
 loadLabs();
 </script>
 {% endblock %}
