@@ -269,11 +269,21 @@ class HdAlertPushService:
             import psycopg2
             conn = psycopg2.connect(self._db_url, connect_timeout=5)
             with conn.cursor() as cur:
+                # Dedup: skip if same rule_id fired for this session in last 30 min
+                cur.execute("""
+                    SELECT id FROM hd_clinical_alerts
+                    WHERE session_id = %s AND rule_id = %s
+                      AND triggered_at > NOW() - INTERVAL '30 minutes'
+                    LIMIT 1
+                """, (session_id, alert.rule_id))
+                if cur.fetchone():
+                    conn.close()
+                    return  # duplicate — skip
                 cur.execute("""
                     INSERT INTO hd_clinical_alerts
                         (session_id, rule_id, severity, message, details,
-                         triggered_at, is_acknowledged)
-                    VALUES (%s, %s, %s::hd_alert_severity, %s, %s, NOW(), FALSE)
+                         triggered_at, is_acknowledged, acknowledged)
+                    VALUES (%s, %s, %s::hd_alert_severity, %s, %s, NOW(), FALSE, FALSE)
                 """, (
                     session_id,
                     alert.rule_id,

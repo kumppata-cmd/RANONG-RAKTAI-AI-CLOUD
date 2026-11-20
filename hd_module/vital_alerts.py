@@ -125,14 +125,17 @@ def store_alerts(cur, session_id, patient_id, alerts):
     inserted = []
     for a in alerts:
         cur.execute("""
-            SELECT id, severity FROM hd_clinical_alerts
-            WHERE session_id = %s AND alert_type = %s AND acknowledged = FALSE
+            SELECT id, severity, acknowledged FROM hd_clinical_alerts
+            WHERE session_id = %s AND alert_type = %s
               AND created_at > NOW() - INTERVAL '%s minutes'
             ORDER BY created_at DESC LIMIT 1
         """, (session_id, a["alert_type"], DEDUPE_MINUTES))
         dup = cur.fetchone()
-        if dup and not (dup[1] == "warning" and a["severity"] == "critical"):
-            continue
+        if dup:
+            # Skip if same or lower severity exists in window, even if acknowledged
+            # Only create new if upgrading warning → critical
+            if not (dup[1] == "warning" and a["severity"] == "critical"):
+                continue
         cur.execute("""
             INSERT INTO hd_clinical_alerts
                 (session_id, patient_id, alert_type, severity, title, message, acknowledged)
