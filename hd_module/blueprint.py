@@ -1805,7 +1805,7 @@ def scheduler_check():
 
 
 @hd_bp.route("/scheduler/apply", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def scheduler_apply():
     """Create scheduled sessions for one date + shift from the plan (with optional manual overrides {bed: patient_id})."""
     import os
@@ -3524,7 +3524,7 @@ def _save_pre_hd(cur, session_id, data):
 
 
 @hd_bp.route("/sessions", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def create_session():
     """Create a new HD session (start dialysis)."""
     data = request.get_json(silent=True) or {}
@@ -3934,7 +3934,7 @@ def get_session_detail(session_id):
 
 
 @hd_bp.route("/sessions/<int:session_id>", methods=["PUT"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def update_session(session_id):
     """Update an HD session (e.g. end dialysis, record post-weight)."""
     data = request.get_json(silent=True) or {}
@@ -4217,7 +4217,7 @@ def _maybe_send_shift_summary(session_id):
 
 
 @hd_bp.route("/sessions/<int:session_id>/send-summary", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def send_session_summary(session_id):
     """Send session summary via LINE to patient or physician."""
     data = request.get_json(silent=True) or {}
@@ -4419,7 +4419,7 @@ def send_patient_summary(session_id, summary=None, trigger="auto"):
 
 
 @hd_bp.route("/sessions/<int:session_id>/patient-summary/preview", methods=["GET"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def patient_summary_preview(session_id):
     import os
     from .patient_summary import build_text, enrich_from_db
@@ -4755,7 +4755,7 @@ def _process_vital_alerts(cur, session_id, sbp=None, dbp=None, hr=None, spo2=Non
     return created
 
 @hd_bp.route("/sessions/<int:session_id>/vitals", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def record_vital(session_id):
     """Record vital signs for a session."""
     data = request.get_json(silent=True) or {}
@@ -4947,7 +4947,7 @@ def _uf_idh_alert(cur, session_id, uf):
 
 
 @hd_bp.route("/sessions/<int:session_id>/uf", methods=["GET", "POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def record_uf(session_id):
     """Record or list UF data for a session."""
     import os
@@ -6082,7 +6082,7 @@ def _ocr_words(img_bytes):
 
 
 @hd_bp.route("/machine-screen/read", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def read_machine_screen():
     """ข้อ 8: รูปหน้าจอเครื่องฟอก → UF removed / UF rate / UF goal / เวลาที่เหลือ / BP
     ผลเป็นค่าแนะนำให้พยาบาลตรวจก่อนกดบันทึกเสมอ — ไม่บันทึกอะไรเอง"""
@@ -9044,7 +9044,7 @@ def get_flowsheet(session_id):
 
 
 @hd_bp.route("/sessions/<int:session_id>/flowsheet", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def save_flowsheet_row(session_id):
     """Save one flowsheet row (insert or update by slot_time)."""
     import os
@@ -9217,7 +9217,7 @@ def save_flowsheet_row(session_id):
 
 
 @hd_bp.route("/sessions/<int:session_id>/pre-hd-note", methods=["PUT"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def save_pre_hd_note(session_id):
     """Save Pre-HD Note."""
     import os
@@ -9580,7 +9580,7 @@ def create_medication_order(hn):
 
 
 @hd_bp.route("/sessions/<int:sid>/medications", methods=["GET", "POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def session_medications(sid):
     """GET: list meds given this session. POST: record a med given."""
     import os
@@ -9743,7 +9743,7 @@ def save_lab_result(hn):
 # ══════════════════════════════════════════════════════════
 
 @hd_bp.route("/sessions/<int:sid>/va-assessment", methods=["GET", "POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def va_assessment(sid):
     """VA assessment per session."""
     import os
@@ -9834,7 +9834,7 @@ def va_history(hn):
 # ══════════════════════════════════════════════════════════
 
 @hd_bp.route("/sessions/<int:sid>/anticoagulation", methods=["GET", "POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def session_anticoagulation(sid):
     """Anticoagulation protocol per session."""
     import os
@@ -10374,7 +10374,7 @@ def _get_physician_line_id(db_url):
 # ══════════════════════════════════════════════════════════
 
 @hd_bp.route("/sessions/<int:session_id>/quick-vital", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def quick_vital_entry(session_id):
     """Quick BP/HR entry without opening the full session page."""
     data = request.get_json(silent=True) or {}
