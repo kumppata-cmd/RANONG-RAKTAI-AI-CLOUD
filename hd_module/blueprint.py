@@ -6412,9 +6412,20 @@ def bed_dashboard():
             with conn.cursor() as cur:
                 # Show ALL active sessions (in_progress, scheduled, completed)
                 # Priority: in_progress > completed > scheduled on same bed
-                # ⚠️ กฎสำคัญ: session ที่ in_progress แสดงเสมอ ไม่ว่าจะดูรอบไหน
-                # เพราะเตียงยังถูกใช้อยู่จนกว่าจะฟอกเสร็จ
-                # scheduled/completed กรองตาม shift ปกติ
+                # กฎแสดงเตียง:
+                # - รอบเดียวกัน: แสดงทุก status (scheduled, in_progress, completed)
+                # - in_progress จากรอบก่อนหน้า: แสดงด้วย (เตียงยังไม่ว่าง)
+                #   เช้า→ดูบ่าย=เห็นเช้าที่ค้าง, บ่าย→ดูค่ำ=เห็นบ่ายที่ค้าง
+                # - in_progress จากรอบหลัง: ไม่แสดง (ดูบ่าย ไม่เห็นค่ำ)
+                _SHIFT_ORDER = {'morning': 0, 'afternoon': 1, 'evening': 2}
+                _cur_ord = _SHIFT_ORDER.get(current_shift, 0)
+                # Shifts ที่จะแสดง in_progress: รอบปัจจุบัน + รอบก่อนหน้า
+                _show_ip_shifts = [current_shift]
+                if current_shift == 'afternoon':
+                    _show_ip_shifts.append('morning')
+                elif current_shift == 'evening':
+                    _show_ip_shifts.extend(['morning', 'afternoon'])
+
                 cur.execute("""
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
@@ -6429,13 +6440,11 @@ def bed_dashboard():
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.session_date = %s
                       AND (
-                        -- in_progress: แสดงเสมอ (เตียงยังไม่ว่าง)
-                        s.status = 'in_progress'
-                        OR (
-                          -- scheduled/completed: กรองตาม shift
-                          s.status IN ('scheduled', 'completed')
-                          AND (s.shift = %s OR (s.shift IS NULL AND %s = 'morning'))
-                        )
+                        -- รอบเดียวกัน: ทุก status
+                        (s.shift = %s OR (s.shift IS NULL AND %s = 'morning'))
+                        OR
+                        -- in_progress จากรอบก่อนหน้า (ฟอกยังไม่เสร็จ)
+                        (s.status = 'in_progress' AND COALESCE(s.shift,'morning') = ANY(%s))
                       )
                     ORDER BY s.bed_number,
                              CASE s.status
@@ -6443,7 +6452,7 @@ def bed_dashboard():
                                WHEN 'completed' THEN 1
                                WHEN 'in_progress' THEN 2
                              END
-                """, (target_date.isoformat(), current_shift, current_shift))
+                """, (target_date.isoformat(), current_shift, current_shift, _show_ip_shifts))
                 rows = cur.fetchall()
                 logger.info("bed_dashboard: date=%s shift=%s rows=%d",
                             target_date.isoformat(), current_shift, len(rows))
