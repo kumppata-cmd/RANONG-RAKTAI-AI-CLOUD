@@ -2969,6 +2969,122 @@ def labs_import_history():
         return jsonify({"imports": [], "error": str(e)})
 
 
+# ── Lab Unified (1+2+3): ลงครั้งเดียวเห็นทุกหน้า · อ่านจากรูปถ่าย · กันซ้ำข้ามแหล่ง ──
+_UNIFIED_COLS = ["hb", "hct", "k", "na", "ca", "phos", "albumin", "pth", "ferritin", "tsat",
+                 "ktv", "urr", "bun", "creatinine", "hbsag", "antihcv"]
+_UNIFIED_TO_TEMPLATE = {"hb": "hemoglobin", "hct": "hematocrit", "k": "potassium", "na": "sodium",
+                        "ca": "calcium", "phos": "phosphate", "albumin": "albumin", "pth": "ipth",
+                        "ferritin": "ferritin", "tsat": "tsat", "ktv": "kt_v", "urr": "urr",
+                        "bun": "bun", "creatinine": "creatinine", "hbsag": "hep_b", "antihcv": "hep_c"}
+
+
+@hd_bp.route("/patients/hn/<hn>/labs-unified", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def get_patient_labs_unified(hn):
+    """(1) ประวัติแล็บรวมทุกแหล่ง — กรอกมือ/Excel + รูปถ่าย LINE — จาก hd_labs VIEW.
+    NEW endpoint: หน้าเดิมที่ใช้ /labs ยังอยู่ครบ."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"labs": []})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(f"""SELECT l.lab_date, l._table, l.source, {', '.join('l.' + c for c in _UNIFIED_COLS)}
+                            FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
+                            WHERE p.hn = %s AND l.lab_date IS NOT NULL
+                            ORDER BY l.lab_date DESC LIMIT 24""", (hn,))
+            rows = cur.fetchall()
+        conn.close()
+        labs = []
+        for r in rows:
+            entry = {"date": r[0].isoformat() if r[0] else None,
+                     "source_type": "photo" if r[1] == "lab_docs" else "manual",
+                     "source": r[2] or ""}
+            for i, c in enumerate(_UNIFIED_COLS):
+                v = r[3 + i]
+                entry[_UNIFIED_TO_TEMPLATE[c]] = (float(v) if v is not None and c not in ("hbsag", "antihcv") else v)
+            labs.append(entry)
+        return jsonify({"labs": labs, "total": len(labs)})
+    except Exception as e:
+        logger.error("labs-unified: %s", e)
+        return jsonify({"labs": [], "error": str(e)})
+
+
+@hd_bp.route("/labs/read-photo", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def labs_read_photo():
+    """(2) รูปถ่ายใบแล็บ → OCR → ดึงค่า → ส่งกลับให้เติมฟอร์ม (คนตรวจก่อนบันทึกเสมอ — ไม่บันทึกเอง)."""
+    from .lab_extractor import extract_lab_values
+    f = request.files.get("image")
+    if not f:
+        return jsonify({"error": "ไม่พบรูป"}), 400
+    data = f.read()
+    if not data or len(data) > 12 * 1024 * 1024:
+        return jsonify({"error": "รูปว่างหรือใหญ่เกิน 12 MB"}), 400
+    words, engine = _ocr_words(data)
+    text = " ".join(w["t"] for w in words)
+    res = extract_lab_values(text)
+    name_to_field = {"Hb": "hemoglobin", "Hct": "hematocrit", "K": "potassium", "Na": "sodium",
+                     "Ca": "calcium", "PO4": "phosphate", "Albumin": "albumin", "iPTH": "ipth",
+                     "BUN": "bun", "Cr": "creatinine", "Ferritin": "ferritin", "TSAT": "tsat",
+                     "Kt/V": "kt_v", "URR": "urr"}
+    # ขอบเขตค่าที่เป็นไปได้ทางคลินิก — เกินนี้คือ OCR อ่านเพี้ยน ไม่ส่งไปเติมฟอร์ม
+    sane = {"hemoglobin": (3, 20), "hematocrit": (10, 60), "potassium": (1.5, 9.9), "sodium": (110, 165),
+            "calcium": (4, 15), "phosphate": (0.5, 12), "albumin": (1, 6), "ipth": (5, 3000),
+            "bun": (2, 200), "creatinine": (0.3, 30), "ferritin": (5, 5000), "tsat": (2, 100),
+            "kt_v": (0.3, 3.5), "urr": (20, 95)}
+    values, rejected = {}, []
+    for item in res.get("found", []):
+        field = name_to_field.get(item["name"])
+        if not field:
+            continue
+        lo, hi = sane[field]
+        if lo <= item["value"] <= hi:
+            values[field] = item["value"]
+        else:
+            rejected.append(f"{item['name']}={item['value']}")
+    log_action(user_id=g.get("hd_user_id"), action="labs.read_photo", resource_type="lab",
+               new_values={"engine": engine, "found": sorted(values), "rejected": rejected},
+               ip_address=request.remote_addr or "")
+    return jsonify({"values": values, "found": sorted(values), "rejected": rejected,
+                    "engine": engine, "words": len(words),
+                    "note": "ค่าแนะนำจาก OCR — ตรวจทุกตัวเลขก่อนบันทึก"})
+
+
+@hd_bp.route("/patients/hn/<hn>/labs/check-date", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def labs_check_date(hn):
+    """(3) กันซ้ำข้ามแหล่ง: วันนี้/วันที่เลือก คนนี้มีผลแล็บอยู่แล้วหรือยัง (ทุกแหล่ง)."""
+    import os, psycopg2
+    from datetime import date as _date
+    q = (request.args.get("date") or "").strip()
+    try:
+        d = _date.fromisoformat(q) if q else _thai_today()
+    except ValueError:
+        return jsonify({"error": "รูปแบบวันที่ไม่ถูกต้อง"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"exists": False, "rows": []})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("""SELECT l._table, l.source, l.hb, l.k, l.ktv
+                           FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
+                           WHERE p.hn = %s AND l.lab_date = %s LIMIT 5""", (hn, d))
+            rows = [{"source_type": "photo" if r[0] == "lab_docs" else "manual", "source": r[1] or "",
+                     "hb": float(r[2]) if r[2] is not None else None,
+                     "k": float(r[3]) if r[3] is not None else None,
+                     "ktv": float(r[4]) if r[4] is not None else None} for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"exists": bool(rows), "date": d.isoformat(), "rows": rows})
+    except Exception as e:
+        logger.warning("labs_check_date: %s", e)
+        return jsonify({"exists": False, "rows": [], "error": str(e)})
+
+
 @hd_bp.route("/labs/sync", methods=["POST"])
 @require_role("physician", "admin")
 def labs_sync_now():

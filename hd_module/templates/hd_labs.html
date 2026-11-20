@@ -64,7 +64,7 @@
 <div class="lab-history">
   <h4 style="margin:0 0 8px;font-size:.9rem">📋 ประวัติ Lab</h4>
   <table class="lab-tbl">
-    <thead><tr><th>วันที่</th><th>BUN</th><th>Cr</th><th>K</th><th>Na</th><th>Ca</th><th>PO4</th><th>Alb</th><th>Hb</th><th>Ferritin</th><th>iPTH</th><th>Kt/V</th><th>HBsAg</th></tr></thead>
+    <thead><tr><th>วันที่</th><th>ที่มา</th><th>BUN</th><th>Cr</th><th>K</th><th>Na</th><th>Ca</th><th>PO4</th><th>Alb</th><th>Hb</th><th>Ferritin</th><th>iPTH</th><th>Kt/V</th><th>HBsAg</th></tr></thead>
     <tbody id="labHistoryBody"><tr><td colspan="11" style="color:var(--fg-muted)">กำลังโหลด...</td></tr></tbody>
   </table>
 </div>
@@ -73,6 +73,9 @@
 <div class="add-overlay" id="addOverlay" onclick="if(event.target===this)closeAddLab()">
   <div class="add-sheet">
     <h3>➕ เพิ่มผล Lab</h3>
+    <button class="btn" onclick="document.getElementById('labPhotoInput').click()" style="width:100%;background:#6f42c1;color:#fff;padding:12px;margin-bottom:6px">📸 ถ่ายรูปใบแล็บ — ระบบเติมค่าให้ แล้วตรวจก่อนบันทึก</button>
+    <input type="file" id="labPhotoInput" accept="image/*" capture="environment" style="display:none" onchange="readLabPhoto(this)">
+    <div id="photoStatus" style="font-size:.75rem;min-height:16px;margin-bottom:6px"></div>
     <div class="add-field" style="margin-bottom:10px"><label>วันที่ Lab</label><input type="date" id="labDate"></div>
     <h4 style="font-size:.8rem;color:var(--fg-muted);margin:8px 0 4px">🩸 Renal</h4>
     <div class="add-grid">
@@ -159,8 +162,15 @@ function saveLab(){
 /* ── Trend Chart (pure Canvas — no external library) ── */
 let _labHistory = [];
 const _origLoadLabs = loadLabs;
+/* (1) ประวัติรวมทุกแหล่ง (กรอกมือ + Excel + รูปถ่าย LINE) — fallback endpoint เดิมถ้า deploy เก่า */
+function _fetchLabHistory(){
+  return hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs-unified').then(r=>r.json())
+    .then(d=>{ if(d && d.labs && d.labs.length) return d;
+               return hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs').then(r=>r.json()); })
+    .catch(()=>hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs').then(r=>r.json()));
+}
 loadLabs = function(){
-  hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs').then(r=>r.json()).then(d=>{
+  _fetchLabHistory().then(d=>{
     if(d.error){document.getElementById('labPatient').textContent='Error: '+d.error;return}
     const latest=d.labs&&d.labs[0]?d.labs[0]:{};
     document.getElementById('labPatient').textContent='HN '+HN+' — ผล Lab ล่าสุด '+(latest.date||'-');
@@ -174,7 +184,8 @@ loadLabs = function(){
     if(!d.labs||!d.labs.length){tbody.innerHTML='<tr><td colspan="11" style="color:var(--fg-muted)">ยังไม่มีผล Lab</td></tr>';return}
     tbody.innerHTML=d.labs.map(l=>{
       function cell(k){const v=l[k];if(v==null)return'<td>—</td>';const c=flagClass(k,v);return'<td class="'+(c==='high'?'flag-high':c==='low'?'flag-low':'')+'">'+v+'</td>'}
-      return'<tr><td>'+l.date+'</td>'+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('ferritin')+cell('ipth')+cell('kt_v')+'<td>'+(l.hep_b?(l.hep_b==='positive'?'<span style="color:var(--danger);font-weight:700">+</span>':'−'):'')+'</td></tr>';
+      const srcTag = l.source_type==='photo' ? '<td title="จากรูปถ่าย/LINE">📸</td>' : '<td title="กรอกมือ/Excel">✍️</td>';
+      return'<tr><td>'+l.date+'</td>'+srcTag+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('ferritin')+cell('ipth')+cell('kt_v')+'<td>'+(l.hep_b?(l.hep_b==='positive'?'<span style="color:var(--danger);font-weight:700">+</span>':'−'):'')+'</td></tr>';
     }).join('');
     /* Store for trend + compare */
     _labHistory = (d.labs||[]).slice().reverse(); // oldest first for chart
@@ -237,6 +248,33 @@ function drawTrend(key, label, unit){
   ctx.fillText(`${label} ${unit?'('+unit+')':''}`, pad.l, 16);
 }
 
+/* (2) ถ่ายรูปใบแล็บ → OCR เติมฟอร์ม → คนตรวจก่อนบันทึก */
+const _PHOTO_FIELD_IDS = {hemoglobin:'lHb', hematocrit:'lHct', potassium:'lK', sodium:'lNa',
+  calcium:'lCa', phosphate:'lPO4', albumin:'lAlb', ipth:'lIpth', bun:'lBun', creatinine:'lCr',
+  ferritin:'lFerritin', tsat:'lTsat', kt_v:'lKtv', urr:'lUrr'};
+function readLabPhoto(input){
+  const f = input.files && input.files[0];
+  if(!f) return;
+  const st = document.getElementById('photoStatus');
+  st.innerHTML = '<span style="color:var(--accent)">⏳ กำลังอ่านรูป...</span>';
+  const fd = new FormData(); fd.append('image', f);
+  hdFetch('/hd/api/v1/labs/read-photo', {method:'POST', body:fd}).then(r=>r.json()).then(d=>{
+    input.value='';
+    if(d.error){ st.innerHTML='<span style="color:var(--danger)">❌ '+d.error+'</span>'; return; }
+    const vals = d.values||{};
+    let filled = 0;
+    for(const [field, id] of Object.entries(_PHOTO_FIELD_IDS)){
+      if(vals[field]!=null){
+        const el = document.getElementById(id);
+        if(el){ el.value = vals[field]; el.style.background='rgba(39,174,96,.12)'; filled++; }
+      }
+    }
+    if(!filled){ st.innerHTML='<span style="color:#e67e22">⚠️ อ่านค่าไม่ได้ — ลองถ่ายให้ชัด/ตรง แสงพอ หรือกรอกเอง</span>'; return; }
+    st.innerHTML = '<span style="color:var(--success)">✅ เติมให้ '+filled+' ค่า (ช่องสีเขียว) — <b>ตรวจทุกตัวเลขก่อนกดบันทึก</b></span>' +
+      (d.rejected&&d.rejected.length ? '<br><span style="color:#e67e22">ค่าที่อ่านได้แต่ดูเพี้ยน (ไม่เติมให้): '+d.rejected.join(', ')+'</span>' : '');
+  }).catch(e=>{ input.value=''; st.innerHTML='<span style="color:var(--danger)">❌ อ่านรูปไม่สำเร็จ: '+(e.message||e)+'</span>'; });
+}
+
 function renderCompare(latest, prev){
   const grid = document.getElementById('compareGrid');
   const keys = Object.keys(LABELS);
@@ -254,6 +292,22 @@ function renderCompare(latest, prev){
     </div>`;
   }).join('');
 }
+
+/* (3) กันซ้ำข้ามแหล่ง: เตือนก่อนบันทึกถ้าวันนั้นมีผลอยู่แล้ว (ทุกแหล่ง) — ครอบ saveLab เดิม ไม่แก้ข้างใน */
+const _origSaveLab = saveLab;
+saveLab = function(){
+  const d = document.getElementById('labDate').value;
+  if(!d){ _origSaveLab(); return; }
+  hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs/check-date?date='+encodeURIComponent(d))
+    .then(r=>r.json()).then(c=>{
+      if(c && c.exists){
+        const srcs = (c.rows||[]).map(r=>r.source_type==='photo'?'📸 รูปถ่าย/LINE':'✍️ กรอกมือ/Excel');
+        const uniq = [...new Set(srcs)].join(', ');
+        if(!confirm('⚠️ วันที่ '+d+' คนไข้นี้มีผลแล็บอยู่แล้ว ('+uniq+')\n\nถ้าเป็นผลชุดเดียวกัน ไม่ต้องบันทึกซ้ำ\nต้องการบันทึกเพิ่มอีกชุดหรือไม่?')) return;
+      }
+      _origSaveLab();
+    }).catch(()=>_origSaveLab());
+};
 
 loadLabs();
 </script>
