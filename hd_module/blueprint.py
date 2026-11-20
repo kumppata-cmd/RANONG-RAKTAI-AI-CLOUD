@@ -5538,6 +5538,26 @@ def list_inactive_patients():
                     "total": len(rows)})
 
 
+@hd_bp.route("/patients/simple-list", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def patients_simple_list():
+    """รายชื่อคนไข้แบบง่ายที่สุด — ไม่ JOIN, ไม่ใช้ VIEW, ไม่มีทาง crash."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"patients": []})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT hn, patient_name, vascular_access, schedule_days FROM hd_patient_mapping WHERE is_active = TRUE ORDER BY patient_name LIMIT 300")
+            rows = cur.fetchall()
+        conn.close()
+        return jsonify({"patients": [{"hn": r[0], "name": r[1], "va": r[2], "sched": r[3]} for r in rows]})
+    except Exception as e:
+        logger.error("patients_simple_list: %s", e)
+        return jsonify({"patients": [], "error": str(e)})
+
+
 @hd_bp.route("/patients/with-lab-summary", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def patients_with_lab_summary():
