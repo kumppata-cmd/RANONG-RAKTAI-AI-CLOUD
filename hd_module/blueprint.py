@@ -7582,10 +7582,10 @@ def patient_drug_advisor(hn):
             pid, name = p
 
             # Latest labs
-            cur.execute("""SELECT hb, hct, potassium, phosphorus, calcium, albumin,
-                                  ferritin, tsat, pth, result_date
+            cur.execute("""SELECT hemoglobin, hematocrit, potassium, phosphate, calcium, albumin,
+                                  ferritin, tsat, ipth, lab_date
                            FROM hd_lab_results WHERE patient_id = %s
-                           ORDER BY result_date DESC LIMIT 1""", (pid,))
+                           ORDER BY lab_date DESC LIMIT 1""", (pid,))
             lab = cur.fetchone()
 
             # ESA info

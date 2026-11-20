@@ -873,23 +873,23 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
 
     # ข้อ 8: QR Code — Smart QR: สแกนแล้วเปิด interactive session + trend + twin
     try:
-        import qrcode as _qr
+        import segno
         session_id = rec.get("session_id") or rec.get("id")
         hn = rec.get("hn") or ""
         if session_id:
             base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://ranong-raktai-ai-cloud.onrender.com")
             # Smart URL: session page with patient context
             qr_url = f"{base_url}/hd/session/{session_id}"
-            qr_img = _qr.make(qr_url, box_size=2, border=1)
+            qr_obj = segno.make(qr_url)
             qr_buf = io.BytesIO()
-            qr_img.save(qr_buf, format="PNG")
+            qr_obj.save(qr_buf, kind="png", scale=2, border=1)
             qr_buf.seek(0)
             from reportlab.lib.utils import ImageReader
             c.drawImage(ImageReader(qr_buf), RM - 50, sig_y - 8, width=42, height=42)
             c.setFont("Loma", 3.5)
             c.drawCentredString(RM - 29, sig_y - 11, "สแกนดู Real-time")
     except ImportError:
-        pass  # qrcode not installed — skip silently
+        pass  # segno not installed — skip silently
 
     # Footer — with version + ws debug info
     c.setFont("Loma", 4.5)
