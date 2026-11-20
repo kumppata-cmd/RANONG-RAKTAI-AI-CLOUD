@@ -5,589 +5,380 @@
 
 {% block extra_css %}
 <style>
-.search-bar { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
-.search-bar input { flex: 1; min-width: 200px; }
-.search-bar select { min-width: 150px; }
-.patient-table { width: 100%; border-collapse: collapse; }
-.patient-table th { background: var(--bg-sidebar); padding: 12px 14px; text-align: left; font-size: .8rem; color: var(--fg-muted); font-weight: 700; text-transform: uppercase; letter-spacing: .5px; position: sticky; top: 0; }
-.patient-table td { padding: 12px 14px; border-bottom: 1px solid var(--border); font-size: .9rem; }
-.patient-table tr { cursor: pointer; transition: background .1s; }
-.patient-table tbody tr:hover { background: rgba(52,152,219,.05); }
-.patient-table tbody tr:active { background: rgba(52,152,219,.1); }
-.patient-avatar { width: 40px; height: 40px; border-radius: 50%; background: var(--accent); color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: .9rem; }
-.patient-name-cell { display: flex; align-items: center; gap: 10px; }
-.schedule-badge { font-size: .75rem; padding: 3px 8px; border-radius: 10px; font-weight: 600; background: rgba(52,152,219,.1); color: var(--info); }
-.access-badge { font-size: .75rem; padding: 3px 8px; border-radius: 10px; font-weight: 600; }
-.access-avf { background: rgba(39,174,96,.1); color: var(--success); }
-.access-avg { background: rgba(243,156,18,.1); color: var(--warning); }
-.access-cvc { background: rgba(231,76,60,.1); color: var(--danger); }
-.stat-row { display: flex; gap: 16px; margin-bottom: 20px; flex-wrap: wrap; }
-.stat-card { padding: 14px 20px; background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius-sm); display: flex; align-items: center; gap: 10px; cursor: pointer; }
-.stat-card .num { font-size: 1.5rem; font-weight: 800; }
-.stat-card .lbl { font-size: .8rem; color: var(--fg-muted); }
-.needs-review { border-left: 3px solid var(--warning); }
-.edit-overlay { position: fixed; inset: 0; background: rgba(0,0,0,.5); display: none; z-index: 999; align-items: flex-end; justify-content: center; }
-.edit-overlay.open { display: flex; }
-.edit-sheet { background: var(--bg-card); border-radius: 16px 16px 0 0; width: 100%; max-width: 420px; padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); max-height: 80vh; overflow-y: auto; }
-.edit-sheet h3 { margin: 0 0 12px; font-size: 1rem; }
-.edit-field { margin-bottom: 12px; }
-.edit-field label { font-size: .8rem; color: var(--fg-muted); display: block; margin-bottom: 4px; }
-.edit-field input, .edit-field select { width: 100%; padding: 10px; font-size: .95rem; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--bg); color: var(--fg); }
-.table-wrapper { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-@media (max-width: 600px) {
-  .patient-table th:nth-child(4), .patient-table td:nth-child(4),
-  .patient-table th:nth-child(5), .patient-table td:nth-child(5) { display: none; }
-}
+/* ── Stats ── */
+.stat-row{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+.stat-pill{display:flex;align-items:center;gap:6px;padding:8px 14px;background:var(--bg-card);border:1px solid var(--border);border-radius:12px;font-size:.82rem;cursor:pointer;transition:background .2s}
+.stat-pill:active{background:var(--border)}.stat-pill .n{font-size:1.3rem;font-weight:800}
+
+/* ── Top bar ── */
+.top-bar{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
+.top-bar input{flex:1;min-width:160px;padding:10px 14px;border:2px solid var(--border);border-radius:12px;font-size:.92rem;background:var(--bg-card);color:var(--fg)}
+.top-bar select{padding:8px 10px;border:1px solid var(--border);border-radius:10px;font-size:.82rem;background:var(--bg-card);color:var(--fg)}
+.btn-add{padding:8px 14px;border-radius:10px;background:linear-gradient(135deg,#2563eb,#3b82f6);color:#fff;border:none;font-size:.82rem;font-weight:700;cursor:pointer;white-space:nowrap}
+.btn-inactive{padding:8px 14px;border-radius:10px;background:var(--border);color:var(--fg-muted);border:none;font-size:.82rem;cursor:pointer;white-space:nowrap}
+
+/* ── Patient cards ── */
+.p-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:10px}
+.pcard{background:var(--bg-card);border:1px solid var(--border);border-radius:14px;padding:14px;display:flex;gap:12px;align-items:flex-start;transition:box-shadow .2s;cursor:pointer;position:relative}
+.pcard:hover{box-shadow:0 2px 12px rgba(0,0,0,.08)}
+.avatar{width:44px;height:44px;min-width:44px;border-radius:50%;background:linear-gradient(135deg,#2563eb,#60a5fa);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:800;font-size:.9rem}
+.avatar.hbv{background:linear-gradient(135deg,#dc2626,#ef4444)}
+.pcard .info{flex:1;min-width:0}
+.pcard .nm{font-weight:700;font-size:.92rem;display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.pcard .meta{font-size:.75rem;color:var(--fg-muted);margin-top:3px;display:flex;gap:6px;flex-wrap:wrap}
+.tag{padding:2px 7px;border-radius:6px;font-size:.7rem;font-weight:600;white-space:nowrap}
+.tag-sched{background:rgba(37,99,235,.08);color:#2563eb}
+.tag-shift-m{background:#fef3c7;color:#b45309}.tag-shift-a{background:#dbeafe;color:#1d4ed8}.tag-shift-e{background:#ede9fe;color:#6d28d9}
+.tag-va-avf{background:rgba(22,163,74,.08);color:#16a34a}
+.tag-va-avg{background:rgba(234,179,8,.08);color:#ca8a04}
+.tag-va-cvc{background:rgba(220,38,38,.08);color:#dc2626}
+.tag-sero{background:#fef2f2;color:#dc2626;border:1px solid #fca5a5;font-weight:800}
+.tag-alert{background:#fef2f2;color:#dc2626}
+
+/* Lab summary chips */
+.lab-chips{display:flex;gap:5px;margin-top:6px;flex-wrap:wrap}
+.lc{padding:3px 8px;border-radius:8px;font-size:.72rem;font-weight:700}
+.lc-ok{background:rgba(22,163,74,.08);color:#16a34a}
+.lc-warn{background:rgba(234,179,8,.1);color:#ca8a04}
+.lc-bad{background:rgba(220,38,38,.08);color:#dc2626}
+.lc-none{background:var(--border);color:var(--fg-muted)}
+.lab-age{font-size:.68rem;color:var(--fg-muted);margin-top:2px}
+.lab-age.old{color:#ca8a04}.lab-age.very-old{color:#dc2626}
+
+/* Action buttons */
+.act-row{display:flex;gap:5px;margin-top:8px;flex-wrap:wrap}
+.abtn{padding:5px 10px;border-radius:8px;border:none;font-size:.72rem;cursor:pointer;font-weight:600;display:inline-flex;align-items:center;gap:3px;transition:opacity .2s}
+.abtn:active{opacity:.7}
+.abtn-lab{background:#2563eb;color:#fff}.abtn-360{background:rgba(37,99,235,.1);color:#2563eb}
+.abtn-edit{background:#6b7280;color:#fff}.abtn-del{background:transparent;color:#dc2626;border:1px solid #dc2626}
+
+/* Modal */
+.modal-bg{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:1000;align-items:center;justify-content:center}
+.modal-bg.open{display:flex}
+.modal{background:var(--bg-card);border-radius:18px;padding:20px;max-width:400px;width:92%;max-height:85vh;overflow-y:auto}
+.modal h3{margin:0 0 14px;font-size:1rem}
+.modal label{display:block;font-size:.78rem;font-weight:600;margin-top:10px;color:var(--fg-muted)}
+.modal input,.modal select,.modal textarea{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:10px;font-size:.88rem;margin-top:4px;background:var(--bg);color:var(--fg)}
+.modal textarea{resize:vertical;min-height:60px}
+.mbtn-row{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
+.mbtn{padding:10px 18px;border:none;border-radius:10px;font-size:.88rem;font-weight:600;cursor:pointer}
+.mbtn-primary{background:#2563eb;color:#fff}.mbtn-cancel{background:var(--border);color:var(--fg)}
+.mbtn-danger{background:#dc2626;color:#fff}
+
+/* Inactive */
+.inactive-item{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)}
+.inactive-item:last-child{border:none}
+
+@media(max-width:400px){.p-grid{grid-template-columns:1fr}}
 </style>
 {% endblock %}
 
 {% block content %}
-<!-- Stats -->
-<div class="stat-row">
-  <div class="stat-card"><span class="num" id="totalPatients" style="color:var(--accent);">0</span><span class="lbl">ผู้ป่วยทั้งหมด</span></div>
-  <div class="stat-card"><span class="num" id="activeToday" style="color:var(--success);">0</span><span class="lbl">ฟอกวันนี้</span></div>
-  <div class="stat-card"><span class="num" id="alertPatients" style="color:var(--danger);">0</span><span class="lbl">ต้องเฝ้าระวัง</span></div>
-  <div class="stat-card" onclick="filterIncomplete()" title="คลิกเพื่อดูรายชื่อ"><span class="num" id="incompletePatients" style="color:var(--warning);">0</span><span class="lbl">ข้อมูลไม่ครบ</span></div>
+<div class="stat-row" id="statsBar"></div>
+
+<div class="top-bar">
+  <input type="text" id="searchBox" placeholder="🔍 ค้นหา HN หรือชื่อ..." oninput="filterP()">
+  <select id="filterSched" onchange="filterP()"><option value="">ทุกตาราง</option></select>
+  <select id="filterShift" onchange="filterP()">
+    <option value="">ทุกรอบ</option><option value="morning">🌅 เช้า</option><option value="afternoon">☀️ บ่าย</option><option value="evening">🌙 ค่ำ</option>
+  </select>
+  <button class="btn-add" onclick="openAdd()">➕ เพิ่มคนไข้</button>
+  <button class="btn-inactive" onclick="showInactive()">📦 ที่ระงับ</button>
 </div>
 
-<!-- Import roster -->
-<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px;flex-wrap:wrap">
+<!-- Import buttons row -->
+<div style="display:flex;gap:6px;margin-bottom:12px;flex-wrap:wrap;font-size:.78rem">
   <input type="file" id="rosterFile" accept=".xlsx,.xlsm" style="display:none" onchange="previewRoster()">
-  <button class="btn btn-primary" onclick="document.getElementById('rosterFile').click()" style="font-size:.85rem">📥 นำเข้า Excel รายชื่อประจำปี (VA / BFR / วันฟอก / รอบ / ยาฉีด / Hct / iPTH / Ferritin)</button>
+  <button class="abtn" style="background:rgba(37,99,235,.1);color:#2563eb" onclick="document.getElementById('rosterFile').click()">📥 นำเข้า Excel รายชื่อ</button>
   <input type="file" id="seroFile" accept=".xlsx,.csv" style="display:none" onchange="previewSero()">
-  <button class="btn" onclick="document.getElementById('seroFile').click()" style="font-size:.85rem;border:1.5px solid #c0392b;color:#c0392b;font-weight:700">🩸 นำเข้าผล HBsAg / Anti-HCV</button>
-  <label style="font-size:.75rem;color:var(--fg-muted)">วันที่ตรวจ Hct ในไฟล์ <input type="date" id="rosterHctDate" style="font-size:.8rem;padding:3px 6px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card);color:inherit"></label>
-  <span style="font-size:.72rem;color:var(--fg-muted)">ระบบอ่านตามชื่อหัวคอลัมน์ จับคู่ด้วย HN แล้วแสดงตัวอย่างก่อนบันทึก (ไม่แก้ชื่อ · ไม่อ่านเลขบัตร · ผลแล็บซ้ำถูกข้าม)</span>
+  <button class="abtn" style="background:#fef2f2;color:#dc2626;border:1px solid #fca5a5" onclick="document.getElementById('seroFile').click()">🩸 นำเข้า HBsAg/Anti-HCV</button>
 </div>
 
-<!-- Serology preview modal -->
-<div class="edit-overlay" id="seroOverlay" onclick="if(event.target===this)closeSero()">
-  <div class="edit-modal" style="max-width:600px;max-height:88vh;overflow-y:auto">
-    <h3 style="margin:0 0 10px">🩸 ตัวอย่างการนำเข้าผล HBsAg / Anti-HCV</h3>
-    <div id="seroSummary" style="font-size:.85rem;line-height:1.7"></div>
-    <div id="seroProblems" style="margin-top:8px;font-size:.78rem"></div>
-    <details style="margin-top:8px" open><summary style="cursor:pointer;font-size:.8rem">รายการที่จะบันทึก</summary>
-      <div id="seroChanges" style="font-size:.74rem;max-height:260px;overflow:auto;margin-top:6px"></div>
-    </details>
-    <button class="btn btn-success" id="seroConfirmBtn" onclick="confirmSero()" style="width:100%;padding:14px;font-size:1rem;margin-top:12px">✅ ยืนยันบันทึก</button>
-    <button class="btn" onclick="closeSero()" style="width:100%;margin-top:8px;padding:10px">ยกเลิก</button>
+<div class="p-grid" id="patientGrid">
+  <div style="text-align:center;color:var(--fg-muted);grid-column:1/-1;padding:40px">กำลังโหลด...</div>
+</div>
+
+<!-- Add Modal -->
+<div class="modal-bg" id="addModal">
+  <div class="modal">
+    <h3>➕ เพิ่มคนไข้ใหม่</h3>
+    <label>HN *</label><input id="addHn" placeholder="เช่น 67001">
+    <label>ชื่อ-สกุล *</label><input id="addName" placeholder="เช่น นายสมชาย ใจดี">
+    <label>Hospital HN</label><input id="addHospHn">
+    <label>เส้นฟอก</label>
+    <select id="addVA"><option value="">ไม่ระบุ</option><option>AVF</option><option>AVG</option><option>DLC</option><option>Perm Cath</option></select>
+    <label>ตารางฟอก</label>
+    <select id="addSched"><option value="">ไม่ระบุ</option><option>จ/พ/ศ</option><option>อ/พฤ/ส</option></select>
+    <label>DW (kg)</label><input id="addDW" type="number" step="0.1">
+    <label>รอบ</label>
+    <select id="addShift"><option value="morning">🌅 เช้า</option><option value="afternoon">☀️ บ่าย</option><option value="evening">🌙 ค่ำ</option></select>
+    <div class="mbtn-row"><button class="mbtn mbtn-cancel" onclick="closeM('addModal')">ยกเลิก</button><button class="mbtn mbtn-primary" onclick="submitAdd()">บันทึก</button></div>
   </div>
 </div>
 
-<!-- Roster preview modal -->
-<div class="edit-overlay" id="rosterOverlay" onclick="if(event.target===this)closeRoster()">
-  <div class="edit-modal" style="max-width:560px;max-height:88vh;overflow-y:auto">
-    <h3 style="margin:0 0 10px">📥 ตัวอย่างการนำเข้า</h3>
+<!-- Edit Modal -->
+<div class="modal-bg" id="editModal">
+  <div class="modal">
+    <h3>✏️ แก้ไข <span id="editTitle"></span></h3>
+    <input type="hidden" id="editHn">
+    <label>ชื่อ-สกุล</label><input id="editName">
+    <label>Hospital HN</label><input id="editHospHn">
+    <label>เส้นฟอก</label>
+    <select id="editVA"><option value="">ไม่ระบุ</option><option>AVF</option><option>AVG</option><option>DLC</option><option>Perm Cath</option></select>
+    <label>ตารางฟอก</label>
+    <select id="editSched"><option value="">ไม่ระบุ</option><option>จ/พ/ศ</option><option>อ/พฤ/ส</option></select>
+    <label>DW (kg)</label><input id="editDW" type="number" step="0.1">
+    <label>รอบ</label>
+    <select id="editShift"><option value="morning">🌅 เช้า</option><option value="afternoon">☀️ บ่าย</option><option value="evening">🌙 ค่ำ</option></select>
+    <label>ESA Drug</label>
+    <select id="editESA"><option value="">ไม่มี</option><option>Epiao</option><option>Hemax</option><option>Hema-plus</option><option>Hypercrit</option><option>Eposis</option><option>Darbepoetin</option></select>
+    <label>ESA Dose</label><input id="editESADose" placeholder="เช่น 4000 IU/wk">
+    <label>🎯 เป้าหมายจากแพทย์</label>
+    <textarea id="editGoal" placeholder="เช่น คุมน้ำหนักให้ต่ำกว่า 2.5 กก."></textarea>
+    <div class="mbtn-row">
+      <button class="mbtn mbtn-danger" onclick="deactivateFromEdit()" style="margin-right:auto">🗑️ ระงับ</button>
+      <button class="mbtn mbtn-cancel" onclick="closeM('editModal')">ยกเลิก</button>
+      <button class="mbtn mbtn-primary" onclick="submitEdit()">💾 บันทึก</button>
+    </div>
+  </div>
+</div>
+
+<!-- Inactive Modal -->
+<div class="modal-bg" id="inactiveModal">
+  <div class="modal" style="max-width:420px">
+    <h3>📦 คนไข้ที่ระงับ</h3>
+    <div id="inactiveList">กำลังโหลด...</div>
+    <div class="mbtn-row"><button class="mbtn mbtn-cancel" onclick="closeM('inactiveModal')">ปิด</button></div>
+  </div>
+</div>
+
+<!-- Roster / Sero import overlays (keep existing functionality) -->
+<div class="modal-bg" id="rosterOverlay">
+  <div class="modal" style="max-width:560px">
+    <h3>📥 ตัวอย่างการนำเข้า</h3>
     <div id="rosterSummary" style="font-size:.85rem;line-height:1.7"></div>
     <div id="rosterUnmatched" style="margin-top:8px"></div>
     <details style="margin-top:8px"><summary style="cursor:pointer;font-size:.8rem">ดูรายการที่จะเปลี่ยน</summary>
       <div id="rosterChanges" style="font-size:.72rem;max-height:220px;overflow:auto;margin-top:6px"></div>
     </details>
-    <button class="btn btn-success" id="rosterConfirmBtn" onclick="confirmRoster()" style="width:100%;padding:14px;font-size:1rem;margin-top:12px">✅ ยืนยันนำเข้า</button>
-    <button class="btn" onclick="closeRoster()" style="width:100%;margin-top:8px;padding:10px">ยกเลิก</button>
+    <div class="mbtn-row">
+      <button class="mbtn mbtn-cancel" onclick="closeM('rosterOverlay')">ยกเลิก</button>
+      <button class="mbtn mbtn-primary" id="rosterConfirmBtn" onclick="confirmRoster()">✅ ยืนยัน</button>
+    </div>
   </div>
 </div>
 
-<!-- Search -->
-<div class="search-bar">
-  <input type="search" class="form-control" id="searchInput" placeholder="🔍 ค้นหา HN, ชื่อ..." autocomplete="off">
-  <select class="form-control" id="filterSchedule">
-    <option value="">ทุกตาราง</option>
-  </select>
-  <select class="form-control" id="filterSero">
-    <option value="">ไวรัสตับอักเสบ: ทั้งหมด</option>
-    <option value="pos">🩸 HBsAg+ / Anti-HCV+</option>
-    <option value="hbv">HBsAg+</option>
-    <option value="hcv">Anti-HCV+</option>
-    <option value="neg">ผลลบ</option>
-    <option value="none">ยังไม่มีผล</option>
-  </select>
-  <select class="form-control" id="filterShift">
-    <option value="">ทุกรอบ</option>
-    <option value="morning">🌅 รอบเช้า</option>
-    <option value="afternoon">☀️ รอบบ่าย</option>
-    <option value="evening">🌙 รอบค่ำ</option>
-  </select>
-  <select class="form-control" id="filterAccess">
-    <option value="">ทุก Vascular Access</option>
-  </select>
-</div>
-
-<!-- Table -->
-<div class="card">
-  <div class="table-wrapper">
-    <table class="patient-table">
-      <thead>
-        <tr>
-          <th>ผู้ป่วย</th>
-          <th>HN</th>
-          <th>วันฟอก</th>
-          <th>รอบ</th>
-          <th>Vascular Access</th>
-          <th>HBsAg / Anti-HCV</th>
-          <th>DW (kg)</th>
-          <th>ฟอกล่าสุด</th>
-        </tr>
-      </thead>
-      <tbody id="patientTableBody">
-        <tr><td colspan="8" style="text-align:center;color:var(--fg-muted);padding:40px;">กำลังโหลด...</td></tr>
-      </tbody>
-    </table>
-  </div>
-</div>
-
-<!-- Patient Edit Modal -->
-<div class="edit-overlay" id="editOverlay" onclick="if(event.target===this)closeEditModal()">
-  <div class="edit-sheet">
-    <h3>✏️ แก้ไขข้อมูล — <span id="editHN">-</span> <span id="editName" style="font-weight:400;font-size:.85rem;"></span></h3>
-    <div class="edit-field"><label>ชื่อ-นามสกุล</label><input type="text" id="editPatientName"></div>
-    <div class="edit-field">
-      <label>ตารางฟอก</label>
-      <select id="editSchedule">
-        <option value="">ไม่ระบุ</option>
-        <option value="จ/พ/ศ">จ/พ/ศ</option>
-        <option value="อ/พฤ/ส">อ/พฤ/ส</option>
-        <option value="จ/พ/ศ (เช้า)">จ/พ/ศ (เช้า)</option>
-        <option value="จ/พ/ศ (บ่าย)">จ/พ/ศ (บ่าย)</option>
-        <option value="อ/พฤ/ส (เช้า)">อ/พฤ/ส (เช้า)</option>
-        <option value="อ/พฤ/ส (บ่าย)">อ/พฤ/ส (บ่าย)</option>
-      </select>
+<div class="modal-bg" id="seroOverlay">
+  <div class="modal" style="max-width:560px">
+    <h3>🩸 ตัวอย่างการนำเข้าผล Serology</h3>
+    <div id="seroSummary" style="font-size:.85rem;line-height:1.7"></div>
+    <div id="seroProblems" style="margin-top:8px;font-size:.78rem"></div>
+    <details open><summary style="cursor:pointer;font-size:.8rem">รายการ</summary>
+      <div id="seroChanges" style="font-size:.74rem;max-height:260px;overflow:auto;margin-top:6px"></div>
+    </details>
+    <div class="mbtn-row">
+      <button class="mbtn mbtn-cancel" onclick="closeM('seroOverlay')">ยกเลิก</button>
+      <button class="mbtn mbtn-primary" id="seroConfirmBtn" onclick="confirmSero()">✅ ยืนยัน</button>
     </div>
-    <div class="edit-field">
-      <label>รอบฟอกประจำ</label>
-      <select id="editShift">
-        <option value="">ไม่ระบุ</option>
-        <option value="morning">🌅 รอบเช้า</option>
-        <option value="afternoon">☀️ รอบบ่าย</option>
-        <option value="evening">🌙 รอบค่ำ</option>
-      </select>
-    </div>
-    <div class="edit-field">
-      <label>Vascular Access</label>
-      <select id="editVA">
-        <option value="">ไม่ระบุ</option>
-        <option value="AVF">AVF</option>
-        <option value="AVG">AVG</option>
-        <option value="DLC">DLC (Double Lumen Catheter)</option>
-        <option value="Perm Cath">Perm Cath</option>
-      </select>
-    </div>
-    <div class="edit-field"><label>Dry Weight (kg)</label><input type="number" id="editDW" step="0.1" inputmode="decimal"></div>
-    <div class="edit-field">
-      <label>ESA Drug</label>
-      <select id="editESA">
-        <option value="">ไม่มี ESA</option>
-        <option value="Epiao">Epiao</option>
-        <option value="Hemax">Hemax</option>
-        <option value="Hema-plus">Hema-plus</option>
-        <option value="Hypercrit">Hypercrit</option>
-        <option value="Eposis">Eposis</option>
-        <option value="Darbepoetin">Darbepoetin</option>
-        <option value="Other">อื่นๆ</option>
-      </select>
-    </div>
-    <div class="edit-field"><label>ESA Dose</label><input type="text" id="editESADose" placeholder="เช่น 4000 IU/wk"></div>
-    <div class="edit-field">
-      <label>🎯 เป้าหมายจากแพทย์ (แสดงบนหน้าผลเลือดของผู้ป่วย)</label>
-      <textarea id="editGoal" rows="2" placeholder="เช่น เดือนนี้คุมน้ำหนักระหว่างรอบให้ต่ำกว่า 2.5 กก.นะครับ" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:inherit;font-size:.85rem;resize:vertical"></textarea>
-      <button class="btn" onclick="saveGoal()" style="margin-top:6px;font-size:.78rem;padding:5px 14px">💾 บันทึกเป้าหมาย (เฉพาะแพทย์ · แจ้งผู้ป่วยทาง LINE)</button>
-    </div>
-    <button class="btn" onclick="showPortalLink()" style="width:100%;margin-top:4px;padding:10px;border:1.5px solid var(--accent);color:var(--accent);font-weight:700">🔗 ลิงก์ผลเลือดสำหรับผู้ป่วย (QR)</button>
-    <button class="btn" onclick="if(_editHN)window.open('/hd/patient-card/'+encodeURIComponent(_editHN),'_blank')" style="width:100%;margin-top:6px;padding:10px">🖨 พิมพ์บัตรผู้ป่วย (ชื่อ+ตารางฟอก+QR)</button>
-    <div id="portalLinkBox" style="display:none;text-align:center;margin:8px 0;padding:10px;border:1px dashed var(--border);border-radius:10px">
-      <img id="portalQr" alt="QR" style="width:160px;height:160px;display:none">
-      <div id="portalUrl" style="font-size:.68rem;word-break:break-all;color:var(--fg-muted);margin-top:6px"></div>
-      <button class="btn" onclick="copyPortalLink()" style="margin-top:6px;font-size:.78rem;padding:4px 12px">📋 คัดลอกลิงก์</button>
-    </div>
-    <button class="btn btn-success" onclick="savePatientEdit()" style="width:100%;padding:14px;font-size:1rem;margin-top:4px;">💾 บันทึก</button>
-    <button class="btn" onclick="closeEditModal()" style="width:100%;margin-top:8px;padding:10px;">ยกเลิก</button>
   </div>
 </div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
-let allPatients = [];
-let _filterTimer = null;
+let allP = [];
+const ROLE = (function(){ try{const t=localStorage.getItem('hd_token');if(!t)return '';const p=JSON.parse(atob(t.split('.')[1]));return p.role||''}catch(e){return ''} })();
+const canEdit = ROLE==='admin'||ROLE==='physician';
 
-function getInitials(name){
-  if(!name) return '?';
-  const parts = name.trim().split(/\s+/);
-  return parts.length > 1 ? (parts[0][0]||'')+(parts[1][0]||'') : name.substring(0,2);
+function ini(n){if(!n)return'?';const p=n.trim().split(/\s+/);return p.length>1?(p[0][0]||'')+(p[1][0]||''):n.substring(0,2);}
+function esc(s){return String(s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;');}
+const SHIFT_L={morning:'🌅 เช้า',afternoon:'☀️ บ่าย',evening:'🌙 ค่ำ'};
+const SHIFT_CLS={morning:'tag-shift-m',afternoon:'tag-shift-a',evening:'tag-shift-e'};
+
+function lcHb(v){if(v==null)return'<span class="lc lc-none">Hb -</span>';return`<span class="lc ${v<10?'lc-bad':v<=12?'lc-ok':'lc-warn'}">Hb ${v.toFixed(1)}</span>`;}
+function lcK(v){if(v==null)return'<span class="lc lc-none">K -</span>';return`<span class="lc ${v>=6?'lc-bad':v>=5.5?'lc-warn':'lc-ok'}">K ${v.toFixed(1)}</span>`;}
+function lcKtv(v){if(v==null)return'<span class="lc lc-none">Kt/V -</span>';return`<span class="lc ${v<1.2?'lc-warn':'lc-ok'}">Kt/V ${v.toFixed(2)}</span>`;}
+
+function loadP(){
+  hdFetch('/hd/api/v1/patients/with-lab-summary').then(r=>r.json()).then(d=>{
+    allP=d.patients||[];
+    buildFilters();
+    renderStats();
+    renderP(allP);
+  }).catch(()=>{document.getElementById('patientGrid').innerHTML='<div style="text-align:center;color:var(--danger);grid-column:1/-1">โหลดไม่ได้</div>';});
 }
 
-function accessClass(a){
-  if(!a) return '';
-  const l = a.toUpperCase();
-  if(l.includes('AVF')) return 'access-avf';
-  if(l.includes('AVG')) return 'access-avg';
-  if(l.includes('CVC') || l.includes('CLC') || l.includes('DLC') || l.includes('PERM')) return 'access-cvc';
-  return '';
+function renderStats(){
+  const t=allP.length,noLab=allP.filter(p=>!p.lab_date).length,old=allP.filter(p=>p.lab_age_days&&p.lab_age_days>30).length;
+  const hbLow=allP.filter(p=>p.hb&&p.hb<10).length,noVA=allP.filter(p=>!p.vascular_access).length;
+  let h=`<div class="stat-pill"><span class="n" style="color:#2563eb">${t}</span>ทั้งหมด</div>`;
+  h+=`<div class="stat-pill" onclick="filterByTag('nolab')"><span class="n" style="color:#dc2626">${noLab}</span>ไม่มี Lab</div>`;
+  if(old)h+=`<div class="stat-pill" onclick="filterByTag('oldlab')"><span class="n" style="color:#ca8a04">${old}</span>Lab เก่า >30d</div>`;
+  if(hbLow)h+=`<div class="stat-pill" onclick="filterByTag('hblow')"><span class="n" style="color:#dc2626">${hbLow}</span>Hb<10</div>`;
+  if(noVA)h+=`<div class="stat-pill" onclick="filterByTag('nova')"><span class="n" style="color:#ca8a04">${noVA}</span>ไม่มี VA</div>`;
+  document.getElementById('statsBar').innerHTML=h;
 }
 
-function formatDate(d){
-  if(!d) return '-';
-  try {
-    const dt = new Date(d);
-    if(isNaN(dt)) return d;
-    const dd = String(dt.getDate()).padStart(2,'0');
-    const mm = String(dt.getMonth()+1).padStart(2,'0');
-    const yy = dt.getFullYear() + 543; /* พ.ศ. */
-    return dd+'/'+mm+'/'+(yy%100);
-  } catch(e){ return d; }
+function buildFilters(){
+  const ss=new Set();allP.forEach(p=>{if(p.schedule_days)ss.add(p.schedule_days);});
+  const sel=document.getElementById('filterSched');
+  sel.innerHTML='<option value="">ทุกตาราง</option>';
+  [...ss].sort().forEach(s=>{sel.innerHTML+=`<option value="${s}">${s}</option>`;});
 }
 
-function isIncomplete(p){
-  return !p.schedule_days || !p.vascular_access;
-}
+function renderP(list){
+  const el=document.getElementById('patientGrid');
+  if(!list.length){el.innerHTML='<div style="text-align:center;color:var(--fg-muted);grid-column:1/-1;padding:40px">ไม่พบผู้ป่วย</div>';return;}
+  el.innerHTML=list.map(p=>{
+    const hn=p.hn||'',nm=p.patient_name||'',sero=p.serology;
+    const hasPos=sero&&(sero.hbsag==='positive'||sero.antihcv==='positive');
+    const labAge=p.lab_age_days;
+    const ageClass=!p.lab_date?'very-old':labAge>30?'old':'';
+    const ageText=p.lab_date?`Lab ${p.lab_date} (${labAge!=null?labAge+'d':''})` :'ยังไม่มีผล Lab';
 
-function renderPatients(patients){
-  const tbody = document.getElementById('patientTableBody');
-  if(!patients.length){
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่พบผู้ป่วย</td></tr>';
-    return;
-  }
-  tbody.innerHTML = patients.map(p => {
-    const name = p.patient_name || p.name || '-';
-    const alertDot = p.unacked_alerts > 0 ? ' <span style="color:var(--danger);font-weight:700;" title="'+p.unacked_alerts+' alerts">⚠️</span>' : '';
-    const incomplete = isIncomplete(p);
-    const rowClass = incomplete ? 'needs-review' : '';
-    const rowAlert = p.unacked_alerts > 0 ? 'style="border-left:3px solid var(--danger);"' : '';
-    const editBtn = `<button class="btn" onclick="event.stopPropagation();openEditModal('${p.hn}')" style="font-size:.7rem;padding:2px 8px;margin-left:4px;" title="แก้ไข">✏️</button><button class="btn" onclick="event.stopPropagation();window.location.href='/hd/patient/${encodeURIComponent(p.hn)}/360'" style="font-size:.7rem;padding:2px 8px;margin-left:2px;background:rgba(41,128,185,.12);color:var(--accent)" title="Patient 360 — ภาพรวมผู้ป่วยทั้งหมด">🧭 360</button>`;
-    const schedCell = p.schedule_days ? '<span class="schedule-badge">'+p.schedule_days+'</span>' : '<span style="color:var(--warning);font-size:.8rem;">⚠️ ไม่ระบุ</span>';
-    const SH = {morning:['🌅 เช้า','#b45309','#fef3c7'], afternoon:['☀️ บ่าย','#1d4ed8','#dbeafe'], evening:['🌙 ค่ำ','#6d28d9','#ede9fe']};
-    const sh = SH[p.default_shift];
-    const seroName = p.serology && (p.serology.hbsag==='positive'||p.serology.antihcv==='positive') ? ' '+seroBadge(p.serology,'.68rem') : '';
-    const shiftCell = sh ? `<span class="schedule-badge" style="color:${sh[1]};background:${sh[2]}">${sh[0]}</span>` : '<span style="color:var(--fg-muted);font-size:.8rem;">-</span>';
-    const vaCell = p.vascular_access ? '<span class="access-badge '+accessClass(p.vascular_access)+'">'+p.vascular_access+'</span>' : '<span style="color:var(--warning);font-size:.8rem;">⚠️ ไม่ระบุ</span>';
-    return `
-    <tr class="${rowClass}" onclick="window.location.href='/hd/patient/${p.hn}'" ${rowAlert}>
-      <td><div class="patient-name-cell"><div class="patient-avatar">${getInitials(name)}</div><span>${name}${seroName}${alertDot}${editBtn}</span></div></td>
-      <td><strong>${p.hn||'-'}</strong></td>
-      <td>${schedCell}</td>
-      <td>${shiftCell}</td>
-      <td>${vaCell}</td>
-      <td>${seroText(p.serology)}</td>
-      <td>${p.dry_weight||'-'}</td>
-      <td>${formatDate(p.last_hd)}</td>
-    </tr>`;
+    let tags='';
+    if(p.schedule_days)tags+=`<span class="tag tag-sched">${p.schedule_days}</span>`;
+    if(p.default_shift)tags+=`<span class="tag ${SHIFT_CLS[p.default_shift]||''}">${SHIFT_L[p.default_shift]||p.default_shift}</span>`;
+    if(p.vascular_access){
+      const vu=p.vascular_access.toUpperCase();
+      const cls=vu.includes('AVF')?'tag-va-avf':vu.includes('AVG')?'tag-va-avg':'tag-va-cvc';
+      tags+=`<span class="tag ${cls}">${p.vascular_access}</span>`;
+    }
+    if(hasPos){
+      if(sero.hbsag==='positive')tags+=`<span class="tag tag-sero">🩸 HBsAg+</span>`;
+      if(sero.antihcv==='positive')tags+=`<span class="tag tag-sero">🩸 Anti-HCV+</span>`;
+    }
+
+    let btns=`<a class="abtn abtn-lab" href="/hd/labs/${hn}" onclick="event.stopPropagation()">🔬 Lab</a>`;
+    btns+=`<a class="abtn abtn-360" href="/hd/patient/${hn}/360" onclick="event.stopPropagation()">🧭 360</a>`;
+    if(canEdit){
+      btns+=`<button class="abtn abtn-edit" onclick="event.stopPropagation();openEdit('${hn}')">✏️</button>`;
+      btns+=`<button class="abtn abtn-del" onclick="event.stopPropagation();deactivate('${hn}','${esc(nm)}')">🗑️</button>`;
+    }
+
+    return`<div class="pcard" onclick="location.href='/hd/patient/${hn}'">
+      <div class="avatar${hasPos?' hbv':''}">${ini(nm)}</div>
+      <div class="info">
+        <div class="nm">${nm||'(ไม่มีชื่อ)'} <span style="font-size:.75rem;color:var(--fg-muted);font-weight:400">HN ${hn}</span></div>
+        <div class="meta">${tags}</div>
+        <div class="lab-chips">${lcHb(p.hb)}${lcK(p.k)}${lcKtv(p.ktv)}</div>
+        <div class="lab-age ${ageClass}">${ageText}</div>
+        <div class="act-row">${btns}</div>
+      </div>
+    </div>`;
   }).join('');
 }
 
-function filterPatients(){
-  const q = (document.getElementById('searchInput').value||'').trim().toLowerCase();
-  const sched = document.getElementById('filterSchedule').value;
-  const access = document.getElementById('filterAccess').value;
-  let filtered = allPatients;
-  if(q){
-    filtered = filtered.filter(p => {
-      const nm = (p.patient_name||p.name||'').toLowerCase();
-      const hn = (p.hn||'').toLowerCase();
-      const hhn = (p.hospital_hn||'').toLowerCase();
-      return nm.includes(q) || hn.includes(q) || hhn.includes(q);
-    });
-  }
-  if(sched){
-    filtered = filtered.filter(p => (p.schedule_days||'').includes(sched));
-  }
-  if(access){
-    filtered = filtered.filter(p => (p.vascular_access||'').toUpperCase().includes(access.toUpperCase()));
-  }
-  const shiftSel = (document.getElementById('filterShift')||{}).value || '';
-  if(shiftSel){
-    filtered = filtered.filter(p => p.default_shift === shiftSel);
-  }
-  const seroSel = (document.getElementById('filterSero')||{}).value || '';
-  if(seroSel){
-    filtered = filtered.filter(p => { const s=p.serology; const hb=s&&s.hbsag==='positive', hc=s&&s.antihcv==='positive';
-      if(seroSel==='pos') return hb||hc; if(seroSel==='hbv') return hb; if(seroSel==='hcv') return hc;
-      if(seroSel==='neg') return s && !hb && !hc && (s.hbsag||s.antihcv); return !s || (!s.hbsag && !s.antihcv); });
-  }
-  renderPatients(filtered);
-  /* Update count display */
-  document.getElementById('totalPatients').textContent = filtered.length + '/' + allPatients.length;
+let _fTag='';
+function filterByTag(tag){_fTag=(_fTag===tag)?'':tag;filterP();}
+function filterP(){
+  const q=document.getElementById('searchBox').value.toLowerCase();
+  const sched=document.getElementById('filterSched').value;
+  const shift=document.getElementById('filterShift').value;
+  let f=allP;
+  if(q)f=f.filter(p=>(p.hn||'').toLowerCase().includes(q)||(p.patient_name||'').toLowerCase().includes(q));
+  if(sched)f=f.filter(p=>(p.schedule_days||'').includes(sched));
+  if(shift)f=f.filter(p=>p.default_shift===shift);
+  if(_fTag==='nolab')f=f.filter(p=>!p.lab_date);
+  if(_fTag==='oldlab')f=f.filter(p=>p.lab_age_days&&p.lab_age_days>30);
+  if(_fTag==='hblow')f=f.filter(p=>p.hb&&p.hb<10);
+  if(_fTag==='nova')f=f.filter(p=>!p.vascular_access);
+  renderP(f);
 }
 
-function debounceFilter(){
-  clearTimeout(_filterTimer);
-  _filterTimer = setTimeout(filterPatients, 150);
+function closeM(id){document.getElementById(id).classList.remove('open');}
+
+/* ── Add ── */
+function openAdd(){document.getElementById('addModal').classList.add('open');document.getElementById('addHn').focus();}
+function submitAdd(){
+  const hn=document.getElementById('addHn').value.trim(),nm=document.getElementById('addName').value.trim();
+  if(!hn||!nm){alert('ต้องระบุ HN และชื่อ');return;}
+  hdFetch('/hd/api/v1/patients/create',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({hn,patient_name:nm,hospital_hn:document.getElementById('addHospHn').value.trim(),
+      vascular_access:document.getElementById('addVA').value,schedule_days:document.getElementById('addSched').value,
+      dry_weight:parseFloat(document.getElementById('addDW').value)||null,default_shift:document.getElementById('addShift').value})
+  }).then(r=>r.json()).then(d=>{if(d.error){alert(d.error);return;}closeM('addModal');loadP();});
 }
 
-function buildFilterOptions(data){
-  const schedSel = document.getElementById('filterSchedule');
-  const accSel = document.getElementById('filterAccess');
-  /* Populate schedule options from actual data */
-  const schedules = data.filter_options?.schedules || [];
-  if(schedules.length){
-    schedules.forEach(s => {
-      const opt = document.createElement('option');
-      opt.value = s; opt.textContent = s;
-      schedSel.appendChild(opt);
-    });
-  } else {
-    /* Fallback: derive from data */
-    const unique = [...new Set(allPatients.map(p=>p.schedule_days).filter(Boolean))].sort();
-    unique.forEach(s => {
-      const opt = document.createElement('option');
-      opt.value = s; opt.textContent = s;
-      schedSel.appendChild(opt);
-    });
-  }
-  /* Populate access options from actual data */
-  const accesses = data.filter_options?.accesses || [];
-  if(accesses.length){
-    accesses.forEach(a => {
-      const opt = document.createElement('option');
-      opt.value = a; opt.textContent = a;
-      accSel.appendChild(opt);
-    });
-  } else {
-    const unique = [...new Set(allPatients.map(p=>p.vascular_access).filter(Boolean))].sort();
-    unique.forEach(a => {
-      const opt = document.createElement('option');
-      opt.value = a; opt.textContent = a;
-      accSel.appendChild(opt);
-    });
-  }
+/* ── Edit ── */
+function openEdit(hn){
+  const p=allP.find(x=>x.hn===hn);if(!p)return;
+  document.getElementById('editHn').value=hn;
+  document.getElementById('editTitle').textContent=`${p.patient_name} (HN ${hn})`;
+  document.getElementById('editName').value=p.patient_name||'';
+  document.getElementById('editHospHn').value=p.hospital_hn||'';
+  document.getElementById('editVA').value=p.vascular_access||'';
+  document.getElementById('editSched').value=p.schedule_days||'';
+  document.getElementById('editDW').value=p.dry_weight||'';
+  document.getElementById('editShift').value=p.default_shift||'morning';
+  document.getElementById('editESA').value=p.esa_drug||'';
+  document.getElementById('editESADose').value=p.esa_dose||'';
+  document.getElementById('editGoal').value='';
+  hdFetch('/hd/api/v1/patients/'+hn+'/goal').then(r=>r.json()).then(d=>{if(!d.error)document.getElementById('editGoal').value=d.goal||'';}).catch(()=>{});
+  document.getElementById('editModal').classList.add('open');
 }
-
-function getTodayThaiDay(){
-  const days = ['อา','จ','อ','พ','พฤ','ศ','ส'];
-  return days[new Date().getDay()];
-}
-
-function fetchPatients(){
-  hdFetch('/hd/api/v1/patients')
-    .then(r=>r.json())
-    .then(data=>{
-      allPatients = data.patients || [];
-      document.getElementById('totalPatients').textContent = allPatients.length;
-      /* Count today's scheduled */
-      const todayDay = getTodayThaiDay();
-      const todayCount = allPatients.filter(p=>(p.schedule_days||'').includes(todayDay)).length;
-      document.getElementById('activeToday').textContent = todayCount;
-      /* Alert patients */
-      const alertCount = data.alert_count || allPatients.filter(p=>p.unacked_alerts>0).length;
-      document.getElementById('alertPatients').textContent = alertCount;
-      /* Incomplete patients */
-      const incompleteCount = allPatients.filter(isIncomplete).length;
-      document.getElementById('incompletePatients').textContent = incompleteCount;
-      /* Build dynamic filter options */
-      buildFilterOptions(data);
-      renderPatients(allPatients);
-    })
-    .catch(err=>{
-      console.error('fetchPatients error:', err);
-      document.getElementById('patientTableBody').innerHTML =
-        '<tr><td colspan="8" style="text-align:center;color:var(--fg-muted);padding:40px;">ไม่สามารถโหลดข้อมูลได้</td></tr>';
-    });
-}
-
-/* ── Edit Modal ── */
-let _editHN = null;
-function openEditModal(hn){
-  _editHN = hn;
-  const p = allPatients.find(x=>x.hn===hn);
-  if(!p) return;
-  document.getElementById('editHN').textContent = hn;
-  document.getElementById('editName').textContent = p.patient_name||'';
-  document.getElementById('editPatientName').value = p.patient_name||'';
-  document.getElementById('editSchedule').value = p.schedule_days||'';
-  document.getElementById('editShift').value = p.default_shift||'';
-  document.getElementById('editGoal').value = '';
-  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(hn)+'/goal').then(r=>r.json()).then(d=>{ if(!d.error && _editHN===hn) document.getElementById('editGoal').value = d.goal||''; }).catch(()=>{});
-  document.getElementById('editVA').value = p.vascular_access||'';
-  document.getElementById('editDW').value = p.dry_weight||'';
-  document.getElementById('editESA').value = p.esa_drug||'';
-  document.getElementById('editESADose').value = p.esa_dose||'';
-  document.getElementById('editOverlay').classList.add('open');
-}
-function saveGoal(){
-  if(!_editHN) return;
-  const goal = (document.getElementById('editGoal')||{}).value||'';
-  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(_editHN)+'/goal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal})})
+function submitEdit(){
+  const hn=document.getElementById('editHn').value;
+  const goal=document.getElementById('editGoal').value.trim();
+  const body={patient_name:document.getElementById('editName').value.trim(),
+    hospital_hn:document.getElementById('editHospHn').value.trim(),
+    vascular_access:document.getElementById('editVA').value,schedule_days:document.getElementById('editSched').value,
+    dry_weight:parseFloat(document.getElementById('editDW').value)||null,default_shift:document.getElementById('editShift').value,
+    esa_drug:document.getElementById('editESA').value,esa_dose:document.getElementById('editESADose').value};
+  hdFetch('/hd/api/v1/patients/'+hn+'/edit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
     .then(r=>r.json()).then(d=>{
-      if(d.error){ showToast(d.error,'danger'); return; }
-      showToast(goal?('🎯 บันทึกเป้าหมายแล้ว'+(d.pushed?' · แจ้งผู้ป่วยทาง LINE แล้ว':'')) : 'ลบเป้าหมายแล้ว','success');
-    }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+      if(d.error){alert(d.error);return;}
+      // Save goal separately
+      if(goal||goal==='')hdFetch('/hd/api/v1/patients/'+hn+'/goal',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({goal})}).catch(()=>{});
+      closeM('editModal');loadP();
+    });
 }
-let _portalUrl = '';
-function showPortalLink(){
-  if(!_editHN) return;
-  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(_editHN)+'/portal-link').then(r=>r.json()).then(d=>{
-    if(d.error){ showToast(d.error,'danger'); return; }
-    _portalUrl = d.url || '';
-    const box = document.getElementById('portalLinkBox');
-    box.style.display = 'block';
-    document.getElementById('portalUrl').textContent = _portalUrl;
-    const img = document.getElementById('portalQr');
-    if(d.qr){ img.src = d.qr; img.style.display = 'inline'; } else { img.style.display = 'none'; }
-  }).catch(()=>showToast('สร้างลิงก์ไม่สำเร็จ','danger'));
-}
-function copyPortalLink(){
-  if(!_portalUrl) return;
-  (navigator.clipboard ? navigator.clipboard.writeText(_portalUrl) : Promise.reject())
-    .then(()=>showToast('คัดลอกลิงก์แล้ว — ส่งให้ผู้ป่วยได้เลย','success'))
-    .catch(()=>showToast(_portalUrl,'info'));
-}
-function closeEditModal(){
-  document.getElementById('portalLinkBox').style.display='none';
-  _portalUrl='';
-  document.getElementById('editOverlay').classList.remove('open');
-  _editHN = null;
-}
-function savePatientEdit(){
-  if(!_editHN) return;
-  const data = {
-    patient_name: document.getElementById('editPatientName').value,
-    schedule_days: document.getElementById('editSchedule').value,
-    default_shift: document.getElementById('editShift').value,
-    vascular_access: document.getElementById('editVA').value,
-    dry_weight: parseFloat(document.getElementById('editDW').value)||null,
-    esa_drug: document.getElementById('editESA').value,
-    esa_dose: document.getElementById('editESADose').value,
-  };
-  hdFetch('/hd/api/v1/patients/'+_editHN,{method:'PUT',body:JSON.stringify(data)})
-    .then(r=>r.json())
-    .then(d=>{
-      if(d.error){ showToast(d.error,'danger'); return; }
-      showToast('บันทึกสำเร็จ — '+_editHN,'success');
-      closeEditModal();
-      fetchPatients(); /* Reload */
-    })
-    .catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
+function deactivateFromEdit(){
+  const hn=document.getElementById('editHn').value;
+  const nm=document.getElementById('editName').value;
+  if(!confirm(`⚠️ ระงับ ${nm} (HN ${hn})?\nข้อมูลจะไม่ถูกลบ`))return;
+  if(!confirm(`ยืนยันอีกครั้ง: ระงับ ${nm}?`))return;
+  hdFetch('/hd/api/v1/patients/'+hn+'/deactivate',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.error){alert(d.error);return;}closeM('editModal');loadP();});
 }
 
-/* ── Roster import (Excel) ── */
-let _rosterFile = null;
-function _rosterPost(confirm){
-  const fd = new FormData();
-  fd.append('file', _rosterFile);
-  fd.append('confirm', confirm ? '1' : '0');
-  fd.append('hct_date', (document.getElementById('rosterHctDate')||{}).value || '');
-  const token = getHdToken();
-  return fetch('/hd/api/v1/patients/import-roster', {
-    method:'POST', headers: token ? {'Authorization':'Bearer '+token} : {}, body: fd
-  }).then(r=>r.json());
-}
-function previewRoster(){
-  const inp = document.getElementById('rosterFile');
-  _rosterFile = inp.files[0];
-  if(!_rosterFile) return;
-  showToast('กำลังอ่านไฟล์...','info');
-  _rosterPost(false).then(d=>{
-    inp.value = '';
-    if(d.error){ showToast(d.error,'danger'); return; }
-    const va = Object.entries(d.va_counts||{}).map(([k,v])=>k+' '+v).join(' · ');
-    document.getElementById('rosterSummary').innerHTML =
-      `พบในไฟล์ <b>${d.total_rows}</b> คน · จับคู่กับระบบได้ <b style="color:var(--success)">${d.matched}</b> คน<br>`+
-      `ทะเบียน: จะอัปเดต <b style="color:var(--accent)">${d.to_update}</b> คน · ตรงอยู่แล้ว ${d.unchanged} คน<br>`+
-      `ใบสั่งฟอก (BFR/ครั้ง-สัปดาห์/เส้นฟอก): แก้ไข ${d.rx_to_update||0} · สร้างใหม่ <b>${d.rx_to_create||0}</b><br>`+
-      `ผลแล็บ (Hct ${d.hct_date? new Date(d.hct_date+'T00:00:00').toLocaleDateString('th-TH'):''} หรือตามเดือนของชีต · iPTH/Ferritin/Kt/V ตามเดือนในหัวคอลัมน์ · Dry weight → น้ำหนักแห้ง+ใบสั่งฟอก): ใหม่ <b style="color:var(--accent)">${d.labs_new||0}</b> จาก ${d.labs_total||0} รายการ (ซ้ำถูกข้าม)<br>`+
-      `<span style="color:var(--fg-muted)">Vascular Access: ${va}</span>`;
-    const um = d.unmatched||[];
-    document.getElementById('rosterUnmatched').innerHTML = um.length
-      ? `<div style="font-size:.78rem;color:var(--danger)">⚠️ ไม่พบในระบบ ${um.length} คน (จะข้าม): `+
-        um.slice(0,15).map(u=>`${u.name} (HN ${u.hn_clinic||u.hn_hospital||'-'})`).join(', ')+(um.length>15?' …':'')+`</div>`
-      : `<div style="font-size:.78rem;color:var(--success)">✅ จับคู่ได้ครบทุกคน</div>`;
-    const ch = (d.details||[]).filter(m=>Object.keys(m.changes).length);
-    document.getElementById('rosterChanges').innerHTML = ch.length
-      ? ch.map(m=>`<div style="padding:3px 0;border-bottom:1px solid var(--border)"><b>HN ${m.hn}</b> ${m.db_name||m.name}: `+
-          Object.entries(m.changes).map(([k,v])=>Array.isArray(v)?`${k}: ${v[0]??'-'} → <b>${v[1]}</b>`:`${k}: `+Object.entries(v).map(([kk,[a,b]])=>`${kk} ${a??'-'}→<b>${b}</b>`).join(' ')).join(', ')+(m.labs?` · แล็บ ${m.labs} ค่า`:'')+`</div>`).join('')
-      : '<div style="color:var(--fg-muted)">ไม่มีรายการเปลี่ยนแปลง</div>';
-    document.getElementById('rosterConfirmBtn').disabled = (d.to_update === 0 && !(d.labs_new>0) && !(d.rx_to_create>0));
-    document.getElementById('rosterOverlay').classList.add('open');
-  }).catch(()=>{ inp.value=''; showToast('อ่านไฟล์ไม่สำเร็จ','danger'); });
-}
-function confirmRoster(){
-  const btn = document.getElementById('rosterConfirmBtn');
-  btn.disabled = true; btn.textContent = 'กำลังบันทึก...';
-  _rosterPost(true).then(d=>{
-    btn.disabled = false; btn.textContent = '✅ ยืนยันนำเข้า';
-    if(d.error){ showToast(d.error,'danger'); return; }
-    showToast(`✅ ทะเบียน ${d.written} คน · ใบสั่งฟอก แก้ ${d.rx_written||0}/สร้าง ${d.rx_created||0} · แล็บ ${d.labs_written||0} รายการ (จับคู่ ${d.matched}/${d.total_rows})`,'success');
-    closeRoster();
-    fetchPatients();
-  }).catch(()=>{ btn.disabled=false; btn.textContent='✅ ยืนยันนำเข้า'; showToast('บันทึกไม่สำเร็จ','danger'); });
-}
-function closeRoster(){ document.getElementById('rosterOverlay').classList.remove('open'); }
-
-/* ── Serology import (HBsAg / Anti-HCV) ── */
-let _seroFile = null;
-function _seroPost(confirm){
-  const fd = new FormData(); fd.append('file', _seroFile); fd.append('confirm', confirm?'1':'0');
-  const token = getHdToken();
-  return fetch('/hd/api/v1/labs/serology/import', {method:'POST', headers: token?{'Authorization':'Bearer '+token}:{}, body: fd}).then(r=>r.json());
-}
-const SV = {positive:'<b style="color:#c0392b">+ POSITIVE</b>', negative:'<span style="color:var(--fg-muted)">− negative</span>'};
-function previewSero(){
-  const inp = document.getElementById('seroFile'); _seroFile = inp.files[0]; if(!_seroFile) return;
-  showToast('กำลังอ่านไฟล์...','info');
-  _seroPost(false).then(d=>{
-    inp.value='';
-    if(d.error){ showToast(d.error,'danger'); return; }
-    const m = d.matched||[];
-    document.getElementById('seroSummary').innerHTML =
-      `จับคู่ HN + ชื่อได้ <b style="color:var(--success)">${m.length}</b> คน · จะบันทึกใหม่ <b style="color:var(--accent)">${d.to_write}</b> · ตรงกับผลล่าสุดอยู่แล้ว ${m.length-d.to_write}<br>`+
-      `<b style="color:#c0392b;font-size:1rem">HBsAg + ${d.pos_hbsag} คน · Anti-HCV + ${d.pos_antihcv} คน</b>`;
-    const pr=[];
-    if((d.unmatched||[]).length) pr.push(`<div style="color:var(--danger)">⚠️ ไม่พบ HN ในระบบ ${d.unmatched.length}: ${d.unmatched.slice(0,10).map(u=>u.hn+' '+u.name).join(', ')}</div>`);
-    if((d.name_mismatch||[]).length) pr.push(`<div style="color:var(--danger)">⛔ ชื่อไม่ตรงกับ HN (จะไม่บันทึก) ${d.name_mismatch.length}: ${d.name_mismatch.map(u=>`HN ${u.hn} ไฟล์ "${u.name}" ≠ ระบบ "${u.registered_name}"`).join(' · ')}</div>`);
-    if((d.errors||[]).length) pr.push(`<div style="color:var(--warning)">${d.errors.slice(0,8).join('<br>')}</div>`);
-    document.getElementById('seroProblems').innerHTML = pr.join('') || '<span style="color:var(--success)">✅ ชื่อและ HN ตรงกันทุกราย</span>';
-    const pos = m.filter(x=>x.hbsag==='positive'||x.antihcv==='positive'), rest = m.filter(x=>!(x.hbsag==='positive'||x.antihcv==='positive'));
-    const line = x=>`<div style="padding:3px 0;border-bottom:1px solid var(--border);${x.duplicate?'opacity:.55':''}"><b>HN ${x.hn}</b> ${x.registered_name} — ${x.hbsag?'HBsAg '+SV[x.hbsag]:''} ${x.antihcv?' · Anti-HCV '+SV[x.antihcv]:''} <span style="color:var(--fg-dim)">${x.date}${x.duplicate?' · เหมือนเดิม':''}</span></div>`;
-    document.getElementById('seroChanges').innerHTML = pos.map(line).join('') + (rest.length?`<div style="margin-top:6px;color:var(--fg-muted)">ผลลบ ${rest.length} คน</div>`+rest.map(line).join(''):'');
-    document.getElementById('seroConfirmBtn').disabled = !(d.to_write>0);
-    document.getElementById('seroOverlay').classList.add('open');
-  }).catch(()=>{ inp.value=''; showToast('อ่านไฟล์ไม่สำเร็จ','danger'); });
-}
-function confirmSero(){
-  const btn=document.getElementById('seroConfirmBtn'); btn.disabled=true; btn.textContent='กำลังบันทึก...';
-  _seroPost(true).then(d=>{
-    btn.disabled=false; btn.textContent='✅ ยืนยันบันทึก';
-    if(d.error){ showToast(d.error,'danger'); return; }
-    showToast(`✅ บันทึกผล ${d.written} คน (HBsAg+ ${d.pos_hbsag} · Anti-HCV+ ${d.pos_antihcv}) · ข้ามซ้ำ ${d.skipped_same}`,'success');
-    closeSero(); fetchPatients();
-  }).catch(()=>{ btn.disabled=false; btn.textContent='✅ ยืนยันบันทึก'; showToast('บันทึกไม่สำเร็จ','danger'); });
-}
-function closeSero(){ document.getElementById('seroOverlay').classList.remove('open'); }
-
-function filterIncomplete(){
-  const incomplete = allPatients.filter(isIncomplete);
-  renderPatients(incomplete);
-  document.getElementById('totalPatients').textContent = incomplete.length + '/' + allPatients.length;
-  /* Clear other filters */
-  document.getElementById('searchInput').value = '';
-  document.getElementById('filterSchedule').value = '';
-  document.getElementById('filterAccess').value = '';
+/* ── Deactivate from card ── */
+function deactivate(hn,nm){
+  if(!confirm(`⚠️ ระงับ ${nm} (HN ${hn})?\nข้อมูลจะไม่ถูกลบ สามารถกู้คืนได้`))return;
+  if(!confirm(`ยืนยันอีกครั้ง: ระงับ ${nm}?`))return;
+  hdFetch('/hd/api/v1/patients/'+hn+'/deactivate',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.error){alert(d.error);return;}loadP();});
 }
 
-/* Bind events */
-document.getElementById('searchInput').addEventListener('input', debounceFilter);
-document.getElementById('searchInput').addEventListener('change', filterPatients);
-document.getElementById('filterSchedule').addEventListener('change', filterPatients);
-document.getElementById('filterAccess').addEventListener('change', filterPatients);
-document.getElementById('filterShift').addEventListener('change', filterPatients);
-document.getElementById('filterSero').addEventListener('change', filterPatients);
-function seroBadge(sr, size){
-  if(!sr) return '';
-  const fs = size||'.72rem', out=[];
-  if(sr.hbsag==='positive') out.push(`<span style="color:#c0392b;font-weight:900;font-size:${fs};background:#fdecea;border:1.5px solid #c0392b;border-radius:6px;padding:1px 6px;white-space:nowrap">🩸 HBsAg +</span>`);
-  if(sr.antihcv==='positive') out.push(`<span style="color:#c0392b;font-weight:900;font-size:${fs};background:#fdecea;border:1.5px solid #c0392b;border-radius:6px;padding:1px 6px;white-space:nowrap">🩸 Anti-HCV +</span>`);
-  return out.join(' ');
+/* ── Inactive ── */
+function showInactive(){
+  document.getElementById('inactiveModal').classList.add('open');
+  document.getElementById('inactiveList').innerHTML='กำลังโหลด...';
+  hdFetch('/hd/api/v1/patients/inactive').then(r=>r.json()).then(d=>{
+    const ls=d.patients||[];
+    if(!ls.length){document.getElementById('inactiveList').innerHTML='<div style="color:var(--fg-muted)">ไม่มีคนไข้ที่ระงับ</div>';return;}
+    document.getElementById('inactiveList').innerHTML=ls.map(p=>
+      `<div class="inactive-item"><div><b>${p.patient_name}</b><br><span style="font-size:.72rem;color:var(--fg-muted)">HN ${p.hn} · ${p.vascular_access||'-'} · ${p.schedule_days||'-'}</span></div>
+      <button class="abtn" style="background:#16a34a;color:#fff" onclick="restoreP('${p.hn}')">♻️ กู้คืน</button></div>`
+    ).join('');
+  });
 }
-function seroText(sr){
-  if(!sr) return '<span style="color:var(--fg-dim);font-size:.75rem">ยังไม่มีผล</span>';
-  const p=[];
-  if(sr.hbsag==='positive') p.push('<b style="color:#c0392b;font-size:.95rem">HBsAg +</b>');
-  if(sr.antihcv==='positive') p.push('<b style="color:#c0392b;font-size:.95rem">Anti-HCV +</b>');
-  if(sr.hbsag==='negative') p.push('<span style="color:var(--fg-muted);font-size:.75rem">HBsAg −</span>');
-  if(sr.antihcv==='negative') p.push('<span style="color:var(--fg-muted);font-size:.75rem">Anti-HCV −</span>');
-  return p.join('<br>') || '<span style="color:var(--fg-dim);font-size:.75rem">ยังไม่มีผล</span>';
+function restoreP(hn){
+  hdFetch('/hd/api/v1/patients/'+hn+'/reactivate',{method:'POST'}).then(r=>r.json()).then(d=>{
+    if(d.error){alert(d.error);return;}showInactive();loadP();});
 }
 
+/* ── Roster Import (keep existing) ── */
+let _rosterFile=null;
+function _rosterPost(c){const fd=new FormData();fd.append('file',_rosterFile);fd.append('confirm',c?'1':'0');fd.append('hct_date','');return hdFetch('/hd/api/v1/patients/import-roster',{method:'POST',body:fd}).then(r=>r.json());}
+function previewRoster(){_rosterFile=document.getElementById('rosterFile').files[0];if(!_rosterFile)return;_rosterPost(false).then(d=>{document.getElementById('rosterFile').value='';if(d.error){alert(d.error);return;}document.getElementById('rosterSummary').innerHTML=`พบ <b>${d.total_rows}</b> คน · จับคู่ <b>${d.matched}</b> · อัปเดต <b>${d.to_update}</b>`;document.getElementById('rosterOverlay').classList.add('open');}).catch(()=>alert('อ่านไฟล์ไม่สำเร็จ'));}
+function confirmRoster(){_rosterPost(true).then(d=>{if(d.error){alert(d.error);return;}closeM('rosterOverlay');loadP();}).catch(()=>alert('บันทึกไม่สำเร็จ'));}
 
-fetchPatients();
+let _seroFile=null;
+function _seroPost(c){const fd=new FormData();fd.append('file',_seroFile);fd.append('confirm',c?'1':'0');return hdFetch('/hd/api/v1/labs/serology/import',{method:'POST',body:fd}).then(r=>r.json());}
+function previewSero(){_seroFile=document.getElementById('seroFile').files[0];if(!_seroFile)return;_seroPost(false).then(d=>{document.getElementById('seroFile').value='';if(d.error){alert(d.error);return;}document.getElementById('seroSummary').innerHTML=`จับคู่ <b>${(d.matched||[]).length}</b> · บันทึก <b>${d.to_write}</b> · HBsAg+ ${d.pos_hbsag} · Anti-HCV+ ${d.pos_antihcv}`;document.getElementById('seroOverlay').classList.add('open');}).catch(()=>alert('อ่านไฟล์ไม่สำเร็จ'));}
+function confirmSero(){_seroPost(true).then(d=>{if(d.error){alert(d.error);return;}closeM('seroOverlay');loadP();}).catch(()=>alert('บันทึกไม่สำเร็จ'));}
+
+loadP();
 </script>
 {% endblock %}
