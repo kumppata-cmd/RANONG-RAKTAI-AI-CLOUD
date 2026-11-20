@@ -6463,6 +6463,70 @@ def _ocr_words(img_bytes):
     return words, "tesseract"
 
 
+def _machine_ai_read(img_bytes):
+    """อ่านหน้าจอเครื่องฟอกด้วย Claude Vision — ตัวเลข 7-segment ที่ OCR ปกติอ่านไม่ออก.
+    คืน dict ค่าที่อ่านได้ หรือ None เมื่อไม่มี key/อ่านไม่ได้. รูปไม่ถูกเก็บ."""
+    import os, json as _json, base64, io
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        return None
+    # ย่อรูปให้พอดีกับ API (ด้านยาว ≤1568px, JPEG) — เร็วขึ้นและไม่เกิน limit
+    try:
+        from PIL import Image, ImageOps
+        im = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes))).convert("RGB")
+        if max(im.size) > 1568:
+            im.thumbnail((1568, 1568))
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=85)
+        img_bytes = buf.getvalue()
+    except Exception:
+        pass
+    import requests as _rq
+    prompt = (
+        "นี่คือรูปหน้าจอเครื่องฟอกไต (Nikkiso/Fresenius) อ่านตัวเลขบนจอแล้วตอบเป็น JSON เท่านั้น:\n"
+        '{"uf_removed": <mL หรือ null>, "uf_rate": <mL/hr หรือ null>, "uf_goal": <mL หรือ null>, '
+        '"time_left_min": <นาทีที่เหลือ หรือ null>, "sbp": <หรือ null>, "dbp": <หรือ null>, "bfr": <mL/min หรือ null>}\n'
+        "กติกา: UF REMOVED/VOLUME คือที่ดึงไปแล้ว, UF GOAL/TARGET คือเป้า, UF RATE คืออัตรา — "
+        "ถ้าจอแสดง UF เป็นลิตร (เช่น 2.50) ให้คูณ 1000 เป็น mL. เวลาที่เหลือรูป H:MM ให้แปลงเป็นนาที. "
+        "อ่านไม่ชัดให้ใส่ null ห้ามเดา. ตอบ JSON อย่างเดียว"
+    )
+    body = _json.dumps({
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 300,
+        "messages": [{"role": "user", "content": [
+            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+                                         "data": base64.b64encode(img_bytes).decode()}},
+            {"type": "text", "text": prompt},
+        ]}],
+    }).encode("utf-8")
+    resp = _rq.post("https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    data=body, timeout=45)
+    if resp.status_code != 200:
+        logger.info("machine-screen claude HTTP %s", resp.status_code)
+        return None
+    txt = resp.json()["content"][0]["text"].strip()
+    if txt.startswith("```"):
+        txt = txt.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    raw = _json.loads(txt)
+    # sanity-check ขอบเขตที่เป็นไปได้ — ค่าเพี้ยนตัดทิ้ง
+    sane = {"uf_removed": (0, 8000), "uf_rate": (0, 3000), "uf_goal": (0, 8000),
+            "time_left_min": (0, 600), "sbp": (50, 260), "dbp": (20, 160), "bfr": (50, 500)}
+    out = {}
+    for k, (lo, hi) in sane.items():
+        v = raw.get(k)
+        if v is None:
+            continue
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            continue
+        if lo <= v <= hi:
+            out[k] = int(v) if k != "uf_rate" or v == int(v) else v
+    return out or None
+
+
 @hd_bp.route("/machine-screen/read", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def read_machine_screen():
@@ -6475,6 +6539,21 @@ def read_machine_screen():
     data = f.read()
     if not data or len(data) > 12 * 1024 * 1024:
         return jsonify({"error": "รูปว่างหรือใหญ่เกิน 12 MB"}), 400
+
+    # 1) Claude Vision ก่อน — อ่านจอ 7-segment ได้จริง (OCR เดิมเป็น fallback)
+    try:
+        ai = _machine_ai_read(data)
+    except Exception as e:
+        logger.info("machine-screen claude: %s", type(e).__name__)
+        ai = None
+    if ai:
+        found = [k for k in ("uf_removed", "uf_rate", "uf_goal", "time_left_min", "sbp") if k in ai]
+        if found:
+            log_action(user_id=g.get("hd_user_id"), action="machine_screen.read", resource_type="session",
+                       resource_id=_safe_int(request.form.get("session_id")),
+                       new_values={"engine": "claude-vision", "found": found}, ip_address=request.remote_addr or "")
+            return jsonify({"values": ai, "engine": "claude-vision", "found": found, "words": 0})
+
     words, engine = _ocr_words(data)
     vals = parse_machine_words(words)
     if not any(k in vals for k in ("uf_removed", "uf_rate", "uf_goal")):

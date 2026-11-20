@@ -1790,7 +1790,7 @@ function processVoice(text){
 
   /* ═══ ระดับ 2: คำสั่งกดปุ่ม ═══ */
   if(/^(?:บันทึก|เซฟ|save|record)$/i.test(t.trim())){
-    document.querySelector('[onclick*="saveVital"]')?.click();
+    try{ saveIntraVital(); }catch(e){ document.querySelector('[onclick*="saveIntraVital"]')?.click(); }
     st.innerHTML = '💾 <b>บันทึก Vital Signs!</b>';
     speak('บันทึก Vital Signs แล้ว');
     vLog('💾','บันทึก Vital Signs');
@@ -1845,7 +1845,7 @@ function processVoice(text){
     /* Auto-save ถ้ากรอกครบ BP+HR (Hands-Free mode) */
     if(_handsFreeMode && filled.some(x=>x.startsWith('BP'))){
       setTimeout(()=>{
-        document.querySelector('[onclick*="saveVital"]')?.click();
+        try{ saveIntraVital(); }catch(e){ document.querySelector('[onclick*="saveIntraVital"]')?.click(); }
         speak('บันทึกอัตโนมัติแล้ว');
         vLog('💾','Auto-save vital signs');
       }, 500);
@@ -1867,13 +1867,16 @@ function processVoice(text){
 function _parseMultiValues(t){
   const filled = [];
   let m;
+  /* ค่า vital ลงช่องใน vitalModal (id จริง: modalSbp/modalDbp/modalHr/modalSpo2/modalTemp)
+     — เปิด modal ให้เห็นค่าที่เติม พยาบาลตรวจก่อนสั่ง "บันทึก" */
+  let _vitalFilled = false;
   /* BP */
   m = t.match(/(?:bp|บีพี|ความดัน|blood\s*pressure)\s*(\d{2,3})\s*[\/\s,]\s*(\d{2,3})/i);
   if(m){
     const sbp=parseInt(m[1]), dbp=parseInt(m[2]);
     if(sbp>50 && sbp<300 && dbp>20 && dbp<200){
-      document.getElementById('sbp').value=sbp; document.getElementById('dbp').value=dbp;
-      filled.push(`BP ${sbp}/${dbp}`);
+      document.getElementById('modalSbp').value=sbp; document.getElementById('modalDbp').value=dbp;
+      filled.push(`BP ${sbp}/${dbp}`); _vitalFilled = true;
     }
   }
   /* HR */
@@ -1881,8 +1884,7 @@ function _parseMultiValues(t){
   if(m){
     const hr=parseInt(m[1]);
     if(hr>30 && hr<250){
-      const el=document.getElementById('hr')||document.getElementById('heart_rate');
-      if(el){ el.value=hr; filled.push(`HR ${hr}`); }
+      document.getElementById('modalHr').value=hr; filled.push(`HR ${hr}`); _vitalFilled = true;
     }
   }
   /* SpO2 */
@@ -1890,8 +1892,7 @@ function _parseMultiValues(t){
   if(m){
     const v=parseInt(m[1]);
     if(v>50 && v<=100){
-      const el=document.getElementById('spo2');
-      if(el){ el.value=v; filled.push(`SpO2 ${v}%`); }
+      document.getElementById('modalSpo2').value=v; filled.push(`SpO2 ${v}%`); _vitalFilled = true;
     }
   }
   /* Temp */
@@ -1899,10 +1900,10 @@ function _parseMultiValues(t){
   if(m){
     const v=parseFloat(m[1]);
     if(v>30 && v<42){
-      const el=document.getElementById('temp')||document.getElementById('temperature');
-      if(el){ el.value=v; filled.push(`Temp ${v}°C`); }
+      document.getElementById('modalTemp').value=v; filled.push(`Temp ${v}°C`); _vitalFilled = true;
     }
   }
+  if(_vitalFilled){ try{ openModal('vitalModal'); }catch(e){} }
   /* UF Removed (ระดับ 1) */
   m = t.match(/(?:uf|ยูเอฟ)\s*(\d{1,5})/i);
   if(m){
@@ -1937,11 +1938,11 @@ function _parseMultiValues(t){
 function _voiceSummary(){
   const name = document.getElementById('patientName').textContent || 'ผู้ป่วย';
   const bed = document.getElementById('bedDisplay').textContent || '-';
-  const timer = document.getElementById('dialysisTimer')?.textContent || '-';
+  const timer = document.getElementById('timerDisplay')?.textContent || '-';
   const ufR = document.getElementById('ufRemoved')?.textContent || '0';
   const ufG = document.getElementById('ufGoal')?.textContent || '-';
-  const bp = (document.getElementById('sbp')?.value||'-') + '/' + (document.getElementById('dbp')?.value||'-');
-  const hr = document.getElementById('hr')?.value || document.getElementById('heart_rate')?.value || '-';
+  const bp = (document.getElementById('modalSbp')?.value||'-') + '/' + (document.getElementById('modalDbp')?.value||'-');
+  const hr = document.getElementById('modalHr')?.value || '-';
   const msg = `${name} เตียง ${bed} ฟอกไปแล้ว ${timer} UF ${ufR} จาก ${ufG} มิลลิลิตร BP ล่าสุด ${bp} HR ${hr}`;
   document.getElementById('voiceStatus').innerHTML = `📊 ${msg}`;
   speak(msg);
@@ -1952,7 +1953,7 @@ function _voiceRemaining(){
   const ufR = parseInt(document.getElementById('ufRemoved')?.textContent) || 0;
   const ufG = parseInt(document.getElementById('ufGoal')?.textContent) || 0;
   const rem = ufG - ufR;
-  const timer = document.getElementById('dialysisTimer')?.textContent || '-';
+  const timer = document.getElementById('timerDisplay')?.textContent || '-';
   const msg = `เหลือ UF อีก ${rem} มิลลิลิตร จากเป้า ${ufG} เวลาเหลือ ${timer}`;
   document.getElementById('voiceStatus').innerHTML = `💧 ${msg}`;
   speak(msg);
@@ -1960,7 +1961,7 @@ function _voiceRemaining(){
 }
 
 function _voiceIdh(){
-  const el = document.getElementById('idhRiskPanel');
+  const el = document.getElementById('idhPanel');
   if(!el || el.style.display==='none'){
     speak('ยังไม่มีข้อมูลความเสี่ยง IDH'); return;
   }
@@ -1988,7 +1989,7 @@ function _voiceCoach(){
 function _voiceNotifyDoctor(text){
   const name = document.getElementById('patientName').textContent || 'ผู้ป่วย';
   const bed = document.getElementById('bedDisplay').textContent || '-';
-  const bp = (document.getElementById('sbp')?.value||'-') + '/' + (document.getElementById('dbp')?.value||'-');
+  const bp = (document.getElementById('modalSbp')?.value||'-') + '/' + (document.getElementById('modalDbp')?.value||'-');
   const reason = text.replace(/แจ้ง.*(?:หมอ|แพทย์)/i,'').trim() || `BP ${bp}`;
   const msg = `🚨 เตียง ${bed} ${name}: ${reason}`;
   if(!sessionData.session_id){ speak('ไม่มี session — เริ่มฟอกก่อน'); return; }
@@ -1996,9 +1997,9 @@ function _voiceNotifyDoctor(text){
   speak('กำลังแจ้งแพทย์ทาง LINE');
   /* ส่งผ่าน alert system */
   hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
-    method:'POST', body:JSON.stringify({phase:'intra', sbp:parseInt(document.getElementById('sbp')?.value)||0,
-      dbp:parseInt(document.getElementById('dbp')?.value)||0, hr:parseInt((document.getElementById('hr')||document.getElementById('heart_rate'))?.value)||0,
-      spo2:parseInt(document.getElementById('spo2')?.value)||0})
+    method:'POST', body:JSON.stringify({phase:'intra', sbp:parseInt(document.getElementById('modalSbp')?.value)||0,
+      dbp:parseInt(document.getElementById('modalDbp')?.value)||0, hr:parseInt(document.getElementById('modalHr')?.value)||0,
+      spo2:parseInt(document.getElementById('modalSpo2')?.value)||0})
   }).then(r=>r.json()).then(d=>{
     if(d.alerts && d.alerts.length) speak('ส่ง alert ถึงแพทย์แล้ว');
     else speak('บันทึก vital แล้ว — ค่ายังอยู่ในเกณฑ์ ระบบไม่ส่ง alert');
