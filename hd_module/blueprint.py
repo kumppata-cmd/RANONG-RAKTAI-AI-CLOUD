@@ -5397,6 +5397,164 @@ def list_patients():
         return jsonify({"patients": [], "total": 0, "error": str(e)})
 
 
+# ── Patient Management: CRUD + Lab Summary ────────────────
+
+@hd_bp.route("/patients/<hn>/deactivate", methods=["POST"])
+@require_role("physician", "admin")
+def deactivate_patient(hn):
+    """Soft-delete: is_active = FALSE. ข้อมูลยังอยู่ กู้คืนได้."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE hd_patient_mapping SET is_active = FALSE WHERE hn = %s RETURNING id, patient_name", (hn,))
+        r = cur.fetchone()
+        if not r:
+            conn.close()
+            return jsonify({"error": "ไม่พบ HN"}), 404
+        conn.commit()
+    conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="patient.deactivate", resource_type="patient", resource_id=hn,
+               new_values={"name": r[1]}, ip_address=request.remote_addr)
+    return jsonify({"ok": True, "hn": hn, "name": r[1], "message": f"ระงับ {r[1]} (HN {hn}) แล้ว"})
+
+
+@hd_bp.route("/patients/<hn>/reactivate", methods=["POST"])
+@require_role("physician", "admin")
+def reactivate_patient(hn):
+    """กู้คืนคนไข้ที่ระงับ."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    with conn.cursor() as cur:
+        cur.execute("UPDATE hd_patient_mapping SET is_active = TRUE WHERE hn = %s RETURNING id, patient_name", (hn,))
+        r = cur.fetchone()
+        if not r:
+            conn.close()
+            return jsonify({"error": "ไม่พบ HN"}), 404
+        conn.commit()
+    conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="patient.reactivate", resource_type="patient", resource_id=hn,
+               new_values={"name": r[1]}, ip_address=request.remote_addr)
+    return jsonify({"ok": True, "hn": hn, "name": r[1], "message": f"กู้คืน {r[1]} (HN {hn}) แล้ว"})
+
+
+@hd_bp.route("/patients/<hn>/edit", methods=["POST"])
+@require_role("physician", "admin")
+def edit_patient(hn):
+    """แก้ไขชื่อ, hospital_hn, vascular_access, schedule, DW, shift."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    data = request.get_json(silent=True) or {}
+    allowed = {"patient_name", "hospital_hn", "vascular_access", "schedule_days",
+               "dry_weight", "default_shift", "esa_drug", "esa_dose", "primary_diagnosis"}
+    updates = {k: v for k, v in data.items() if k in allowed and v is not None}
+    if not updates:
+        return jsonify({"error": "ไม่มีข้อมูลที่จะแก้"}), 400
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    with conn.cursor() as cur:
+        sets = ", ".join(f"{k} = %s" for k in updates)
+        vals = list(updates.values()) + [hn]
+        cur.execute(f"UPDATE hd_patient_mapping SET {sets} WHERE hn = %s RETURNING id, patient_name", vals)
+        r = cur.fetchone()
+        if not r:
+            conn.close()
+            return jsonify({"error": "ไม่พบ HN"}), 404
+        conn.commit()
+    conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="patient.edit", resource_type="patient", resource_id=hn,
+               new_values=updates, ip_address=request.remote_addr)
+    return jsonify({"ok": True, "hn": hn, "updated": updates})
+
+
+@hd_bp.route("/patients/create", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def create_patient():
+    """เพิ่มคนไข้ใหม่."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    data = request.get_json(silent=True) or {}
+    hn = (data.get("hn") or "").strip()
+    name = (data.get("patient_name") or "").strip()
+    if not hn or not name:
+        return jsonify({"error": "ต้องระบุ HN และชื่อ-สกุล"}), 400
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+        if cur.fetchone():
+            conn.close()
+            return jsonify({"error": f"HN {hn} มีอยู่แล้ว"}), 409
+        cur.execute("""INSERT INTO hd_patient_mapping (hn, patient_name, hospital_hn, vascular_access,
+                       schedule_days, dry_weight, default_shift, is_active)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE) RETURNING id""",
+                    (hn, name, data.get("hospital_hn", ""), data.get("vascular_access", ""),
+                     data.get("schedule_days", ""), data.get("dry_weight"), data.get("default_shift", "morning")))
+        pid = cur.fetchone()[0]
+        conn.commit()
+    conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="patient.create", resource_type="patient", resource_id=hn,
+               new_values={"name": name, "id": pid}, ip_address=request.remote_addr)
+    return jsonify({"ok": True, "id": pid, "hn": hn, "patient_name": name}), 201
+
+
+@hd_bp.route("/patients/inactive", methods=["GET"])
+@require_role("physician", "admin")
+def list_inactive_patients():
+    """รายชื่อคนไข้ที่ระงับ — สำหรับกู้คืน."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    with conn.cursor() as cur:
+        cur.execute("""SELECT hn, patient_name, hospital_hn, vascular_access, schedule_days
+                       FROM hd_patient_mapping WHERE is_active = FALSE ORDER BY patient_name""")
+        rows = cur.fetchall()
+    conn.close()
+    return jsonify({"patients": [{"hn": r[0], "patient_name": r[1], "hospital_hn": r[2],
+                                   "vascular_access": r[3], "schedule_days": r[4]} for r in rows],
+                    "total": len(rows)})
+
+
+@hd_bp.route("/patients/with-lab-summary", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def patients_with_lab_summary():
+    """รายชื่อคนไข้ + ค่า Lab ล่าสุด (Hb, K+, Kt/V) สำหรับหน้า Lab Index."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"patients": []})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT p.hn, p.patient_name, p.vascular_access, p.schedule_days,
+                                  p.is_active, p.default_shift,
+                                  lb.lab_date, lb.hb, lb.k, lb.ktv
+                           FROM hd_patient_mapping p
+                           LEFT JOIN LATERAL (
+                               SELECT lab_date, hb, k, ktv FROM hd_labs
+                               WHERE patient_id = p.id ORDER BY lab_date DESC NULLS LAST LIMIT 1
+                           ) lb ON TRUE
+                           WHERE p.is_active = TRUE
+                           ORDER BY lb.lab_date ASC NULLS FIRST, p.patient_name""")
+            rows = cur.fetchall()
+        conn.close()
+        patients = []
+        for r in rows:
+            lab_date = r[6].isoformat() if r[6] else None
+            lab_age = (_thai_today() - r[6]).days if r[6] else None
+            patients.append({
+                "hn": r[0], "patient_name": r[1], "vascular_access": r[2],
+                "schedule_days": r[3], "is_active": r[4], "default_shift": r[5],
+                "lab_date": lab_date, "lab_age_days": lab_age,
+                "hb": float(r[7]) if r[7] else None,
+                "k": float(r[8]) if r[8] else None,
+                "ktv": float(r[9]) if r[9] else None,
+            })
+        return jsonify({"patients": patients, "total": len(patients)})
+    except Exception as e:
+        logger.error("patients_with_lab_summary: %s", e)
+        return jsonify({"patients": [], "error": str(e)})
+
+
 WEEK_DAYS = ["จ", "อ", "พ", "พฤ", "ศ", "ส", "อา"]
 SHIFT_ORDER = ["morning", "afternoon", "evening"]
 
