@@ -2890,6 +2890,85 @@ def labs_import_commit():
     return jsonify({"ok": True, **res, "source": source, "patient_notify": notified})
 
 
+@hd_bp.route("/labs/import/template", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def labs_import_template():
+    """แม่แบบ Excel สำหรับกรอกผลแล็บ — เติม HN+ชื่อคนไข้ทุกคนให้แล้ว เจ้าหน้าที่กรอกแค่ตัวเลข.
+    หัวคอลัมน์ตรงกับ parser ของระบบนำเข้า → กรอกเสร็จอัปโหลดกลับได้ทันที. NEW — ไม่แตะของเดิม."""
+    import os, io, psycopg2
+    from flask import send_file
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill, Alignment
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    patients = []
+    if db_url:
+        try:
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("""SELECT hn, patient_name FROM hd_patient_mapping
+                               WHERE is_active = TRUE ORDER BY patient_name""")
+                patients = cur.fetchall()
+            conn.close()
+        except Exception as e:
+            logger.warning("labs_import_template patients: %s", e)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "ผลแล็บ"
+    headers = ["HN", "ชื่อ-สกุล", "วันที่ตรวจ", "Hb(g/dL)", "Hct(%)", "K", "Na", "Ca", "P",
+               "Alb", "iPTH", "Ferritin", "TSAT", "BUN", "Cr", "Kt/V", "URR", "HBsAg", "Anti-HCV"]
+    ws.append(headers)
+    hdr_fill = PatternFill("solid", fgColor="1F6FB2")
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = hdr_fill
+        c.alignment = Alignment(horizontal="center")
+    today_str = _thai_today().strftime("%d/%m/%Y")
+    for hn, name in patients:
+        ws.append([hn, name, today_str] + [None] * (len(headers) - 3))
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 28
+    ws.column_dimensions["C"].width = 12
+    for col in "DEFGHIJKLMNOPQRS":
+        ws.column_dimensions[col].width = 9
+    ws.freeze_panes = "A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"lab_template_{_thai_today().isoformat()}.xlsx"
+    return send_file(buf, as_attachment=True, download_name=fname,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+@hd_bp.route("/labs/import/history", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def labs_import_history():
+    """ประวัติการนำเข้าผลแล็บ (group ตาม source) — ไฟล์ไหน เมื่อไหร่ กี่รายการ. NEW — ไม่แตะของเดิม."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"imports": []})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT source, COUNT(*), MIN(lab_date), MAX(lab_date), MAX(created_at),
+                                  COUNT(DISTINCT patient_id)
+                           FROM hd_lab_results
+                           WHERE source LIKE 'import:%%' OR source = 'excel_import'
+                           GROUP BY source ORDER BY MAX(created_at) DESC NULLS LAST LIMIT 20""")
+            rows = cur.fetchall()
+        conn.close()
+        return jsonify({"imports": [{
+            "source": r[0], "rows": r[1],
+            "lab_date_from": r[2].isoformat() if r[2] else None,
+            "lab_date_to": r[3].isoformat() if r[3] else None,
+            "imported_at": r[4].isoformat() if r[4] else None,
+            "patients": r[5],
+        } for r in rows]})
+    except Exception as e:
+        logger.error("labs_import_history: %s", e)
+        return jsonify({"imports": [], "error": str(e)})
+
+
 @hd_bp.route("/labs/sync", methods=["POST"])
 @require_role("physician", "admin")
 def labs_sync_now():

@@ -106,14 +106,24 @@
 
 <!-- Import Excel Modal -->
 <div class="modal-bg" id="importModal">
-  <div class="modal">
+  <div class="modal" style="max-width:580px">
     <h3>📥 นำเข้าผล Lab จาก Excel</h3>
-    <p style="font-size:.8rem;color:var(--fg-muted);margin:0 0 10px">อัปโหลดไฟล์ .xlsx หรือ .csv ที่มีคอลัมน์ HN, วันที่, Hb, Hct, K, Na ฯลฯ<br>ระบบจะจับคู่ HN อัตโนมัติ — แสดงตัวอย่างก่อนบันทึก</p>
-    <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;font-size:.85rem;background:var(--bg);color:var(--fg)">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+      <button class="btn-sm" style="background:#0d6efd;color:#fff;padding:8px 12px" onclick="downloadTemplate()">📄 ดาวน์โหลดแม่แบบ (มีชื่อคนไข้ครบ)</button>
+      <button class="btn-sm" style="background:var(--border);color:var(--fg);padding:8px 12px" onclick="toggleImportHistory()">🕐 ประวัติการนำเข้า</button>
+    </div>
+    <div id="importHistory" style="display:none;font-size:.75rem;max-height:140px;overflow-y:auto;margin-bottom:10px;border:1px solid var(--border);border-radius:8px;padding:8px">กำลังโหลด...</div>
+    <div id="dropZone" onclick="document.getElementById('importFile').click()"
+         style="border:2px dashed var(--border);border-radius:12px;padding:22px;text-align:center;cursor:pointer;font-size:.85rem;color:var(--fg-muted);transition:border-color .2s">
+      📂 ลากไฟล์มาวางที่นี่ หรือ <u>กดเพื่อเลือกไฟล์</u><br>
+      <span style="font-size:.72rem">(.xlsx หรือ .csv — มีคอลัมน์ HN, วันที่, Hb, K ฯลฯ ระบบจับคู่ HN + กันข้อมูลซ้ำอัตโนมัติ)</span>
+      <div id="dropFileName" style="margin-top:6px;font-weight:700;color:var(--fg)"></div>
+    </div>
+    <input type="file" id="importFile" accept=".xlsx,.xls,.csv" style="display:none" onchange="onImportFileChosen()">
     <div id="importStatus" style="font-size:.8rem;margin-top:8px;min-height:20px"></div>
-    <div id="importPreview" style="font-size:.78rem;max-height:200px;overflow-y:auto;margin-top:8px;display:none"></div>
+    <div id="importPreview" style="font-size:.78rem;max-height:240px;overflow-y:auto;margin-top:8px;display:none"></div>
     <div class="btn-row">
-      <button class="btn-cancel" onclick="closeModal('importModal')">ยกเลิก</button>
+      <button class="btn-cancel" onclick="closeModal('importModal')">ปิด</button>
       <button class="btn-primary" id="btnImportPreview" onclick="previewImport()">ดูตัวอย่าง</button>
       <button class="btn-primary" id="btnImportCommit" onclick="commitImport()" style="display:none;background:#198754">✅ บันทึก</button>
     </div>
@@ -317,9 +327,67 @@ function restorePatient(hn){
   });
 }
 
-/* ── Import Excel ── */
+/* ── Import Excel (v2: template, drag&drop, abnormal highlight, history) ── */
 let _importData = null;
-function openImportModal(){ _importData=null; document.getElementById('importFile').value=''; document.getElementById('importStatus').innerHTML=''; document.getElementById('importPreview').style.display='none'; document.getElementById('btnImportCommit').style.display='none'; document.getElementById('btnImportPreview').style.display=''; document.getElementById('importModal').classList.add('open'); }
+function openImportModal(){ _importData=null; document.getElementById('importFile').value=''; document.getElementById('dropFileName').textContent=''; document.getElementById('importStatus').innerHTML=''; document.getElementById('importPreview').style.display='none'; document.getElementById('importHistory').style.display='none'; document.getElementById('btnImportCommit').style.display='none'; document.getElementById('btnImportPreview').style.display=''; document.getElementById('importModal').classList.add('open'); _setupDropZone(); }
+
+function downloadTemplate(){
+  document.getElementById('importStatus').innerHTML='<span style="color:var(--accent)">⏳ กำลังสร้างแม่แบบ...</span>';
+  hdFetch('/hd/api/v1/labs/import/template').then(r=>{
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return r.blob();
+  }).then(b=>{
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(b);
+    a.download='lab_template_'+new Date().toISOString().slice(0,10)+'.xlsx';
+    a.click(); URL.revokeObjectURL(a.href);
+    document.getElementById('importStatus').innerHTML='<span style="color:var(--success)">✅ ดาวน์โหลดแม่แบบแล้ว — กรอกตัวเลขแล้วอัปโหลดกลับได้เลย</span>';
+  }).catch(e=>{document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">❌ สร้างแม่แบบไม่สำเร็จ: '+(e.message||e)+'</span>';});
+}
+
+function toggleImportHistory(){
+  const el=document.getElementById('importHistory');
+  if(el.style.display==='none'){
+    el.style.display='block'; el.innerHTML='⏳ กำลังโหลด...';
+    hdFetch('/hd/api/v1/labs/import/history').then(r=>r.json()).then(d=>{
+      const im=d.imports||[];
+      if(!im.length){el.innerHTML='<span style="color:var(--fg-muted)">ยังไม่เคยนำเข้า</span>';return;}
+      el.innerHTML='<table style="width:100%;border-collapse:collapse"><thead><tr><th style="text-align:left">ไฟล์</th><th>รายการ</th><th>คนไข้</th><th>วันที่ Lab</th><th>นำเข้าเมื่อ</th></tr></thead><tbody>'+
+        im.map(h=>`<tr style="border-bottom:1px solid var(--border)"><td>${(h.source||'').replace('import:','')}</td><td style="text-align:center">${h.rows}</td><td style="text-align:center">${h.patients}</td><td style="text-align:center">${h.lab_date_from===h.lab_date_to?(h.lab_date_from||'-'):(h.lab_date_from+' → '+h.lab_date_to)}</td><td style="text-align:center">${h.imported_at?h.imported_at.slice(0,10):'-'}</td></tr>`).join('')+'</tbody></table>';
+    }).catch(()=>{el.innerHTML='<span style="color:var(--danger)">โหลดไม่สำเร็จ</span>';});
+  } else el.style.display='none';
+}
+
+function _setupDropZone(){
+  const dz=document.getElementById('dropZone');
+  if(dz._ready) return; dz._ready=true;
+  ['dragenter','dragover'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.style.borderColor='#0d6efd';}));
+  ['dragleave','drop'].forEach(ev=>dz.addEventListener(ev,e=>{e.preventDefault();dz.style.borderColor='var(--border)';}));
+  dz.addEventListener('drop',e=>{
+    const f=e.dataTransfer.files&&e.dataTransfer.files[0];
+    if(!f) return;
+    const dt=new DataTransfer(); dt.items.add(f);
+    document.getElementById('importFile').files=dt.files;
+    onImportFileChosen();
+  });
+}
+function onImportFileChosen(){
+  const f=document.getElementById('importFile').files[0];
+  if(!f) return;
+  document.getElementById('dropFileName').textContent='📄 '+f.name+' ('+Math.round(f.size/1024)+' KB)';
+  previewImport(); /* auto-preview ทันทีที่เลือกไฟล์ */
+}
+
+function _abn(field,v){ /* abnormal check → css color or '' */
+  if(v==null||v==='') return '';
+  const n=parseFloat(v); if(isNaN(n)) return '';
+  if(field==='hb') return n<10?'color:#e74c3c;font-weight:700':(n>12?'color:#e67e22;font-weight:700':'');
+  if(field==='k') return n>=6?'color:#e74c3c;font-weight:700':(n>=5.5?'color:#e67e22;font-weight:700':'');
+  if(field==='po4') return n>5.5?'color:#e67e22;font-weight:700':'';
+  if(field==='ktv') return n<1.2?'color:#e67e22;font-weight:700':'';
+  return '';
+}
+
 function previewImport(){
   const file = document.getElementById('importFile').files[0];
   if(!file){document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">เลือกไฟล์ก่อน</span>';return;}
@@ -332,28 +400,50 @@ function previewImport(){
     const ok = (d.matched||[]).filter(r=>!r.duplicate).length;
     document.getElementById('importStatus').innerHTML=
       `<span style="color:var(--success)">✅ พบ ${d.matched.length} แถว — บันทึกได้ ${ok} (ซ้ำ ${dup})</span>` +
-      (d.unmatched&&d.unmatched.length ? `<br><span style="color:#e67e22">⚠️ จับคู่ไม่ได้ ${d.unmatched.length} แถว</span>` : '') +
-      (d.errors&&d.errors.length ? `<br><span style="color:var(--danger)">${d.errors.join('; ')}</span>` : '');
-    // Show preview table
+      (d.unmatched&&d.unmatched.length ? `<br><span style="color:#e67e22">⚠️ จับคู่ HN ไม่ได้ ${d.unmatched.length} แถว: ${d.unmatched.slice(0,5).map(u=>u.hn).join(', ')}${d.unmatched.length>5?'…':''}</span>` : '') +
+      (d.errors&&d.errors.length ? `<br><span style="color:var(--danger)">${d.errors.slice(0,5).join('; ')}</span>` : '');
     const prev = document.getElementById('importPreview');
     if(d.matched&&d.matched.length){
       prev.style.display='block';
-      prev.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:.72rem"><thead><tr><th>HN</th><th>ชื่อ</th><th>วันที่</th><th>Hb</th><th>K</th><th>สถานะ</th></tr></thead><tbody>' +
-        d.matched.slice(0,20).map(r=>`<tr style="border-bottom:1px solid var(--border)"><td>${r.hn||''}</td><td>${r.name||''}</td><td>${r.lab_date||''}</td><td>${r.hemoglobin||'-'}</td><td>${r.potassium||'-'}</td><td>${r.duplicate?'<span style="color:#e67e22">ซ้ำ</span>':'<span style="color:var(--success)">ใหม่</span>'}</td></tr>`).join('') +
-        '</tbody></table>' + (d.matched.length>20?`<div style="color:var(--fg-muted);margin-top:4px">...และอีก ${d.matched.length-20} แถว</div>`:'');
+      prev.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:.72rem"><thead><tr><th>HN</th><th style="text-align:left">ชื่อ</th><th>วันที่</th><th>Hb</th><th>K</th><th>PO4</th><th>Kt/V</th><th>สถานะ</th></tr></thead><tbody>' +
+        d.matched.slice(0,30).map(r=>`<tr style="border-bottom:1px solid var(--border)${r.duplicate?';opacity:.55':''}">
+          <td>${r.hn||''}</td><td>${r.name||r.registered_name||''}</td><td>${r.lab_date||''}</td>
+          <td style="text-align:center;${_abn('hb',r.hemoglobin)}">${r.hemoglobin??'-'}</td>
+          <td style="text-align:center;${_abn('k',r.potassium)}">${r.potassium??'-'}</td>
+          <td style="text-align:center;${_abn('po4',r.phosphate)}">${r.phosphate??'-'}</td>
+          <td style="text-align:center;${_abn('ktv',r.kt_v)}">${r.kt_v??'-'}</td>
+          <td style="text-align:center">${r.duplicate?'<span style="color:#e67e22">ซ้ำ</span>':'<span style="color:var(--success)">ใหม่</span>'}</td></tr>`).join('') +
+        '</tbody></table>' + (d.matched.length>30?`<div style="color:var(--fg-muted);margin-top:4px">...และอีก ${d.matched.length-30} แถว</div>`:'');
     }
     if(ok>0){document.getElementById('btnImportCommit').style.display='';document.getElementById('btnImportPreview').style.display='none';}
   }).catch(e=>{document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">❌ '+e.message+'</span>';});
 }
+
 function commitImport(){
   if(!_importData||!_importData.rows){return;}
   document.getElementById('importStatus').innerHTML='<span style="color:var(--accent)">⏳ กำลังบันทึก...</span>';
+  const rows=_importData.rows.filter(r=>!r.duplicate);
   hdFetch('/hd/api/v1/labs/import/commit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(_importData)}).then(r=>r.json()).then(d=>{
     if(d.error){document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">❌ '+d.error+'</span>';return;}
-    document.getElementById('importStatus').innerHTML=`<span style="color:var(--success)">✅ บันทึกสำเร็จ ${d.inserted||0} รายการ (ข้าม ${d.skipped||0})</span>`;
+    /* สรุปค่าผิดปกติหลังบันทึก — ให้พยาบาล/หมอเห็นทันทีว่าใครต้องตามด่วน */
+    const hbLow=rows.filter(r=>r.hemoglobin!=null&&r.hemoglobin<10);
+    const kHigh=rows.filter(r=>r.potassium!=null&&r.potassium>=5.5);
+    const po4High=rows.filter(r=>r.phosphate!=null&&r.phosphate>5.5);
+    const ktvLow=rows.filter(r=>r.kt_v!=null&&r.kt_v<1.2);
+    let abn='';
+    const nameOf=r=>(r.name||r.registered_name||r.hn);
+    if(hbLow.length) abn+=`<br>🩸 <b style="color:#e74c3c">Hb &lt;10:</b> ${hbLow.slice(0,8).map(nameOf).join(', ')}${hbLow.length>8?' +'+(hbLow.length-8):''}`;
+    if(kHigh.length) abn+=`<br>⚡ <b style="color:#e74c3c">K ≥5.5:</b> ${kHigh.slice(0,8).map(nameOf).join(', ')}${kHigh.length>8?' +'+(kHigh.length-8):''}`;
+    if(po4High.length) abn+=`<br>🦴 <b style="color:#e67e22">PO4 &gt;5.5:</b> ${po4High.slice(0,8).map(nameOf).join(', ')}${po4High.length>8?' +'+(po4High.length-8):''}`;
+    if(ktvLow.length) abn+=`<br>🧪 <b style="color:#e67e22">Kt/V &lt;1.2:</b> ${ktvLow.slice(0,8).map(nameOf).join(', ')}${ktvLow.length>8?' +'+(ktvLow.length-8):''}`;
+    document.getElementById('importStatus').innerHTML=`<span style="color:var(--success)">✅ บันทึกสำเร็จ ${d.inserted||0} รายการ (ข้าม ${d.skipped||0})</span>`+
+      (d.patient_notify?`<br>📱 แจ้งคนไข้ทาง LINE แล้ว ${d.patient_notify} คน`:'')+
+      (abn?`<div style="margin-top:6px;padding:8px;border-radius:8px;background:rgba(231,76,60,.07)"><b>⚠️ ค่าผิดปกติที่ควรตาม:</b>${abn}</div>`:'');
     document.getElementById('btnImportCommit').style.display='none';
+    document.getElementById('importPreview').style.display='none';
     _importData=null;
-    setTimeout(()=>{closeModal('importModal');loadPatients();},1500);
+    loadPatients();
+    if(!abn) setTimeout(()=>{closeModal('importModal');},1800); /* มีค่าผิดปกติ → ค้างไว้ให้อ่าน กดปิดเอง */
   }).catch(e=>{document.getElementById('importStatus').innerHTML='<span style="color:var(--danger)">❌ '+e.message+'</span>';});
 }
 
