@@ -107,12 +107,34 @@ const ROLE = (function(){ try{const t=localStorage.getItem('hd_token');if(!t)ret
 const isAdmin = ROLE === 'admin' || ROLE === 'physician';
 
 function loadPatients(){
-  hdFetch('/hd/api/v1/patients/with-lab-summary').then(r=>r.json()).then(data=>{
+  hdFetch('/hd/api/v1/patients/with-lab-summary').then(r=>{
+    if(!r.ok) throw new Error('API '+r.status);
+    return r.json();
+  }).then(data=>{
+    if(data.error) console.warn('with-lab-summary error:', data.error);
     _patients = data.patients || [];
+    if(_patients.length){
+      renderStats();
+      renderPatients(_patients);
+    } else {
+      /* Fallback: use basic /patients API */
+      _loadBasicPatients();
+    }
+  }).catch(()=>{
+    _loadBasicPatients();
+  });
+}
+function _loadBasicPatients(){
+  hdFetch('/hd/api/v1/patients').then(r=>r.ok?r.json():Promise.reject()).then(data=>{
+    _patients = (data.patients||[]).map(p=>({
+      hn: p.hn, patient_name: p.patient_name, vascular_access: p.vascular_access,
+      schedule_days: p.schedule_days, default_shift: p.default_shift,
+      hb: null, k: null, ktv: null, lab_date: null, lab_age_days: null
+    }));
     renderStats();
     renderPatients(_patients);
   }).catch(()=>{
-    document.getElementById('patientList').innerHTML='<div style="text-align:center;color:var(--danger);grid-column:1/-1;">โหลดไม่ได้</div>';
+    document.getElementById('patientList').innerHTML='<div style="text-align:center;color:var(--danger);grid-column:1/-1;">⚠️ โหลดข้อมูลไม่ได้ — ลอง refresh หรือ login ใหม่</div>';
   });
 }
 

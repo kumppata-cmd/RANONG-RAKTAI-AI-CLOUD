@@ -5544,18 +5544,36 @@ def patients_with_lab_summary():
         return jsonify({"patients": []})
     try:
         conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True  # each query independent — one fail doesn't break the rest
         with conn.cursor() as cur:
-            cur.execute("""SELECT p.hn, p.patient_name, p.vascular_access, p.schedule_days,
-                                  p.is_active, p.default_shift,
-                                  lb.lab_date, lb.hb, lb.k, lb.ktv
-                           FROM hd_patient_mapping p
-                           LEFT JOIN LATERAL (
-                               SELECT lab_date, hb, k, ktv FROM hd_labs
-                               WHERE patient_id = p.id ORDER BY lab_date DESC NULLS LAST LIMIT 1
-                           ) lb ON TRUE
-                           WHERE p.is_active = TRUE
-                           ORDER BY lb.lab_date ASC NULLS FIRST, p.patient_name""")
-            rows = cur.fetchall()
+            # Try full query with hd_labs VIEW first
+            rows = None
+            try:
+                cur.execute("""SELECT p.hn, p.patient_name, p.vascular_access, p.schedule_days,
+                                      p.is_active, p.default_shift,
+                                      lb.lab_date, lb.hb, lb.k, lb.ktv
+                               FROM hd_patient_mapping p
+                               LEFT JOIN LATERAL (
+                                   SELECT lab_date, hb, k, ktv FROM hd_labs
+                                   WHERE patient_id = p.id ORDER BY lab_date DESC NULLS LAST LIMIT 1
+                               ) lb ON TRUE
+                               WHERE p.is_active = TRUE
+                               ORDER BY lb.lab_date ASC NULLS FIRST, p.patient_name""")
+                rows = cur.fetchall()
+            except Exception as view_err:
+                logger.warning("with-lab-summary: hd_labs VIEW failed (%s), falling back to basic query", view_err)
+            # Fallback: just patient list without lab data
+            if rows is None:
+                try:
+                    cur.execute("""SELECT hn, patient_name, vascular_access, schedule_days,
+                                         is_active, NULL::VARCHAR,
+                                         NULL::DATE, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC
+                                  FROM hd_patient_mapping WHERE is_active = TRUE
+                                  ORDER BY patient_name""")
+                    rows = cur.fetchall()
+                except Exception as e2:
+                    logger.error("with-lab-summary fallback also failed: %s", e2)
+                    rows = []
         conn.close()
         patients = []
         for r in rows:
