@@ -629,7 +629,7 @@ class TestHdWebRoutes(unittest.TestCase):
     def test_patient_list_page_renders(self):
         resp = self.client.get("/hd/patients")
         self.assertEqual(resp.status_code, 200)
-        self.assertIn("patient-table".encode(), resp.data)
+        self.assertIn(b"patientGrid", resp.data)
 
     def test_alerts_page_renders(self):
         resp = self.client.get("/hd/alerts")
