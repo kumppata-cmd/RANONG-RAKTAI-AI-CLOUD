@@ -362,12 +362,13 @@
     </button>
   </div>
   <div style="text-align:center;margin-bottom:16px">
-    <button id="voiceBtn" onclick="toggleVoice()" class="btn" style="padding:10px 20px;border-radius:30px;background:linear-gradient(135deg,#7c3aed,#1e40af);color:#fff;font-size:.85rem">
+    <button id="voiceBtn" onclick="toggleVoice()" class="btn" style="padding:6px 14px;border-radius:20px;background:linear-gradient(135deg,#7c3aed,#1e40af);color:#fff;font-size:.72rem">
       🎤 สั่งด้วยเสียง
     </button>
-    <button id="handsFreeBtn" onclick="toggleHandsFree()" class="btn" style="padding:10px 16px;border-radius:30px;background:linear-gradient(135deg,#059669,#047857);color:#fff;font-size:.78rem;margin-left:6px">
+    <button id="handsFreeBtn" onclick="toggleHandsFree()" class="btn" style="padding:6px 12px;border-radius:20px;background:linear-gradient(135deg,#059669,#047857);color:#fff;font-size:.72rem;margin-left:6px">
       🙌 Hands-Free
     </button>
+    <span style="font-size:.62rem;color:var(--fg-muted);margin-left:4px">(ทดลอง — ใช้ใน Chrome)</span>
     <div id="voiceStatus" style="font-size:.78rem;margin-top:4px;color:var(--fg-muted);display:none"></div>
     <div id="voiceLog" style="font-size:.72rem;margin-top:2px;color:var(--fg-dim);max-height:60px;overflow-y:auto;display:none"></div>
   </div>
@@ -1644,10 +1645,30 @@ const _hasTTS = !!_TTS;
 /* ── Core: Start / Stop Voice ── */
 function toggleVoice(){
   if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)){
-    showToast('เบราว์เซอร์ไม่รองรับ Voice — ใช้ Chrome หรือ Safari','danger'); return;
+    const st0 = document.getElementById('voiceStatus');
+    st0.style.display='block';
+    st0.innerHTML = '❌ เบราว์เซอร์นี้ไม่รองรับการสั่งด้วยเสียง<br>📱 เปิดหน้านี้ใน <b>Google Chrome</b> แล้วลองใหม่';
+    showToast('ใช้ Google Chrome เพื่อสั่งด้วยเสียง','danger'); return;
   }
   if(voiceActive){ stopVoice(); return; }
   startVoice();
+}
+
+/* แปล error ของระบบเสียงเป็นคำแนะนำภาษาไทยที่ทำตามได้ */
+function _voiceErrTh(code){
+  switch(code){
+    case 'not-allowed':
+    case 'service-not-allowed':
+      return '🎤 ยังไม่ได้อนุญาตไมโครโฟน<br>👉 แตะไอคอน 🔒 ข้างช่อง URL → การตั้งค่าเว็บไซต์ → <b>ไมโครโฟน → อนุญาต</b> แล้วกดปุ่ม 🎤 ใหม่<br>(ถ้าใช้ Samsung Internet ให้เปิดหน้านี้ใน <b>Chrome</b>)';
+    case 'audio-capture':
+      return '🎤 ไม่พบไมโครโฟนในอุปกรณ์นี้ — ตรวจว่าไมค์ไม่ถูกแอปอื่นใช้อยู่';
+    case 'network':
+      return '📶 เครือข่ายขัดข้อง — ระบบรู้จำเสียงต้องใช้อินเทอร์เน็ต ลองใหม่อีกครั้ง';
+    case 'language-not-supported':
+      return '🗣️ อุปกรณ์นี้ไม่รองรับรู้จำเสียงภาษาไทย — ใช้ Chrome บน Android';
+    default:
+      return '❌ ระบบเสียงขัดข้อง (' + code + ') — กดปุ่ม 🎤 เพื่อลองใหม่';
+  }
 }
 
 function startVoice(){
@@ -1672,7 +1693,18 @@ function startVoice(){
     if(final) processVoice(final.trim());
   };
   recognition.onerror = function(e){
-    if(e.error !== 'no-speech') st.textContent = '❌ ' + e.error;
+    if(e.error === 'no-speech' || e.error === 'aborted') return;
+    st.style.display = 'block';
+    st.innerHTML = _voiceErrTh(e.error);
+    if(e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'audio-capture' || e.error === 'language-not-supported'){
+      /* ปัญหาที่ลองซ้ำเองไม่หาย — หยุดฟัง กันวนลูป error แต่คงคำแนะนำไว้บนจอ */
+      voiceActive = false;
+      if(_handsFreeMode) stopHandsFree();
+      try{ recognition.stop(); }catch(_e){}
+      const b = document.getElementById('voiceBtn');
+      b.style.background = 'linear-gradient(135deg,#7c3aed,#1e40af)';
+      b.textContent = '🎤 สั่งด้วยเสียง';
+    }
   };
   recognition.onend = function(){ if(voiceActive) try{ recognition.start(); }catch(e){} };
   recognition.start();
