@@ -115,6 +115,19 @@ body.tv-mode .ac-head { font-size: 1.1rem; }
 .bed-age.due { color: var(--warning); background: rgba(243,156,18,.15); }
 .bed-age.overdue { color: var(--danger); background: rgba(231,76,60,.15); animation: pulse-border 1.5s infinite; }
 .bed-card.vital-overdue { border-color: var(--warning); }
+/* 🚨 Critical bed pulse */
+.bed-card.bed-pulse { animation: bedPulse 1.4s ease-in-out infinite; }
+@keyframes bedPulse { 0%,100%{box-shadow:0 0 0 0 rgba(231,76,60,.45)} 50%{box-shadow:0 0 0 7px rgba(231,76,60,0)} }
+.bed-card.bed-flash { outline: 3px solid var(--danger); transition: outline .3s; }
+/* 📺 TV Mode — จอใหญ่ติดผนัง อ่านข้ามห้องได้ */
+body.tv-mode .bed-grid { grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)) !important; gap: 14px; }
+body.tv-mode .bed-card .bed-num { font-size: 2.1rem; }
+body.tv-mode .bed-card .bed-patient { font-size: 1.05rem; font-weight: 700; }
+body.tv-mode .bed-card .bed-hn, body.tv-mode .bed-card .bed-vitals { font-size: .85rem; }
+body.tv-mode .bed-card .bed-time { font-size: 1rem; }
+body.tv-mode .bed-card .bed-status { font-size: .9rem; }
+body.tv-mode #alertStrip { font-size: 1.05rem; padding: 12px 16px; }
+body.tv-mode #todayPatientsList, body.tv-mode .quick-vital-btn { display: none !important; }
 .bed-uf { margin-top: 4px; }
 .bed-uf .bar { height: 5px; border-radius: 3px; background: rgba(127,140,141,.2); overflow: hidden; }
 .bed-uf .fill { height: 100%; background: var(--accent); border-radius: 3px; }
@@ -170,8 +183,10 @@ body.tv-mode .ac-head { font-size: 1.1rem; }
 <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center;">
   <button class="shift-btn active" id="viewSingle" onclick="setViewMode('single')">🔘 รอบเดียว</button>
   <button class="shift-btn" id="viewAll" onclick="setViewMode('all')">📊 ดูทุกรอบ (RNRT)</button>
-  <button class="btn btn-outline" onclick="shiftHandover()" style="margin-left:auto;color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่งเวร</button>
+  <button class="btn btn-outline" onclick="openShiftSummary()" style="margin-left:auto;color:var(--success);border-color:var(--success);font-size:.8rem;">🏁 สรุปเวร</button>
+  <button class="btn btn-outline" onclick="shiftHandover()" style="color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่งเวร</button>
   <button class="btn btn-outline" onclick="autoAssignBeds()" style="color:var(--info);border-color:var(--info);font-size:.8rem;">🤖 จัดเตียง</button>
+  <button class="btn btn-outline" onclick="toggleTvMode()" id="tvModeBtn" style="font-size:.8rem;">📺 TV</button>
   <a id="newSessionLink" href="/hd/session/new" class="btn btn-success" style="font-size:.85rem;" onclick="this.href='/hd/session/new?shift='+currentShift">➕ เริ่มฟอก</a>
 </div>
 
@@ -193,6 +208,9 @@ body.tv-mode .ac-head { font-size: 1.1rem; }
 </div>
 
 <!-- Single Shift Bed Grid -->
+<!-- 🚨 Alert strip: เตียงที่ต้องดูด่วน — แตะเพื่อเลื่อนไปที่เตียง -->
+<div id="alertStrip" style="display:none;margin-bottom:10px;padding:8px 12px;border-radius:12px;background:rgba(231,76,60,.08);border:1px solid rgba(231,76,60,.3);font-size:.82rem;font-weight:700;display:none;flex-wrap:wrap;gap:8px;align-items:center"></div>
+
 <div class="bed-grid" id="bedGrid">
   {% for i in range(1, config.TOTAL_BEDS + 1 if config else 26) %}
   <div class="bed-card bed-available" onclick="window.location.href='/hd/session/new?bed={{ i }}&shift='+currentShift">
@@ -452,15 +470,16 @@ function ackFromCenter(id){
 
 function renderBeds(beds){
   const grid = document.getElementById('bedGrid');
-  grid.innerHTML = '';
+  grid.querySelectorAll('.bed-error').forEach(e=>e.remove());
+  const _seenKeys = new Set();
+  const _alertBeds = [];
   let counts = {active:0, pre:0, available:0, warning:0, critical:0};
   beds.forEach(b => {
     const s = STATUS_MAP[b.status] || STATUS_MAP.available;
-    const card = document.createElement('div');
-    card.className = 'bed-card ' + s.cls;
+    let _cls = 'bed-card ' + s.cls;
     /* Quick-action: กดเตียง → เปิด session ทันที */
     const hn = b.patient_hn || (b.patient && b.patient.hn) || '';
-    card.onclick = () => {
+    const _onclick = () => {
       if(b.session_id) window.location.href='/hd/session/'+b.session_id;
       else {
         let url = '/hd/session/new?bed='+b.bed_number+'&shift='+currentShift;
@@ -590,10 +609,25 @@ function renderBeds(beds){
         filterContent = `${dialyzerBadge}${anticoagBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${ufWatchLine(b)}${idhLine(b)}${checklist(b)}${labLine(b)}`;
     }
     if(b.status === 'available') filterContent = '';   /* เตียงว่าง: ไม่ต้องขึ้น "ไม่มีข้อมูล" */
-    if(vitalAgeMin(b) !== null && vitalAgeMin(b) >= VITAL_DUE_MIN && (b.status==='active')) card.classList.add('vital-overdue');
+    if(vitalAgeMin(b) !== null && vitalAgeMin(b) >= VITAL_DUE_MIN && (b.status==='active')) _cls += ' vital-overdue';
+    if(b.status==='critical') _cls += ' bed-pulse';
+    if(b.status==='critical' || b.status==='warning'){
+      _alertBeds.push({bed:b.bed_number, status:b.status,
+        reason: b.alert_reason || (b.alerts&&b.alerts[0]&&b.alerts[0].title) || ''});
+    }
 
-    card.innerHTML = `
-      <div class="bed-num">${b.bed_number}</div>
+    /* ⏳ Progress ring: % เวลาฟอกที่ผ่านไป รอบเลขเตียง */
+    let bedNumHtml = `<div class="bed-num">${b.bed_number}</div>`;
+    if(b.start_time && (b.status==='active'||b.status==='warning'||b.status==='critical')){
+      let st2 = b.start_time;
+      if(st2 && !st2.endsWith('Z') && !st2.includes('+')) st2 += 'Z';
+      const pct = Math.max(0, Math.min(1, (Date.now() - new Date(st2).getTime()) / ((b.duration_hours||4)*3600000)));
+      const rc = b.status==='critical' ? 'var(--danger)' : (b.status==='warning' ? 'var(--warning)' : 'var(--success)');
+      bedNumHtml = `<div class="bed-num" style="display:flex;align-items:center;gap:7px"><svg width="34" height="34" viewBox="0 0 36 36" style="flex:none"><circle cx="18" cy="18" r="15" fill="none" stroke="var(--border)" stroke-width="4"/><circle cx="18" cy="18" r="15" fill="none" stroke="${rc}" stroke-width="4" stroke-linecap="round" stroke-dasharray="${(pct*94.2).toFixed(1)} 94.2" transform="rotate(-90 18 18)"/><text x="18" y="22" text-anchor="middle" font-size="11" font-weight="800" fill="${rc}">${Math.round(pct*100)}</text></svg><span>${b.bed_number}</span></div>`;
+    }
+
+    const inner = `
+      ${bedNumHtml}
       <div class="bed-patient">${pName}${seroBadge(b.serology,'.68rem')?' '+seroBadge(b.serology,'.68rem'):''}</div>
       ${hnLine}
       ${machineBadge}
@@ -604,6 +638,14 @@ function renderBeds(beds){
       ${quickBtn}
       ${wsBtn}
     `;
+    /* 🔁 Diff render: อัปเดตเฉพาะเตียงที่เปลี่ยน — จอไม่กระพริบ */
+    const _key = 'bedcard-' + b.bed_number;
+    _seenKeys.add(_key);
+    let card = document.getElementById(_key);
+    if(!card){ card = document.createElement('div'); card.id = _key; }
+    const _sig = _cls + '||' + inner;
+    if(card._sig !== _sig){ card.className = _cls; card.innerHTML = inner; card._sig = _sig; }
+    card.onclick = _onclick;
     grid.appendChild(card);
 
     if(b.status==='active' || b.status==='warning' || b.status==='critical') counts.active++;
@@ -613,6 +655,17 @@ function renderBeds(beds){
     if(b.status==='warning') counts.warning++;
     if(b.status==='critical') counts.critical++;
   });
+  Array.from(grid.querySelectorAll('[id^="bedcard-"]')).forEach(el=>{ if(!_seenKeys.has(el.id)) el.remove(); });
+  /* 🚨 Alert strip: เตียงที่ต้องดูด่วน — แตะเพื่อเลื่อนไปที่เตียง */
+  const _strip = document.getElementById('alertStrip');
+  if(_strip){
+    if(_alertBeds.length){
+      _strip.style.display = 'flex';
+      _strip.innerHTML = '<span>🚨 ต้องดูด่วน:</span>' + _alertBeds.map(a =>
+        `<span onclick="_gotoBed(${a.bed})" style="cursor:pointer;padding:4px 10px;border-radius:16px;background:${a.status==='critical'?'var(--danger)':'var(--warning)'};color:#fff">${a.status==='critical'?'🔴':'🟡'} เตียง ${a.bed}${a.reason?' — '+String(a.reason).slice(0,28):''}</span>`
+      ).join('');
+    } else { _strip.style.display = 'none'; }
+  }
   document.getElementById('statActive').textContent = counts.active;
   document.getElementById('statPre').textContent = counts.pre;
   document.getElementById('statAvailable').textContent = counts.available;
@@ -630,6 +683,62 @@ function renderBeds(beds){
   }
   _prevCriticalCount = counts.critical;
   _prevWarningCount = counts.warning;
+}
+
+/* 🚨 แตะ chip → เลื่อนไปที่เตียง + ไฮไลต์ */
+function _gotoBed(n){
+  const el = document.getElementById('bedcard-'+n);
+  if(!el) return;
+  el.scrollIntoView({behavior:'smooth', block:'center'});
+  el.classList.add('bed-flash');
+  setTimeout(()=>el.classList.remove('bed-flash'), 2500);
+}
+
+/* 📺 TV Mode — จอใหญ่ติดผนัง */
+function toggleTvMode(){
+  const on = document.body.classList.toggle('tv-mode');
+  try{ localStorage.setItem('hd_tv_mode', on?'1':'0'); }catch(e){}
+  document.getElementById('tvModeBtn').textContent = on ? '📺 TV ✓' : '📺 TV';
+  try{ if(on && document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+       else if(!on && document.fullscreenElement) document.exitFullscreen(); }catch(e){}
+}
+try{ if(localStorage.getItem('hd_tv_mode')==='1'){ document.body.classList.add('tv-mode'); setTimeout(()=>{const b=document.getElementById('tvModeBtn'); if(b) b.textContent='📺 TV ✓';},0); } }catch(e){}
+
+/* 🏁 สรุปเวรบนจอ (preview ก่อน — ส่ง LINE เมื่อกดยืนยันเท่านั้น) */
+function openShiftSummary(){
+  const shift = document.querySelector('.shift-btn.active')?.dataset?.shift || 'morning';
+  let ov = document.getElementById('shiftSumOverlay');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = 'shiftSumOverlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1200;display:flex;align-items:center;justify-content:center;padding:16px';
+    ov.onclick = e => { if(e.target===ov) ov.style.display='none'; };
+    ov.innerHTML = '<div id="shiftSumBox" style="background:var(--bg-card);border-radius:16px;padding:18px;max-width:460px;width:100%;max-height:85vh;overflow-y:auto"></div>';
+    document.body.appendChild(ov);
+  }
+  ov.style.display = 'flex';
+  const box = document.getElementById('shiftSumBox');
+  box.innerHTML = '⏳ กำลังสรุปเวร...';
+  hdFetch('/hd/api/v1/shift/handover', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({shift: shift, send_line: false})
+  }).then(r=>r.json()).then(d=>{
+    if(d.error){ box.innerHTML = '❌ ' + d.error; return; }
+    const act = d.active_beds||[], comp = d.completed_beds||[], al = d.pending_alerts||[];
+    const li = (arr, f) => arr.length ? '<ul style="margin:4px 0 10px;padding-left:18px;font-size:.85rem">'+arr.map(f).join('')+'</ul>' : '<div style="font-size:.8rem;color:var(--fg-muted);margin:2px 0 10px">— ไม่มี —</div>';
+    const bedTxt = x => '<li>'+(typeof x==='string'?x:('เตียง '+(x.bed_number||x.bed||'-')+(x.patient_name?' — '+x.patient_name:'')))+'</li>';
+    box.innerHTML =
+      '<h3 style="margin:0 0 10px">🏁 สรุปเวร' + ({morning:'เช้า',afternoon:'บ่าย',evening:'ค่ำ'}[shift]||'') + '</h3>' +
+      '<div style="display:flex;gap:10px;margin-bottom:10px;font-size:.9rem;font-weight:700">' +
+        '<span style="color:var(--accent)">กำลังฟอก ' + act.length + '</span>' +
+        '<span style="color:var(--success)">เสร็จแล้ว ' + comp.length + '</span>' +
+        '<span style="color:var(--danger)">Alert ค้าง ' + al.length + '</span></div>' +
+      '<b style="font-size:.85rem">💉 กำลังฟอก</b>' + li(act, bedTxt) +
+      '<b style="font-size:.85rem">✅ เสร็จแล้ว</b>' + li(comp, bedTxt) +
+      '<b style="font-size:.85rem">🚨 Alert ที่ยังไม่ได้รับทราบ</b>' + li(al, a=>'<li>'+(a.title||a.text||a)+'</li>') +
+      '<div style="display:flex;gap:8px;margin-top:12px">' +
+        '<button class="btn btn-outline" style="flex:1" onclick="document.getElementById(\'shiftSumOverlay\').style.display=\'none\'">ปิด</button>' +
+        '<button class="btn btn-primary" style="flex:1;background:var(--success);border:none" onclick="document.getElementById(\'shiftSumOverlay\').style.display=\'none\';shiftHandover()">📤 ส่ง LINE ต่อเวร</button></div>';
+  }).catch(e=>{ box.innerHTML = '❌ สรุปไม่สำเร็จ: ' + (e.message||e); });
 }
 
 function shiftHandover(){
@@ -1042,7 +1151,8 @@ const _origFetchBeds = fetchBeds;
 /* Initial load + auto refresh */
 initDayButtons();
 if(_viewMode === 'all') fetchAllRounds(); else fetchBeds();
-setInterval(()=>{ if(_viewMode==='all') fetchAllRounds(); else fetchBeds(); }, 30000);
+/* 15 วิ — diff-render อัปเดตเฉพาะเตียงที่เปลี่ยน จอไม่กระพริบ */
+setInterval(()=>{ if(_viewMode==='all') fetchAllRounds(); else fetchBeds(); }, 15000);
 
 /* Force refresh when page restored from bfcache (back/forward navigation) */
 window.addEventListener('pageshow', function(e) {
