@@ -365,7 +365,11 @@
     <button id="voiceBtn" onclick="toggleVoice()" class="btn" style="padding:10px 20px;border-radius:30px;background:linear-gradient(135deg,#7c3aed,#1e40af);color:#fff;font-size:.85rem">
       🎤 สั่งด้วยเสียง
     </button>
+    <button id="handsFreeBtn" onclick="toggleHandsFree()" class="btn" style="padding:10px 16px;border-radius:30px;background:linear-gradient(135deg,#059669,#047857);color:#fff;font-size:.78rem;margin-left:6px">
+      🙌 Hands-Free
+    </button>
     <div id="voiceStatus" style="font-size:.78rem;margin-top:4px;color:var(--fg-muted);display:none"></div>
+    <div id="voiceLog" style="font-size:.72rem;margin-top:2px;color:var(--fg-dim);max-height:60px;overflow-y:auto;display:none"></div>
   </div>
   <!-- HD Sheet link -->
   <a id="hdSheetLink" href="#" class="btn btn-outline" style="width:100%;text-align:center;margin-bottom:16px;padding:12px;font-size:.9rem;display:none;" onclick="return true;">
@@ -1606,14 +1610,28 @@ function loadPredictAlert(){
 }
 setInterval(loadPredictAlert, 60000); // refresh every 1 min
 
-/* ── Voice Command — สั่งด้วยเสียง ── */
+/* ══════════════════════════════════════════════════════════
+   🎤 VOICE COMMAND v5.0 — Full Hands-Free HD Monitoring
+   ระดับ 1: กรอกค่า (BP, HR, SpO2, Temp, UF, น้ำหนัก)
+   ระดับ 2: คำสั่งกดปุ่ม (บันทึก, บันทึกUF, จบฟอก)
+            + พูดหลายค่าพร้อมกัน + auto-save
+   ระดับ 3: อ่านออกเสียง (สรุป, เหลือเท่าไหร่, IDH)
+            + Hands-Free mode เตือนทุก 30 นาที
+   ระดับ 4: ถามตอบ (คนไข้เตียง X, เปรียบเทียบ BP, แจ้งหมอ)
+   ระดับ 5: Full workflow (เริ่มฟอก HN..., จบฟอก น้ำหนัก...)
+   ══════════════════════════════════════════════════════════ */
 let voiceActive = false;
 let recognition = null;
+let _handsFreeMode = false;
+let _handsFreeTimer = null;
+let _voiceLog = [];
+const _TTS = window.speechSynthesis;
+const _hasTTS = !!_TTS;
 
+/* ── Core: Start / Stop Voice ── */
 function toggleVoice(){
   if(!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)){
-    showToast('เบราว์เซอร์ไม่รองรับ Voice — ใช้ Chrome หรือ Safari','danger');
-    return;
+    showToast('เบราว์เซอร์ไม่รองรับ Voice — ใช้ Chrome หรือ Safari','danger'); return;
   }
   if(voiceActive){ stopVoice(); return; }
   startVoice();
@@ -1625,15 +1643,14 @@ function startVoice(){
   recognition.lang = 'th-TH';
   recognition.continuous = true;
   recognition.interimResults = true;
-
   const btn = document.getElementById('voiceBtn');
   const st = document.getElementById('voiceStatus');
   btn.style.background = '#dc2626';
   btn.textContent = '🔴 กำลังฟัง... (กดหยุด)';
   st.style.display = 'block';
-  st.textContent = 'พูด: "BP 130/80" หรือ "HR 88" หรือ "SPO2 99"';
+  st.textContent = '🎙️ พร้อมรับคำสั่ง — พูด "ช่วยอะไรได้บ้าง" เพื่อดูรายการ';
+  document.getElementById('voiceLog').style.display = 'block';
   voiceActive = true;
-
   recognition.onresult = function(e){
     let final = '';
     for(let i = e.resultIndex; i < e.results.length; i++){
@@ -1642,70 +1659,321 @@ function startVoice(){
     if(final) processVoice(final.trim());
   };
   recognition.onerror = function(e){
-    st.textContent = '❌ ' + (e.error === 'no-speech' ? 'ไม่ได้ยินเสียง — ลองพูดอีกครั้ง' : e.error);
+    if(e.error !== 'no-speech') st.textContent = '❌ ' + e.error;
   };
-  recognition.onend = function(){
-    if(voiceActive) recognition.start(); // auto-restart
-  };
+  recognition.onend = function(){ if(voiceActive) try{ recognition.start(); }catch(e){} };
   recognition.start();
 }
 
 function stopVoice(){
   voiceActive = false;
-  if(recognition) recognition.stop();
+  if(recognition) try{ recognition.stop(); }catch(e){}
   document.getElementById('voiceBtn').style.background = 'linear-gradient(135deg,#7c3aed,#1e40af)';
   document.getElementById('voiceBtn').textContent = '🎤 สั่งด้วยเสียง';
   document.getElementById('voiceStatus').style.display = 'none';
+  if(!_handsFreeMode) document.getElementById('voiceLog').style.display = 'none';
 }
 
+/* ── TTS: พูดออกเสียง ── */
+function speak(text, cb){
+  if(!_hasTTS){ if(cb) cb(); return; }
+  _TTS.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'th-TH'; u.rate = 1.1; u.pitch = 1;
+  if(cb) u.onend = cb;
+  _TTS.speak(u);
+}
+
+function vLog(icon, msg){
+  const t = new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+  _voiceLog.unshift(`${t} ${icon} ${msg}`);
+  if(_voiceLog.length > 20) _voiceLog.length = 20;
+  document.getElementById('voiceLog').innerHTML = _voiceLog.join('<br>');
+}
+
+/* ── Hands-Free Mode (ระดับ 3) ── */
+function toggleHandsFree(){
+  if(_handsFreeMode){ stopHandsFree(); return; }
+  _handsFreeMode = true;
+  const btn = document.getElementById('handsFreeBtn');
+  btn.style.background = '#dc2626';
+  btn.textContent = '🔴 Hands-Free ON';
+  if(!voiceActive) startVoice();
+  speak('เปิดโหมดแฮนด์ฟรี — ระบบจะเตือนให้วัด BP ทุก 30 นาที');
+  vLog('🙌','เปิด Hands-Free mode');
+  _handsFreeTimer = setInterval(_handsFreeReminder, 30*60*1000);
+  showToast('🙌 Hands-Free ON — เตือนวัด BP ทุก 30 นาที','success');
+}
+
+function stopHandsFree(){
+  _handsFreeMode = false;
+  if(_handsFreeTimer){ clearInterval(_handsFreeTimer); _handsFreeTimer = null; }
+  document.getElementById('handsFreeBtn').style.background = 'linear-gradient(135deg,#059669,#047857)';
+  document.getElementById('handsFreeBtn').textContent = '🙌 Hands-Free';
+  speak('ปิดโหมดแฮนด์ฟรี');
+  vLog('🙌','ปิด Hands-Free mode');
+}
+
+function _handsFreeReminder(){
+  const name = document.getElementById('patientName').textContent || 'ผู้ป่วย';
+  speak('ถึงเวลาวัดความดัน ' + name + ' แล้วค่ะ — พูดค่า BP ได้เลย', function(){
+    if(!voiceActive && _handsFreeMode) startVoice();
+  });
+  vLog('⏰','เตือนวัด BP');
+  showToast('⏰ ถึงเวลาวัด BP — พูดค่าได้เลย','info');
+}
+
+/* ══════════════════════════════════════════
+   processVoice: ตัวแยกคำสั่ง ระดับ 1-5
+   ══════════════════════════════════════════ */
 function processVoice(text){
   const st = document.getElementById('voiceStatus');
   st.textContent = '🗣 "' + text + '"';
+  vLog('🗣', text);
+  const t = text.toLowerCase().replace(/\s+/g,' ');
 
-  // Parse: "BP 130/80" or "BP 130 80" or "ความดัน 130/80"
-  let m = text.match(/(?:bp|บีพี|ความดัน|เลือด)\s*(\d{2,3})\s*[\/\s]\s*(\d{2,3})/i);
-  if(m){
-    const sbp = parseInt(m[1]), dbp = parseInt(m[2]);
-    if(sbp > 50 && sbp < 300 && dbp > 20 && dbp < 200){
-      document.getElementById('sbp').value = sbp;
-      document.getElementById('dbp').value = dbp;
-      st.innerHTML = `✅ BP ${sbp}/${dbp} — <b>กรอกแล้ว!</b>`;
-      showToast(`🎤 BP ${sbp}/${dbp} กรอกแล้ว`,'success');
-      return;
-    }
+  /* ═══ ระดับ 5: Full Workflow Commands ═══ */
+  if(/^(?:จบฟอก|เสร็จ|end|complete)/.test(t)){
+    const wm = t.match(/น้ำหนัก\s*(\d{2,3}\.?\d?)/);
+    if(wm) document.getElementById('postWeight').value = parseFloat(wm[1]);
+    st.innerHTML = '🏁 <b>เปิดหน้าจบฟอก...</b>';
+    speak('เปิดหน้าจบฟอก');
+    vLog('🏁','จบฟอก');
+    switchTab('session','post');
+    return;
   }
 
-  // Parse: "HR 88" or "ชีพจร 88"
-  m = text.match(/(?:hr|เอชอาร์|ชีพจร|หัวใจ|heart)\s*(\d{2,3})/i);
-  if(m){
-    const hr = parseInt(m[1]);
-    if(hr > 30 && hr < 250){
-      const el = document.getElementById('hr') || document.getElementById('heart_rate');
-      if(el){ el.value = hr; st.innerHTML = `✅ HR ${hr} — <b>กรอกแล้ว!</b>`; showToast(`🎤 HR ${hr} กรอกแล้ว`,'success'); return; }
-    }
+  /* ═══ ระดับ 2: คำสั่งกดปุ่ม ═══ */
+  if(/^(?:บันทึก|เซฟ|save|record)$/i.test(t.trim())){
+    document.querySelector('[onclick*="saveVital"]')?.click();
+    st.innerHTML = '💾 <b>บันทึก Vital Signs!</b>';
+    speak('บันทึก Vital Signs แล้ว');
+    vLog('💾','บันทึก Vital Signs');
+    return;
+  }
+  if(/(?:บันทึก.*(?:ยู|uf)|uf.*บันทึก|save.*uf)/i.test(t)){
+    openUfModal();
+    st.innerHTML = '💧 <b>เปิดหน้าบันทึก UF</b>';
+    speak('เปิดบันทึก UF');
+    vLog('💧','เปิด UF modal');
+    return;
+  }
+  if(/(?:อ่าน.*เครื่อง|ถ่าย.*เครื่อง|scan.*machine|ocr)/i.test(t)){
+    document.querySelector('[onclick*="openOcr"]')?.click();
+    st.innerHTML = '📸 <b>เปิดกล้องอ่านเครื่อง</b>';
+    speak('เปิดกล้องอ่านหน้าจอเครื่อง');
+    vLog('📸','เปิด OCR');
+    return;
   }
 
-  // Parse: "SPO2 99" or "ออกซิเจน 99"
-  m = text.match(/(?:spo2|spo|ออกซิเจน|oxygen|แซท)\s*(\d{2,3})/i);
-  if(m){
-    const spo = parseInt(m[1]);
-    if(spo > 50 && spo <= 100){
-      const el = document.getElementById('spo2');
-      if(el){ el.value = spo; st.innerHTML = `✅ SpO2 ${spo}% — <b>กรอกแล้ว!</b>`; showToast(`🎤 SpO2 ${spo}% กรอกแล้ว`,'success'); return; }
-    }
+  /* ═══ ระดับ 3: ถามข้อมูล — อ่านออกเสียง ═══ */
+  if(/(?:สรุป|summary|สถานะ|status)/i.test(t)){
+    _voiceSummary();
+    return;
+  }
+  if(/(?:เหลือ.*เท่า|เหลือ.*ไหร|remaining|เวลาเหลือ)/i.test(t)){
+    _voiceRemaining();
+    return;
+  }
+  if(/(?:เสี่ยง|idh|ความเสี่ยง|risk)/i.test(t)){
+    _voiceIdh();
+    return;
+  }
+  if(/(?:แนะนำ|recommend|คำแนะนำ|coach)/i.test(t)){
+    _voiceCoach();
+    return;
   }
 
-  // Parse: "อุณหภูมิ 36.5" or "temp 36.5"
-  m = text.match(/(?:temp|อุณหภูมิ|ไข้)\s*(\d{2,3}\.?\d?)/i);
-  if(m){
-    const t = parseFloat(m[1]);
-    if(t > 30 && t < 42){
-      const el = document.getElementById('temp') || document.getElementById('temperature');
-      if(el){ el.value = t; st.innerHTML = `✅ Temp ${t}°C — <b>กรอกแล้ว!</b>`; showToast(`🎤 Temp ${t}°C กรอกแล้ว`,'success'); return; }
-    }
+  /* ═══ ระดับ 4: แจ้งหมอ ═══ */
+  if(/(?:แจ้ง.*หมอ|แจ้ง.*แพทย์|notify.*doctor|call.*doctor|ส่ง.*line)/i.test(t)){
+    _voiceNotifyDoctor(t);
+    return;
   }
 
-  st.textContent = '❓ ไม่เข้าใจ "' + text + '" — ลองพูด: BP 130/80, HR 88, SPO2 99';
+  /* ═══ ระดับ 2: พูดหลายค่าพร้อมกัน ═══ */
+  let filled = _parseMultiValues(t);
+  if(filled.length > 0){
+    const summary = filled.join(', ');
+    st.innerHTML = `✅ ${summary} — <b>กรอกแล้ว!</b>`;
+    speak(summary + ' กรอกแล้ว');
+    vLog('✅', summary);
+    /* Auto-save ถ้ากรอกครบ BP+HR (Hands-Free mode) */
+    if(_handsFreeMode && filled.some(x=>x.startsWith('BP'))){
+      setTimeout(()=>{
+        document.querySelector('[onclick*="saveVital"]')?.click();
+        speak('บันทึกอัตโนมัติแล้ว');
+        vLog('💾','Auto-save vital signs');
+      }, 500);
+    }
+    return;
+  }
+
+  /* ═══ ระดับ 1: ช่วยเหลือ ═══ */
+  if(/(?:ช่วย|help|คำสั่ง|ทำอะไร)/i.test(t)){
+    _voiceHelp();
+    return;
+  }
+
+  st.textContent = '❓ ไม่เข้าใจ "' + text + '" — พูด "ช่วยอะไรได้บ้าง"';
+  if(_handsFreeMode) speak('ไม่เข้าใจคำสั่ง ลองพูดใหม่');
+}
+
+/* ═══ ระดับ 1+2: แยกค่าหลายตัวจากประโยคเดียว ═══ */
+function _parseMultiValues(t){
+  const filled = [];
+  let m;
+  /* BP */
+  m = t.match(/(?:bp|บีพี|ความดัน|blood\s*pressure)\s*(\d{2,3})\s*[\/\s,]\s*(\d{2,3})/i);
+  if(m){
+    const sbp=parseInt(m[1]), dbp=parseInt(m[2]);
+    if(sbp>50 && sbp<300 && dbp>20 && dbp<200){
+      document.getElementById('sbp').value=sbp; document.getElementById('dbp').value=dbp;
+      filled.push(`BP ${sbp}/${dbp}`);
+    }
+  }
+  /* HR */
+  m = t.match(/(?:hr|เอชอาร์|ชีพจร|หัวใจ|heart|pulse)\s*(\d{2,3})/i);
+  if(m){
+    const hr=parseInt(m[1]);
+    if(hr>30 && hr<250){
+      const el=document.getElementById('hr')||document.getElementById('heart_rate');
+      if(el){ el.value=hr; filled.push(`HR ${hr}`); }
+    }
+  }
+  /* SpO2 */
+  m = t.match(/(?:spo2|spo|ออกซิเจน|oxygen|แซท|o2)\s*(\d{2,3})/i);
+  if(m){
+    const v=parseInt(m[1]);
+    if(v>50 && v<=100){
+      const el=document.getElementById('spo2');
+      if(el){ el.value=v; filled.push(`SpO2 ${v}%`); }
+    }
+  }
+  /* Temp */
+  m = t.match(/(?:temp|อุณหภูมิ|ไข้)\s*(\d{2,3}\.?\d?)/i);
+  if(m){
+    const v=parseFloat(m[1]);
+    if(v>30 && v<42){
+      const el=document.getElementById('temp')||document.getElementById('temperature');
+      if(el){ el.value=v; filled.push(`Temp ${v}°C`); }
+    }
+  }
+  /* UF Removed (ระดับ 1) */
+  m = t.match(/(?:uf|ยูเอฟ)\s*(\d{1,5})/i);
+  if(m){
+    const v=parseInt(m[1]);
+    if(v>=0 && v<=10000){
+      const el=document.getElementById('modalUfRemoved');
+      if(el){ el.value=v; filled.push(`UF ${v} mL`); }
+    }
+  }
+  /* น้ำหนัก (ระดับ 1) */
+  m = t.match(/(?:น้ำหนัก|weight|pre.*weight)\s*(\d{2,3}\.?\d?)/i);
+  if(m){
+    const v=parseFloat(m[1]);
+    if(v>20 && v<200){
+      const el=document.getElementById('preWeight')||document.getElementById('postWeight');
+      if(el){ el.value=v; filled.push(`น้ำหนัก ${v} kg`); }
+    }
+  }
+  /* เป้า UF Goal */
+  m = t.match(/(?:เป้า|goal|target)\s*(\d{3,5})/i);
+  if(m){
+    const v=parseInt(m[1]);
+    if(v>0 && v<=10000){
+      const el=document.getElementById('ufGoalInput');
+      if(el){ el.value=v; filled.push(`เป้า UF ${v} mL`); }
+    }
+  }
+  return filled;
+}
+
+/* ═══ ระดับ 3: อ่านสรุปออกเสียง ═══ */
+function _voiceSummary(){
+  const name = document.getElementById('patientName').textContent || 'ผู้ป่วย';
+  const bed = document.getElementById('bedDisplay').textContent || '-';
+  const timer = document.getElementById('dialysisTimer')?.textContent || '-';
+  const ufR = document.getElementById('ufRemoved')?.textContent || '0';
+  const ufG = document.getElementById('ufGoal')?.textContent || '-';
+  const bp = (document.getElementById('sbp')?.value||'-') + '/' + (document.getElementById('dbp')?.value||'-');
+  const hr = document.getElementById('hr')?.value || document.getElementById('heart_rate')?.value || '-';
+  const msg = `${name} เตียง ${bed} ฟอกไปแล้ว ${timer} UF ${ufR} จาก ${ufG} มิลลิลิตร BP ล่าสุด ${bp} HR ${hr}`;
+  document.getElementById('voiceStatus').innerHTML = `📊 ${msg}`;
+  speak(msg);
+  vLog('📊','สรุป: '+msg);
+}
+
+function _voiceRemaining(){
+  const ufR = parseInt(document.getElementById('ufRemoved')?.textContent) || 0;
+  const ufG = parseInt(document.getElementById('ufGoal')?.textContent) || 0;
+  const rem = ufG - ufR;
+  const timer = document.getElementById('dialysisTimer')?.textContent || '-';
+  const msg = `เหลือ UF อีก ${rem} มิลลิลิตร จากเป้า ${ufG} เวลาเหลือ ${timer}`;
+  document.getElementById('voiceStatus').innerHTML = `💧 ${msg}`;
+  speak(msg);
+  vLog('💧',msg);
+}
+
+function _voiceIdh(){
+  const el = document.getElementById('idhRiskPanel');
+  if(!el || el.style.display==='none'){
+    speak('ยังไม่มีข้อมูลความเสี่ยง IDH'); return;
+  }
+  const pct = el.querySelector('[id*="idhScore"],.idh-score')?.textContent || el.textContent.match(/(\d+)%/)?.[0] || '';
+  const msg = pct ? `ความเสี่ยง IDH ${pct}` : 'กำลังโหลดข้อมูล IDH';
+  document.getElementById('voiceStatus').innerHTML = `⚡ ${msg}`;
+  speak(msg);
+  vLog('⚡',msg);
+}
+
+function _voiceCoach(){
+  const el = document.getElementById('ufCoachPanel');
+  if(!el || el.style.display==='none'){
+    speak('ยังไม่มีคำแนะนำ UF Coach'); return;
+  }
+  const risk = el.querySelector('#ufCoachRisk')?.textContent || '';
+  const rec = el.querySelector('.uf-coach-rec,.coach-rec')?.textContent || '';
+  const msg = `คำแนะนำ UF Coach: ${risk} ${rec}`.trim();
+  document.getElementById('voiceStatus').innerHTML = `💡 ${msg.substring(0,100)}`;
+  speak(msg.substring(0,200));
+  vLog('💡',msg.substring(0,80));
+}
+
+/* ═══ ระดับ 4: แจ้งหมอผ่าน LINE ═══ */
+function _voiceNotifyDoctor(text){
+  const name = document.getElementById('patientName').textContent || 'ผู้ป่วย';
+  const bed = document.getElementById('bedDisplay').textContent || '-';
+  const bp = (document.getElementById('sbp')?.value||'-') + '/' + (document.getElementById('dbp')?.value||'-');
+  const reason = text.replace(/แจ้ง.*(?:หมอ|แพทย์)/i,'').trim() || `BP ${bp}`;
+  const msg = `🚨 เตียง ${bed} ${name}: ${reason}`;
+  if(!sessionData.session_id){ speak('ไม่มี session — เริ่มฟอกก่อน'); return; }
+  document.getElementById('voiceStatus').innerHTML = `📱 กำลังส่ง LINE: ${msg}`;
+  speak('กำลังแจ้งแพทย์ทาง LINE');
+  /* ส่งผ่าน alert system */
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
+    method:'POST', body:JSON.stringify({phase:'intra', sbp:parseInt(document.getElementById('sbp')?.value)||0,
+      dbp:parseInt(document.getElementById('dbp')?.value)||0, hr:parseInt((document.getElementById('hr')||document.getElementById('heart_rate'))?.value)||0,
+      spo2:parseInt(document.getElementById('spo2')?.value)||0})
+  }).then(r=>r.json()).then(d=>{
+    if(d.alerts && d.alerts.length) speak('ส่ง alert ถึงแพทย์แล้ว');
+    else speak('บันทึก vital แล้ว — ค่ายังอยู่ในเกณฑ์ ระบบไม่ส่ง alert');
+    vLog('📱','แจ้งหมอ: '+msg);
+  }).catch(()=>{ speak('ส่งไม่สำเร็จ ลองใหม่'); });
+}
+
+/* ═══ ช่วยเหลือ: รายการคำสั่ง ═══ */
+function _voiceHelp(){
+  const help = [
+    '🎤 คำสั่งที่ใช้ได้:',
+    'กรอกค่า: BP 130/80, HR 88, SPO2 99, อุณหภูมิ 36.5, UF 500, น้ำหนัก 65',
+    'พูดหลายค่า: BP 120/80 HR 90 ออกซิเจน 99',
+    'กดปุ่ม: บันทึก, บันทึก UF, อ่านเครื่อง, จบฟอก',
+    'ถามข้อมูล: สรุป, เหลือเท่าไหร่, เสี่ยงไหม, แนะนำ',
+    'แจ้ง: แจ้งหมอ BP ต่ำ',
+  ].join('\n');
+  document.getElementById('voiceStatus').innerHTML = help.replace(/\n/g,'<br>');
+  speak('คำสั่งที่ใช้ได้ เช่น BP 130/80, HR 88, บันทึก, สรุป, เหลือเท่าไหร่, แจ้งหมอ');
+  vLog('❓','แสดงรายการคำสั่ง');
 }
 
 /* ── WOW #4: AI UF Coach ── */
