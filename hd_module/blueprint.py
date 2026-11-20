@@ -251,16 +251,53 @@ def hd_settings_page():
 @hd_web.route("/labs")
 def hd_labs_index():
     """Lab Results — หน้ารวมเลือกคนไข้."""
-    # Pre-load patients server-side — ไม่ต้องพึ่ง API + token
+    # Pre-load patients + latest lab server-side — ไม่ต้องพึ่ง API + token
     patients = []
     try:
         import os, psycopg2
+        from datetime import date as _date
         db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
         if db_url:
             conn = psycopg2.connect(db_url, connect_timeout=5)
+            conn.autocommit = True
             with conn.cursor() as cur:
-                cur.execute("SELECT hn, patient_name, vascular_access, schedule_days FROM hd_patient_mapping WHERE is_active = TRUE ORDER BY patient_name LIMIT 300")
-                patients = [{"hn": r[0], "name": r[1] or "", "va": r[2] or "", "sched": r[3] or ""} for r in cur.fetchall()]
+                cur.execute("SELECT id, hn, patient_name, vascular_access, schedule_days FROM hd_patient_mapping WHERE is_active = TRUE ORDER BY patient_name LIMIT 300")
+                prows = cur.fetchall()
+                # ดึง Lab ล่าสุดแต่ละคน — ลอง hd_labs VIEW ก่อน, fallback ไป hd_lab_results
+                lab_map = {}  # patient_id → {hb, k, ktv, lab_date}
+                pids = [r[0] for r in prows]
+                if pids:
+                    for _lab_sql in [
+                        """SELECT DISTINCT ON (patient_id) patient_id, hb, k, ktv, lab_date
+                           FROM hd_labs WHERE patient_id = ANY(%s)
+                           ORDER BY patient_id, lab_date DESC NULLS LAST""",
+                        """SELECT DISTINCT ON (patient_id) patient_id,
+                                  hemoglobin, potassium, kt_v, lab_date
+                           FROM hd_lab_results WHERE patient_id = ANY(%s)
+                           ORDER BY patient_id, lab_date DESC NULLS LAST""",
+                    ]:
+                        try:
+                            cur.execute(_lab_sql, (pids,))
+                            for lr in cur.fetchall():
+                                _today = _thai_today()
+                                _ld = lr[4]
+                                lab_map[lr[0]] = {
+                                    "hb": float(lr[1]) if lr[1] else None,
+                                    "k": float(lr[2]) if lr[2] else None,
+                                    "ktv": float(lr[3]) if lr[3] else None,
+                                    "lab_date": _ld.isoformat() if _ld else None,
+                                    "lab_age": (_today - _ld).days if _ld else None,
+                                }
+                            break  # สำเร็จ → ไม่ต้อง fallback
+                        except Exception:
+                            continue  # ลอง query ถัดไป
+                for r in prows:
+                    lb = lab_map.get(r[0], {})
+                    patients.append({
+                        "hn": r[1], "name": r[2] or "", "va": r[3] or "", "sched": r[4] or "",
+                        "hb": lb.get("hb"), "k": lb.get("k"), "ktv": lb.get("ktv"),
+                        "lab_date": lb.get("lab_date"), "lab_age": lb.get("lab_age"),
+                    })
             conn.close()
     except Exception as e:
         logger.warning("labs_index preload: %s", e)

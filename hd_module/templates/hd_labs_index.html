@@ -115,7 +115,8 @@ function loadPatients(){
     _patients = _serverPatients.map(p=>({
       hn: p.hn, patient_name: p.name, vascular_access: p.va,
       schedule_days: p.sched, default_shift: null,
-      hb: null, k: null, ktv: null, lab_date: null, lab_age_days: null
+      hb: p.hb||null, k: p.k||null, ktv: p.ktv||null,
+      lab_date: p.lab_date||null, lab_age_days: p.lab_age||null
     }));
     renderStats(); renderPatients(_patients);
   }
