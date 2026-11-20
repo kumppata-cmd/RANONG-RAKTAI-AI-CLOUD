@@ -254,9 +254,13 @@ _LABELS = {
     "uf_goal": ("uf goal", "ufgoal"),
     "uf_rate": ("uf rate", "ufrate"),
     "time_left": ("treat.time remaining", "treat. time remaining", "treat time remaining", "treat.time",
-                  "remain time", "uf time left", "remain"),
-    "bp": ("bld. press", "bld press", "bld.press", "blood press"),
-    "blood_flow": ("blood flow", "b. flw", "b.flw", "b flw", "eff. blood flow", "bp rate", "bp1"),
+                  "remain time", "remain.time", "remaining time", "uf time left", "remain",
+                  "time remaining"),
+    "elapsed_time": ("elapsed time", "elapsed"),
+    "bp": ("bld. press", "bld press", "bld.press", "blood press", "bid. press", "bid press"),
+    "blood_flow": ("blood flow", "b. flw", "b.flw", "b flw", "eff. blood flow",
+                   "bf rate", "bf.rate", "b.f rate", "bp1", "bp rate",
+                   "b. flow", "bflow"),
     "sys": ("sys",), "dia": ("dia",), "pulse": ("pulse",),
 }
 _NUM = re.compile(r"^-?\d{1,4}(?:[.,]\d{1,2})?$")
@@ -339,11 +343,11 @@ def parse_machine_words(words):
                 continue
             for v in vals:
                 kind = _value_kind(v["t"])
-                if key == "time_left" and kind != "time":
+                if key in ("time_left", "elapsed_time") and kind != "time":
                     continue
                 if key == "bp" and kind != "bp":
                     continue
-                if key not in ("time_left", "bp") and kind != "num":
+                if key not in ("time_left", "elapsed_time", "bp") and kind != "num":
                     continue
                 lcx, vcx = ph["x"] + ph["w"] / 2, v["x"] + v["w"] / 2
                 dy = v["y"] - (ph["y"] + ph["h"])
@@ -390,6 +394,18 @@ def normalize_machine_values(raw):
         if "time_left" in raw:
             h, m = raw["time_left"].split(":")
             out["time_left_min"] = int(h) * 60 + int(m)
+        elif "elapsed_time" in raw and "time_left_min" not in out:
+            # Nikkiso DBB-27C: shows elapsed time, not remaining
+            # Estimate remaining from standard 4h session
+            eh, em = raw["elapsed_time"].split(":")
+            elapsed_min = int(eh) * 60 + int(em)
+            out["elapsed_min"] = elapsed_min
+            # Guess total session from UF goal/rate if available, else assume 4h
+            if out.get("uf_rate") and out.get("uf_rate") > 0 and out.get("uf_goal"):
+                remaining_ml = max(0, out["uf_goal"] - out.get("uf_removed", 0))
+                out["time_left_min"] = max(0, round(remaining_ml / out["uf_rate"] * 60))
+            else:
+                out["time_left_min"] = max(0, 240 - elapsed_min)  # assume 4h
         if "bp" in raw:
             m = _BP.match(raw["bp"].replace(" ", ""))
             if m:
@@ -423,8 +439,13 @@ def parse_machine_text(text):
         "uf_volume": r"uf\s*vol(?:ume)?\D{0,12}?(\d{1,4}(?:[.,]\d{1,2})?)",
         "uf_goal": r"uf\s*goal\D{0,12}?(\d{1,4}(?:[.,]\d{1,2})?)",
         "uf_rate": r"uf\s*rate\D{0,12}?(\d{1,4}(?:[.,]\d{1,2})?)",
-        "time_left": r"(?:remain(?:ing)?\s*time|time\s*left|time\s*remaining)\D{0,12}?(\d{1,2}:\d{2})",
-        "bp": r"bld\.?\s*press\.?\D{0,6}?(\d{2,3}\s*/\s*\d{2,3})",
+        "time_left": r"(?:remain(?:ing)?\s*time|time\s*(?:left|remaining)|treat\.?\s*time\s*remain(?:ing)?)\D{0,12}?(\d{1,2}:\d{2})",
+        "elapsed_time": r"elapsed\s*time\D{0,12}?(\d{1,2}:\d{2})",
+        "bp": r"(?:bld|bid)\.?\s*press\.?\D{0,6}?(\d{2,3}\s*/\s*\d{2,3})",
+        "blood_flow": r"(?:b\.?\s*fl[wo]|blood\s*flow|eff\.?\s*blood\s*flow|bf\s*rate)\D{0,8}?(\d{2,3})",
+        "sys": r"\bsys\D{0,8}?(\d{2,3})",
+        "dia": r"\bdia\D{0,8}?(\d{2,3})",
+        "pulse": r"\bpulse\D{0,8}?(\d{2,3})",
     }
     for k, p in pats.items():
         m = re.search(p, t, re.IGNORECASE)

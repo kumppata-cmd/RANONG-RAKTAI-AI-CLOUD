@@ -5947,14 +5947,56 @@ def patient_uf_coach(hn):
                     "last_post_weight": pc["prev_post"], "home_weights": home})
 
 
+def _preprocess_machine_image(img_bytes):
+    """ปรับภาพเครื่องฟอกให้ OCR อ่านง่ายขึ้น:
+    1. EXIF transpose
+    2. Resize ถ้าใหญ่เกิน
+    3. Enhance contrast (CLAHE) สำหรับหน้าจอเรืองแสง
+    4. Sharpen ถ้าเบลอ
+    5. Return enhanced bytes (PNG) + PIL image for Tesseract
+    """
+    import io
+    from PIL import Image, ImageOps, ImageEnhance, ImageFilter
+    img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes)))
+    # Resize if too large (keep aspect)
+    if img.width > 2000:
+        ratio = 2000 / img.width
+        img = img.resize((2000, int(img.height * ratio)), Image.LANCZOS)
+    # Sharpen slightly (helps blurry photos)
+    img = img.filter(ImageFilter.SHARPEN)
+    # Enhance contrast (machine screens are often washed out in photos)
+    enhancer = ImageEnhance.Contrast(img)
+    img = enhancer.enhance(1.5)
+    # Enhance brightness slightly
+    enhancer = ImageEnhance.Brightness(img)
+    img = enhancer.enhance(1.1)
+    # Convert to PNG bytes for Vision API
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    enhanced_bytes = buf.getvalue()
+    # Grayscale + threshold for Tesseract
+    gray = img.convert("L")
+    # Adaptive-like threshold: boost contrast more
+    enhancer = ImageEnhance.Contrast(gray)
+    gray = enhancer.enhance(2.0)
+    return enhanced_bytes, gray
+
+
 def _ocr_words(img_bytes):
     """รูป → [{t,x,y,w,h}] : Google Vision (มีตำแหน่งคำ) → สำรอง Tesseract image_to_data
     รูปหน้าจอเครื่องไม่ถูกเก็บ — ประมวลผลในหน่วยความจำแล้วทิ้ง"""
     words = []
+    # Preprocess image for better OCR
+    try:
+        enhanced_bytes, gray_img = _preprocess_machine_image(img_bytes)
+    except Exception as e:
+        logger.info("machine-screen preprocess: %s", type(e).__name__)
+        enhanced_bytes, gray_img = img_bytes, None
+    # 1. Google Vision (best accuracy)
     try:
         from google.cloud import vision
         client = vision.ImageAnnotatorClient()
-        resp = client.document_text_detection(image=vision.Image(content=img_bytes))
+        resp = client.document_text_detection(image=vision.Image(content=enhanced_bytes))
         if not resp.error.message and resp.full_text_annotation:
             for page in resp.full_text_annotation.pages:
                 for block in page.blocks:
@@ -5968,17 +6010,30 @@ def _ocr_words(img_bytes):
                 return words, "vision"
     except Exception as e:
         logger.info("machine-screen vision: %s", type(e).__name__)
+    # 2. Tesseract fallback with preprocessed grayscale
     try:
-        import io
         import pytesseract
-        from PIL import Image, ImageOps
-        img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes))).convert("L")
-        if img.width > 1600:
-            img = img.resize((1600, int(img.height * 1600 / img.width)))
-        d = pytesseract.image_to_data(img, config="--psm 11", output_type=pytesseract.Output.DICT, timeout=25)
-        for i, t in enumerate(d["text"]):
-            if t and t.strip():
-                words.append({"t": t.strip(), "x": d["left"][i], "y": d["top"][i], "w": d["width"][i], "h": d["height"][i]})
+        ocr_img = gray_img
+        if ocr_img is None:
+            import io
+            from PIL import Image, ImageOps
+            ocr_img = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes))).convert("L")
+        if ocr_img.width > 1600:
+            ocr_img = ocr_img.resize((1600, int(ocr_img.height * 1600 / ocr_img.width)))
+        # Try multiple PSM modes: 11 (sparse) then 6 (block) — pick whichever finds more
+        best_words = []
+        for psm in ("11", "6"):
+            try:
+                d = pytesseract.image_to_data(ocr_img, config=f"--psm {psm}", output_type=pytesseract.Output.DICT, timeout=20)
+                wds = []
+                for i, t in enumerate(d["text"]):
+                    if t and t.strip():
+                        wds.append({"t": t.strip(), "x": d["left"][i], "y": d["top"][i], "w": d["width"][i], "h": d["height"][i]})
+                if len(wds) > len(best_words):
+                    best_words = wds
+            except Exception:
+                pass
+        words = best_words
     except Exception as e:
         logger.info("machine-screen tesseract: %s", type(e).__name__)
     return words, "tesseract"
