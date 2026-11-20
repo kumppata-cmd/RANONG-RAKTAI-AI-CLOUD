@@ -19,6 +19,8 @@ class FakeCur:
     def __init__(self, results=(), docs=(), patients=()):
         self.results, self.docs, self.patients = list(results), list(docs), list(patients)
         self.inserts, self.sql = [], ""
+        # Merge results+docs into a combined hd_labs view simulation
+        self._hd_labs = list(results) + list(docs)
 
     def execute(self, sql, params=None):
         self.sql = sql
@@ -26,6 +28,8 @@ class FakeCur:
             self.inserts.append(params)
 
     def fetchall(self):
+        if "FROM hd_labs" in self.sql:
+            return self._hd_labs
         if "FROM hd_lab_results" in self.sql:
             return self.results
         if "FROM hd_lab_docs" in self.sql:
