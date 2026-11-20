@@ -5350,25 +5350,13 @@ def list_patients():
         access = request.args.get("access", "").strip()
         shift_q = request.args.get("shift", "").strip()
         with conn.cursor() as cur:
-            # Check which optional columns exist
-            try:
-                cur.execute("""SELECT column_name FROM information_schema.columns
-                               WHERE table_name = 'hd_patient_mapping'
-                                 AND column_name = 'default_shift'""")
-                _has_shift = bool(cur.fetchone())
-            except Exception:
-                _has_shift = False
-            _dshift_sel = ", p.default_shift" if _has_shift else ", NULL::VARCHAR AS default_shift"
-            _dshift_grp = ", p.default_shift" if _has_shift else ""
-            _dshift_where = " AND p.default_shift = %s" if (_has_shift and shift_q) else ""
-
             # Join with hd_sessions to get last_hd date + unacked alert count
-            sql = f"""SELECT p.id, p.hn, p.hospital_hn, p.patient_name,
+            sql = """SELECT p.id, p.hn, p.hospital_hn, p.patient_name,
                             p.vascular_access, p.dry_weight, p.schedule_days,
                             p.esa_drug, p.esa_dose, p.primary_diagnosis, p.is_active,
                             MAX(s.started_at)::date AS last_hd,
-                            COALESCE(SUM(CASE WHEN a.acknowledged = FALSE THEN 1 ELSE 0 END), 0) AS unacked_alerts
-                            {_dshift_sel}
+                            COALESCE(SUM(CASE WHEN a.acknowledged = FALSE THEN 1 ELSE 0 END), 0) AS unacked_alerts,
+                            p.default_shift
                      FROM hd_patient_mapping p
                      LEFT JOIN hd_sessions s ON s.patient_id = p.id
                      LEFT JOIN hd_clinical_alerts a ON a.session_id = s.id AND a.acknowledged = FALSE
@@ -5383,12 +5371,12 @@ def list_patients():
             if access:
                 sql += " AND UPPER(p.vascular_access) LIKE UPPER(%s)"
                 params.append(f"%{access}%")
-            if _dshift_where:
-                sql += _dshift_where
+            if shift_q:
+                sql += " AND p.default_shift = %s"
                 params.append(shift_q)
-            sql += f""" GROUP BY p.id, p.hn, p.hospital_hn, p.patient_name,
+            sql += """ GROUP BY p.id, p.hn, p.hospital_hn, p.patient_name,
                                p.vascular_access, p.dry_weight, p.schedule_days,
-                               p.esa_drug, p.esa_dose, p.primary_diagnosis, p.is_active{_dshift_grp}
+                               p.esa_drug, p.esa_dose, p.primary_diagnosis, p.is_active, p.default_shift
                        ORDER BY p.hn LIMIT 300"""
             cur.execute(sql, params)
             rows = cur.fetchall()
@@ -5556,37 +5544,17 @@ def patients_with_lab_summary():
         return jsonify({"patients": []})
     try:
         conn = psycopg2.connect(db_url, connect_timeout=5)
-        conn.autocommit = True
         with conn.cursor() as cur:
-            # Check optional columns/views
-            _has_dshift = False
-            try:
-                cur.execute("""SELECT 1 FROM information_schema.columns
-                               WHERE table_name='hd_patient_mapping' AND column_name='default_shift'""")
-                _has_dshift = bool(cur.fetchone())
-            except Exception:
-                pass
-            _dshift = "p.default_shift" if _has_dshift else "NULL::VARCHAR AS default_shift"
-
-            # Try with hd_labs VIEW first, fallback to basic query
-            try:
-                cur.execute(f"""SELECT p.hn, p.patient_name, p.vascular_access, p.schedule_days,
-                                      p.is_active, {_dshift},
-                                      lb.lab_date, lb.hb, lb.k, lb.ktv
-                               FROM hd_patient_mapping p
-                               LEFT JOIN LATERAL (
-                                   SELECT lab_date, hb, k, ktv FROM hd_labs
-                                   WHERE patient_id = p.id ORDER BY lab_date DESC NULLS LAST LIMIT 1
-                               ) lb ON TRUE
-                               WHERE p.is_active = TRUE
-                               ORDER BY lb.lab_date ASC NULLS FIRST, p.patient_name""")
-            except Exception as view_err:
-                logger.warning("with-lab-summary hd_labs VIEW failed (%s), falling back", view_err)
-                cur.execute(f"""SELECT p.hn, p.patient_name, p.vascular_access, p.schedule_days,
-                                      p.is_active, {_dshift},
-                                      NULL::DATE, NULL::NUMERIC, NULL::NUMERIC, NULL::NUMERIC
-                               FROM hd_patient_mapping p
-                               WHERE p.is_active = TRUE ORDER BY p.patient_name""")
+            cur.execute("""SELECT p.hn, p.patient_name, p.vascular_access, p.schedule_days,
+                                  p.is_active, p.default_shift,
+                                  lb.lab_date, lb.hb, lb.k, lb.ktv
+                           FROM hd_patient_mapping p
+                           LEFT JOIN LATERAL (
+                               SELECT lab_date, hb, k, ktv FROM hd_labs
+                               WHERE patient_id = p.id ORDER BY lab_date DESC NULLS LAST LIMIT 1
+                           ) lb ON TRUE
+                           WHERE p.is_active = TRUE
+                           ORDER BY lb.lab_date ASC NULLS FIRST, p.patient_name""")
             rows = cur.fetchall()
         conn.close()
         patients = []
@@ -6127,20 +6095,19 @@ def get_patient(hn):
         import psycopg2
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
-            # Core query: only columns guaranteed to exist in the base schema
             cur.execute("""
                 SELECT id, hn, hospital_hn, patient_name, date_of_birth,
                        gender, blood_type, allergies, vascular_access,
                        dry_weight, schedule_days, esa_drug, esa_dose,
-                       primary_diagnosis, is_active, created_at
+                       primary_diagnosis, is_active, created_at,
+                       COALESCE(bfr, 0) as bfr
                 FROM hd_patient_mapping WHERE hn = %s
             """, (hn,))
             row = cur.fetchone()
-            # Optional columns (may not exist in older schemas)
+            # Get va_location separately (column may not exist yet)
             va_loc = None
             sero = None
             dshift = None
-            _bfr = None
             if row:
                 try:
                     cur.execute("SELECT va_location, default_shift FROM hd_patient_mapping WHERE hn = %s", (hn,))
@@ -6149,13 +6116,6 @@ def get_patient(hn):
                         va_loc, dshift = vr[0], vr[1]
                 except Exception:
                     pass  # column doesn't exist yet
-                try:
-                    cur.execute("SELECT COALESCE(bfr, 0) FROM hd_patient_mapping WHERE hn = %s", (hn,))
-                    br = cur.fetchone()
-                    if br:
-                        _bfr = br[0]
-                except Exception:
-                    pass  # bfr column doesn't exist yet
                 try:
                     from .serology import latest_for as _sero_latest
                     sero = _sero_latest(cur, [row[0]]).get(row[0])
@@ -6175,7 +6135,7 @@ def get_patient(hn):
             "schedule_days": row[10], "esa_drug": row[11], "esa_dose": row[12],
             "primary_diagnosis": row[13], "is_active": row[14],
             "created_at": row[15].isoformat() if row[15] else None,
-            "bfr": _bfr,
+            "bfr": row[16] if row[16] else None,
             "serology": sero,
             "default_shift": dshift,
         })
@@ -6428,27 +6388,9 @@ def bed_dashboard():
             conn = psycopg2.connect(db_url, connect_timeout=5)
             conn.autocommit = True   # read-only: one failed lookup must not abort the rest
             with conn.cursor() as cur:
-                # Show ALL active sessions (in_progress, scheduled)
-                # Priority: in_progress > scheduled (so active session
-                # is never overwritten by a scheduled one on the same bed)
-                # ORDER BY: 'in_progress' sorts AFTER 'scheduled' so it
-                # overwrites in the loop — last write wins
-                # Query sessions: match shift exactly, OR include NULL-shift
-                # sessions when viewing morning (legacy sessions before shift feature)
-                # -- Safe column check: some columns may not exist in older schemas
-                _extra_patient_cols = ""
-                try:
-                    cur.execute("""SELECT column_name FROM information_schema.columns
-                                   WHERE table_name = 'hd_patient_mapping'
-                                     AND column_name IN ('default_shift', 'schedule_days', 'esa_dose')""")
-                    _has_cols = {r[0] for r in cur.fetchall()}
-                except Exception:
-                    _has_cols = set()
-                _p_default_shift = "p.default_shift" if "default_shift" in _has_cols else "NULL::VARCHAR"
-                _p_schedule_days = "p.schedule_days" if "schedule_days" in _has_cols else "NULL::VARCHAR"
-                _p_esa_dose = "p.esa_dose" if "esa_dose" in _has_cols else "NULL::VARCHAR"
-
-                cur.execute(f"""
+                # Show ALL active sessions (in_progress, scheduled, completed)
+                # Priority: in_progress > completed > scheduled on same bed
+                cur.execute("""
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
                            p.dry_weight, p.esa_drug,
@@ -6457,9 +6399,7 @@ def bed_dashboard():
                            s.shift as saved_shift,
                            s.ended_at, s.pre_weight, s.post_weight, s.actual_uf,
                            (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id) AS n_alerts,
-                           {_p_default_shift} AS default_shift,
-                           {_p_schedule_days} AS schedule_days,
-                           {_p_esa_dose} AS esa_dose
+                           p.default_shift, p.schedule_days, p.esa_dose
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.status IN ('scheduled', 'in_progress', 'completed')
