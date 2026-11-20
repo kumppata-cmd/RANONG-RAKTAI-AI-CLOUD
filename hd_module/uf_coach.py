@@ -68,8 +68,12 @@ DEFAULT_WEIGHT_TEMPLATE = (
 
 
 def parse_weight_message(text):
-    """'น้ำหนัก 62.4' / 'นน 62,4 กก' → 62.4 (30–250 kg) หรือ None"""
-    m = _WEIGHT_RE.match(_norm_thai(text) or "")
+    """'น้ำหนัก 62.4' / 'นน 62,4 กก' → 62.4 (30–250 kg) หรือ None
+
+    Handles both composed ◌ำ and decomposed ◌ํ◌า Thai encodings.
+    """
+    normed = _norm_thai(text)
+    m = _WEIGHT_RE.match(normed or "")
     if not m:
         return None
     v = float(m.group(1).replace(",", "."))
