@@ -655,7 +655,12 @@ function renderBeds(beds){
     if(b.status==='warning') counts.warning++;
     if(b.status==='critical') counts.critical++;
   });
-  Array.from(grid.querySelectorAll('[id^="bedcard-"]')).forEach(el=>{ if(!_seenKeys.has(el.id)) el.remove(); });
+  /* ลบทุกอย่างที่ไม่ใช่การ์ดของรอบนี้: placeholder จาก template, การ์ดเตียงที่หายไป, และการ์ดซ้ำ id เดียวกัน */
+  const _kept = new Set();
+  Array.from(grid.children).forEach(el=>{
+    const ok = el.id && el.id.indexOf('bedcard-')===0 && _seenKeys.has(el.id) && !_kept.has(el.id);
+    if(ok) _kept.add(el.id); else el.remove();
+  });
   /* 🚨 Alert strip: เตียงที่ต้องดูด่วน — แตะเพื่อเลื่อนไปที่เตียง */
   const _strip = document.getElementById('alertStrip');
   if(_strip){
