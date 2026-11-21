@@ -9401,6 +9401,7 @@ def prehd_send_now():
 @hd_web.route("/family")
 def family_link_page():
     """👨‍👩‍👧 หน้าผูกญาติ — เปิดผ่าน LIFF (liff.line.me/<family_liff_id>?code=...)."""
+    import os
     liff_id = (get_setting_value("family_liff_id", "") or os.environ.get("HD_FAMILY_LIFF_ID", "")).strip()
     return render_template("hd_family_link.html", liff_id=liff_id,
                            code=(request.args.get("code") or "").strip()[:8],
