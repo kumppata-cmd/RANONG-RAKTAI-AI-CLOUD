@@ -9438,8 +9438,8 @@ def family_register():
 @hd_web.route("/food/<token>")
 def food_coach_page(token):
     """🍲 โค้ชอาหาร — ถ่ายรูปมื้ออาหาร AI แนะนำตามค่าเลือดของตัวเอง (ลิงก์จาก LINE)."""
-    from .patient_engage import parse_token
-    hn, _ = parse_token("food", token, max_age_days=14)
+    from .patient_engage import parse_token, FOOD_TOKEN_DAYS
+    hn, _ = parse_token("food", token, max_age_days=FOOD_TOKEN_DAYS)
     return render_template("hd_food_coach.html", token=token, valid=bool(hn))
 
 
@@ -9447,10 +9447,11 @@ def food_coach_page(token):
 def food_analyze():
     """รูปอาหาร (token-verified) → Claude Vision + แล็บล่าสุดรายคน → คำแนะนำ."""
     import os, psycopg2
-    from .patient_engage import parse_token, analyze_food_photo, DISCLAIMER
-    hn, _ = parse_token("food", str(request.form.get("token", "")), max_age_days=14)
+    from .patient_engage import parse_token, analyze_food_photo, DISCLAIMER, FOOD_TOKEN_DAYS
+    hn, _ = parse_token("food", str(request.form.get("token", "")), max_age_days=FOOD_TOKEN_DAYS)
     if not hn:
-        return jsonify({"error": "ลิงก์หมดอายุ — ขอลิงก์ใหม่จากข้อความผลแล็บใน LINE"}), 403
+        return jsonify({"error": "ลิงก์หมดอายุ — ขอลิงก์ใหม่จากข้อความผลแล็บใน LINE หรือพิมพ์ "
+                                 "'@รักษ์ไต ลิงก์อาหาร <HN>' ในกลุ่มพยาบาล"}), 403
     f = request.files.get("image")
     if not f:
         return jsonify({"error": "ไม่พบรูป"}), 400

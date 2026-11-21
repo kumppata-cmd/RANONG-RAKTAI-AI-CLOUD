@@ -27,7 +27,8 @@ HELP = ("🤖 รักษ์ไต ช่วยตอบได้ (พิมพ
         "• เตียง — สถานะเตียงตอนนี้\n• วันนี้ — รอบฟอกวันนี้\n• พรุ่งนี้ — ใครมีนัดพรุ่งนี้\n"
         "• alert — แจ้งเตือนที่ยังไม่มีคำสั่งแพทย์\n• esa — รายการ ESA รออนุมัติ\n• น้ำ — ผลตรวจน้ำล่าสุด\n"
         "• HN 1234 หรือ ชื่อผู้ป่วย — ข้อมูลผู้ป่วย\n"
-        "• รหัสญาติ <HN> — ออกรหัสให้ญาติรับสรุปหลังฟอก · ยกเลิกญาติ <HN>\n\n"
+        "• รหัสญาติ <HN> — ออกรหัสให้ญาติรับสรุปหลังฟอก · ยกเลิกญาติ <HN>\n"
+        "• ลิงก์อาหาร <HN> — ออกลิงก์โค้ชอาหาร (ถ่ายรูปถาม AI) ส่งต่อผู้ป่วย\n\n"
         "ตอบจากข้อมูลในระบบเท่านั้น ไม่สั่งการรักษา")
 
 
@@ -217,6 +218,9 @@ def answer(conn, body, base_url=""):
         if low.startswith("รหัสญาติ") or low.startswith("ยกเลิกญาติ"):
             from .patient_engage import family_code_command
             return family_code_command(cur, conn, b)
+        if low.startswith("ลิงก์อาหาร") or low.startswith("ลิงค์อาหาร") or low.startswith("โค้ชอาหาร") or low.startswith("food"):
+            from .patient_engage import food_link_command
+            return food_link_command(cur, b)
         if any(w in low for w in ("เตียง", "ว่าง", "bed")):
             return _beds(cur, today)
         if any(w in low for w in ("พรุ่งนี้", "tomorrow")):

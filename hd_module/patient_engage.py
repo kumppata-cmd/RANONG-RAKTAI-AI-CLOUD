@@ -53,6 +53,30 @@ def _base_url():
     return (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
 
 
+# อายุลิงก์โค้ชอาหาร (วัน) — แล็บออกราวเดือนละครั้ง ลิงก์ต้องอยู่ถึงแล็บรอบถัดไป
+FOOD_TOKEN_DAYS = 45
+
+
+def food_link_command(cur, body):
+    """คำสั่งในกลุ่มพยาบาล: 'ลิงก์อาหาร <HN>' — ออกลิงก์โค้ชอาหาร (Food Coach)
+    ของผู้ป่วย อายุ 45 วัน ให้เจ้าหน้าที่ส่งต่อทาง LINE. คืนข้อความตอบเสมอ."""
+    import re as _re
+    m = _re.search(r"(\d{3,9})", body or "")
+    if not m:
+        return "ใช้: ลิงก์อาหาร <HN> เช่น ลิงก์อาหาร 68443"
+    hn = m.group(1)
+    cur.execute("SELECT patient_name FROM hd_patient_mapping WHERE hn = %s", (hn,))
+    pr = cur.fetchone()
+    if not pr:
+        return f"ไม่พบ HN {hn} ในทะเบียนผู้ป่วย"
+    day = datetime.now(_THAI_TZ).strftime("%Y%m%d")
+    link = f"{_base_url()}/hd/food/{make_token('food', hn, day)}"
+    return (f"🍲 ลิงก์โค้ชอาหารของ {pr[0] or hn} (HN {hn})\n{link}\n\n"
+            f"ส่งต่อให้ผู้ป่วย/ญาติทาง LINE ได้เลย — เปิดลิงก์ → ถ่ายรูปอาหาร → "
+            f"AI แนะนำตามผลแล็บล่าสุดของผู้ป่วยคนนี้ (ใช้ได้ {FOOD_TOKEN_DAYS} วัน ถ่ายได้ไม่จำกัดครั้ง)\n"
+            f"⚠️ อย่าส่งรูปอาหารเข้าแชท OA ตรง ๆ — รูปในแชทจะเข้าระบบจัดเก็บเอกสาร")
+
+
 # ───────────────────────── 1) แล็บฉบับภาษาบ้าน ─────────────────────────
 
 def _band(v, lo, hi, warn_lo=None, warn_hi=None):
