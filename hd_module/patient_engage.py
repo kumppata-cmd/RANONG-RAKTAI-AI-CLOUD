@@ -56,6 +56,24 @@ def _base_url():
 # อายุลิงก์โค้ชอาหาร (วัน) — แล็บออกราวเดือนละครั้ง ลิงก์ต้องอยู่ถึงแล็บรอบถัดไป
 FOOD_TOKEN_DAYS = 45
 
+# รุ่น AI vision กลางของ hd_module — 21 พ.ย. 2569: claude-sonnet-4-20250514 ถูกปลดระวาง (API 404)
+# เปลี่ยนได้ 3 ชั้นโดยไม่แก้โค้ด: env HD_VISION_MODEL > ตั้งค่า ai_vision_model ใน ⚙️ > ค่านี้
+DEFAULT_AI_MODEL = "claude-haiku-5-5"
+
+
+def ai_model():
+    m = (os.environ.get("HD_VISION_MODEL", "") or "").strip()
+    if m:
+        return m
+    try:
+        from .blueprint import get_setting_value
+        m = (get_setting_value("ai_vision_model", "") or "").strip()
+        if m:
+            return m
+    except Exception:
+        pass
+    return DEFAULT_AI_MODEL
+
 
 def food_link_command(cur, body):
     """คำสั่งในกลุ่มพยาบาล: 'ลิงก์อาหาร <HN>' — ออกลิงก์โค้ชอาหาร (Food Coach)
@@ -307,7 +325,7 @@ def analyze_food_photo(img_bytes, labs, detail=False, debug=False):
     )
     import requests as _rq
     body = _json.dumps({
-        "model": "claude-sonnet-4-20250514", "max_tokens": 450,
+        "model": ai_model(), "max_tokens": 450,
         "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                          "data": base64.b64encode(img_bytes).decode()}},

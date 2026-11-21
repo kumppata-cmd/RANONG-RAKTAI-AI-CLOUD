@@ -6531,8 +6531,9 @@ def _machine_ai_read(img_bytes):
         "ถ้าจอแสดง UF เป็นลิตร (เช่น 2.50) ให้คูณ 1000 เป็น mL. เวลาที่เหลือรูป H:MM ให้แปลงเป็นนาที. "
         "อ่านไม่ชัดให้ใส่ null ห้ามเดา. ตอบ JSON อย่างเดียว"
     )
+    from .patient_engage import ai_model as _ai_model
     body = _json.dumps({
-        "model": "claude-sonnet-4-20250514",
+        "model": _ai_model(),
         "max_tokens": 300,
         "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
@@ -7875,6 +7876,7 @@ def _ai_fallback_claude(question):
     finally:
         conn.close()
     import requests as _rq
+    from .patient_engage import ai_model as _ai_model
     prompt = (
         "คุณคือผู้ช่วยข้อมูลของหน่วยไตเทียม 'คลินิกระนอง รักษ์ไต' ตอบคำถามเจ้าหน้าที่เป็นภาษาไทย กระชับ\n"
         "กติกาเด็ดขาด: ตอบจากข้อมูลด้านล่างเท่านั้น ห้ามเดาตัวเลขหรือแต่งข้อมูลคนไข้ "
@@ -7886,7 +7888,7 @@ def _ai_fallback_claude(question):
     resp = _rq.post("https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": key, "anthropic-version": "2023-06-01",
                              "content-type": "application/json"},
-                    data=_json.dumps({"model": "claude-sonnet-4-20250514", "max_tokens": 500,
+                    data=_json.dumps({"model": _ai_model(), "max_tokens": 500,
                                       "messages": [{"role": "user", "content": prompt}]}).encode("utf-8"),
                     timeout=30)
     if resp.status_code != 200:
@@ -8996,6 +8998,7 @@ def update_settings():
         "tpl_weight_reply",          # ข้อความตอบน้ำหนัก (แก้ได้ มีตัวแปร {weight} {gain} ...)
         "patient_card_note",         # ข้อความจากแพทย์ต่อท้ายการ์ดสรุปหลังฟอกทุกใบ
         "family_liff_id",            # 21 พ.ย. 2569: LIFF ID ของหน้า Family Link (ญาติรับสรุปหลังฟอก)
+        "ai_vision_model",           # 21 พ.ย. 2569: รุ่น Claude ของ hd_module (default ใน patient_engage)
         "family_summary_push",       # ส่งสรุปจบรอบให้ญาติที่ผูกไว้ (on/off, default on)
     ]
     if key not in allowed_keys:
