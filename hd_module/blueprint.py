@@ -9402,7 +9402,8 @@ def prehd_send_now():
 def family_link_page():
     """👨‍👩‍👧 หน้าผูกญาติ — เปิดผ่าน LIFF (liff.line.me/<family_liff_id>?code=...)."""
     import os
-    liff_id = (get_setting_value("family_liff_id", "") or os.environ.get("HD_FAMILY_LIFF_ID", "")).strip()
+    liff_id = (get_setting_value("family_liff_id", "") or os.environ.get("HD_FAMILY_LIFF_ID", "")
+               or "2012225688-BPqtXCLI").strip()  # LIFF "ครอบครัวรักษ์ไต" สร้าง 21 พ.ย. 2026
     return render_template("hd_family_link.html", liff_id=liff_id,
                            code=(request.args.get("code") or "").strip()[:8],
                            liff_state=(request.args.get("liff.state") or ""))

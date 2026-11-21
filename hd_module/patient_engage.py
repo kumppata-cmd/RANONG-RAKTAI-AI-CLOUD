@@ -274,9 +274,10 @@ def family_code_command(cur, conn, body):
     liff_id = ""
     try:
         from .blueprint import get_setting_value
-        liff_id = (get_setting_value("family_liff_id", "") or os.environ.get("HD_FAMILY_LIFF_ID", "")).strip()
+        liff_id = (get_setting_value("family_liff_id", "") or os.environ.get("HD_FAMILY_LIFF_ID", "")
+                   or "2012225688-BPqtXCLI").strip()
     except Exception:
-        liff_id = os.environ.get("HD_FAMILY_LIFF_ID", "").strip()
+        liff_id = (os.environ.get("HD_FAMILY_LIFF_ID", "") or "2012225688-BPqtXCLI").strip()
     link = (f"https://liff.line.me/{liff_id}?code={code}" if liff_id
             else f"{_base_url()}/hd/family?code={code}")
     out = (f"👨‍👩‍👧 รหัสผูกญาติของ {name} (HN {hn})\n"
