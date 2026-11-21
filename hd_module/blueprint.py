@@ -4258,8 +4258,21 @@ def update_session(session_id):
                     updates.append("status = 'completed'")
                     updates.append("ended_at = NOW()")
                 elif data.get("status") == "cancelled":
+                    # (3) กันยกเลิกพลาด: มีบันทึก vital/UF แล้ว → ต้องจบรอบก่อนกำหนดแทน ไม่ให้ข้อมูลการฟอกหาย
+                    cur.execute("""
+                        SELECT (SELECT COUNT(*) FROM hd_vital_signs WHERE session_id = %s)
+                             + (SELECT COUNT(*) FROM hd_uf_records WHERE session_id = %s)
+                    """, (session_id, session_id))
+                    _nrec = cur.fetchone()[0] or 0
+                    if _nrec > 0:
+                        conn.close()
+                        return jsonify({"error": f"รอบนี้มีบันทึกระหว่างฟอกแล้ว {_nrec} รายการ — ยกเลิกเฉยๆ ไม่ได้ ให้ใช้ 'จบรอบก่อนกำหนด' ที่แท็บ Post-HD แทน",
+                                        "has_records": int(_nrec), "use_early_end": True}), 409
                     updates.append("status = 'cancelled'")
                     updates.append("ended_at = NOW()")
+                    if data.get("cancel_reason"):
+                        updates.append("cancel_reason = %s")
+                        params.append(str(data["cancel_reason"])[:200])
                 if data.get("post_weight") is not None:
                     updates.append("post_weight = %s")
                     params.append(data["post_weight"])
@@ -6854,6 +6867,7 @@ def bed_dashboard():
 
     beds = []
     completed_sessions = []
+    cancelled_sessions = []
     for i in range(1, HdConfig.TOTAL_BEDS + 1):
         beds.append({
             "bed_number": i,
@@ -6896,7 +6910,8 @@ def bed_dashboard():
                            s.shift as saved_shift,
                            s.ended_at, s.pre_weight, s.post_weight, s.actual_uf,
                            (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id) AS n_alerts,
-                           p.default_shift, p.schedule_days, p.esa_dose
+                           p.default_shift, p.schedule_days, p.esa_dose,
+                           s.cancel_reason
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.session_date = %s
@@ -6940,7 +6955,12 @@ def bed_dashboard():
                             })
                             continue
                         if db_status == "cancelled":
-                            # ยกเลิกแล้ว = ปล่อยเตียงสมบูรณ์ — ห้ามเอาชื่อไปติดการ์ด "ว่าง"
+                            # ยกเลิกแล้ว = ปล่อยเตียงสมบูรณ์ — แยกไปแถบ "ยกเลิกวันนี้" (กดเอากลับได้)
+                            cancelled_sessions.append({
+                                "session_id": row[1], "bed_number": bed_num,
+                                "patient_hn": row[3], "patient_name": row[4],
+                                "reason": row[21] if len(row) > 21 else None,
+                            })
                             continue
                         js_status = {"in_progress": "active", "scheduled": "pre_hd", "completed": "done"}.get(db_status, db_status)
                         # Priority: in_progress > completed > scheduled on same bed
@@ -7249,6 +7269,7 @@ def bed_dashboard():
         "date": target_date.isoformat(),
         "active_in_shift": active_count,
         "completed_sessions": completed_sessions,
+        "cancelled_sessions": cancelled_sessions,
         "completed_in_shift": len(completed_sessions),
         "today_scheduled": today_count,
         "today_patients": today_patients,
@@ -9153,6 +9174,42 @@ def notify_nurse_group():
 
 
 # ── F2: Shift Handover ────────────────────────────────────
+
+@hd_bp.route("/sessions/<int:session_id>/restore", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def restore_cancelled_session(session_id):
+    """↩️ เอากลับ: คืน session ที่ยกเลิกไปเป็น 'พร้อมฟอก' (กรณีกดยกเลิกผิดคน). NEW — ไม่แตะของเดิม."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            try:
+                cur.execute("""UPDATE hd_sessions
+                               SET status = 'scheduled', ended_at = NULL, cancel_reason = NULL
+                               WHERE id = %s AND status = 'cancelled'
+                               RETURNING bed_number""", (session_id,))
+                row = cur.fetchone()
+            except Exception as e:
+                conn.rollback()
+                conn.close()
+                if "ux_hd_sessions_bed_active" in str(e) or "duplicate key" in str(e).lower():
+                    return jsonify({"error": "เตียงนี้มีคนไข้รายอื่นลงไปแล้ว — เอากลับไม่ได้ ให้ลงเตียงใหม่"}), 409
+                raise
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบรายการที่ยกเลิก หรือถูกเอากลับไปแล้ว"}), 404
+            conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action="session.restore", resource_type="session",
+                   resource_id=session_id, new_values={"bed": row[0]}, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "bed_number": row[0], "message": f"คืนสถานะสำเร็จ — เตียง {row[0]} พร้อมฟอก"})
+    except Exception as e:
+        logger.error("restore session: %s", e)
+        return jsonify({"error": str(e)}), 500
+
 
 @hd_bp.route("/shift/handover", methods=["POST"])
 @require_role("physician", "nurse", "admin")

@@ -237,6 +237,8 @@ def _run_hd_migrations():
                 "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_sbp INTEGER",
                 "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_dbp INTEGER",
             ]
+            # ── เหตุผลการยกเลิกรอบฟอก (สถิติ no-show + audit) ──
+            fixes.append("ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS cancel_reason TEXT")
             # ── กันเตียงซ้อนระดับ DB: 1 เตียง/วัน/รอบ มี session ทำงานได้ 1 เดียว ──
             # (ปิดช่องโหว่ 2 คนกด submit พร้อมกันเสี้ยววินาที — app เช็คอยู่แล้ว นี่คือชั้นสุดท้าย)
             fixes.append("""

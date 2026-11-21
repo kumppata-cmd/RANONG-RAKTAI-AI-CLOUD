@@ -1255,12 +1255,48 @@ function scheduleSession(){
 
 function cancelSession(){
   if(!sessionData.session_id){ showToast('ไม่มี session ที่จะยกเลิก','warning'); return; }
-  if(!confirm('ยืนยันยกเลิกรอบฟอกนี้?')) return;
+  /* (1) เลือกเหตุผลก่อนยกเลิก — เก็บสถิติ no-show */
+  let ov = document.getElementById('cancelReasonOverlay');
+  if(!ov){
+    ov = document.createElement('div');
+    ov.id = 'cancelReasonOverlay';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1300;display:flex;align-items:center;justify-content:center;padding:16px';
+    ov.onclick = e => { if(e.target===ov) ov.style.display='none'; };
+    const btn = (label, reason) => '<button class="btn btn-outline" style="width:100%;margin-top:8px;padding:12px;font-size:.9rem" onclick="_doCancelSession(\''+reason+'\')">'+label+'</button>';
+    ov.innerHTML = '<div style="background:var(--bg-card);border-radius:16px;padding:18px;max-width:380px;width:100%">'
+      + '<h3 style="margin:0 0 4px">❌ ยกเลิกรอบฟอก</h3>'
+      + '<div style="font-size:.8rem;color:var(--fg-muted)">เลือกเหตุผล (ใช้ทำสถิติการมาฟอก)</div>'
+      + btn('🙅 คนไข้ไม่มา (no-show)','คนไข้ไม่มา')
+      + btn('📅 เลื่อนนัด','เลื่อนนัด')
+      + btn('🏥 ส่งต่อโรงพยาบาล','ส่งต่อโรงพยาบาล')
+      + btn('🛏️ ลงเตียงผิด/ลงซ้ำ','ลงเตียงผิด')
+      + btn('✏️ อื่นๆ (ระบุเอง)','__other__')
+      + '<button class="btn" style="width:100%;margin-top:12px;padding:10px;background:var(--border);color:var(--fg)" onclick="document.getElementById(\'cancelReasonOverlay\').style.display=\'none\'">ไม่ยกเลิกแล้ว</button>'
+      + '</div>';
+    document.body.appendChild(ov);
+  }
+  ov.style.display = 'flex';
+}
+
+function _doCancelSession(reason){
+  if(reason === '__other__'){
+    reason = (prompt('ระบุเหตุผลการยกเลิก:') || '').trim();
+    if(!reason) return;
+  }
+  document.getElementById('cancelReasonOverlay').style.display = 'none';
   hdFetch('/hd/api/v1/sessions/'+sessionData.session_id,{
     method:'PUT',
-    body:JSON.stringify({status:'cancelled'})
-  }).then(r=>r.json()).then(d=>{
-    showToast('ยกเลิกรอบฟอกสำเร็จ — เตียงว่างแล้ว','success');
+    body:JSON.stringify({status:'cancelled', cancel_reason: reason})
+  }).then(async r=>{
+    const d = await r.json();
+    /* (3) มีบันทึกระหว่างฟอกแล้ว → ห้ามยกเลิก ชี้ไปจบรอบก่อนกำหนด */
+    if(r.status === 409 && d.use_early_end){
+      alert('⚠️ ' + d.error + '\n\nระบบจะพาไปแท็บ Post-HD เพื่อปิดรอบอย่างถูกต้อง (ข้อมูลที่บันทึกไว้จะไม่หาย)');
+      try{ switchTab('session','post'); }catch(e){}
+      return;
+    }
+    if(!r.ok || d.error){ showToast('❌ ' + (d.error||'ยกเลิกไม่สำเร็จ'),'danger'); return; }
+    showToast('ยกเลิกรอบฟอกสำเร็จ ('+reason+') — เตียงว่างแล้ว','success');
     document.getElementById('sessionStatus').textContent = 'ยกเลิกแล้ว';
     document.getElementById('sessionStatus').className = 'badge badge-muted';
     document.getElementById('cancelBtn').style.display = 'none';

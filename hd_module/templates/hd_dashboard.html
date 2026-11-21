@@ -691,6 +691,37 @@ function renderBeds(beds){
   _prevWarningCount = counts.warning;
 }
 
+/* 🚫 แถบ "ยกเลิกวันนี้" — audit + กดเอากลับได้ (undo กดยกเลิกผิดคน) */
+function renderCancelledToday(list){
+  let el = document.getElementById('cancelledPanel');
+  if(!list.length){ if(el) el.remove(); return; }
+  if(!el){
+    el = document.createElement('div');
+    el.id = 'cancelledPanel';
+    el.style.cssText = 'margin:12px 0 16px;background:var(--bg-card);border-radius:var(--radius-sm);border:1px dashed var(--danger);padding:12px;';
+    const comp = document.getElementById('completedPanel');
+    (comp || document.getElementById('bedGrid')).after(el);
+  }
+  el.innerHTML = '<div style="font-weight:700;font-size:.9rem;margin-bottom:6px;color:var(--danger)">🚫 ยกเลิกวันนี้ ('+list.length+')</div>'
+    + list.map(c =>
+      '<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:.82rem;">'
+      + '<span>เตียง '+c.bed_number+' — '+(c.patient_name||'')+(c.patient_hn?' <span style="color:var(--fg-muted);font-size:.7rem">HN '+c.patient_hn+'</span>':'')
+      + (c.reason?' <span style="color:var(--fg-muted);font-size:.72rem">('+c.reason+')</span>':'')+'</span>'
+      + '<button class="btn btn-outline" style="font-size:.72rem;padding:4px 10px;color:var(--success);border-color:var(--success);flex:none" onclick="restoreCancelled('+c.session_id+')">↩️ เอากลับ</button>'
+      + '</div>'
+    ).join('');
+}
+function restoreCancelled(sid){
+  if(!confirm('คืนรายการนี้กลับเป็น "พร้อมฟอก" บนเตียงเดิม?')) return;
+  hdFetch('/hd/api/v1/sessions/'+sid+'/restore', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+    .then(async r=>{
+      const d = await r.json();
+      if(!r.ok || d.error){ showToast('❌ '+(d.error||'เอากลับไม่สำเร็จ'),'danger'); return; }
+      showToast('✅ '+(d.message||'คืนสถานะสำเร็จ'),'success');
+      fetchBeds();
+    }).catch(e=>showToast('❌ '+(e.message||e),'danger'));
+}
+
 /* 🚨 แตะ chip → เลื่อนไปที่เตียง + ไฮไลต์ */
 function _gotoBed(n){
   const el = document.getElementById('bedcard-'+n);
@@ -819,6 +850,7 @@ function fetchBeds(){
       /* Always render — the grid must reflect the current shift state */
       renderBeds(beds);
       renderCompleted(data.completed_sessions || [], 'completedPanel', document.getElementById('bedGrid'));
+      renderCancelledToday(data.cancelled_sessions || []);
       /* Show debug info */
       const shiftNames = {morning:'เช้า', afternoon:'บ่าย', evening:'ค่ำ'};
       const activeCount = data.active_in_shift || 0;
