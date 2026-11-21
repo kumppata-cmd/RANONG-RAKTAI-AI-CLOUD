@@ -9507,6 +9507,54 @@ def food_analyze():
     return jsonify({"answer": ans + DISCLAIMER})
 
 
+@hd_web.route("/r/<token>")
+def session_record_view(token):
+    """📱 ใบฟอกดิจิทัล — QR บน Hemodialysis work sheet เปิดหน้านี้ (ไม่ต้อง login).
+    token HMAC ผูกกับรอบฟอกใบนั้นใบเดียว: ผู้ถือใบ (ผู้ป่วย) เห็นของตัวเองเท่านั้น
+    เจ้าหน้าที่มีลิงก์ต่อไปหน้ารอบฟอก Real-time (ต้อง login ตามสิทธิ์เดิม)."""
+    import os
+    from .patient_engage import parse_token
+    sid, _ = parse_token("rec", token, max_age_days=400)
+    try:
+        sid = int(sid) if sid else None
+    except (TypeError, ValueError):
+        sid = None
+    rec = None
+    uf_total = None
+    vit_rows = []
+    if sid:
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        try:
+            import psycopg2
+            from .daily_records import load_session_record
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            conn.autocommit = True
+            try:
+                rec = load_session_record(conn, sid)
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.warning("record view %s: %s", sid, e)
+            rec = None
+    if rec:
+        from .hd_worksheet import _sheet_total_uf, _thai_time, _thai_date
+        uf_total = _sheet_total_uf(rec) or (int(rec["actual_uf"]) if rec.get("actual_uf") else None)
+        for v in (rec.get("vitals") or []):
+            vit_rows.append({
+                "time": _thai_time(v[6]) if v[6] else "",
+                "phase": {"pre": "ก่อนฟอก", "intra": "ระหว่างฟอก", "post": "หลังฟอก"}.get(v[0], v[0] or ""),
+                "bp": f"{v[1]}/{v[2]}" if v[1] else "-",
+                "hr": v[3] or "-",
+                "temp": (f"{float(v[4]):.1f}" if v[4] is not None else "-"),
+                "spo2": v[5] or "-",
+            })
+        rec["_date_th"] = _thai_date(rec.get("date"))
+        rec["_t_start"] = _thai_time(rec.get("started_at"))
+        rec["_t_end"] = _thai_time(rec.get("ended_at"))
+    return render_template("hd_record_view.html", rec=rec, sid=sid,
+                           uf_total=uf_total, vit_rows=vit_rows)
+
+
 @hd_bp.route("/food/selftest", methods=["GET"])
 def food_selftest():
     """ตรวจสุขภาพ Food Coach บน production (ADMIN_SECRET gate เหมือน force-reset):

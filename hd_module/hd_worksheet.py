@@ -77,6 +77,28 @@ def _f(v, nd=1):
         return str(v)
 
 
+def _first_vital(rec, idx):
+    """ค่าจาก vital signs ของรอบนี้: ค่าแรกที่ไม่ว่าง (fallback ค่าสุดท้าย = เผื่อกรอกช้า).
+    rec["vitals"] tuple: (phase, sbp, dbp, heart_rate, temperature, spo2, recorded_at)."""
+    vals = [v[idx] for v in (rec.get("vitals") or []) if len(v) > idx and v[idx] is not None]
+    return vals[0] if vals else None
+
+
+def _sheet_total_uf(rec):
+    """Total UF จากเครื่องจริง: ค่าสูงสุดของช่อง UF รวมใน Monitoring Sheet
+    (รวมที่ sync มาจากหน้ารอบฟอก/ปุ่มบันทึก UF) — ตรงกว่า actual_uf ที่กรอกมือ."""
+    best = None
+    for e in (rec.get("sheet") or []):
+        t = e.get("total_uf")
+        try:
+            t = int(float(t)) if t not in (None, "") else None
+        except (TypeError, ValueError):
+            t = None
+        if t:
+            best = t if best is None else max(best, t)
+    return best
+
+
 def _register_fonts():
     from reportlab.pdfbase import pdfmetrics
     from reportlab.pdfbase.ttfonts import TTFont
@@ -425,12 +447,16 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     # Hb/Hct: ดึงจาก session → extras → rec (ทุกทาง)
     _hct = _f(ex.get("hct_value") or rec.get("hct"))
     _hb = _f(ex.get("hb_value") or rec.get("hb"))
+    # 21 พ.ย. 2569: O2 sat / BT ลงอัตโนมัติจาก vital signs ของรอบนี้
+    # (ค่าแรกที่บันทึก = ก่อน/เริ่มฟอก ตามที่แพทย์กำหนด "ครั้งแรกหรือครั้งสุดท้ายก็ได้")
+    _o2 = rec.get("o2sat") or ex.get("o2sat_value") or _first_vital(rec, 5)
+    _bt = rec.get("bt") or ex.get("bt_value") or _first_vital(rec, 4)
     col3 = [
         f"Duration  {duration}  hr",
         f"Time start  {_thai_time(rec.get('started_at'))}",
         f"Time off  {_thai_time(rec.get('ended_at'))}",
-        "O2 sat              %",
-        f"BT  {_f(rec.get('bt') or ex.get('bt_value'))}  'C",
+        f"O2 sat  {_f(_o2)}  %" if _o2 is not None else "O2 sat              %",
+        f"BT  {_f(_bt)}  'C",
         f"Hct=  {_hct}  %",
         f"Hb =  {_hb}  g/dl",
     ]
@@ -684,7 +710,10 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
     for i, lbl in enumerate(post_labels):
         cell(LM + i * pw, y_post, pw, 10, lbl, sz=5.5, bold=True, align="center")
     y_post -= 10
-    actual_uf = _f(rec.get("actual_uf"), 0) if rec.get("actual_uf") else ""
+    # 21 พ.ย. 2569: Total UF ลิงก์กับค่าเครื่องจริงจาก Sheet (ไม่ใช่ actual_uf ที่กรอกมือ)
+    # Net UF balance = Total UF − สารน้ำทดแทน (ระบบยังไม่เก็บช่องทดแทน → เท่ากัน)
+    _uf_tot = _sheet_total_uf(rec) or (int(rec["actual_uf"]) if rec.get("actual_uf") else None)
+    actual_uf = str(_uf_tot) if _uf_tot else ""
     post_vals = ["ml", "ml", "ml", "ml", "ml", f"{actual_uf} ml", f"{actual_uf} ml"]
     for i, val in enumerate(post_vals):
         cell(LM + i * pw, y_post, pw, 10, val, sz=6, bold=True, align="center")
@@ -878,8 +907,16 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
         hn = rec.get("hn") or ""
         if session_id:
             base_url = os.environ.get("RENDER_EXTERNAL_URL", "https://ranong-raktai-ai-cloud.onrender.com")
-            # Smart URL: session page with patient context
-            qr_url = f"{base_url}/hd/session/{session_id}"
+            # 21 พ.ย. 2569: QR เฉพาะใบ — token HMAC ผูกกับรอบฟอกนี้ใบเดียว เดา URL ไม่ได้
+            # ผู้ถือใบ (ผู้ป่วย) สแกนเห็นใบฟอกดิจิทัลของตัวเองเท่านั้น · เจ้าหน้าที่มีลิงก์
+            # ต่อไปหน้า Real-time ในหน้านั้น (ต้อง login) — ดูได้ทุกใบตามสิทธิ์เดิม
+            try:
+                from .patient_engage import make_token
+                _d = rec.get("date")
+                _day = _d.strftime("%Y%m%d") if _d else datetime.now().strftime("%Y%m%d")
+                qr_url = f"{base_url}/hd/r/{make_token('rec', str(session_id), _day)}"
+            except Exception:
+                qr_url = f"{base_url}/hd/session/{session_id}"
             qr_obj = segno.make(qr_url)
             qr_buf = io.BytesIO()
             qr_obj.save(qr_buf, kind="png", scale=2, border=1)
@@ -887,7 +924,7 @@ def build_worksheet_pdf(rec, extras=None, clinic_name="ระนอง รัก
             from reportlab.lib.utils import ImageReader
             c.drawImage(ImageReader(qr_buf), RM - 50, sig_y - 8, width=42, height=42)
             c.setFont("Loma", 3.5)
-            c.drawCentredString(RM - 29, sig_y - 11, "สแกนดู Real-time")
+            c.drawCentredString(RM - 29, sig_y - 11, "สแกนดูใบฟอกดิจิทัล")
     except ImportError:
         pass  # segno not installed — skip silently
 
@@ -1155,7 +1192,7 @@ def _build_overlay(rec, extras=None):
     # Nurse Off: y≈270
     # Total repletcement / Total UF / Net UF balance: y≈253
     # ════════════════════════════════════════════════════════
-    actual_uf = rec.get("actual_uf")
+    actual_uf = _sheet_total_uf(rec) or rec.get("actual_uf")   # 21 พ.ย. 2569: ลิงก์ค่าเครื่องจริงจาก Sheet
     if actual_uf is not None:
         # Total UF: field-map box(448,248,55,14)
         txtc(448, 250, str(int(actual_uf)), 55, size=7, bold=True)
