@@ -13703,9 +13703,17 @@ CLASSIFY_PROMPT = (
 def call_claude_api(messages_content: list) -> dict | None:
     """เรียก Claude API และ parse JSON response."""
     try:
+        # 21 พ.ย. 2569 (แพทย์อนุมัติแก้ server.py จุดนี้): claude-sonnet-4-20250514
+        # ถูกปลดระวางจาก API (404) — ใช้รุ่นกลางเดียวกับ hd_module
+        # (env HD_VISION_MODEL > ตั้งค่า ai_vision_model > claude-haiku-5-5)
+        try:
+            from hd_module.patient_engage import ai_model as _hd_ai_model
+            _model = _hd_ai_model()
+        except Exception:
+            _model = os.getenv("HD_VISION_MODEL", "").strip() or "claude-haiku-5-5"
         request_body = json.dumps(
             {
-                "model": "claude-sonnet-4-20250514",
+                "model": _model,
                 "max_tokens": 256,
                 "messages": [
                     {"role": "user", "content": messages_content}
@@ -13731,7 +13739,11 @@ def call_claude_api(messages_content: list) -> dict | None:
             resp.raise_for_status()
 
         result = resp.json()
-        answer_text = result["content"][0]["text"].strip()
+        # รุ่นปัจจุบันอาจตอบหลายบล็อก โดยบล็อกแรกไม่ใช่ text — รวมเฉพาะบล็อก text
+        answer_text = "".join(
+            b.get("text", "") for b in (result.get("content") or [])
+            if b.get("type") == "text"
+        ).strip()
         if answer_text.startswith("```"):
             answer_text = answer_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
