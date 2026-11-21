@@ -219,7 +219,8 @@ def answer(conn, body, base_url=""):
         if low.startswith("รหัสญาติ") or low.startswith("ยกเลิกญาติ"):
             from .patient_engage import family_code_command
             return family_code_command(cur, conn, b)
-        if low.startswith("ลิงก์อาหาร") or low.startswith("ลิงค์อาหาร") or low.startswith("โค้ชอาหาร") or low.startswith("food"):
+        # link สะกดได้หลายแบบ: ลิงก์/ลิงค์/ลิ้งก์/ลิ้งค์/ลิ้ง/ลิง — รับทุกแบบ รวมถึง "อาหาร <HN>" เฉย ๆ
+        if re.match(r"^(ลิ้?ง[กค]?์?\s*อาหาร|โค้ชอาหาร|อาหาร|food)", low):
             from .patient_engage import food_link_command
             return food_link_command(cur, b)
         if low.startswith("แล็บบ้าน") or low.startswith("ส่งแล็บบ้าน") or low.startswith("แลบบ้าน") or low.startswith("ส่งแลบบ้าน"):
