@@ -323,7 +323,10 @@ def analyze_food_photo(img_bytes, labs, detail=False, debug=False):
         return _ret(None, f"net:{type(e).__name__}")
     if resp.status_code != 200:
         logger.warning("food coach HTTP %s: %s", resp.status_code, resp.text[:200])
-        err = f"api:{resp.status_code}"
+        if resp.status_code == 400 and "credit balance" in (resp.text or ""):
+            err = "no_credit"          # เครดิต Anthropic API หมด — กระทบ AI ทุกตัวในระบบ
+        else:
+            err = f"api:{resp.status_code}"
         if debug:
             err += "|" + (resp.text or "")[:200]
         return _ret(None, err)

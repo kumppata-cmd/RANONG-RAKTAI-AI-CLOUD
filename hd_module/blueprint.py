@@ -9485,7 +9485,9 @@ def food_analyze():
         ans, err = None, f"exc:{type(e).__name__}"
     if not ans:
         logger.warning("food analyze fail hn=%s err=%s bytes=%d", hn, err, len(data))
-        if err == "no_api_key":
+        if err == "no_credit":
+            msg = "ระบบ AI ไม่พร้อมใช้งานชั่วคราว — แจ้งเจ้าหน้าที่คลินิกให้เติมเครดิตระบบ AI"
+        elif err == "no_api_key":
             msg = "ระบบ AI ยังไม่ได้ตั้งค่า — แจ้งเจ้าหน้าที่คลินิก (รหัส: no_api_key)"
         elif err in ("api:429", "api:529"):
             msg = "ระบบ AI คิวเต็มชั่วคราว รอ 1 นาทีแล้วลองใหม่"
