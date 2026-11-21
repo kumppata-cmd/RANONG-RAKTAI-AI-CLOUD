@@ -24,9 +24,11 @@
   {% if not valid %}
   <div class="card" style="text-align:center">⏰ ลิงก์นี้หมดอายุแล้ว<br><span style="color:var(--muted);font-size:.85rem">ลิงก์ใหม่จะมาพร้อมข้อความผลแล็บใน LINE หรือขอจากเจ้าหน้าที่ได้</span></div>
   {% else %}
-  <button class="shoot" onclick="document.getElementById('cam').click()">📸 ถ่ายรูปมื้อนี้ / เลือกรูปอาหาร</button>
+  <button class="shoot" onclick="document.getElementById('cam').click()">📸 ถ่ายรูปมื้อนี้</button>
+  <button class="shoot" style="margin-top:8px;background:#fff;color:var(--p);border:2px solid var(--p)" onclick="document.getElementById('gal').click()">🖼 เลือกรูปที่ถ่ายไว้แล้ว</button>
   <input type="file" id="cam" accept="image/*" capture="environment" style="display:none" onchange="go(this)">
-  <div class="hint">ถ่ายให้เห็นอาหารทั้งจาน ระบบตอบใน 10–20 วินาที</div>
+  <input type="file" id="gal" accept="image/*" style="display:none" onchange="go(this)">
+  <div class="hint">ถ่ายให้เห็นอาหารทั้งจาน ระบบตอบใน 10–20 วินาที<br>ถ้ากดแล้วกล้องไม่เปิด: ถ่ายด้วยแอปกล้องก่อน แล้วกด "เลือกรูปที่ถ่ายไว้แล้ว"</div>
   <img id="preview" alt="">
   <div id="status"></div>
   <div class="card" id="ans"></div>
@@ -37,6 +39,19 @@
 </div>
 <script>
 const TOKEN = "{{ token }}";
+/* ย่อรูปในเครื่องก่อนส่ง: เร็วบนเน็ตมือถือ และได้ JPEG ที่ระบบอ่านได้แน่นอน */
+async function shrink(f){
+  try{
+    const bmp = await createImageBitmap(f);
+    const s = Math.min(1, 1280/Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width*s)), h = Math.max(1, Math.round(bmp.height*s));
+    const c = document.createElement('canvas'); c.width=w; c.height=h;
+    c.getContext('2d').drawImage(bmp, 0, 0, w, h);
+    const blob = await new Promise(res=>c.toBlob(res, 'image/jpeg', 0.85));
+    if(blob && blob.size > 0) return new File([blob], 'meal.jpg', {type:'image/jpeg'});
+  }catch(e){}
+  return f;  /* ย่อไม่ได้ → ส่งไฟล์เดิม */
+}
 async function go(inp){
   const f = inp.files && inp.files[0];
   if(!f) return;
@@ -45,11 +60,12 @@ async function go(inp){
   const st=document.getElementById('status'), ans=document.getElementById('ans');
   ans.style.display='none';
   st.textContent='🤖 กำลังดูรูปและเทียบกับผลเลือดของคุณ...';
-  const fd=new FormData(); fd.append('token',TOKEN); fd.append('image',f);
+  const up = await shrink(f);
+  const fd=new FormData(); fd.append('token',TOKEN); fd.append('image',up,'meal.jpg');
   try{
     const r=await fetch('/hd/api/v1/food/analyze',{method:'POST',body:fd});
-    const d=await r.json();
-    if(!r.ok||d.error){st.textContent='❌ '+(d.error||'วิเคราะห์ไม่สำเร็จ');inp.value='';return;}
+    let d={}; try{ d=await r.json(); }catch(e){}
+    if(!r.ok||d.error){st.textContent='❌ '+(d.error||('วิเคราะห์ไม่สำเร็จ (HTTP '+r.status+') ลองใหม่อีกครั้ง'));inp.value='';return;}
     st.textContent='';
     ans.textContent=d.answer;
     ans.style.display='block';

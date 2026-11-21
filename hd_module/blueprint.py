@@ -6096,7 +6096,7 @@ def notify_patients_new_results(hns, kind="ผลเลือด"):
                     for hn in set(hns):
                         fm = build_lab_friendly_message(cur, hn, kind=kind)
                         if fm:
-                            food_url = f"{base}/hd/food/{make_token('food', hn, _day)}"
+                            food_url = f"{base}/hd/food/{make_token('food', hn, _day)}?openExternalBrowser=1"
                             friendly[hn] = fm + f"\n\n🔎 ดูกราฟแนวโน้ม: {url}\n🍲 ไม่แน่ใจว่ามื้อไหนกินได้ไหม? ถ่ายรูปถามโค้ชอาหาร: {food_url}"
             finally:
                 _cf.close()
@@ -9479,15 +9479,49 @@ def food_analyze():
     except Exception as e:
         logger.warning("food labs lookup: %s", e)
     try:
-        ans = analyze_food_photo(data, labs)
+        ans, err = analyze_food_photo(data, labs, detail=True)
     except Exception as e:
         logger.warning("food analyze: %s", e)
-        ans = None
+        ans, err = None, f"exc:{type(e).__name__}"
     if not ans:
-        return jsonify({"error": "วิเคราะห์ไม่สำเร็จ ลองถ่ายใหม่ให้เห็นอาหารชัดๆ"}), 502
+        logger.warning("food analyze fail hn=%s err=%s bytes=%d", hn, err, len(data))
+        if err == "no_api_key":
+            msg = "ระบบ AI ยังไม่ได้ตั้งค่า — แจ้งเจ้าหน้าที่คลินิก (รหัส: no_api_key)"
+        elif err in ("api:429", "api:529"):
+            msg = "ระบบ AI คิวเต็มชั่วคราว รอ 1 นาทีแล้วลองใหม่"
+        elif err and err.startswith("net:"):
+            msg = "เชื่อมต่อระบบ AI ไม่ได้ชั่วคราว ลองใหม่อีกครั้ง"
+        else:
+            msg = f"วิเคราะห์ไม่สำเร็จ ลองถ่ายใหม่ให้เห็นอาหารชัดๆ (รหัส: {err or 'unknown'})"
+        return jsonify({"error": msg}), 502
     log_action(user_id=None, action="food.coach", resource_type="patient",
                new_values={"hn": hn, "labs": bool(labs)}, ip_address=request.remote_addr or "")
     return jsonify({"answer": ans + DISCLAIMER})
+
+
+@hd_bp.route("/food/selftest", methods=["GET"])
+def food_selftest():
+    """ตรวจสุขภาพ Food Coach บน production (ADMIN_SECRET gate เหมือน force-reset):
+    ส่งรูปสังเคราะห์เข้า AI จริง — ไม่มีข้อมูลผู้ป่วย. GET /food/selftest?secret=XXX"""
+    import os
+    if not os.environ.get("ADMIN_SECRET") or \
+            request.args.get("secret", "") != os.environ.get("ADMIN_SECRET", ""):
+        return jsonify({"error": "forbidden"}), 403
+    import io
+    from .patient_engage import analyze_food_photo
+    try:
+        from PIL import Image, ImageDraw
+        im = Image.new("RGB", (640, 480), (245, 238, 220))
+        d = ImageDraw.Draw(im)
+        d.ellipse((140, 90, 500, 390), fill=(250, 250, 250), outline=(200, 200, 200), width=4)
+        d.ellipse((230, 160, 410, 320), fill=(235, 235, 235))
+        buf = io.BytesIO()
+        im.save(buf, "JPEG", quality=85)
+        img = buf.getvalue()
+    except Exception as e:
+        return jsonify({"ok": False, "err": f"pil:{type(e).__name__}"}), 500
+    ans, err = analyze_food_photo(img, {"K": 4.2, "P": 4.8}, detail=True)
+    return jsonify({"ok": bool(ans), "err": err, "answer": (ans or "")[:400]})
 
 
 @hd_bp.route("/stats/cancellations", methods=["GET"])

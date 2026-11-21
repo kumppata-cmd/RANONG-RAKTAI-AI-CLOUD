@@ -70,7 +70,8 @@ def food_link_command(cur, body):
     if not pr:
         return f"ไม่พบ HN {hn} ในทะเบียนผู้ป่วย"
     day = datetime.now(_THAI_TZ).strftime("%Y%m%d")
-    link = f"{_base_url()}/hd/food/{make_token('food', hn, day)}"
+    # openExternalBrowser=1: LINE เปิดใน Chrome/เบราว์เซอร์เครื่อง → ปุ่มถ่ายรูปเปิดกล้องได้จริง
+    link = f"{_base_url()}/hd/food/{make_token('food', hn, day)}?openExternalBrowser=1"
     return (f"🍲 ลิงก์โค้ชอาหารของ {pr[0] or hn} (HN {hn})\n{link}\n\n"
             f"ส่งต่อให้ผู้ป่วย/ญาติทาง LINE ได้เลย — เปิดลิงก์ → ถ่ายรูปอาหาร → "
             f"AI แนะนำตามผลแล็บล่าสุดของผู้ป่วยคนนี้ (ใช้ได้ {FOOD_TOKEN_DAYS} วัน ถ่ายได้ไม่จำกัดครั้ง)\n"
@@ -194,7 +195,7 @@ def lab_friendly_command(cur, body):
     if not push_fn:
         return "ระบบส่ง LINE ยังไม่พร้อม — ลองใหม่อีกครั้ง"
     day = datetime.now(_THAI_TZ).strftime("%Y%m%d")
-    food_url = f"{_base_url()}/hd/food/{make_token('food', hn, day)}"
+    food_url = f"{_base_url()}/hd/food/{make_token('food', hn, day)}?openExternalBrowser=1"
     msg = fm + f"\n\n🍲 ไม่แน่ใจว่ามื้อไหนกินได้ไหม? ถ่ายรูปถามโค้ชอาหาร: {food_url}"
     try:
         if push_fn(lid, msg[:4900]) is False:
@@ -274,12 +275,17 @@ def checkin_is_flagged(symptoms_text):
 
 # ───────────────────────── 4) Food Coach (Claude Vision + แล็บรายคน) ─────────────────────────
 
-def analyze_food_photo(img_bytes, labs):
-    """รูปอาหาร + แล็บล่าสุดของคนไข้ → คำแนะนำสั้นภาษาไทย. คืน str หรือ None."""
+def analyze_food_photo(img_bytes, labs, detail=False):
+    """รูปอาหาร + แล็บล่าสุดของคนไข้ → คำแนะนำสั้นภาษาไทย.
+    คืน str|None (detail=False) หรือ (str|None, err_code|None) (detail=True)."""
     import io, json as _json, base64
+
+    def _ret(ans, err):
+        return (ans, err) if detail else ans
+
     key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
     if not key:
-        return None
+        return _ret(None, "no_api_key")
     try:
         from PIL import Image, ImageOps
         im = ImageOps.exif_transpose(Image.open(io.BytesIO(img_bytes))).convert("RGB")
@@ -306,15 +312,19 @@ def analyze_food_photo(img_bytes, labs):
                                          "data": base64.b64encode(img_bytes).decode()}},
             {"type": "text", "text": prompt}]}],
     }).encode("utf-8")
-    resp = _rq.post("https://api.anthropic.com/v1/messages",
-                    headers={"x-api-key": key, "anthropic-version": "2023-06-01",
-                             "content-type": "application/json"},
-                    data=body, timeout=45)
+    try:
+        resp = _rq.post("https://api.anthropic.com/v1/messages",
+                        headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                                 "content-type": "application/json"},
+                        data=body, timeout=45)
+    except Exception as e:
+        logger.warning("food coach net: %s", type(e).__name__)
+        return _ret(None, f"net:{type(e).__name__}")
     if resp.status_code != 200:
-        logger.info("food coach HTTP %s", resp.status_code)
-        return None
+        logger.info("food coach HTTP %s: %s", resp.status_code, resp.text[:200])
+        return _ret(None, f"api:{resp.status_code}")
     txt = (resp.json().get("content") or [{}])[0].get("text", "").strip()
-    return txt or None
+    return _ret(txt or None, None if txt else "empty")
 
 
 # ───────────────────────── 3b) Family Link — ญาติรับสรุปหลังฟอก ─────────────────────────
