@@ -228,14 +228,16 @@ tr:hover td { background: rgba(0,0,0,.02); }
     <a href="/hd/clinic-pulse" class="{% block nav_pulse %}{% endblock %}" style="background:linear-gradient(135deg,#dc2626,#f59e0b);color:#fff;border-radius:10px;margin-bottom:2px"><span class="icon">🫀</span> Clinic Pulse LIVE</a>
     <a href="/hd/ai" class="{% block nav_ai %}{% endblock %}" style="background:linear-gradient(135deg,#1e40af,#7c3aed);color:#fff;border-radius:10px;margin-bottom:4px"><span class="icon">🤖</span> AI Assistant</a>
     <a href="/hd/dashboard" class="{% block nav_dashboard %}{% endblock %}"><span class="icon">📊</span> แดชบอร์ด {{ total_beds or 28 }} เตียง</a>
-    <a href="/hd/bedmap" class="{% block nav_bedmap %}{% endblock %}"><span class="icon">🗺</span> Smart Bed Map</a>
+    {# ซ่อนเมนูซ้ำซ้อนตามมติ 21 พ.ย. 2026 — โค้ด/หน้าไม่ถูกลบ ยังเข้าผ่าน URL ตรงได้ (/hd/bedmap) #}
+    {# <a href="/hd/bedmap" class="{% block nav_bedmap %}{% endblock %}"><span class="icon">🗺</span> Smart Bed Map</a> #}
     <a href="/hd/session/new" class="{% block nav_session %}{% endblock %}"><span class="icon">💉</span> เริ่มรอบฟอก</a>
     <a href="/hd/patients" class="{% block nav_patients %}{% endblock %}"><span class="icon">👥</span> รายชื่อผู้ป่วย</a>
     <a href="/hd/labs" class="{% block nav_labs %}{% endblock %}"><span class="icon">🔬</span> Lab ผลเลือด</a>
     <a href="/hd/alerts" class="{% block nav_alerts %}{% endblock %}"><span class="icon">🔔</span> การแจ้งเตือน</a>
     <a href="/hd/kpi" class="{% block nav_kpi %}{% endblock %}"><span class="icon">📈</span> KPI</a>
     <a href="/hd/analytics" class="{% block nav_analytics %}{% endblock %}"><span class="icon">📊</span> Analytics</a>
-    <a href="/hd/calculator" class="{% block nav_calculator %}{% endblock %}"><span class="icon">🧮</span> Kt/V Calculator</a>
+    {# ซ่อน — Adequacy (Kt/V) ครอบคลุมแล้ว; ยังเข้าได้ที่ /hd/calculator #}
+    {# <a href="/hd/calculator" class="{% block nav_calculator %}{% endblock %}"><span class="icon">🧮</span> Kt/V Calculator</a> #}
     <a href="/hd/quality" class="{% block nav_quality %}{% endblock %}"><span class="icon">🏥</span> ตัวชี้วัดคุณภาพ</a>
     <a href="/hd/checklist/page" class="{% block nav_checklist %}{% endblock %}"><span class="icon">✅</span> เช็คลิสส์ประจำวัน</a>
     <a href="/hd/daily" class="{% block nav_daily %}{% endblock %}"><span class="icon">📒</span> ทะเบียนประจำวัน</a>
@@ -249,7 +251,8 @@ tr:hover td { background: rgba(0,0,0,.02); }
     <a href="/hd/scheduler" class="{% block nav_scheduler %}{% endblock %}"><span class="icon">🗓</span> จัดเตียงอัตโนมัติ</a>
     <a href="/hd/consents" class="{% block nav_consents %}{% endblock %}"><span class="icon">🔐</span> ความยินยอม PDPA</a>
     <a href="/hd/water-ro" class="{% block nav_water %}{% endblock %}"><span class="icon">💧</span> ตรวจน้ำ RO</a>
-    <a href="/hd/radar" class="{% block nav_radar %}{% endblock %}"><span class="icon">🎯</span> เรดาร์หัวหน้าเวร</a>
+    {# ซ่อน — alert strip + Alert Center บน dashboard ทำหน้าที่นี้แล้ว; ยังเข้าได้ที่ /hd/radar #}
+    {# <a href="/hd/radar" class="{% block nav_radar %}{% endblock %}"><span class="icon">🎯</span> เรดาร์หัวหน้าเวร</a> #}
     <a href="/hd/handover" class="{% block nav_handover %}{% endblock %}"><span class="icon">📋</span> ส่งต่อเวร</a>
     <a href="/hd/api/v1/qr/beds" target="_blank" rel="noopener"><span class="icon">📱</span> QR Check-in (พิมพ์)</a>
     <a href="/hd/tv" target="_blank" rel="noopener"><span class="icon">📺</span> TV Mode</a>
