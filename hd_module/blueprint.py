@@ -6548,7 +6548,8 @@ def _machine_ai_read(img_bytes):
     if resp.status_code != 200:
         logger.info("machine-screen claude HTTP %s", resp.status_code)
         return None
-    txt = resp.json()["content"][0]["text"].strip()
+    txt = "".join(x.get("text", "") for x in (resp.json().get("content") or [])
+                  if x.get("type") == "text").strip()
     if txt.startswith("```"):
         txt = txt.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
     raw = _json.loads(txt)
@@ -7894,7 +7895,8 @@ def _ai_fallback_claude(question):
     if resp.status_code != 200:
         logger.info("ai fallback HTTP %s", resp.status_code)
         return None
-    txt = (resp.json().get("content") or [{}])[0].get("text", "").strip()
+    txt = "".join(x.get("text", "") for x in (resp.json().get("content") or [])
+                  if x.get("type") == "text").strip()
     return txt or None
 
 

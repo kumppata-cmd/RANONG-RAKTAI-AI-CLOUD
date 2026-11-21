@@ -348,7 +348,8 @@ def analyze_food_photo(img_bytes, labs, detail=False, debug=False):
         if debug:
             err += "|" + (resp.text or "")[:200]
         return _ret(None, err)
-    txt = (resp.json().get("content") or [{}])[0].get("text", "").strip()
+    txt = "".join(b.get("text", "") for b in (resp.json().get("content") or [])
+                  if b.get("type") == "text").strip()
     return _ret(txt or None, None if txt else "empty")
 
 
