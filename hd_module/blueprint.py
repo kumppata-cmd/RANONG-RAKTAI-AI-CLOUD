@@ -7777,6 +7777,86 @@ def patient_dialysis_twin(hn):
 
 # ── AI Assistant (Chat + LINE) ─────────────────────────────
 
+def _ai_fallback_claude(question):
+    """ถามนอกแพทเทิร์น → Claude ตอบจาก snapshot ข้อมูลคลินิก (ไม่เดา ไม่สั่งการรักษา).
+    คืน str หรือ None เมื่อไม่มี key/ตอบไม่ได้. ใช้ API เดียวกับ doc classifier/lab OCR."""
+    import os, re as _re, json as _json, psycopg2
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not key or not db_url:
+        return None
+    ctx = []
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM hd_patient_mapping WHERE is_active = TRUE")
+            ctx.append(f"ผู้ป่วย active {cur.fetchone()[0]} ราย")
+            cur.execute("""SELECT COUNT(*) FILTER (WHERE status='in_progress'),
+                                  COUNT(*) FILTER (WHERE status='completed'),
+                                  COUNT(*) FILTER (WHERE status='cancelled'), COUNT(*)
+                           FROM hd_sessions WHERE session_date = CURRENT_DATE""")
+            r = cur.fetchone()
+            ctx.append(f"วันนี้: กำลังฟอก {r[0]} · เสร็จ {r[1]} · ยกเลิก {r[2]} · รวม {r[3]} รอบ")
+            cur.execute("""SELECT COUNT(*) FROM hd_clinical_alerts a JOIN hd_sessions s ON s.id = a.session_id
+                           WHERE a.acknowledged = FALSE AND s.session_date >= CURRENT_DATE - 1""")
+            ctx.append(f"alert รอตอบรับ {cur.fetchone()[0]} รายการ")
+            # ถ้าคำถามพาดพิงคนไข้ (HN หรือชื่อ) → เติมข้อมูลย่อของคนนั้น
+            hn = None
+            m = _re.search(r"\b(\d{4,7})\b", question)
+            if m:
+                hn = m.group(1)
+                cur.execute("SELECT id, hn, patient_name, vascular_access, dry_weight FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            else:
+                toks = [t for t in _re.split(r"\s+", question) if len(t) >= 3][:4]
+                row = None
+                for t in toks:
+                    cur.execute("SELECT id, hn, patient_name, vascular_access, dry_weight FROM hd_patient_mapping WHERE patient_name ILIKE %s LIMIT 1", (f"%{t}%",))
+                    row = cur.fetchone()
+                    if row:
+                        break
+                if row is None:
+                    cur.execute("SELECT NULL WHERE FALSE")
+            prow = cur.fetchone() if hn else (row if not hn else None)
+            if prow:
+                pid = prow[0]
+                ctx.append(f"คนไข้ที่ถามถึง: {prow[2]} (HN {prow[1]}) VA={prow[3] or '-'} DW={prow[4] or '-'}")
+                cur.execute("""SELECT session_date, status, pre_weight, post_weight, actual_uf
+                               FROM hd_sessions WHERE patient_id = %s ORDER BY session_date DESC LIMIT 3""", (pid,))
+                for s in cur.fetchall():
+                    ctx.append(f"  รอบ {s[0]}: {s[1]} pre={s[2] or '-'} post={s[3] or '-'} UF={s[4] or '-'}")
+                try:
+                    cur.execute("""SELECT lab_date, hb, k, ktv, phos FROM hd_labs
+                                   WHERE patient_id = %s AND lab_date IS NOT NULL
+                                   ORDER BY lab_date DESC LIMIT 2""", (pid,))
+                    for l in cur.fetchall():
+                        ctx.append(f"  แล็บ {l[0]}: Hb={l[1] or '-'} K={l[2] or '-'} Kt/V={l[3] or '-'} PO4={l[4] or '-'}")
+                except Exception:
+                    pass
+    finally:
+        conn.close()
+    import requests as _rq
+    prompt = (
+        "คุณคือผู้ช่วยข้อมูลของหน่วยไตเทียม 'คลินิกระนอง รักษ์ไต' ตอบคำถามเจ้าหน้าที่เป็นภาษาไทย กระชับ\n"
+        "กติกาเด็ดขาด: ตอบจากข้อมูลด้านล่างเท่านั้น ห้ามเดาตัวเลขหรือแต่งข้อมูลคนไข้ "
+        "ห้ามให้คำสั่งการรักษา/ปรับยา (ชี้ให้ปรึกษาแพทย์แทน) "
+        "ถ้าข้อมูลที่ให้มาไม่พอจะตอบ ให้บอกตรงๆ ว่าไม่มีข้อมูลในระบบสำหรับคำถามนี้ และแนะนำปุ่มที่ใกล้เคียง (สรุป/เตียง/Hb ต่ำ/ขาดนัด)\n"
+        "ความรู้ทั่วไปด้านไตเทียมตอบได้ แต่ระบุว่าเป็นความรู้ทั่วไป\n\n"
+        f"ข้อมูลคลินิกตอนนี้:\n" + "\n".join(ctx) + f"\n\nคำถาม: {question}"
+    )
+    resp = _rq.post("https://api.anthropic.com/v1/messages",
+                    headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                             "content-type": "application/json"},
+                    data=_json.dumps({"model": "claude-sonnet-4-20250514", "max_tokens": 500,
+                                      "messages": [{"role": "user", "content": prompt}]}).encode("utf-8"),
+                    timeout=30)
+    if resp.status_code != 200:
+        logger.info("ai fallback HTTP %s", resp.status_code)
+        return None
+    txt = (resp.json().get("content") or [{}])[0].get("text", "").strip()
+    return txt or None
+
+
 @hd_bp.route("/ai/ask", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def ai_assistant_ask():
@@ -7886,10 +7966,21 @@ def ai_assistant_ask():
         if extended:
             reply = extended
 
-        log_action(user_id=g.get("hd_user_id"), action="ai.ask", resource_type="ai_assistant",
-                   new_values={"q": question[:100]}, ip_address=request.remote_addr or "")
+        source = "rule-based (no external AI)"
+        # 🤖 Claude fallback: rule-based จนมุม ("ไม่พบ ...") → Claude ตอบจาก snapshot จริง ไม่เดา
+        if (not extended) and isinstance(reply, str) and reply.startswith("ไม่พบ "):
+            try:
+                _ai_ans = _ai_fallback_claude(question)
+                if _ai_ans:
+                    reply = _ai_ans + "\n\n— 🤖 ตอบโดย Claude AI จากข้อมูลสรุปของระบบ · โปรดตรวจกับข้อมูลจริงก่อนใช้ตัดสินใจรักษา"
+                    source = "claude-fallback"
+            except Exception as _cf_e:
+                logger.info("ai fallback failed: %s", type(_cf_e).__name__)
 
-        return jsonify({"question": question, "answer": reply, "source": "rule-based (no external AI)"})
+        log_action(user_id=g.get("hd_user_id"), action="ai.ask", resource_type="ai_assistant",
+                   new_values={"q": question[:100], "source": source}, ip_address=request.remote_addr or "")
+
+        return jsonify({"question": question, "answer": reply, "source": source})
     except Exception as e:
         logger.error("ai ask error: %s", e)
         return jsonify({"error": str(e)}), 500
