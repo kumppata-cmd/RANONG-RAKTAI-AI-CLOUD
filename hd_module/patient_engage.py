@@ -155,6 +155,56 @@ def build_lab_friendly_message(cur, hn, kind="ผลเลือด"):
     return head + "\n".join(lines) + DISCLAIMER
 
 
+def lab_friendly_command(cur, body):
+    """คำสั่งในกลุ่มพยาบาล:
+    'แล็บบ้าน <HN>'   — ดูตัวอย่างข้อความแล็บภาษาบ้านของผู้ป่วย (ไม่ส่ง)
+    'ส่งแล็บบ้าน <HN>' — ส่งข้อความนั้นเข้า LINE ผู้ป่วยทันที (เคารพ PDPA)
+    คืนข้อความตอบเสมอ."""
+    import re as _re
+    low = (body or "").strip().lower()
+    send = low.startswith("ส่ง")
+    m = _re.search(r"(\d{3,9})", body or "")
+    if not m:
+        return "ใช้: แล็บบ้าน <HN> (ดูตัวอย่าง) หรือ ส่งแล็บบ้าน <HN> (ส่งเข้า LINE ผู้ป่วย)"
+    hn = m.group(1)
+    fm = build_lab_friendly_message(cur, hn)
+    if not fm:
+        return (f"ยังไม่มีผลแล็บของ HN {hn} ในระบบ HD — "
+                f"ข้อความภาษาบ้านสร้างจากแล็บล่าสุด (Hb/K/P/Alb/Kt/V) ต้อง import หรือบันทึกแล็บก่อน")
+    if not send:
+        return ("📋 ตัวอย่างข้อความที่ผู้ป่วยจะได้รับ (ยังไม่ส่ง):\n\n" + fm +
+                f"\n\n👉 ส่งจริง: @รักษ์ไต ส่งแล็บบ้าน {hn}")
+    # ── ส่งจริง: PDPA → LINE id → push พร้อมลิงก์โค้ชอาหาร (เหมือน push อัตโนมัติ) ──
+    try:
+        from .pdpa import status_for
+        st = (status_for(cur, hn).get("line_messaging") or {}).get("status")
+        if st == "withdrawn":
+            return f"⛔ ผู้ป่วย HN {hn} ถอนความยินยอมรับข้อความ LINE แล้ว — ไม่ส่ง"
+    except Exception as e:
+        logger.warning("lab friendly pdpa %s: %s", hn, e)
+    from .blueprint import _resolve_patient_line_id
+    lid = _resolve_patient_line_id(hn)
+    if not lid:
+        return f"ผู้ป่วย HN {hn} ยังไม่ได้ผูก LINE — ให้ผู้ป่วยพิมพ์ 'ผูก <รหัส>' กับ OA ก่อน"
+    try:
+        from flask import current_app
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+    except Exception:
+        push_fn = None
+    if not push_fn:
+        return "ระบบส่ง LINE ยังไม่พร้อม — ลองใหม่อีกครั้ง"
+    day = datetime.now(_THAI_TZ).strftime("%Y%m%d")
+    food_url = f"{_base_url()}/hd/food/{make_token('food', hn, day)}"
+    msg = fm + f"\n\n🍲 ไม่แน่ใจว่ามื้อไหนกินได้ไหม? ถ่ายรูปถามโค้ชอาหาร: {food_url}"
+    try:
+        if push_fn(lid, msg[:4900]) is False:
+            return "ส่งไม่สำเร็จ (อาจติดโควตาข้อความ LINE ประจำเดือน)"
+    except Exception as e:
+        logger.warning("lab friendly push %s: %s", hn, e)
+        return "ส่งไม่สำเร็จ — ลองใหม่อีกครั้ง"
+    return f"✅ ส่งแล็บภาษาบ้าน + ลิงก์โค้ชอาหาร เข้า LINE ผู้ป่วย HN {hn} แล้ว"
+
+
 # ───────────────────────── 2) Pre-HD Check-in ─────────────────────────
 
 RED_FLAG_WORDS = ("เจ็บอก", "แน่นหน้าอก", "เหนื่อยมาก", "หอบ", "หมดสติ", "ใจสั่น")
