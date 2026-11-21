@@ -52,26 +52,36 @@ async function shrink(f){
   }catch(e){}
   return f;  /* ย่อไม่ได้ → ส่งไฟล์เดิม */
 }
+let _lastUp = null;  /* รูปล่าสุด (ย่อแล้ว) — ให้ปุ่ม "ลองอีกครั้ง" ส่งซ้ำได้โดยไม่ต้องถ่ายใหม่ */
 async function go(inp){
   const f = inp.files && inp.files[0];
   if(!f) return;
   const img=document.getElementById('preview');
   img.src=URL.createObjectURL(f); img.style.display='block';
+  _lastUp = await shrink(f);
+  inp.value='';
+  analyze();
+}
+async function analyze(){
+  if(!_lastUp) return;
   const st=document.getElementById('status'), ans=document.getElementById('ans');
   ans.style.display='none';
-  st.textContent='🤖 กำลังดูรูปและเทียบกับผลเลือดของคุณ...';
-  const up = await shrink(f);
-  const fd=new FormData(); fd.append('token',TOKEN); fd.append('image',up,'meal.jpg');
+  st.innerHTML='🤖 กำลังดูรูปและเทียบกับผลเลือดของคุณ...';
+  const fd=new FormData(); fd.append('token',TOKEN); fd.append('image',_lastUp,'meal.jpg');
+  let failMsg=null;
   try{
     const r=await fetch('/hd/api/v1/food/analyze',{method:'POST',body:fd});
     let d={}; try{ d=await r.json(); }catch(e){}
-    if(!r.ok||d.error){st.textContent='❌ '+(d.error||('วิเคราะห์ไม่สำเร็จ (HTTP '+r.status+') ลองใหม่อีกครั้ง'));inp.value='';return;}
-    st.textContent='';
-    ans.textContent=d.answer;
-    ans.style.display='block';
-    ans.scrollIntoView({behavior:'smooth'});
-  }catch(e){st.textContent='❌ เครือข่ายขัดข้อง ลองใหม่อีกครั้ง';}
-  inp.value='';
+    if(!r.ok||d.error){ failMsg=d.error||('ระบบไม่ตอบ (HTTP '+r.status+')'); }
+    else{
+      st.textContent='';
+      ans.textContent=d.answer;
+      ans.style.display='block';
+      ans.scrollIntoView({behavior:'smooth'});
+      return;
+    }
+  }catch(e){ failMsg='เครือข่ายขัดข้อง'; }
+  st.innerHTML='❌ '+failMsg+'<br><button type="button" class="shoot" style="margin-top:8px;padding:12px;font-size:1rem" onclick="analyze()">🔄 ลองอีกครั้ง (รูปเดิม)</button>';
 }
 </script>
 </body></html>

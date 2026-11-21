@@ -331,32 +331,45 @@ def analyze_food_photo(img_bytes, labs, detail=False, debug=False):
                                          "data": base64.b64encode(img_bytes).decode()}},
             {"type": "text", "text": prompt}]}],
     }).encode("utf-8")
-    try:
-        resp = _rq.post("https://api.anthropic.com/v1/messages",
-                        headers={"x-api-key": key, "anthropic-version": "2023-06-01",
-                                 "content-type": "application/json"},
-                        data=body, timeout=45)
-    except Exception as e:
-        logger.warning("food coach net: %s", type(e).__name__)
-        return _ret(None, f"net:{type(e).__name__}")
-    if resp.status_code != 200:
-        logger.warning("food coach HTTP %s: %s", resp.status_code, resp.text[:200])
-        if resp.status_code == 400 and "credit balance" in (resp.text or ""):
-            err = "no_credit"          # เครดิต Anthropic API หมด — กระทบ AI ทุกตัวในระบบ
-        else:
-            err = f"api:{resp.status_code}"
-        if debug:
-            err += "|" + (resp.text or "")[:200]
-        return _ret(None, err)
-    rj = resp.json()
-    txt = "".join(b.get("text", "") for b in (rj.get("content") or [])
-                  if b.get("type") == "text").strip()
-    if txt:
-        return _ret(txt, None)
+    # รุ่นเจนใหม่ตอบว่าง/สะดุดเป็นครั้งคราว — ลองซ้ำเองสูงสุด 2 รอบก่อนยอมแพ้
+    import time as _time
     err = "empty"
-    if debug:
-        err += "|stop:%s|blocks:%s" % (rj.get("stop_reason"),
-                                       ",".join(b.get("type", "?") for b in (rj.get("content") or [])) or "none")
+    for attempt in (1, 2):
+        try:
+            resp = _rq.post("https://api.anthropic.com/v1/messages",
+                            headers={"x-api-key": key, "anthropic-version": "2023-06-01",
+                                     "content-type": "application/json"},
+                            data=body, timeout=45)
+        except Exception as e:
+            logger.warning("food coach net (%d): %s", attempt, type(e).__name__)
+            err = f"net:{type(e).__name__}"
+            if attempt == 1:
+                _time.sleep(1.5)
+                continue
+            return _ret(None, err)
+        if resp.status_code != 200:
+            logger.warning("food coach HTTP %s (%d): %s", resp.status_code, attempt, resp.text[:200])
+            if resp.status_code == 400 and "credit balance" in (resp.text or ""):
+                return _ret(None, "no_credit")   # เครดิตหมด — ลองซ้ำไปก็เท่าเดิม
+            err = f"api:{resp.status_code}"
+            if debug:
+                err += "|" + (resp.text or "")[:200]
+            if attempt == 1 and resp.status_code in (429, 500, 502, 503, 529):
+                _time.sleep(1.5)
+                continue
+            return _ret(None, err)
+        rj = resp.json()
+        txt = "".join(b.get("text", "") for b in (rj.get("content") or [])
+                      if b.get("type") == "text").strip()
+        if txt:
+            return _ret(txt, None)
+        err = "empty"
+        if debug:
+            err += "|stop:%s|blocks:%s" % (rj.get("stop_reason"),
+                                           ",".join(b.get("type", "?") for b in (rj.get("content") or [])) or "none")
+        logger.warning("food coach empty response (attempt %d)", attempt)
+        if attempt == 1:
+            _time.sleep(1.5)
     return _ret(None, err)
 
 

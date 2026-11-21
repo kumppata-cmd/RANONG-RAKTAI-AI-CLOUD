@@ -9495,11 +9495,12 @@ def food_analyze():
         elif err == "no_api_key":
             msg = "ระบบ AI ยังไม่ได้ตั้งค่า — แจ้งเจ้าหน้าที่คลินิก (รหัส: no_api_key)"
         elif err in ("api:429", "api:529"):
-            msg = "ระบบ AI คิวเต็มชั่วคราว รอ 1 นาทีแล้วลองใหม่"
+            msg = "ระบบ AI คิวเต็มชั่วคราว รอสักครู่แล้วกด 'ลองอีกครั้ง'"
         elif err and err.startswith("net:"):
-            msg = "เชื่อมต่อระบบ AI ไม่ได้ชั่วคราว ลองใหม่อีกครั้ง"
+            msg = "เชื่อมต่อระบบ AI ไม่ได้ชั่วคราว — กด 'ลองอีกครั้ง' ได้เลย"
         else:
-            msg = f"วิเคราะห์ไม่สำเร็จ ลองถ่ายใหม่ให้เห็นอาหารชัดๆ (รหัส: {err or 'unknown'})"
+            # empty และอื่น ๆ: ระบบ AI ตอบไม่ทันรอบนี้ — รูปไม่ผิด กดซ้ำมักผ่าน
+            msg = "ระบบตอบไม่ทันในรอบนี้ (รูปของคุณไม่มีปัญหา) — กด 'ลองอีกครั้ง' ด้วยรูปเดิมได้เลย"
         return jsonify({"error": msg}), 502
     log_action(user_id=None, action="food.coach", resource_type="patient",
                new_values={"hn": hn, "labs": bool(labs)}, ip_address=request.remote_addr or "")
