@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ผูกญาติ — คลินิกระนอง รักษ์ไต</title>
+<script src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+<style>
+  :root{--p:#1e6fb2;--bg:#f4f7fb;--card:#fff;--fg:#1f2937;--muted:#6b7280;--border:#e5e7eb}
+  *{box-sizing:border-box} body{margin:0;font-family:'Noto Sans Thai',system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+  .wrap{max-width:430px;margin:0 auto;padding:22px 16px 40px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:18px;margin-bottom:12px}
+  label{font-weight:700;font-size:.92rem;display:block;margin:10px 0 6px}
+  input{width:100%;padding:14px;font-size:1.15rem;border:2px solid var(--border);border-radius:12px}
+  #code{text-align:center;letter-spacing:6px;font-size:1.5rem}
+  button{width:100%;padding:15px;margin-top:14px;font-size:1.05rem;font-weight:800;color:#fff;background:var(--p);border:none;border-radius:14px;cursor:pointer}
+  #status{min-height:22px;text-align:center;font-size:.85rem;margin-top:10px;color:var(--muted)}
+  #done{display:none;text-align:center;padding:26px 8px}
+</style>
+</head>
+<body><div class="wrap">
+  <div style="text-align:center;font-size:2.2rem">👨‍👩‍👧</div>
+  <h2 style="text-align:center;margin:6px 0 2px">ผูกบัญชีญาติ</h2>
+  <div style="text-align:center;color:var(--muted);font-size:.8rem;margin-bottom:14px">คลินิกระนอง รักษ์ไต · รับข้อความสรุปทุกครั้งที่คนในครอบครัวฟอกเลือดเสร็จ</div>
+
+  <div class="card" id="form">
+    <label>🔑 รหัส 6 หลักจากเจ้าหน้าที่</label>
+    <input id="code" inputmode="numeric" maxlength="6" placeholder="••••••" value="{{ code }}">
+    <label>คุณเกี่ยวข้องเป็น (ไม่บังคับ)</label>
+    <input id="label" maxlength="30" placeholder="เช่น ลูกสาว, ภรรยา, หลาน">
+    <button onclick="doRegister()">💚 ผูกบัญชี</button>
+    <div id="status"></div>
+  </div>
+
+  <div class="card" id="done">
+    <div style="font-size:3rem">💚</div>
+    <h3 id="doneMsg"></h3>
+    <div style="color:var(--muted);font-size:.85rem">ปิดหน้านี้ได้เลย — ข้อความสรุปจะมาที่ LINE นี้อัตโนมัติ</div>
+  </div>
+
+  <div class="card" style="font-size:.76rem;color:var(--muted)">
+    🔒 ระบบเก็บเฉพาะบัญชี LINE ของคุณเพื่อส่งข้อความสรุปเท่านั้น · ผู้ป่วยเป็นผู้ยินยอมผ่านเจ้าหน้าที่ · ยกเลิกได้ทุกเมื่อโดยแจ้งคลินิก
+  </div>
+</div>
+<script>
+const LIFF_ID = "{{ liff_id }}";
+let _uid = "", _dname = "";
+async function boot(){
+  const st = document.getElementById('status');
+  if(!LIFF_ID){ st.innerHTML = '⚠️ ระบบยังไม่พร้อม (ยังไม่ตั้งค่า LIFF) — แจ้งเจ้าหน้าที่'; return; }
+  try{
+    await liff.init({ liffId: LIFF_ID });
+    if(!liff.isLoggedIn()){ liff.login({ redirectUri: location.href }); return; }
+    const prof = await liff.getProfile();
+    _uid = prof.userId; _dname = prof.displayName || '';
+    st.textContent = 'สวัสดีคุณ ' + _dname + ' 👋 ใส่รหัสแล้วกดผูกได้เลย';
+    /* รหัสมากับ liff.state (?code=) ตอนเปิดจาก liff.line.me */
+    if(!document.getElementById('code').value){
+      const q = new URLSearchParams(location.search);
+      let c = q.get('code') || '';
+      if(!c && q.get('liff.state')) c = new URLSearchParams(q.get('liff.state').replace(/^\?/,'')).get('code') || '';
+      if(c) document.getElementById('code').value = c.slice(0,6);
+    }
+  }catch(e){ st.innerHTML = '❌ เปิดผ่าน LINE เท่านั้น — แตะลิงก์ที่ได้รับใน LINE อีกครั้ง'; }
+}
+async function doRegister(){
+  const st = document.getElementById('status');
+  const code = document.getElementById('code').value.trim();
+  if(!/^\d{6}$/.test(code)){ st.innerHTML = '⚠️ ใส่รหัส 6 หลักให้ครบ'; return; }
+  if(!_uid){ st.innerHTML = '⚠️ ยังไม่พร้อม — เปิดหน้านี้ผ่านลิงก์ใน LINE'; return; }
+  st.textContent = '⏳ กำลังผูก...';
+  try{
+    const r = await fetch('/hd/api/v1/family/register', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({code: code, user_id: _uid, display_name: _dname, label: document.getElementById('label').value})});
+    const d = await r.json();
+    if(!r.ok || d.error){ st.innerHTML = '❌ ' + (d.error || 'ผูกไม่สำเร็จ'); return; }
+    document.getElementById('form').style.display = 'none';
+    document.getElementById('doneMsg').textContent = d.message || 'ผูกสำเร็จ';
+    document.getElementById('done').style.display = 'block';
+  }catch(e){ st.innerHTML = '❌ เครือข่ายขัดข้อง ลองใหม่'; }
+}
+boot();
+</script>
+</body></html>

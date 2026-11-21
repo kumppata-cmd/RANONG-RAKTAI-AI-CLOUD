@@ -251,6 +251,27 @@ def _run_hd_migrations():
                     UNIQUE (hn, checkin_date)
                 )
             """)
+            # ── Family Link: ญาติรับสรุปหลังฟอกทาง LINE (ผูกด้วยรหัสจากเจ้าหน้าที่) ──
+            fixes.append("""
+                CREATE TABLE IF NOT EXISTS hd_family_codes (
+                    code TEXT PRIMARY KEY,
+                    hn TEXT NOT NULL,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at TIMESTAMPTZ,
+                    used_at TIMESTAMPTZ
+                )
+            """)
+            fixes.append("""
+                CREATE TABLE IF NOT EXISTS hd_family_links (
+                    id SERIAL PRIMARY KEY,
+                    hn TEXT NOT NULL,
+                    line_user_id TEXT NOT NULL,
+                    label TEXT,
+                    display_name TEXT,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE (hn, line_user_id)
+                )
+            """)
             # ── เหตุผลการยกเลิกรอบฟอก (สถิติ no-show + audit) ──
             fixes.append("ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS cancel_reason TEXT")
             # ── กันเตียงซ้อนระดับ DB: 1 เตียง/วัน/รอบ มี session ทำงานได้ 1 เดียว ──

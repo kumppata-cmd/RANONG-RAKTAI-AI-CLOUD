@@ -241,3 +241,136 @@ def analyze_food_photo(img_bytes, labs):
         return None
     txt = (resp.json().get("content") or [{}])[0].get("text", "").strip()
     return txt or None
+
+
+# ───────────────────────── 3b) Family Link — ญาติรับสรุปหลังฟอก ─────────────────────────
+
+def family_code_command(cur, conn, body):
+    """คำสั่งในกลุ่มพยาบาล: 'รหัสญาติ <HN>' ออกรหัสผูกญาติ (48 ชม. ใช้ครั้งเดียว),
+    'ยกเลิกญาติ <HN>' ถอนญาติทั้งหมดของ HN นั้น. คืนข้อความตอบเสมอ."""
+    import re as _re
+    import secrets
+    low = body.strip().lower()
+    m = _re.search(r"(\d{3,9})", body)
+    if not m:
+        return "ใช้: รหัสญาติ <HN> หรือ ยกเลิกญาติ <HN>"
+    hn = m.group(1)
+    cur.execute("SELECT patient_name FROM hd_patient_mapping WHERE hn = %s", (hn,))
+    pr = cur.fetchone()
+    if not pr:
+        return f"ไม่พบ HN {hn} ในทะเบียนผู้ป่วย"
+    name = pr[0] or hn
+    if low.startswith("ยกเลิกญาติ"):
+        cur.execute("DELETE FROM hd_family_links WHERE hn = %s", (hn,))
+        n = cur.rowcount
+        cur.execute("DELETE FROM hd_family_codes WHERE hn = %s AND used_at IS NULL", (hn,))
+        conn.commit()
+        return f"✅ ถอนญาติของ {name} (HN {hn}) แล้ว {n} ราย และยกเลิกรหัสที่ค้างอยู่"
+    # ออกรหัสใหม่ (เจ้าหน้าที่ยืนยันความยินยอมของผู้ป่วยที่เคาน์เตอร์ก่อนออกรหัส)
+    code = f"{secrets.randbelow(900000) + 100000}"
+    cur.execute("""INSERT INTO hd_family_codes (code, hn, expires_at)
+                   VALUES (%s, %s, NOW() + INTERVAL '48 hours')""", (code, hn))
+    conn.commit()
+    liff_id = ""
+    try:
+        from .blueprint import get_setting_value
+        liff_id = (get_setting_value("family_liff_id", "") or os.environ.get("HD_FAMILY_LIFF_ID", "")).strip()
+    except Exception:
+        liff_id = os.environ.get("HD_FAMILY_LIFF_ID", "").strip()
+    link = (f"https://liff.line.me/{liff_id}?code={code}" if liff_id
+            else f"{_base_url()}/hd/family?code={code}")
+    out = (f"👨‍👩‍👧 รหัสผูกญาติของ {name} (HN {hn})\n"
+           f"🔑 รหัส: {code} (ใช้ได้ 48 ชม. ครั้งเดียว)\n"
+           f"ให้ญาติเปิดลิงก์นี้ใน LINE แล้วใส่รหัส:\n{link}\n"
+           f"ผูกแล้วญาติจะได้รับสรุปทุกครั้งที่ฟอกเสร็จ")
+    if not liff_id:
+        out += "\n⚠️ ยังไม่ตั้งค่า family_liff_id — ลิงก์นี้เปิดนอก LINE จะผูกไม่ได้ (ต้องเปิดผ่าน LIFF)"
+    return out
+
+
+def register_family(cur, conn, code, line_user_id, display_name="", label=""):
+    """ผูกญาติด้วยรหัส — คืน (ok, message)."""
+    cur.execute("""SELECT hn FROM hd_family_codes
+                   WHERE code = %s AND used_at IS NULL AND expires_at > NOW()""", (str(code).strip(),))
+    r = cur.fetchone()
+    if not r:
+        return False, "รหัสไม่ถูกต้องหรือหมดอายุ — ขอรหัสใหม่จากเจ้าหน้าที่ที่คลินิก"
+    hn = r[0]
+    cur.execute("SELECT patient_name FROM hd_patient_mapping WHERE hn = %s", (hn,))
+    pr = cur.fetchone()
+    name = (pr[0] if pr else "") or hn
+    cur.execute("""INSERT INTO hd_family_links (hn, line_user_id, label, display_name)
+                   VALUES (%s, %s, %s, %s)
+                   ON CONFLICT (hn, line_user_id) DO UPDATE SET label = EXCLUDED.label""",
+                (hn, line_user_id, (label or "")[:40], (display_name or "")[:60]))
+    cur.execute("UPDATE hd_family_codes SET used_at = NOW() WHERE code = %s", (str(code).strip(),))
+    conn.commit()
+    first = name.split()
+    nick = first[-1] if first else name
+    return True, f"ผูกสำเร็จ 💚 คุณจะได้รับข้อความสรุปทุกครั้งที่คุณ{nick}ฟอกเลือดเสร็จ"
+
+
+def _family_summary_text(cur, session_id):
+    """ข้อความสรุปจบรอบฉบับครอบครัว (สั้น อุ่นใจ ไม่มีรายละเอียดทางคลินิกลึก)."""
+    cur.execute("""SELECT p.hn, p.patient_name, s.started_at, s.ended_at, s.pre_weight, s.post_weight
+                   FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                   WHERE s.id = %s AND s.status = 'completed'""", (session_id,))
+    r = cur.fetchone()
+    if not r:
+        return None, None
+    hn, name = r[0], r[1] or ""
+    first = name.split()
+    nick = first[-1] if first else name
+    lines = [f"💚 วันนี้คุณ{nick}ฟอกเลือดเสร็จเรียบร้อยแล้วค่ะ/ครับ"]
+    try:
+        if r[2] and r[3]:
+            mins = int((r[3] - r[2]).total_seconds() // 60)
+            if 0 < mins < 24 * 60:
+                lines.append(f"⏱ ใช้เวลา {mins // 60} ชม. {mins % 60} นาที ราบรื่นดี")
+    except Exception:
+        pass
+    try:
+        if r[4] and r[5]:
+            lines.append(f"⚖️ น้ำหนักหลังฟอก {float(r[5]):.1f} กก.")
+    except Exception:
+        pass
+    lines.append("ขอบคุณที่ดูแลกันนะคะ/ครับ 🙏 — คลินิกระนอง รักษ์ไต")
+    return hn, "\n".join(lines) + DISCLAIMER
+
+
+def push_family_summaries(app_config, db_url, session_id):
+    """ส่งสรุปจบรอบให้ญาติทุกคนที่ผูกกับ HN ของ session นี้. never raises."""
+    import psycopg2
+    out = {"sent": 0, "links": 0}
+    try:
+        push_fn = app_config.get("LINE_PUSH_FN")
+        if not push_fn:
+            return {"off": True}
+        try:
+            from .blueprint import get_setting_value
+            if (get_setting_value("family_summary_push", "on") or "on").lower() in ("off", "0", "false"):
+                return {"off": True}
+        except Exception:
+            pass
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                hn, text = _family_summary_text(cur, session_id)
+                if not hn or not text:
+                    return out
+                cur.execute("SELECT line_user_id FROM hd_family_links WHERE hn = %s", (hn,))
+                uids = [r[0] for r in cur.fetchall()]
+        finally:
+            conn.close()
+        out["links"] = len(uids)
+        for uid in uids[:5]:
+            try:
+                if push_fn(uid, text[:4900]) is not False:
+                    out["sent"] += 1
+            except Exception as e:
+                logger.warning("family push: %s", e)
+        return out
+    except Exception as e:
+        logger.warning("push_family_summaries: %s", e)
+        return {"error": str(e)[:80]}

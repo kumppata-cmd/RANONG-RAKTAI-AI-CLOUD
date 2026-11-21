@@ -4380,6 +4380,15 @@ def update_session(session_id):
                 result["patient_summary"] = send_patient_summary(session_id, trigger="auto")
         except Exception as e:
             logger.warning("patient summary: %s", e)
+        # 👨‍👩‍👧 Family Link: สรุปฉบับครอบครัวถึงญาติที่ผูกไว้ (additive — ล้มได้ไม่กระทบ)
+        try:
+            from .patient_engage import push_family_summaries
+            result["family_summary"] = push_family_summaries(
+                current_app.config,
+                os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", ""),
+                session_id)
+        except Exception as e:
+            logger.warning("family summary: %s", e)
         # Auto Kt/V calculation if pre/post BUN available
         try:
             result["kt_v"] = _auto_kt_v_on_complete(session_id)
@@ -8986,6 +8995,8 @@ def update_settings():
         "patient_weight_coach",      # ตอบผู้ป่วยที่ส่ง "น้ำหนัก xx" ทาง LINE (on/off)
         "tpl_weight_reply",          # ข้อความตอบน้ำหนัก (แก้ได้ มีตัวแปร {weight} {gain} ...)
         "patient_card_note",         # ข้อความจากแพทย์ต่อท้ายการ์ดสรุปหลังฟอกทุกใบ
+        "family_liff_id",            # 21 พ.ย. 2569: LIFF ID ของหน้า Family Link (ญาติรับสรุปหลังฟอก)
+        "family_summary_push",       # ส่งสรุปจบรอบให้ญาติที่ผูกไว้ (on/off, default on)
     ]
     if key not in allowed_keys:
         return jsonify({"error": f"Invalid setting key: {key}"}), 400
@@ -9385,6 +9396,41 @@ def prehd_send_now():
     from .patient_engage import send_prehd_checkins
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     return jsonify(send_prehd_checkins(push_fn, db_url))
+
+
+@hd_web.route("/family")
+def family_link_page():
+    """👨‍👩‍👧 หน้าผูกญาติ — เปิดผ่าน LIFF (liff.line.me/<family_liff_id>?code=...)."""
+    liff_id = (get_setting_value("family_liff_id", "") or os.environ.get("HD_FAMILY_LIFF_ID", "")).strip()
+    return render_template("hd_family_link.html", liff_id=liff_id,
+                           code=(request.args.get("code") or "").strip()[:8],
+                           liff_state=(request.args.get("liff.state") or ""))
+
+
+@hd_bp.route("/family/register", methods=["POST"])
+def family_register():
+    """ผูกญาติด้วยรหัส + LINE userId จาก LIFF (no JWT — รหัสคือการยืนยัน)."""
+    import os, psycopg2
+    from .patient_engage import register_family
+    data = request.get_json(silent=True) or {}
+    code = str(data.get("code") or "").strip()
+    uid = str(data.get("user_id") or "").strip()
+    if not (code and uid.startswith("U") and len(uid) == 33):
+        return jsonify({"error": "ข้อมูลไม่ครบ — เปิดหน้านี้ผ่านลิงก์ใน LINE และใส่รหัสจากเจ้าหน้าที่"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            ok, msg = register_family(cur, conn, code, uid,
+                                      display_name=str(data.get("display_name") or ""),
+                                      label=str(data.get("label") or ""))
+    finally:
+        conn.close()
+    if not ok:
+        return jsonify({"error": msg}), 400
+    log_action(user_id=None, action="family.register", resource_type="patient",
+               new_values={"code": code[:6]}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "message": msg})
 
 
 @hd_web.route("/food/<token>")

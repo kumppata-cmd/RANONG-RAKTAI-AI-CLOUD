@@ -26,7 +26,9 @@ ST_TH = {"scheduled": "รอ", "in_progress": "กำลังฟอก", "comp
 HELP = ("🤖 รักษ์ไต ช่วยตอบได้ (พิมพ์ @รักษ์ไต ตามด้วย)\n"
         "• เตียง — สถานะเตียงตอนนี้\n• วันนี้ — รอบฟอกวันนี้\n• พรุ่งนี้ — ใครมีนัดพรุ่งนี้\n"
         "• alert — แจ้งเตือนที่ยังไม่มีคำสั่งแพทย์\n• esa — รายการ ESA รออนุมัติ\n• น้ำ — ผลตรวจน้ำล่าสุด\n"
-        "• HN 1234 หรือ ชื่อผู้ป่วย — ข้อมูลผู้ป่วย\n\nตอบจากข้อมูลในระบบเท่านั้น ไม่สั่งการรักษา")
+        "• HN 1234 หรือ ชื่อผู้ป่วย — ข้อมูลผู้ป่วย\n"
+        "• รหัสญาติ <HN> — ออกรหัสให้ญาติรับสรุปหลังฟอก · ยกเลิกญาติ <HN>\n\n"
+        "ตอบจากข้อมูลในระบบเท่านั้น ไม่สั่งการรักษา")
 
 
 def _thai_now():
@@ -212,6 +214,9 @@ def answer(conn, body, base_url=""):
     with conn.cursor() as cur:
         if not b or low in ("help", "ช่วย", "ช่วยด้วย", "?"):
             return HELP
+        if low.startswith("รหัสญาติ") or low.startswith("ยกเลิกญาติ"):
+            from .patient_engage import family_code_command
+            return family_code_command(cur, conn, b)
         if any(w in low for w in ("เตียง", "ว่าง", "bed")):
             return _beds(cur, today)
         if any(w in low for w in ("พรุ่งนี้", "tomorrow")):
