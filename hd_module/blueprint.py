@@ -9856,7 +9856,10 @@ def flowsheet_entries(conn, session_id):
             # Get session info
             cur.execute("""
                 SELECT s.uf_goal, s.pre_hd_note, s.started_at,
-                       p.patient_name, p.hn, p.vascular_access
+                       p.patient_name, p.hn, p.vascular_access,
+                       COALESCE((SELECT r.duration_hours FROM hd_prescriptions r
+                                 WHERE r.patient_id = s.patient_id AND r.is_active = TRUE
+                                 ORDER BY r.prescribed_date DESC LIMIT 1), 4) AS duration_hours
                 FROM hd_sessions s
                 JOIN hd_patient_mapping p ON p.id = s.patient_id
                 WHERE s.id = %s
@@ -9973,6 +9976,7 @@ def get_flowsheet(session_id):
                 "patient_name": srow[3] if srow else None,
                 "hn": srow[4] if srow else None,
                 "va": srow[5] if srow else None,
+                "duration_hours": float(srow[6]) if srow and len(srow) > 6 and srow[6] else 4,
             } if srow else {},
         })
     except Exception as e:
