@@ -6074,6 +6074,25 @@ def notify_patients_new_results(hns, kind="ผลเลือด"):
                "━━━━━━━━━━━━\n"
                "แตะดูค่าเลือด กราฟแนวโน้ม และคำแนะนำ:\n" + url +
                "\n\n(ข้อความอัตโนมัติจากคลินิกระนอง รักษ์ไต)")
+        # 🌟 WOW: แล็บฉบับภาษาบ้านรายคน (rule-based) + ลิงก์โค้ชอาหาร — ล้มเหลว = ใช้ข้อความเดิม
+        friendly = {}
+        try:
+            import psycopg2
+            from .patient_engage import build_lab_friendly_message, make_token
+            from datetime import datetime as _dtf, timezone as _tzf, timedelta as _tdf
+            _day = _dtf.now(_tzf(_tdf(hours=7))).strftime("%Y%m%d")
+            _cf = psycopg2.connect(os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", ""), connect_timeout=5)
+            try:
+                with _cf.cursor() as cur:
+                    for hn in set(hns):
+                        fm = build_lab_friendly_message(cur, hn, kind=kind)
+                        if fm:
+                            food_url = f"{base}/hd/food/{make_token('food', hn, _day)}"
+                            friendly[hn] = fm + f"\n\n🔎 ดูกราฟแนวโน้ม: {url}\n🍲 ไม่แน่ใจว่ามื้อไหนกินได้ไหม? ถ่ายรูปถามโค้ชอาหาร: {food_url}"
+            finally:
+                _cf.close()
+        except Exception as e:
+            logger.warning("friendly lab msg: %s", e)
         for hn in sorted(set(hns)):
             st = consent.get(hn)
             if st == "withdrawn" or (require_consent and st != "given"):
@@ -6084,7 +6103,7 @@ def notify_patients_new_results(hns, kind="ผลเลือด"):
                 out["no_line"] += 1
                 continue
             try:
-                if push_fn(lid, msg) is not False:
+                if push_fn(lid, (friendly.get(hn) or msg)[:4900]) is not False:
                     out["notified"] += 1
             except Exception as e:
                 logger.warning("notify patient %s: %s", hn, e)
@@ -7236,6 +7255,17 @@ def bed_dashboard():
                                 tp["noshow_90d"] = _ns[tp["hn"]]
                     except Exception as _ns_e:
                         logger.warning("noshow badge query: %s", _ns_e)
+                    # 🌅 Pre-HD Check-in ของวันนี้ (additive — ล้มได้ไม่กระทบ)
+                    try:
+                        cur.execute("""SELECT hn, weight_home, symptoms, flagged
+                                       FROM hd_prehd_checkins WHERE checkin_date = %s""", (_thai_today(),))
+                        _ci = {r[0]: {"weight_home": float(r[1]) if r[1] is not None else None,
+                                      "symptoms": r[2], "flagged": bool(r[3])} for r in cur.fetchall()}
+                        for tp in today_patients:
+                            if tp["hn"] in _ci:
+                                tp["checkin"] = _ci[tp["hn"]]
+                    except Exception as _ci_e:
+                        logger.warning("checkin badge query: %s", _ci_e)
                 conn2.close()
                 today_count = len(today_patients)
         except Exception as e:
@@ -9280,6 +9310,136 @@ def notify_nurse_group():
 
 
 # ── F2: Shift Handover ────────────────────────────────────
+
+# ═══════════ Patient Engagement: Pre-HD Check-in + Food Coach (ไม่แตะ server.py) ═══════════
+
+@hd_web.route("/checkin/<token>")
+def prehd_checkin_page(token):
+    """หน้าเช็คอิน 3 ข้อสำหรับผู้ป่วย — เข้าจากลิงก์ใน LINE, token HMAC ไม่ต้อง login."""
+    from .patient_engage import parse_token
+    hn, day = parse_token("checkin", token, max_age_days=1)
+    return render_template("hd_checkin_form.html", token=token, valid=bool(hn), hn=hn or "")
+
+
+@hd_bp.route("/prehd/submit", methods=["POST"])
+def prehd_submit():
+    """รับคำตอบเช็คอิน (token-verified, no JWT) — บันทึก + red flag แจ้งกลุ่มพยาบาลทันที."""
+    import os, psycopg2
+    from .patient_engage import parse_token, checkin_is_flagged, DISCLAIMER
+    data = request.get_json(silent=True) or {}
+    hn, day = parse_token("checkin", str(data.get("token", "")), max_age_days=1)
+    if not hn:
+        return jsonify({"error": "ลิงก์หมดอายุ — ใช้ลิงก์ล่าสุดจาก LINE ของวันนี้"}), 403
+    wt = data.get("weight_home")
+    try:
+        wt = float(wt) if wt not in (None, "") else None
+        if wt is not None and not (20 <= wt <= 250):
+            wt = None
+    except (TypeError, ValueError):
+        wt = None
+    symptoms = ", ".join(str(s)[:40] for s in (data.get("symptoms") or [])[:8]) or "ไม่มีอาการผิดปกติ"
+    meds = str(data.get("meds_taken") or "")[:40]
+    flagged = checkin_is_flagged(symptoms)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""INSERT INTO hd_prehd_checkins (hn, checkin_date, weight_home, symptoms, meds_taken, flagged)
+                           VALUES (%s, %s, %s, %s, %s, %s)
+                           ON CONFLICT (hn, checkin_date) DO UPDATE
+                           SET weight_home = EXCLUDED.weight_home, symptoms = EXCLUDED.symptoms,
+                               meds_taken = EXCLUDED.meds_taken, flagged = EXCLUDED.flagged,
+                               created_at = NOW()""", (hn, day, wt, symptoms, meds, flagged))
+            cur.execute("SELECT patient_name FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            pr = cur.fetchone()
+        conn.commit()
+    finally:
+        conn.close()
+    pname = (pr[0] if pr else "") or hn
+    # 🚨 red flag → แจ้งกลุ่มพยาบาลทันที (ก่อนคนไข้ถึงคลินิก)
+    if flagged:
+        try:
+            push_fn = current_app.config.get("LINE_PUSH_FN")
+            gid = (get_setting_value("nurse_group_id", "") or "").strip()
+            if push_fn and gid:
+                push_fn(gid, f"🚨 Pre-HD Check-in: {pname} (HN {hn}) แจ้งอาการ: {symptoms}"
+                             f"{' · น้ำหนักบ้าน ' + str(wt) + ' กก.' if wt else ''}\n"
+                             f"โปรดเตรียมรับ/โทรติดตามก่อนมาถึง")
+        except Exception as e:
+            logger.warning("checkin flag push: %s", e)
+    log_action(user_id=None, action="prehd.checkin", resource_type="patient",
+               new_values={"hn": hn, "flagged": flagged}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "flagged": flagged,
+                    "message": ("ขอบคุณค่ะ/ครับ 💚 พยาบาลได้รับข้อมูลแล้ว" +
+                                (" และจะดูแลอาการที่แจ้งเป็นพิเศษ" if flagged else " แล้วพบกันที่คลินิก"))})
+
+
+@hd_bp.route("/prehd/send", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def prehd_send_now():
+    """ส่งลิงก์เช็คอินเช้านี้ด้วยมือ (ทดสอบ/ส่งซ้ำ) — ตัวจริงรันอัตโนมัติ 06:30."""
+    import os
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    if not push_fn:
+        return jsonify({"error": "LINE push ยังไม่พร้อม"}), 503
+    from .patient_engage import send_prehd_checkins
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    return jsonify(send_prehd_checkins(push_fn, db_url))
+
+
+@hd_web.route("/food/<token>")
+def food_coach_page(token):
+    """🍲 โค้ชอาหาร — ถ่ายรูปมื้ออาหาร AI แนะนำตามค่าเลือดของตัวเอง (ลิงก์จาก LINE)."""
+    from .patient_engage import parse_token
+    hn, _ = parse_token("food", token, max_age_days=14)
+    return render_template("hd_food_coach.html", token=token, valid=bool(hn))
+
+
+@hd_bp.route("/food/analyze", methods=["POST"])
+def food_analyze():
+    """รูปอาหาร (token-verified) → Claude Vision + แล็บล่าสุดรายคน → คำแนะนำ."""
+    import os, psycopg2
+    from .patient_engage import parse_token, analyze_food_photo, DISCLAIMER
+    hn, _ = parse_token("food", str(request.form.get("token", "")), max_age_days=14)
+    if not hn:
+        return jsonify({"error": "ลิงก์หมดอายุ — ขอลิงก์ใหม่จากข้อความผลแล็บใน LINE"}), 403
+    f = request.files.get("image")
+    if not f:
+        return jsonify({"error": "ไม่พบรูป"}), 400
+    data = f.read()
+    if not data or len(data) > 10 * 1024 * 1024:
+        return jsonify({"error": "รูปว่างหรือใหญ่เกิน 10 MB"}), 400
+    labs = {}
+    try:
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("""SELECT l.k, l.phos, l.hb, l.lab_date FROM hd_labs l
+                           JOIN hd_patient_mapping p ON p.id = l.patient_id
+                           WHERE p.hn = %s AND l.lab_date IS NOT NULL
+                             AND (l.k IS NOT NULL OR l.phos IS NOT NULL)
+                           ORDER BY l.lab_date DESC LIMIT 1""", (hn,))
+            r = cur.fetchone()
+            if r:
+                labs = {"K": float(r[0]) if r[0] is not None else None,
+                        "P": float(r[1]) if r[1] is not None else None,
+                        "Hb": float(r[2]) if r[2] is not None else None,
+                        "วันที่ตรวจ": r[3].isoformat() if r[3] else None}
+        conn.close()
+    except Exception as e:
+        logger.warning("food labs lookup: %s", e)
+    try:
+        ans = analyze_food_photo(data, labs)
+    except Exception as e:
+        logger.warning("food analyze: %s", e)
+        ans = None
+    if not ans:
+        return jsonify({"error": "วิเคราะห์ไม่สำเร็จ ลองถ่ายใหม่ให้เห็นอาหารชัดๆ"}), 502
+    log_action(user_id=None, action="food.coach", resource_type="patient",
+               new_values={"hn": hn, "labs": bool(labs)}, ip_address=request.remote_addr or "")
+    return jsonify({"answer": ans + DISCLAIMER})
+
 
 @hd_bp.route("/stats/cancellations", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")

@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>โค้ชอาหารโรคไต — คลินิกระนอง รักษ์ไต</title>
+<style>
+  :root{--p:#6f42c1;--bg:#f6f4fb;--card:#fff;--fg:#1f2937;--muted:#6b7280;--border:#e5e7eb}
+  *{box-sizing:border-box} body{margin:0;font-family:'Noto Sans Thai',system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+  .wrap{max-width:430px;margin:0 auto;padding:18px 16px 40px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:12px}
+  .shoot{display:block;width:100%;padding:18px;font-size:1.15rem;font-weight:800;color:#fff;background:linear-gradient(135deg,#6f42c1,#4e2a96);border:none;border-radius:16px;cursor:pointer;text-align:center}
+  #preview{width:100%;border-radius:14px;display:none;margin-top:10px}
+  #ans{white-space:pre-wrap;line-height:1.65;font-size:.95rem;display:none}
+  #status{min-height:22px;text-align:center;font-size:.85rem;color:var(--muted);margin-top:8px}
+  .hint{font-size:.78rem;color:var(--muted);text-align:center;margin-top:6px}
+</style>
+</head>
+<body><div class="wrap">
+  <div style="text-align:center;font-size:2.2rem">🍲</div>
+  <h2 style="text-align:center;margin:6px 0 2px">โค้ชอาหารโรคไต</h2>
+  <div style="text-align:center;color:var(--muted);font-size:.8rem;margin-bottom:14px">คลินิกระนอง รักษ์ไต · AI แนะนำตามผลเลือดล่าสุดของคุณเอง</div>
+
+  {% if not valid %}
+  <div class="card" style="text-align:center">⏰ ลิงก์นี้หมดอายุแล้ว<br><span style="color:var(--muted);font-size:.85rem">ลิงก์ใหม่จะมาพร้อมข้อความผลแล็บใน LINE หรือขอจากเจ้าหน้าที่ได้</span></div>
+  {% else %}
+  <button class="shoot" onclick="document.getElementById('cam').click()">📸 ถ่ายรูปมื้อนี้ / เลือกรูปอาหาร</button>
+  <input type="file" id="cam" accept="image/*" capture="environment" style="display:none" onchange="go(this)">
+  <div class="hint">ถ่ายให้เห็นอาหารทั้งจาน ระบบตอบใน 10–20 วินาที</div>
+  <img id="preview" alt="">
+  <div id="status"></div>
+  <div class="card" id="ans"></div>
+  <div class="card" style="font-size:.8rem;color:var(--muted)">
+    💡 ใช้ได้ไม่จำกัดครั้ง ถ่ายก่อนกินทุกมื้อได้เลย · คำแนะนำอิงค่าโพแทสเซียม/ฟอสฟอรัสล่าสุดของคุณ
+  </div>
+  {% endif %}
+</div>
+<script>
+const TOKEN = "{{ token }}";
+async function go(inp){
+  const f = inp.files && inp.files[0];
+  if(!f) return;
+  const img=document.getElementById('preview');
+  img.src=URL.createObjectURL(f); img.style.display='block';
+  const st=document.getElementById('status'), ans=document.getElementById('ans');
+  ans.style.display='none';
+  st.textContent='🤖 กำลังดูรูปและเทียบกับผลเลือดของคุณ...';
+  const fd=new FormData(); fd.append('token',TOKEN); fd.append('image',f);
+  try{
+    const r=await fetch('/hd/api/v1/food/analyze',{method:'POST',body:fd});
+    const d=await r.json();
+    if(!r.ok||d.error){st.textContent='❌ '+(d.error||'วิเคราะห์ไม่สำเร็จ');inp.value='';return;}
+    st.textContent='';
+    ans.textContent=d.answer;
+    ans.style.display='block';
+    ans.scrollIntoView({behavior:'smooth'});
+  }catch(e){st.textContent='❌ เครือข่ายขัดข้อง ลองใหม่อีกครั้ง';}
+  inp.value='';
+}
+</script>
+</body></html>

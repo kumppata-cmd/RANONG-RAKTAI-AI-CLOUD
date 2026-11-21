@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>เช็คอินก่อนฟอก — คลินิกระนอง รักษ์ไต</title>
+<style>
+  :root{--p:#1e6fb2;--ok:#27ae60;--bg:#f4f7fb;--card:#fff;--fg:#1f2937;--muted:#6b7280;--border:#e5e7eb}
+  *{box-sizing:border-box} body{margin:0;font-family:'Noto Sans Thai',system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+  .wrap{max-width:430px;margin:0 auto;padding:18px 16px 40px}
+  h2{margin:8px 0 2px;font-size:1.25rem} .sub{color:var(--muted);font-size:.8rem;margin-bottom:14px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:12px}
+  label{font-weight:700;font-size:.95rem;display:block;margin-bottom:8px}
+  input[type=number]{width:100%;padding:14px;font-size:1.3rem;text-align:center;border:2px solid var(--border);border-radius:12px}
+  .chk{display:flex;align-items:center;gap:10px;padding:12px;border:2px solid var(--border);border-radius:12px;margin-bottom:8px;font-size:.95rem;cursor:pointer}
+  .chk input{width:22px;height:22px}
+  .chk.red{border-color:#fca5a5}
+  .seg{display:flex;gap:8px} .seg label{flex:1;margin:0}
+  .seg input{display:none}
+  .seg span{display:block;text-align:center;padding:13px 4px;border:2px solid var(--border);border-radius:12px;font-weight:700;cursor:pointer}
+  .seg input:checked + span{background:var(--p);color:#fff;border-color:var(--p)}
+  button.send{width:100%;padding:16px;font-size:1.1rem;font-weight:800;color:#fff;background:var(--p);border:none;border-radius:14px;cursor:pointer}
+  #done{display:none;text-align:center;padding:30px 10px}
+  #done .big{font-size:3rem} #status{min-height:22px;font-size:.85rem;text-align:center;margin-top:8px;color:var(--muted)}
+</style>
+</head>
+<body><div class="wrap">
+  <div style="text-align:center;font-size:2rem">🏥</div>
+  <h2 style="text-align:center">เช็คอินก่อนมาฟอกวันนี้</h2>
+  <div class="sub" style="text-align:center">คลินิกระนอง รักษ์ไต · ตอบ 3 ข้อ ไม่ถึง 1 นาที</div>
+
+  {% if not valid %}
+  <div class="card" style="text-align:center">⏰ ลิงก์นี้หมดอายุแล้ว<br><span style="color:var(--muted);font-size:.85rem">กรุณาใช้ลิงก์จากข้อความ LINE ของเช้าวันนี้ หรือแจ้งเจ้าหน้าที่</span></div>
+  {% else %}
+  <form id="f" onsubmit="return send(event)">
+    <div class="card">
+      <label>1️⃣ น้ำหนักชั่งที่บ้านเช้านี้ (กก.)</label>
+      <input type="number" step="0.1" min="20" max="250" id="wt" placeholder="เช่น 62.5" inputmode="decimal">
+      <div style="font-size:.75rem;color:var(--muted);margin-top:6px">ไม่ได้ชั่ง เว้นว่างได้</div>
+    </div>
+    <div class="card">
+      <label>2️⃣ ตั้งแต่เมื่อคืนมีอาการเหล่านี้ไหม (เลือกได้หลายข้อ)</label>
+      <label class="chk red"><input type="checkbox" value="เจ็บอก/แน่นหน้าอก"> 💔 เจ็บอก / แน่นหน้าอก</label>
+      <label class="chk red"><input type="checkbox" value="เหนื่อยมาก หอบ"> 😮‍💨 เหนื่อยมาก / หอบ นอนราบไม่ได้</label>
+      <label class="chk"><input type="checkbox" value="บวมมากขึ้น"> 🦵 ขา/หน้าบวมมากขึ้น</label>
+      <label class="chk"><input type="checkbox" value="ไข้"> 🤒 มีไข้</label>
+      <label class="chk"><input type="checkbox" value="เวียนหัว"> 😵 เวียนหัว หน้ามืด</label>
+      <label class="chk" style="border-color:var(--ok)"><input type="checkbox" id="noneBox" value="__none__" checked> ✅ สบายดี ไม่มีอาการ</label>
+    </div>
+    <div class="card">
+      <label>3️⃣ เมื่อเช้ากินยาประจำครบไหม</label>
+      <div class="seg">
+        <label><input type="radio" name="meds" value="ครบ" checked><span>✅ ครบ</span></label>
+        <label><input type="radio" name="meds" value="ไม่ครบ"><span>⚠️ ไม่ครบ</span></label>
+        <label><input type="radio" name="meds" value="ไม่มียา"><span>— ไม่มียาเช้า</span></label>
+      </div>
+    </div>
+    <button class="send" type="submit">📨 ส่งให้พยาบาล</button>
+    <div id="status"></div>
+  </form>
+  {% endif %}
+
+  <div id="done">
+    <div class="big">💚</div>
+    <h3 id="doneMsg">ขอบคุณค่ะ/ครับ</h3>
+    <div style="color:var(--muted);font-size:.9rem">พยาบาลได้รับข้อมูลแล้ว แล้วพบกันที่คลินิก</div>
+  </div>
+</div>
+<script>
+const TOKEN = "{{ token }}";
+/* ติ๊กอาการใดๆ → เอาติ๊ก "สบายดี" ออก และกลับกัน */
+document.querySelectorAll('.chk input').forEach(c=>c.addEventListener('change',()=>{
+  if(c.id==='noneBox' && c.checked) document.querySelectorAll('.chk input:not(#noneBox)').forEach(x=>x.checked=false);
+  else if(c.checked) document.getElementById('noneBox').checked=false;
+}));
+async function send(e){
+  e.preventDefault();
+  const st=document.getElementById('status');
+  st.textContent='⏳ กำลังส่ง...';
+  const syms=[...document.querySelectorAll('.chk input:checked')].map(c=>c.value).filter(v=>v!=='__none__');
+  try{
+    const r=await fetch('/hd/api/v1/prehd/submit',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({token:TOKEN, weight_home:document.getElementById('wt').value||null,
+        symptoms:syms, meds_taken:document.querySelector('input[name=meds]:checked').value})});
+    const d=await r.json();
+    if(!r.ok||d.error){st.textContent='❌ '+(d.error||'ส่งไม่สำเร็จ ลองใหม่');return false;}
+    document.getElementById('f').style.display='none';
+    document.getElementById('doneMsg').textContent=d.message||'ขอบคุณค่ะ/ครับ';
+    document.getElementById('done').style.display='block';
+  }catch(err){st.textContent='❌ เครือข่ายขัดข้อง ลองใหม่อีกครั้ง';}
+  return false;
+}
+</script>
+</body></html>

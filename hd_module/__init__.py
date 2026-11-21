@@ -237,6 +237,20 @@ def _run_hd_migrations():
                 "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_sbp INTEGER",
                 "ALTER TABLE hd_worksheet_data ADD COLUMN IF NOT EXISTS bp_discharge_dbp INTEGER",
             ]
+            # ── Pre-HD Check-in: คำตอบ 3 ข้อจากผู้ป่วยก่อนมาฟอก (ทาง LINE) ──
+            fixes.append("""
+                CREATE TABLE IF NOT EXISTS hd_prehd_checkins (
+                    id SERIAL PRIMARY KEY,
+                    hn TEXT NOT NULL,
+                    checkin_date DATE NOT NULL,
+                    weight_home NUMERIC,
+                    symptoms TEXT,
+                    meds_taken TEXT,
+                    flagged BOOLEAN DEFAULT FALSE,
+                    created_at TIMESTAMPTZ DEFAULT NOW(),
+                    UNIQUE (hn, checkin_date)
+                )
+            """)
             # ── เหตุผลการยกเลิกรอบฟอก (สถิติ no-show + audit) ──
             fixes.append("ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS cancel_reason TEXT")
             # ── กันเตียงซ้อนระดับ DB: 1 เตียง/วัน/รอบ มี session ทำงานได้ 1 เดียว ──
@@ -676,6 +690,7 @@ def _start_daily_reminder_scheduler(app):
         last_sent_date = None
         last_export_date = None
         last_brief_date = None
+        last_checkin_date = None
         if first:
             time.sleep(90)   # let server.py finish wiring storage / LINE
             _boot_tasks()
@@ -713,6 +728,18 @@ def _start_daily_reminder_scheduler(app):
                                 pass
                             ops.check_line_quota(_os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip())
                 lab_tick += 1
+                # 🌅 06:30: Pre-HD Check-in — ลิงก์ถาม 3 ข้อถึงคนไข้ที่มีคิวฟอกวันนี้ (WOW 21 พ.ย. 2026)
+                if now.hour == 6 and now.minute >= 30 and last_checkin_date != now.date():
+                    last_checkin_date = now.date()
+                    if _claim_once(app, "prehd_checkin", now.date()):
+                        with app.app_context():
+                            import os as _os_ci
+                            _dbu_ci = _os_ci.environ.get("HD_DATABASE_URL", "") or _os_ci.environ.get("DATABASE_URL", "")
+                            _pf_ci = app.config.get("LINE_PUSH_FN")
+                            if _dbu_ci and _pf_ci:
+                                from .patient_engage import send_prehd_checkins
+                                _r_ci = ops.run_guarded("prehd_checkin", send_prehd_checkins, _pf_ci, _dbu_ci, timeout=300)
+                                logger.info("Pre-HD checkin: %s", _r_ci)
                 # Send at 18:00 Thai time
                 if now.hour == 18 and now.minute < 5 and last_sent_date != now.date():
                     last_sent_date = now.date()
