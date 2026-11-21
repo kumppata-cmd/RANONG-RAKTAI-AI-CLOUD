@@ -782,7 +782,7 @@ function shiftHandover(){
   if(!confirm('สร้างสรุปส่งต่อเวรและส่ง LINE?')) return;
   const shift = document.querySelector('.shift-btn.active')?.dataset?.shift || 'morning';
   const token = getHdToken();
-  fetch('/hd/api/v1/shift/handover', {
+  hdFetch('/hd/api/v1/shift/handover', {
     method:'POST',
     headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
     body:JSON.stringify({shift:shift, send_line:true})
@@ -796,7 +796,7 @@ function autoAssignBeds(){
   if(!confirm('จัดเตียงอัตโนมัติสำหรับผู้ป่วยนัดฟอกวันนี้?')) return;
   const shift = document.querySelector('.shift-btn.active')?.dataset?.shift || 'morning';
   const token = getHdToken();
-  fetch('/hd/api/v1/schedule/auto-assign', {
+  hdFetch('/hd/api/v1/schedule/auto-assign', {
     method:'POST',
     headers:{'Authorization':'Bearer '+token,'Content-Type':'application/json'},
     body:JSON.stringify({shift:shift})

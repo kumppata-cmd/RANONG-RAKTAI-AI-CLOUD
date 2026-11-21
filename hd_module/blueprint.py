@@ -1386,7 +1386,7 @@ def water_ro_list():
 
 
 @hd_bp.route("/water-ro", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def water_ro_add():
     """Entry from the web page: JSON, or multipart with up to 8 photos (phone camera/gallery).
     Photos go to GCS + Drive like the LINE flow; the result is pushed to the nurse group."""
@@ -1461,7 +1461,7 @@ def water_ro_add():
 
 
 @hd_bp.route("/water-ro/<int:rid>/photos", methods=["POST"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def water_ro_add_photos(rid):
     """Add up to 8 more photos to an existing record (multipart 'photos')."""
     from flask import current_app
@@ -1495,7 +1495,7 @@ def water_ro_add_photos(rid):
 
 
 @hd_bp.route("/water-ro/<int:rid>/photo/<int:idx>", methods=["DELETE"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def water_ro_remove_photo(rid, idx):
     """Unlink one photo from the record. The file is kept (ห้ามลบไฟล์ต้นฉบับ) — only hidden from the record."""
     from .water_check import remove_photo
@@ -1517,7 +1517,7 @@ def water_ro_remove_photo(rid, idx):
 
 
 @hd_bp.route("/water-ro/<int:rid>", methods=["DELETE"])
-@require_role("physician", "nurse")
+@require_role("physician", "nurse", "admin")
 def water_ro_delete(rid):
     """Soft-delete a record (hidden from lists/brief; row and files are kept for audit)."""
     import os
@@ -1710,7 +1710,7 @@ def esa_proposals():
 
 
 @hd_bp.route("/esa/proposals/<int:pid>/decide", methods=["POST"])
-@require_role("physician")
+@require_role("physician", "admin")
 def esa_decide(pid):
     """Physician approves (applies the dose to the patient record) or rejects."""
     import os
@@ -2244,7 +2244,7 @@ def dw_proposals():
 
 
 @hd_bp.route("/dw/proposals/<int:pid>/decide", methods=["POST"])
-@require_role("physician")
+@require_role("physician", "admin")
 def dw_decide(pid):
     """Approve (optionally with a different value) → updates hd_patient_mapping.dry_weight; or reject."""
     import os
@@ -5477,7 +5477,7 @@ def session_alerts(session_id):
 
 
 @hd_bp.route("/alerts/<int:alert_id>/order", methods=["POST"])
-@require_role("physician")
+@require_role("physician", "admin")
 def physician_order(alert_id):
     """Physician records a treatment order on an alert (free text, by a human).
 
@@ -10180,7 +10180,7 @@ def get_patient_medications(hn):
 
 
 @hd_bp.route("/patients/<hn>/medications", methods=["POST"])
-@require_role("physician")
+@require_role("physician", "admin")
 def create_medication_order(hn):
     """Create a new medication order."""
     import os

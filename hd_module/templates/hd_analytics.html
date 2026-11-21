@@ -75,7 +75,7 @@ function loadAnalytics(days, btn){
 
   const token = getHdToken();
   const period = {7:'weekly',30:'monthly',90:'quarterly'}[days]||'monthly';
-  fetch('/hd/api/v1/analytics/clinic?days='+days, {
+  hdFetch('/hd/api/v1/analytics/clinic?days='+days, {
     headers: token ? {'Authorization':'Bearer '+token} : {}
   }).then(r=>r.json()).then(data=>{
     _analyticsData = data;

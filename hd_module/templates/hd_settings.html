@@ -499,7 +499,7 @@ document.addEventListener('DOMContentLoaded', ()=>loadOpsStatus(false));
 (function loadSettings(){
   const token = getHdToken();
   const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
-  fetch('/hd/api/v1/settings', {headers})
+  hdFetch('/hd/api/v1/settings', {headers})
     .then(r=>r.ok?r.json():Promise.reject())
     .then(d=>{
       const s = d.settings || {};
@@ -517,7 +517,7 @@ document.addEventListener('DOMContentLoaded', ()=>loadOpsStatus(false));
     .catch(e=>console.warn('loadSettings:', e));
 
   /* Health check */
-  fetch('/hd/api/v1/health', {headers})
+  hdFetch('/hd/api/v1/health', {headers})
     .then(r=>r.json())
     .then(d=>{
       document.getElementById('healthInfo').innerHTML =

@@ -208,7 +208,7 @@ document.addEventListener('DOMContentLoaded', loadUfCoachCard);
 (function(){
   const token = getHdToken();
   const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
-  fetch('/hd/api/v1/patients/'+HN, {headers})
+  hdFetch('/hd/api/v1/patients/'+HN, {headers})
     .then(r=>r.ok?r.json():Promise.reject())
     .then(p=>{
       const name = p.patient_name||'ไม่ทราบชื่อ';
@@ -235,7 +235,7 @@ document.addEventListener('DOMContentLoaded', loadUfCoachCard);
 (function(){
   const token = getHdToken();
   const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
-  fetch('/hd/api/v1/patients/'+HN+'/history', {headers})
+  hdFetch('/hd/api/v1/patients/'+HN+'/history', {headers})
     .then(r=>r.ok?r.json():Promise.reject())
     .then(data=>{
       renderSessions(data.sessions||[]);

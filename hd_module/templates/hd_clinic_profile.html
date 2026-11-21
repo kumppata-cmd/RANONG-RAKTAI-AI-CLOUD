@@ -569,7 +569,7 @@ function uploadWaterFile(){
   const fd=new FormData();fd.append('file',file);fd.append('sop_key',_waterUploadKey);fd.append('uploaded_by','');
   showToast('กำลังอัปโหลด...','info');
   const token=getHdToken();
-  fetch('/hd/api/v1/clinic-profile/sop-files',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd})
+  hdFetch('/hd/api/v1/clinic-profile/sop-files',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd})
     .then(r=>r.json()).then(d=>{input.value='';if(d.error){showToast(d.error,'danger');return}
       showToast('เก็บไฟล์ "'+d.filename+'" แล้ว','success');loadWaterDocs();})
     .catch(()=>{input.value='';showToast('อัปโหลดไม่สำเร็จ','danger');});
@@ -624,7 +624,7 @@ function uploadAssessFile(){
   const fd=new FormData();fd.append('file',file);fd.append('sop_key',_assessUploadKey);fd.append('uploaded_by','');
   showToast('กำลังอัปโหลด...','info');
   const token=getHdToken();
-  fetch('/hd/api/v1/clinic-profile/sop-files',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd})
+  hdFetch('/hd/api/v1/clinic-profile/sop-files',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd})
     .then(r=>r.json()).then(d=>{input.value='';if(d.error){showToast(d.error,'danger');return}
       showToast('เก็บเอกสาร "'+d.filename+'" แล้ว','success');loadAssessDocs();})
     .catch(()=>{input.value='';showToast('อัปโหลดไม่สำเร็จ','danger');});
@@ -677,7 +677,7 @@ function uploadLicFile(){
   const fd=new FormData();fd.append('file',file);fd.append('sop_key',_licUploadKey);fd.append('uploaded_by','');
   showToast('กำลังอัปโหลด...','info');
   const token=getHdToken();
-  fetch('/hd/api/v1/clinic-profile/sop-files',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd})
+  hdFetch('/hd/api/v1/clinic-profile/sop-files',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd})
     .then(r=>r.json()).then(d=>{input.value='';if(d.error){showToast(d.error,'danger');return}
       showToast('เก็บสำเนา "'+d.filename+'" แล้ว','success');loadLicDocs();})
     .catch(()=>{input.value='';showToast('อัปโหลดไม่สำเร็จ','danger');});
@@ -838,12 +838,12 @@ function importEquipment(){
   const inp = document.getElementById('equipImportFile'); const f = inp.files[0]; if(!f) return;
   const token = getHdToken(); const fd = new FormData(); fd.append('file', f);
   showToast('กำลังอ่านไฟล์…','info');
-  fetch('/hd/api/v1/clinic-profile/equipment/import?dry_run=1',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd}).then(r=>r.json()).then(d=>{
+  hdFetch('/hd/api/v1/clinic-profile/equipment/import?dry_run=1',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd}).then(r=>r.json()).then(d=>{
     if(d.error){ showToast(d.error,'danger'); inp.value=''; return; }
     const lines = d.rows.slice(0,30).map(r=>`${r.action==='insert'?'➕':'✏️'} เครื่อง ${r.bed||'-'}: ${r.brand} ${r.model||''} S/N ${r.serial||'-'} · ซื้อ ${r.purchase_year?r.purchase_year+543:'-'} · สัญญาถึง ${r.contract_end||'-'}`).join('\n');
     if(!confirm(`พบ ${d.rows.length} เครื่อง — เพิ่มใหม่ ${d.to_insert} · อัปเดต (S/N ตรงกัน) ${d.to_update}${d.errors.length?'\n⚠️ '+d.errors.join('\n'):''}\n\n${lines}${d.rows.length>30?'\n…':''}\n\nยืนยันนำเข้า?`)){ inp.value=''; return; }
     const fd2 = new FormData(); fd2.append('file', f);
-    return fetch('/hd/api/v1/clinic-profile/equipment/import',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd2}).then(r=>r.json()).then(d2=>{
+    return hdFetch('/hd/api/v1/clinic-profile/equipment/import',{method:'POST',headers:token?{'Authorization':'Bearer '+token}:{},body:fd2}).then(r=>r.json()).then(d2=>{
       inp.value=''; if(d2.error){ showToast(d2.error,'danger'); return; }
       showToast(`นำเข้าแล้ว: เพิ่ม ${d2.inserted} · อัปเดต ${d2.updated}`,'success'); loadEquipment();
     });
@@ -1056,7 +1056,7 @@ function saveWaterLog(){
 
   showToast('กำลังบันทึก...','info');
   const token = getHdToken();
-  fetch('/hd/api/v1/clinic-profile/water-quality',{
+  hdFetch('/hd/api/v1/clinic-profile/water-quality',{
     method:'POST',
     headers: token ? {'Authorization':'Bearer '+token} : {},
     body: formData
@@ -1249,7 +1249,7 @@ function uploadSopFile(){
 
   showToast('กำลังอัปโหลด...','info');
   const token = getHdToken();
-  fetch('/hd/api/v1/clinic-profile/sop-files', {
+  hdFetch('/hd/api/v1/clinic-profile/sop-files', {
     method:'POST',
     headers: token ? {'Authorization':'Bearer '+token} : {},
     body: formData
@@ -1333,7 +1333,7 @@ function deleteSop(key){
 function downloadFile(fileId, filename){
   showToast('กำลังดาวน์โหลด...','info');
   const token = getHdToken();
-  fetch('/hd/api/v1/clinic-profile/sop-files/'+fileId+'/download', {
+  hdFetch('/hd/api/v1/clinic-profile/sop-files/'+fileId+'/download', {
     headers: token ? {'Authorization':'Bearer '+token} : {}
   }).then(r=>{
     if(!r.ok) throw new Error('HTTP '+r.status);
@@ -1351,7 +1351,7 @@ function downloadFile(fileId, filename){
 function downloadWqFile(wqId, filename){
   showToast('กำลังดาวน์โหลด...','info');
   const token = getHdToken();
-  fetch('/hd/api/v1/clinic-profile/water-quality/'+wqId+'/file', {
+  hdFetch('/hd/api/v1/clinic-profile/water-quality/'+wqId+'/file', {
     headers: token ? {'Authorization':'Bearer '+token} : {}
   }).then(r=>{
     if(!r.ok) throw new Error('HTTP '+r.status);
