@@ -9856,15 +9856,30 @@ def flowsheet_entries(conn, session_id):
             # Get session info
             cur.execute("""
                 SELECT s.uf_goal, s.pre_hd_note, s.started_at,
-                       p.patient_name, p.hn, p.vascular_access,
-                       COALESCE((SELECT r.duration_hours FROM hd_prescriptions r
-                                 WHERE r.patient_id = s.patient_id AND r.is_active = TRUE
-                                 ORDER BY r.prescribed_date DESC LIMIT 1), 4) AS duration_hours
+                       p.patient_name, p.hn, p.vascular_access
                 FROM hd_sessions s
                 JOIN hd_patient_mapping p ON p.id = s.patient_id
                 WHERE s.id = %s
             """, (session_id,))
             srow = cur.fetchone()
+            # duration_hours จากใบสั่งฟอกล่าสุด — เสริมเท่านั้น ห้ามทำให้หน้า Sheet ล้ม
+            # (ไม่ใช้ SAVEPOINT เพราะ route PDF เรียกด้วย conn.autocommit=True)
+            if srow is not None:
+                dur_h = 4.0
+                try:
+                    cur.execute("""SELECT r.duration_hours FROM hd_prescriptions r
+                                   JOIN hd_sessions s ON s.patient_id = r.patient_id AND s.id = %s
+                                   WHERE r.is_active = TRUE ORDER BY r.id DESC LIMIT 1""", (session_id,))
+                    dr = cur.fetchone()
+                    if dr and dr[0]:
+                        dur_h = float(dr[0])
+                except Exception as de:
+                    try:
+                        conn.rollback()   # อ่านอย่างเดียว — เคลียร์ transaction ที่พังเท่านั้น
+                    except Exception:
+                        pass
+                    logger.warning("flowsheet duration lookup failed: %s", de)
+                srow = tuple(srow) + (dur_h,)
             # Everything recorded elsewhere for this session (session page,
             # quick "วัด BP" on the dashboard, UF button) — merged into slots below
             cur.execute("""SELECT sbp, dbp, heart_rate, temperature, spo2, recorded_at
