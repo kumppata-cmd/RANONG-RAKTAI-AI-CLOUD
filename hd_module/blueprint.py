@@ -9520,7 +9520,7 @@ def food_selftest():
         img = buf.getvalue()
     except Exception as e:
         return jsonify({"ok": False, "err": f"pil:{type(e).__name__}"}), 500
-    ans, err = analyze_food_photo(img, {"K": 4.2, "P": 4.8}, detail=True)
+    ans, err = analyze_food_photo(img, {"K": 4.2, "P": 4.8}, detail=True, debug=True)
     return jsonify({"ok": bool(ans), "err": err, "answer": (ans or "")[:400]})
 
 

@@ -275,9 +275,10 @@ def checkin_is_flagged(symptoms_text):
 
 # ───────────────────────── 4) Food Coach (Claude Vision + แล็บรายคน) ─────────────────────────
 
-def analyze_food_photo(img_bytes, labs, detail=False):
+def analyze_food_photo(img_bytes, labs, detail=False, debug=False):
     """รูปอาหาร + แล็บล่าสุดของคนไข้ → คำแนะนำสั้นภาษาไทย.
-    คืน str|None (detail=False) หรือ (str|None, err_code|None) (detail=True)."""
+    คืน str|None (detail=False) หรือ (str|None, err_code|None) (detail=True).
+    debug=True (ใช้กับ selftest เท่านั้น): err แนบข้อความ error จาก API มาด้วย."""
     import io, json as _json, base64
 
     def _ret(ans, err):
@@ -321,8 +322,11 @@ def analyze_food_photo(img_bytes, labs, detail=False):
         logger.warning("food coach net: %s", type(e).__name__)
         return _ret(None, f"net:{type(e).__name__}")
     if resp.status_code != 200:
-        logger.info("food coach HTTP %s: %s", resp.status_code, resp.text[:200])
-        return _ret(None, f"api:{resp.status_code}")
+        logger.warning("food coach HTTP %s: %s", resp.status_code, resp.text[:200])
+        err = f"api:{resp.status_code}"
+        if debug:
+            err += "|" + (resp.text or "")[:200]
+        return _ret(None, err)
     txt = (resp.json().get("content") or [{}])[0].get("text", "").strip()
     return _ret(txt or None, None if txt else "empty")
 
