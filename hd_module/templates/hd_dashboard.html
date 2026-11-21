@@ -881,7 +881,7 @@ function fetchBeds(){
           + '<div id="todayPatientsBody" style="'+(openList?'':'display:none;')+'max-height:60vh;overflow-y:auto;">'
           + data.today_patients.map(p=>
             '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--border);font-size:.85rem;">'
-            + '<span>'+p.hn+' — '+p.name+(p.va?' <span class="bed-access '+(function(v){var u=(v||'').toUpperCase();if(u.includes('AVF'))return'bed-access-avf';if(u.includes('AVG'))return'bed-access-avg';if(u.includes('DLC')||u.includes('CVC'))return'bed-access-dlc';return'bed-access-avf'})(p.va)+'">'+p.va+'</span>':' <span style="font-size:.65rem;color:var(--fg-muted);">ไม่ระบุ VA</span>')+'</span>'
+            + '<span>'+p.hn+' — '+p.name+((p.noshow_90d||0)>=2?' <span style="font-size:.62rem;background:rgba(231,76,60,.12);color:var(--danger);padding:2px 8px;border-radius:8px;font-weight:700" title="ขาดฟอก (no-show) '+p.noshow_90d+' ครั้งใน 90 วัน — ควรโทรยืนยันก่อน">🙅 ขาดบ่อย '+p.noshow_90d+'</span>':'')+(p.va?' <span class="bed-access '+(function(v){var u=(v||'').toUpperCase();if(u.includes('AVF'))return'bed-access-avf';if(u.includes('AVG'))return'bed-access-avg';if(u.includes('DLC')||u.includes('CVC'))return'bed-access-dlc';return'bed-access-avf'})(p.va)+'">'+p.va+'</span>':' <span style="font-size:.65rem;color:var(--fg-muted);">ไม่ระบุ VA</span>')+'</span>'
             + '<a href="/hd/session/new?hn='+encodeURIComponent(p.hn)+'&shift='+currentShift+'" style="font-size:.8rem;color:var(--success);font-weight:600;text-decoration:none;">▶ เริ่มฟอก</a>'
             + '</div>'
           ).join('') + '</div>';

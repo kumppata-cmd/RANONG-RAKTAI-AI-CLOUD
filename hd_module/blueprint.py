@@ -7221,6 +7221,21 @@ def bed_dashboard():
                             "hn": row[0], "name": row[1],
                             "va": row[2], "schedule": row[3],
                         })
+                    # 🙅 ป้ายขาดฟอกบ่อย: no-show 90 วันย้อนหลังต่อคน (additive — ล้มได้ไม่กระทบ)
+                    try:
+                        cur.execute("""
+                            SELECT p.hn, COUNT(*) FROM hd_sessions s
+                            JOIN hd_patient_mapping p ON p.id = s.patient_id
+                            WHERE s.status = 'cancelled' AND s.cancel_reason LIKE %s
+                              AND s.session_date >= CURRENT_DATE - 90
+                            GROUP BY p.hn
+                        """, ('%ไม่มา%',))
+                        _ns = dict(cur.fetchall())
+                        for tp in today_patients:
+                            if _ns.get(tp["hn"]):
+                                tp["noshow_90d"] = _ns[tp["hn"]]
+                    except Exception as _ns_e:
+                        logger.warning("noshow badge query: %s", _ns_e)
                 conn2.close()
                 today_count = len(today_patients)
         except Exception as e:
@@ -9174,6 +9189,67 @@ def notify_nurse_group():
 
 
 # ── F2: Shift Handover ────────────────────────────────────
+
+@hd_bp.route("/stats/cancellations", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def stats_cancellations():
+    """📊 สถิติขาดฟอก/ยกเลิก/ส่งต่อ — รายเดือนแยกเหตุผล + Top no-show 90 วัน. NEW — อ่านอย่างเดียว."""
+    import os, psycopg2
+    months = max(1, min(12, _safe_int(request.args.get("months")) or 3))
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"months": [], "top_noshow": []})
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        out_months, top_noshow = [], []
+        c90 = {"noshow": 0, "referral": 0, "postpone": 0, "other": 0, "total": 0}
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT to_char(date_trunc('month', session_date), 'YYYY-MM') AS ym,
+                       COALESCE(NULLIF(TRIM(cancel_reason), ''), 'ไม่ระบุเหตุผล') AS reason,
+                       COUNT(*)
+                FROM hd_sessions
+                WHERE status = 'cancelled'
+                  AND session_date >= date_trunc('month', CURRENT_DATE) - (%s || ' months')::interval
+                GROUP BY 1, 2 ORDER BY 1 DESC, 3 DESC
+            """, (months - 1,))
+            bym = {}
+            for ym, reason, n in cur.fetchall():
+                bym.setdefault(ym, {"month": ym, "by_reason": {}, "total": 0})
+                bym[ym]["by_reason"][reason] = n
+                bym[ym]["total"] += n
+            out_months = sorted(bym.values(), key=lambda x: x["month"], reverse=True)
+
+            cur.execute("""
+                SELECT COALESCE(NULLIF(TRIM(cancel_reason), ''), 'ไม่ระบุเหตุผล'), COUNT(*)
+                FROM hd_sessions
+                WHERE status = 'cancelled' AND session_date >= CURRENT_DATE - 90
+                GROUP BY 1
+            """)
+            for reason, n in cur.fetchall():
+                c90["total"] += n
+                if "ไม่มา" in reason: c90["noshow"] += n
+                elif "ส่งต่อ" in reason: c90["referral"] += n
+                elif "เลื่อน" in reason: c90["postpone"] += n
+                else: c90["other"] += n
+
+            cur.execute("""
+                SELECT p.hn, p.patient_name, COUNT(*) AS n, MAX(s.session_date)
+                FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                WHERE s.status = 'cancelled' AND s.cancel_reason LIKE %s
+                  AND s.session_date >= CURRENT_DATE - 90
+                GROUP BY p.hn, p.patient_name
+                ORDER BY n DESC, 4 DESC LIMIT 10
+            """, ('%ไม่มา%',))
+            top_noshow = [{"hn": r[0], "name": r[1], "count": r[2],
+                           "last_date": r[3].isoformat() if r[3] else None} for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"months": out_months, "top_noshow": top_noshow, "last_90d": c90})
+    except Exception as e:
+        logger.error("stats_cancellations: %s", e)
+        return jsonify({"months": [], "top_noshow": [], "error": str(e)})
+
 
 @hd_bp.route("/sessions/<int:session_id>/restore", methods=["POST"])
 @require_role("physician", "nurse", "admin")

@@ -157,6 +157,11 @@ def collect_month(conn, year, month):
                               COUNT(*) FILTER (WHERE status='completed' AND shift='evening')
                        FROM hd_sessions WHERE session_date BETWEEN %s AND %s""", (f, l))
         D["sessions"] = dict(zip(("completed", "cancelled", "patients", "morning", "afternoon", "evening"), r[0])) if r else {}
+        # ยกเลิก/ขาดฟอก แยกเหตุผล (additive — cancel_reason เริ่มเก็บ 21 พ.ย. 2026)
+        r = _q(cur, """SELECT COALESCE(NULLIF(TRIM(cancel_reason), ''), 'ไม่ระบุเหตุผล'), COUNT(*)
+                       FROM hd_sessions WHERE status='cancelled' AND session_date BETWEEN %s AND %s
+                       GROUP BY 1 ORDER BY 2 DESC""", (f, l))
+        D["cancel_reasons"] = {row[0]: row[1] for row in (r or [])}
         # IDH
         r = _q(cur, """SELECT COUNT(DISTINCT a.session_id) FROM hd_clinical_alerts a JOIN hd_sessions s ON s.id = a.session_id
                        WHERE s.session_date BETWEEN %s AND %s AND a.alert_type IN ('idh','hypotension')""", (f, l))
@@ -281,6 +286,13 @@ def line_text(D, base_url=""):
     idwg = D.get("idwg", {})
     if idwg.get("sessions"):
         L.append(f"💧 IDWG > 5%DW: {idwg['over_5pct']}/{idwg['sessions']} รอบ ({idwg['over_5pct'] / idwg['sessions'] * 100:.0f}%) · > 3%: {idwg['over_3pct']}")
+    cr = D.get("cancel_reasons", {})
+    if cr:
+        _ns = sum(n for k, n in cr.items() if "ไม่มา" in k)
+        _rf = sum(n for k, n in cr.items() if "ส่งต่อ" in k)
+        _pp = sum(n for k, n in cr.items() if "เลื่อน" in k)
+        _tot = sum(cr.values())
+        L.append(f"🚫 ยกเลิกรอบฟอก {_tot} ครั้ง · no-show {_ns} · เลื่อนนัด {_pp} · ส่งต่อ รพ. {_rf}")
     eq = D.get("equipment", {})
     if eq.get("expired") or eq.get("expiring_soon"):
         L.append(f"🔧 เครื่องฟอก: สัญญาหมด {eq.get('expired', 0)} · หมดใน 90 วัน {eq.get('expiring_soon', 0)}")
