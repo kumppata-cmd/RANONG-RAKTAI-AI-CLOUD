@@ -6534,7 +6534,7 @@ def _machine_ai_read(img_bytes):
     from .patient_engage import ai_model as _ai_model
     body = _json.dumps({
         "model": _ai_model(),
-        "max_tokens": 300,
+        "max_tokens": 1500,
         "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                          "data": base64.b64encode(img_bytes).decode()}},
@@ -7889,7 +7889,7 @@ def _ai_fallback_claude(question):
     resp = _rq.post("https://api.anthropic.com/v1/messages",
                     headers={"x-api-key": key, "anthropic-version": "2023-06-01",
                              "content-type": "application/json"},
-                    data=_json.dumps({"model": _ai_model(), "max_tokens": 500,
+                    data=_json.dumps({"model": _ai_model(), "max_tokens": 1500,
                                       "messages": [{"role": "user", "content": prompt}]}).encode("utf-8"),
                     timeout=30)
     if resp.status_code != 200:

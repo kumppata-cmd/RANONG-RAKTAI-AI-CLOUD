@@ -325,7 +325,7 @@ def analyze_food_photo(img_bytes, labs, detail=False, debug=False):
     )
     import requests as _rq
     body = _json.dumps({
-        "model": ai_model(), "max_tokens": 450,
+        "model": ai_model(), "max_tokens": 2000,
         "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                          "data": base64.b64encode(img_bytes).decode()}},
@@ -348,9 +348,16 @@ def analyze_food_photo(img_bytes, labs, detail=False, debug=False):
         if debug:
             err += "|" + (resp.text or "")[:200]
         return _ret(None, err)
-    txt = "".join(b.get("text", "") for b in (resp.json().get("content") or [])
+    rj = resp.json()
+    txt = "".join(b.get("text", "") for b in (rj.get("content") or [])
                   if b.get("type") == "text").strip()
-    return _ret(txt or None, None if txt else "empty")
+    if txt:
+        return _ret(txt, None)
+    err = "empty"
+    if debug:
+        err += "|stop:%s|blocks:%s" % (rj.get("stop_reason"),
+                                       ",".join(b.get("type", "?") for b in (rj.get("content") or [])) or "none")
+    return _ret(None, err)
 
 
 # ───────────────────────── 3b) Family Link — ญาติรับสรุปหลังฟอก ─────────────────────────

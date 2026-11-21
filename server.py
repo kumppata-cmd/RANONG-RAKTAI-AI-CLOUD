@@ -13714,7 +13714,7 @@ def call_claude_api(messages_content: list) -> dict | None:
         request_body = json.dumps(
             {
                 "model": _model,
-                "max_tokens": 256,
+                "max_tokens": 1200,
                 "messages": [
                     {"role": "user", "content": messages_content}
                 ],
