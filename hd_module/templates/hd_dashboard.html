@@ -487,8 +487,9 @@ function renderBeds(beds){
         window.location.href = url;
       }
     };
-    /* Patient details */
-    const pName = b.patient_name || (b.patient && b.patient.name) || '';
+    /* Patient details — สถานะที่หน้าจอไม่รู้จัก (แสดงเป็น "ว่าง") ห้ามโชว์ชื่อคนไข้ค้าง */
+    const _knownStatus = !!STATUS_MAP[b.status];
+    const pName = _knownStatus ? (b.patient_name || (b.patient && b.patient.name) || '') : '';
     const pHn = hn;
     const va = b.vascular_access || (b.patient && b.patient.vascular_access) || '';
 

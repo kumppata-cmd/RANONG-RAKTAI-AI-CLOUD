@@ -6939,6 +6939,9 @@ def bed_dashboard():
                                 "alert_count": int(row[17] or 0),
                             })
                             continue
+                        if db_status == "cancelled":
+                            # ยกเลิกแล้ว = ปล่อยเตียงสมบูรณ์ — ห้ามเอาชื่อไปติดการ์ด "ว่าง"
+                            continue
                         js_status = {"in_progress": "active", "scheduled": "pre_hd", "completed": "done"}.get(db_status, db_status)
                         # Priority: in_progress > completed > scheduled on same bed
                         current_bed = beds[bed_num - 1]
