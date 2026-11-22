@@ -2725,6 +2725,180 @@ def update_session_uf_goal(sid):
         return jsonify({"error": str(e)}), 500
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 📁 แฟ้มเอกสารผู้ป่วย — จัดการใบผิดคน/ใบซ้ำ (22 พ.ย. 2569, แพทย์อนุมัติ)
+# ═══════════════════════════════════════════════════════════════════════════
+
+@hd_web.route("/patient-docs")
+def patient_docs_page():
+    """หน้า UI แฟ้มเอกสารผู้ป่วย (?hn=... เปิดโหลดทันที)."""
+    return render_template("hd_patient_docs.html",
+                           hn=(request.args.get("hn") or "").strip())
+
+
+@hd_bp.route("/patients/<hn>/documents", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def patient_documents_list(hn):
+    """เอกสารทุกใบของ HN จากดัชนีเอกสารกลาง + ธงสงสัยซ้ำ."""
+    from flask import current_app
+    di = current_app.config.get("DOC_INDEX")
+    if di is None:
+        return jsonify({"error": "ระบบเอกสารยังไม่พร้อม"}), 503
+    from .patient_docs import list_patient_docs
+    docs = list_patient_docs(di, hn)
+    name = None
+    try:
+        import os as _os
+        import psycopg2 as _pg
+        _db = _os.environ.get("HD_DATABASE_URL", "") or _os.environ.get("DATABASE_URL", "")
+        c = _pg.connect(_db, connect_timeout=5)
+        with c.cursor() as cur:
+            cur.execute("SELECT patient_name FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            r = cur.fetchone()
+            name = r[0] if r else None
+        c.close()
+    except Exception:
+        pass
+    return jsonify({"hn": hn, "patient_name": name, "documents": docs,
+                    "dup_suspects": sum(1 for d in docs if d.get("dup_suspect"))})
+
+
+@hd_bp.route("/documents/<ref>/image", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def document_image(ref):
+    """รูปเอกสารตามรหัส 8 ตัว — ใช้กับ <img src=...?token=> (auth เดิมรองรับ)."""
+    from flask import current_app, Response
+    from .patient_docs import srv
+    try:
+        s = srv()
+        doc, err = s._find_doc_by_prefix(ref)
+    except Exception:
+        doc, err = None, "ระบบเอกสารยังไม่พร้อม"
+    if doc is None:
+        return jsonify({"error": err}), 404
+    storage = current_app.config.get("STORAGE_OBJ")
+    path = doc.get("gcs_object_path") or ""
+    raw = None
+    if storage and path:
+        try:
+            raw = storage.get(path)
+        except Exception:
+            raw = None
+    if not raw:
+        return jsonify({"error": "อ่านไฟล์ไม่สำเร็จ"}), 404
+    low = path.lower()
+    mt = ("image/png" if low.endswith(".png")
+          else "application/pdf" if low.endswith(".pdf") else "image/jpeg")
+    return Response(raw, mimetype=mt, headers={"Cache-Control": "private, max-age=600"})
+
+
+@hd_bp.route("/documents/<ref>/refile", methods=["POST"])
+@require_role("physician", "admin")
+def document_refile(ref):
+    """↪️ ย้ายไป HN อื่น (ใบผิดคน) — เรียกฟังก์ชันเดียวกับคำสั่ง LINE 'ย้ายเอกสาร'."""
+    import os
+    from .patient_docs import srv, doc_hn, log_cleanup
+    data = request.get_json(silent=True) or {}
+    hn_to = (data.get("hn") or "").strip()
+    new_cat = (data.get("category") or "").strip() or None
+    if not hn_to:
+        return jsonify({"error": "ต้องระบุ HN ปลายทาง"}), 400
+    if new_cat and new_cat not in ("lab", "rx", "dialysis"):
+        return jsonify({"error": "หมวดต้องเป็น lab / rx / dialysis"}), 400
+    try:
+        s = srv()
+        doc, err = s._find_doc_by_prefix(ref)
+        if doc is None:
+            return jsonify({"error": err}), 404
+        old_hn, old_cat = doc_hn(doc), doc.get("category", "")
+        old_path = doc.get("gcs_object_path", "")
+        actor = f"hd_user:{g.get('hd_user_id')}"
+        r = s._move_document_to_patient(ref, hn_to, actor, new_cat=new_cat)
+        if r.get("error"):
+            return jsonify(r), 400
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        log_cleanup(db_url, doc_id=(doc.get("document_id") or "")[:8], action="refile",
+                    hn_from=old_hn, hn_to=hn_to, category_from=old_cat,
+                    category_to=new_cat or old_cat, path_left=old_path,
+                    reason=(data.get("reason") or "")[:300], user_id=g.get("hd_user_id"))
+        return jsonify(r)
+    except Exception as e:
+        logger.error("doc refile: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/documents/<ref>/category", methods=["POST"])
+@require_role("physician", "admin")
+def document_change_category(ref):
+    """🏷 เปลี่ยนหมวด (คนเดิม) — เรียกฟังก์ชันเดียวกับคำสั่ง LINE 'เปลี่ยนประเภท'."""
+    import os
+    from .patient_docs import srv, doc_hn, log_cleanup
+    data = request.get_json(silent=True) or {}
+    cat = (data.get("category") or "").strip()
+    if cat not in ("lab", "rx", "dialysis"):
+        return jsonify({"error": "หมวดต้องเป็น lab / rx / dialysis"}), 400
+    try:
+        s = srv()
+        doc, err = s._find_doc_by_prefix(ref)
+        if doc is None:
+            return jsonify({"error": err}), 404
+        old_hn, old_cat = doc_hn(doc), doc.get("category", "")
+        old_path = doc.get("gcs_object_path", "")
+        actor = f"hd_user:{g.get('hd_user_id')}"
+        r = s._change_document_category(ref, cat, old_hn, actor)
+        if r.get("error"):
+            return jsonify(r), 400
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        log_cleanup(db_url, doc_id=(doc.get("document_id") or "")[:8], action="category",
+                    hn_from=old_hn, hn_to=old_hn, category_from=old_cat, category_to=cat,
+                    path_left=old_path, reason="", user_id=g.get("hd_user_id"))
+        return jsonify(r)
+    except Exception as e:
+        logger.error("doc category: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/documents/<ref>/unfile", methods=["POST"])
+@require_role("physician", "admin")
+def document_unfile(ref):
+    """🚫 เอาออกจากแฟ้ม (ใบซ้ำ/ใบขยะ) → กองกลาง 'รอตรวจสอบ' — ไม่ลบจริง ย้อนกลับได้."""
+    import os
+    from .patient_docs import unfile_document
+    data = request.get_json(silent=True) or {}
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        r = unfile_document(ref, data.get("reason") or "", f"hd_user:{g.get('hd_user_id')}", db_url)
+        return (jsonify(r), 400) if r.get("error") else jsonify(r)
+    except Exception as e:
+        logger.error("doc unfile: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/documents/cleanup-report", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def documents_cleanup_report():
+    """🧹 รายงานไฟล์ตกค้าง — สำเนาเก่าในคอม/Drive ไม่ถูกลบอัตโนมัติ ต้องลบมือ."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            from .patient_docs import CLEANUP_SQL
+            cur.execute(CLEANUP_SQL)
+            cur.execute("""SELECT doc_id, action, hn_from, hn_to, category_from,
+                                  category_to, path_left, reason, created_at
+                           FROM hd_doc_cleanup_log ORDER BY created_at DESC LIMIT 200""")
+            rows = [{"doc8": r[0], "action": r[1], "hn_from": r[2], "hn_to": r[3],
+                     "cat_from": r[4], "cat_to": r[5], "path_left": r[6],
+                     "reason": r[7], "at": r[8].isoformat()[:16] if r[8] else None}
+                    for r in cur.fetchall()]
+        conn.close()
+        return jsonify({"items": rows})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/medications/source/<doc_id>", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def medication_source_image(doc_id):
