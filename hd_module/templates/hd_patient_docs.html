@@ -1,0 +1,181 @@
+{% extends "hd_base.html" %}
+{% block title %}แฟ้มเอกสารผู้ป่วย{% endblock %}
+{% block page_title %}📁 แฟ้มเอกสารผู้ป่วย{% endblock %}
+{% block nav_patients %}active{% endblock %}
+
+{% block extra_css %}
+<style>
+.pd-bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+.pd-bar input{padding:9px 12px;border:1px solid var(--border);border-radius:8px;font-size:1rem;width:150px}
+.pd-btn{border:1px solid var(--border);background:var(--bg-card);border-radius:8px;padding:8px 12px;font-size:.85rem;cursor:pointer;color:var(--fg)}
+.pd-btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.pd-head{font-size:.9rem;margin-bottom:10px;color:var(--fg-muted)}
+.pd-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:10px}
+.pd-card{background:var(--bg-card);border:1px solid var(--border);border-radius:10px;padding:8px;position:relative}
+.pd-card.sel{outline:3px solid var(--accent)}
+.pd-thumb{width:100%;height:150px;object-fit:cover;border-radius:6px;background:var(--bg);cursor:zoom-in;display:block}
+.pd-thumb.pdf{display:flex;align-items:center;justify-content:center;font-size:2rem;cursor:pointer}
+.pd-meta{font-size:.7rem;color:var(--fg-muted);margin-top:5px;line-height:1.5;word-break:break-all}
+.pd-cat{display:inline-block;border-radius:6px;padding:1px 7px;font-size:.68rem;font-weight:700}
+.pd-cat.lab{background:#dcfce7;color:#166534}.pd-cat.rx{background:#fde8e8;color:#9b1c1c}
+.pd-cat.dialysis{background:#dbeafe;color:#1e40af}.pd-cat.review{background:#fef3c7;color:#92400e}
+.pd-dup{position:absolute;top:6px;left:6px;background:#e67e22;color:#fff;border-radius:6px;padding:1px 6px;font-size:.64rem;font-weight:700}
+.pd-acts{display:flex;gap:4px;flex-wrap:wrap;margin-top:6px}
+.pd-mini{border:1px solid var(--border);background:var(--bg);border-radius:6px;padding:3px 7px;font-size:.68rem;cursor:pointer;color:var(--fg)}
+#pdLightbox,#pdCompare,#pdReport{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:950;overflow:auto;padding:16px;text-align:center}
+#pdLightbox img{max-width:96%;max-height:92vh;border-radius:8px}
+#pdCompare .cmp{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+#pdCompare img{max-width:48%;max-height:88vh;border-radius:8px;background:#fff}
+#pdReport .box{background:var(--bg-card);color:var(--fg);max-width:720px;margin:0 auto;border-radius:12px;padding:14px;text-align:left;font-size:.8rem}
+.pd-close{position:fixed;top:10px;right:14px;font-size:1.6rem;color:#fff;cursor:pointer;z-index:951}
+#pdMsg{margin:10px 0;font-size:.85rem}
+@media (max-width:480px){ .pd-grid{grid-template-columns:repeat(auto-fill,minmax(140px,1fr))} #pdCompare img{max-width:95%} }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="pd-bar">
+  <input id="pdHn" inputmode="numeric" placeholder="HN" value="{{ hn }}">
+  <button class="pd-btn primary" onclick="pdLoad()">🔍 เปิดแฟ้ม</button>
+  <button class="pd-btn" onclick="pdCompareSel()" id="pdCmpBtn" disabled>🆚 เทียบ 2 ใบ</button>
+  <button class="pd-btn" onclick="pdReport()">🧹 รายงานไฟล์ตกค้าง</button>
+</div>
+<div class="pd-head" id="pdHead">ใส่ HN แล้วกด "เปิดแฟ้ม" — เห็นเอกสารทุกใบของผู้ป่วย จัดการใบผิดคน/ใบซ้ำได้จากที่นี่ (ไม่มีการลบไฟล์จริง ทุกอย่างย้อนกลับได้)</div>
+<div id="pdMsg"></div>
+<div class="pd-grid" id="pdGrid"></div>
+
+<div id="pdLightbox" onclick="this.style.display='none'"><span class="pd-close">✕</span><img id="pdLightImg" alt=""></div>
+<div id="pdCompare" onclick="if(event.target===this)this.style.display='none'">
+  <span class="pd-close" onclick="document.getElementById('pdCompare').style.display='none'">✕</span>
+  <div class="cmp"><img id="pdCmpA" alt=""><img id="pdCmpB" alt=""></div>
+</div>
+<div id="pdReport" onclick="if(event.target===this)this.style.display='none'">
+  <span class="pd-close" onclick="document.getElementById('pdReport').style.display='none'">✕</span>
+  <div class="box" id="pdReportBox"></div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+/* 📁 แฟ้มเอกสารผู้ป่วย — 22 พ.ย. 2569
+   ปุ่มทุกปุ่มเรียกกลไกเดียวกับคำสั่ง LINE (ย้ายเอกสาร/เปลี่ยนประเภท) —
+   ไม่มีการลบไฟล์จริง: "เอาออกจากแฟ้ม" = กลับกองกลาง 'รอตรวจสอบ' ย้อนกลับได้ */
+let _pdDocs = [], _pdSel = [];
+const CAT_TH = {lab:'แล็บ', rx:'ยา', dialysis:'ใบฟอก', review:'รอตรวจสอบ', bills:'บิล'};
+
+function pdImgUrl(doc8){ return '/hd/api/v1/documents/'+doc8+'/image?token='+encodeURIComponent(getHdToken()); }
+
+function pdLoad(){
+  const hn = document.getElementById('pdHn').value.trim();
+  if(!hn){ showToast('ใส่ HN ก่อนครับ','warning'); return; }
+  history.replaceState(null,'','/hd/patient-docs?hn='+encodeURIComponent(hn));
+  document.getElementById('pdMsg').textContent = '⏳ กำลังโหลดแฟ้ม...';
+  _pdSel = []; pdCmpBtn();
+  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(hn)+'/documents')
+    .then(r=>r.json()).then(d=>{
+      if(d.error){ document.getElementById('pdMsg').textContent = '❌ '+d.error; return; }
+      _pdDocs = d.documents || [];
+      document.getElementById('pdHead').innerHTML =
+        '👤 <b>'+(d.patient_name || 'ไม่พบชื่อในทะเบียน HD')+'</b> — HN '+d.hn
+        + ' · เอกสาร <b>'+_pdDocs.length+'</b> ใบ'
+        + (d.dup_suspects ? ' · <span style="color:#e67e22;font-weight:700">⚠️ สงสัยซ้ำ '+d.dup_suspects+' ใบ</span>' : '');
+      document.getElementById('pdMsg').textContent = _pdDocs.length ? '' : 'ไม่มีเอกสารในแฟ้มนี้';
+      pdRender();
+    }).catch(()=>{ document.getElementById('pdMsg').textContent = '❌ โหลดไม่สำเร็จ'; });
+}
+
+function pdRender(){
+  const g = document.getElementById('pdGrid');
+  g.innerHTML = _pdDocs.map(d=>{
+    const sel = _pdSel.includes(d.doc8) ? ' sel' : '';
+    const thumb = d.is_image
+      ? '<img class="pd-thumb" loading="lazy" src="'+pdImgUrl(d.doc8)+'" onclick="pdZoom(\''+d.doc8+'\')" alt="">'
+      : '<div class="pd-thumb pdf" onclick="window.open(pdImgUrl(\''+d.doc8+'\'),\'_blank\')">📄<span style="font-size:.7rem">PDF</span></div>';
+    return '<div class="pd-card'+sel+'" id="pdc-'+d.doc8+'">'
+      + (d.dup_suspect ? '<span class="pd-dup">⚠️ อาจซ้ำ</span>' : '')
+      + thumb
+      + '<div class="pd-meta"><span class="pd-cat '+d.category+'">'+(CAT_TH[d.category]||d.category)+'</span> '
+      + (d.date||'') + '<br>🆔 ' + d.doc8 + '</div>'
+      + '<div class="pd-acts">'
+      + '<button class="pd-mini" onclick="pdToggleSel(\''+d.doc8+'\')">🆚 เลือกเทียบ</button>'
+      + '<button class="pd-mini" onclick="pdRefile(\''+d.doc8+'\')">↪️ ย้าย HN</button>'
+      + '<button class="pd-mini" onclick="pdCat(\''+d.doc8+'\',\''+d.category+'\')">🏷 หมวด</button>'
+      + '<button class="pd-mini" style="color:#b91c1c" onclick="pdUnfile(\''+d.doc8+'\')">🚫 เอาออก</button>'
+      + '</div></div>';
+  }).join('');
+}
+
+function pdZoom(doc8){
+  document.getElementById('pdLightImg').src = pdImgUrl(doc8);
+  document.getElementById('pdLightbox').style.display = 'block';
+}
+function pdToggleSel(doc8){
+  const i = _pdSel.indexOf(doc8);
+  if(i >= 0) _pdSel.splice(i,1);
+  else { _pdSel.push(doc8); if(_pdSel.length > 2) _pdSel.shift(); }
+  pdRender(); pdCmpBtn();
+}
+function pdCmpBtn(){ document.getElementById('pdCmpBtn').disabled = _pdSel.length !== 2; }
+function pdCompareSel(){
+  if(_pdSel.length !== 2) return;
+  document.getElementById('pdCmpA').src = pdImgUrl(_pdSel[0]);
+  document.getElementById('pdCmpB').src = pdImgUrl(_pdSel[1]);
+  document.getElementById('pdCompare').style.display = 'block';
+}
+
+function _pdDone(d, fallback){
+  if(d && d.error){ showToast(d.error, 'danger'); return; }
+  showToast((d && d.message) || fallback, 'success');
+  pdLoad();
+}
+function pdRefile(doc8){
+  const hn = prompt('ย้ายเอกสาร '+doc8+' ไปแฟ้ม HN ใด? (ใบผิดคน)');
+  if(hn === null) return;
+  const hnT = hn.trim();
+  if(!hnT){ showToast('ต้องระบุ HN','warning'); return; }
+  if(!confirm('ยืนยันย้ายเอกสาร '+doc8+' → HN '+hnT+' ?\n(ไฟล์เดิมไม่ถูกลบ ระบบชี้ไปแฟ้มใหม่ มี audit)')) return;
+  hdFetch('/hd/api/v1/documents/'+doc8+'/refile', {method:'POST',
+    body: JSON.stringify({hn: hnT})})
+    .then(r=>r.json()).then(d=>_pdDone(d,'ย้ายแล้ว')).catch(()=>showToast('เครือข่ายขัดข้อง','danger'));
+}
+function pdCat(doc8, cur){
+  const v = prompt('หมวดใหม่ของ '+doc8+' (ปัจจุบัน: '+(CAT_TH[cur]||cur)+')\nพิมพ์: แล็บ / ยา / ฟอก');
+  if(v === null) return;
+  const map = {'แล็บ':'lab','แลบ':'lab','lab':'lab','ยา':'rx','rx':'rx','ฟอก':'dialysis','dialysis':'dialysis'};
+  const cat = map[v.trim().toLowerCase()];
+  if(!cat){ showToast('พิมพ์ได้เฉพาะ แล็บ / ยา / ฟอก','warning'); return; }
+  hdFetch('/hd/api/v1/documents/'+doc8+'/category', {method:'POST',
+    body: JSON.stringify({category: cat})})
+    .then(r=>r.json()).then(d=>_pdDone(d,'เปลี่ยนหมวดแล้ว')).catch(()=>showToast('เครือข่ายขัดข้อง','danger'));
+}
+function pdUnfile(doc8){
+  const reason = prompt('เอาเอกสาร '+doc8+' ออกจากแฟ้มผู้ป่วย เพราะอะไร?\n(เช่น ใบซ้ำ / รูปเบลอ / ไม่ใช่เอกสารผู้ป่วย)\n\n⚠️ ไม่ใช่การลบ — เอกสารกลับไปกองกลาง "รอตรวจสอบ" ย้อนกลับได้');
+  if(reason === null) return;
+  hdFetch('/hd/api/v1/documents/'+doc8+'/unfile', {method:'POST',
+    body: JSON.stringify({reason: reason})})
+    .then(r=>r.json()).then(d=>_pdDone(d,'เอาออกแล้ว')).catch(()=>showToast('เครือข่ายขัดข้อง','danger'));
+}
+
+function pdReport(){
+  hdFetch('/hd/api/v1/documents/cleanup-report')
+    .then(r=>r.json()).then(d=>{
+      const rows = d.items || [];
+      const act = {refile:'↪️ ย้าย HN', category:'🏷 เปลี่ยนหมวด', unfile:'🚫 เอาออก'};
+      let h = '<h3 style="margin:0 0 6px">🧹 ไฟล์ตกค้างให้ลบมือ ('+rows.length+')</h3>'
+        + '<div style="color:var(--fg-muted);margin-bottom:8px">การย้าย/เอาออก ไม่ลบไฟล์สำเนาเดิมในคอมคลินิก/Google Drive (ระบบไม่มีสิทธิ์ลบโดยเจตนา) — ใช้รายการนี้ไล่ลบในคอมเป็นรอบ ๆ</div>';
+      if(!rows.length) h += '<div>ยังไม่มีรายการ</div>';
+      rows.forEach(r=>{
+        h += '<div style="border-top:1px solid var(--border);padding:6px 0">'
+          + (act[r.action]||r.action)+' · 🆔 '+r.doc8+' · '+(r.at||'')
+          + (r.hn_from ? ' · จาก HN '+r.hn_from : '') + (r.hn_to && r.hn_to!==r.hn_from ? ' → '+r.hn_to : '')
+          + (r.reason ? '<br>เหตุผล: '+r.reason : '')
+          + '<br><code style="font-size:.7rem">'+(r.path_left||'')+'</code></div>';
+      });
+      document.getElementById('pdReportBox').innerHTML = h;
+      document.getElementById('pdReport').style.display = 'block';
+    }).catch(()=>showToast('โหลดรายงานไม่สำเร็จ','danger'));
+}
+
+{% if hn %}pdLoad();{% endif %}
+</script>
+{% endblock %}

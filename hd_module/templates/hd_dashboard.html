@@ -1295,6 +1295,7 @@ function renderMedPanel(d){
      + '<button class="med-act" onclick="document.getElementById(\'medPhoto\').click()">📸 อ่านยาจากรูป (AI)</button>'
      + '<button class="med-act" onclick="window.open(\'/hd/api/v1/patients/\'+_medHN+\'/medications/pdf\',\'_blank\')">🖨 ใบรายการยา</button>'
      + '<button class="med-act" onclick="syncMedPhotos()">📥 ดึงรูปยาจาก LINE</button>'
+     + '<button class="med-act" onclick="window.open(\'/hd/patient-docs?hn=\'+_medHN,\'_blank\')">📁 แฟ้มเอกสาร</button>'
      + '</div><div id="medFormArea"></div><div id="medMsg" style="font-size:.8rem;margin-top:6px"></div>';
   body.innerHTML = h;
 }
