@@ -16787,16 +16787,23 @@ def _parse_move_document(text: str):
     """
     import re as _re_mv
 
+    # 22 พ.ย. 2569 (แพทย์อนุมัติ): รับหมวดปลายทางต่อท้าย เพื่อย้ายเอกสาร 'review'
+    # เข้าแฟ้มผู้ป่วยพร้อมจัดหมวด เช่น "ย้ายเอกสาร a1b2c3d4 57042 แล็บ"
     m = _re_mv.match(
         r"^\s*(?:ย้ายเอกสาร|ย้าย|move)\s+"
         r"([0-9a-fA-F]{6,32})\s+"
-        r"([A-Za-z0-9\-/]{2,20})\s*$",
+        r"([A-Za-z0-9\-/]{2,20})"
+        r"(?:\s+(แล็บ|แลบ|lab|ยา|rx|ฟอก|dialysis))?\s*$",
         (text or "").strip(),
         _re_mv.IGNORECASE,
     )
     if not m:
         return None
-    return (m.group(1), m.group(2))
+    _cat_map = {"แล็บ": "lab", "แลบ": "lab", "lab": "lab",
+                "ยา": "rx", "rx": "rx",
+                "ฟอก": "dialysis", "dialysis": "dialysis"}
+    new_cat = _cat_map.get((m.group(3) or "").lower()) if m.group(3) else None
+    return (m.group(1), m.group(2), new_cat)
 
 
 _CATEGORY_WORDS = {
@@ -17202,7 +17209,7 @@ def _find_doc_by_prefix(doc_id_prefix: str):
 
 
 def _move_document_to_patient(
-    doc_id_prefix: str, hn: str, actor_hash: str,
+    doc_id_prefix: str, hn: str, actor_hash: str, new_cat=None,
 ) -> dict:
     """ย้ายเอกสารไปแฟ้มของผู้ป่วยที่ถูกต้อง
 
@@ -17242,7 +17249,14 @@ def _move_document_to_patient(
             return {"error": f"ไม่พบ HN {hn} ในทะเบียน — ลงทะเบียนอัตโนมัติไม่สำเร็จ"}
 
     cat = doc.get("category", "")
-    if cat not in CLINICAL_CATEGORIES:
+    # 22 พ.ย. 2569 (แพทย์อนุมัติ): new_cat = จัดหมวดใหม่พร้อมย้าย (ใช้กับเอกสาร review)
+    eff_cat = new_cat or cat
+    if eff_cat not in CLINICAL_CATEGORIES:
+        if cat in ("review", "other", ""):
+            return {"error": (
+                f"เอกสารนี้เป็นประเภท '{cat or 'ไม่ระบุ'}' ยังไม่มีหมวดคลินิก — "
+                f"ระบุหมวดปลายทางต่อท้าย: ย้ายเอกสาร {doc.get('document_id', '')[:8]} <HN> แล็บ|ยา|ฟอก"
+            )}
         return {"error": (
             f"เอกสารนี้เป็นประเภท '{cat}' ซึ่งไม่ได้จัดเก็บตามรายผู้ป่วย"
         )}
@@ -17261,7 +17275,7 @@ def _move_document_to_patient(
 
     filename = blob_path.rsplit("/", 1)[-1]
     new_blob_path = build_document_path(
-        FOLDERS.get(cat, FOLDERS["review"]), filename, cat,
+        FOLDERS.get(eff_cat, FOLDERS["review"]), filename, eff_cat,
         patient_folder=patient.folder_name, date=doc_dt,
     )
 
@@ -17282,12 +17296,13 @@ def _move_document_to_patient(
             storage._bucket.copy_blob(src, storage._bucket, new_blob_path)
 
         doc_index.update_category(
-            doc.get("document_id", ""), cat, new_blob_path,
+            doc.get("document_id", ""), eff_cat, new_blob_path,
         )
 
         audit_logger.log("document_refiled", actor_hash, {
             "doc_id": doc.get("document_id", "")[:8],
-            "category": cat,
+            "category": eff_cat,
+            "from_category": cat,
             "to_patient_folder": patient.folder_name,
         })
         logger.info(
@@ -17300,8 +17315,9 @@ def _move_document_to_patient(
                 f"✅ ย้ายเอกสารเรียบร้อย\n"
                 f"📄 รหัส: {doc.get('document_id', '')[:8]}\n"
                 f"👤 แฟ้มใหม่: {patient.hn_display} — "
-                f"{patient.patient_name or 'ไม่มีชื่อ'}\n\n"
-                f"หมายเหตุ: ไฟล์เดิมยังอยู่ ระบบชี้ไปที่แฟ้มใหม่แล้ว"
+                f"{patient.patient_name or 'ไม่มีชื่อ'}\n"
+                + (f"🏷 จัดหมวดใหม่: {cat or 'ไม่ระบุ'} → {eff_cat}\n" if eff_cat != cat else "")
+                + f"\nหมายเหตุ: ไฟล์เดิมยังอยู่ ระบบชี้ไปที่แฟ้มใหม่แล้ว"
             ),
         }
     except Exception as e:
@@ -19369,7 +19385,7 @@ def webhook():
                             _mb.get("message") or f"❌ {_mb.get('error', 'ย้ายไม่สำเร็จ')}",
                         )
                 elif _parse_move_document(text) is not None:
-                    _mv_doc, _mv_hn = _parse_move_document(text)
+                    _mv_doc, _mv_hn, _mv_cat = _parse_move_document(text)
                     if (user_hash not in PHYSICIAN_USERS
                             and user_hash not in ADMIN_USERS):
                         audit_logger.log(
@@ -19382,7 +19398,7 @@ def webhook():
                         )
                     else:
                         _mv_res = _move_document_to_patient(
-                            _mv_doc, _mv_hn, user_hash,
+                            _mv_doc, _mv_hn, user_hash, new_cat=_mv_cat,
                         )
                         if _mv_res.get("error"):
                             reply_message(
