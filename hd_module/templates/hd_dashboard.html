@@ -1282,7 +1282,8 @@ function renderMedPanel(d){
   const drafts = orders.filter(o=>o.verify_status==='ai_draft');
   const rest = orders.filter(o=>o.verify_status!=='ai_draft');
   if(drafts.length){
-    h += '<div style="font-weight:700;color:#7c3aed;font-size:.85rem;margin:6px 0 4px">🤖 จาก AI อ่านรูป — รอแพทย์ยืนยัน ('+drafts.length+')</div>';
+    h += '<div style="font-weight:700;color:#7c3aed;font-size:.85rem;margin:6px 0 4px">🤖 จาก AI อ่านรูป — รอแพทย์ยืนยัน ('+drafts.length+')'
+       + ' <button class="med-mini" style="background:#7c3aed;color:#fff" onclick="openReconcile()">🔀 เทียบกับรายการปัจจุบัน</button></div>';
     drafts.forEach(o=>{ h += medRow(o, true); });
   }
   h += '<div style="font-weight:700;font-size:.85rem;margin:8px 0 4px">รายการยา ('+rest.filter(o=>o.active).length+')</div>';
@@ -1302,6 +1303,7 @@ function medRow(o, draft){
            : (draft ? '' : '');
   const stopTag = !o.active ? ' <span style="color:#991b1b;font-size:.68rem">⏸ หยุด'+(o.stop_reason?' — '+_esc(o.stop_reason):'')+'</span>' : '';
   let btns = '<button class="med-mini" onclick="editMedForm('+o.id+')">✏️</button>';
+  if(o.source_doc) btns += '<button class="med-mini" onclick="window.open(\'/hd/api/v1/medications/source/'+encodeURIComponent(o.source_doc)+'\',\'_blank\')" title="รูปใบยาต้นฉบับ">🖼 ใบยา</button>';
   if(o.active) btns += '<button class="med-mini" onclick="stopMed('+o.id+')">⏸ หยุด</button>';
   else btns += '<button class="med-mini" onclick="medAct('+o.id+',\'resume\')">▶️ ใช้ต่อ</button>';
   if(o.verify_status==='pending' || draft) btns += '<button class="med-mini" style="background:#16a34a;color:#fff" onclick="medAct('+o.id+',\'ack\')">✔ ยืนยัน</button>';
@@ -1386,6 +1388,58 @@ function editAllergies(){
   if(v === null) return;
   hdFetch('/hd/api/v1/patients/'+_medHN+'/allergies', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({allergies:v})})
     .then(r=>r.json()).then(d=>_medDone(d, 'บันทึกแพ้ยาแล้ว'));
+}
+/* ── 🔀 เทียบใบยาใหม่กับรายการปัจจุบัน (Reconciliation — 22 พ.ย. 2569) ── */
+function openReconcile(){
+  document.getElementById('medMsg').innerHTML = '🔀 กำลังเทียบ...';
+  hdFetch('/hd/api/v1/patients/'+_medHN+'/medications/reconcile')
+    .then(r=>r.json()).then(d=>{
+      if(d.error){ document.getElementById('medMsg').innerHTML='❌ '+_esc(d.error); return; }
+      document.getElementById('medMsg').innerHTML='';
+      let h = '<div style="border:2px solid #7c3aed;border-radius:10px;padding:10px;margin-top:8px;font-size:.8rem">'
+            + '<b style="color:#7c3aed">🔀 ผลเทียบใบยาใหม่ ↔ รายการปัจจุบัน</b>';
+      const row = (chk, id, val, label, sub, color) =>
+        '<div style="border-left:3px solid '+color+';padding:4px 8px;margin:5px 0;background:var(--bg)">'
+        + '<label style="display:flex;gap:6px;align-items:flex-start">'
+        + '<input type="checkbox" class="rc" data-g="'+chk+'" value="'+val+'" '+(chk!=='missing_stop'?'checked':'')+'>'
+        + '<span><b>'+label+'</b><br><span style="color:var(--fg-muted);font-size:.73rem">'+sub+'</span></span></label></div>';
+      if((d.new||[]).length){
+        h += '<div style="margin-top:6px;font-weight:700;color:#16a34a">🟢 ยาใหม่ (ไม่มีในรายการเดิม)</div>';
+        d.new.forEach(x=>{ h += row('new', x.id, x.id, _esc(x.drug), _esc((x.dose||'')+' '+(x.frequency||'')), '#16a34a'); });
+      }
+      if((d.changed||[]).length){
+        h += '<div style="margin-top:6px;font-weight:700;color:#e67e22">🟡 ขนาด/วิธีเปลี่ยนจากเดิม</div>';
+        d.changed.forEach(x=>{ h += row('changed', x.draft.id, x.draft.id+','+x.current.id, _esc(x.draft.drug),
+          'เดิม: '+_esc((x.current.dose||'')+' '+(x.current.frequency||''))+' → ใหม่: <b>'+_esc((x.draft.dose||'')+' '+(x.draft.frequency||''))+'</b>', '#e67e22'); });
+      }
+      if((d.missing||[]).length){
+        h += '<div style="margin-top:6px;font-weight:700;color:#dc2626">🔴 ไม่อยู่ในใบใหม่ (ติ๊กเพื่อหยุดยา)</div>';
+        d.missing.forEach(x=>{ h += row('missing_stop', x.id, x.id, _esc(x.drug), _esc((x.dose||'')+' '+(x.frequency||''))+' — ถ้าไม่ติ๊ก = คงไว้ตามเดิม', '#dc2626'); });
+      }
+      if((d.same||[]).length)
+        h += '<div style="margin-top:6px;color:var(--fg-muted)">⚪ เหมือนเดิม '+d.same.length+' รายการ (ระบบจะปิดร่างซ้ำให้)</div>';
+      if(!(d.new||[]).length && !(d.changed||[]).length && !(d.missing||[]).length && !(d.same||[]).length)
+        h += '<div style="color:var(--fg-muted);margin-top:6px">ไม่มีร่างให้เทียบ</div>';
+      h += '<div style="margin-top:8px"><button class="med-act" style="background:#7c3aed;color:#fff" onclick="applyReconcile('
+         + _esc(JSON.stringify((d.same||[]).map(x=>x.draft.id)))
+         + ')">✔ ใช้ตามที่เลือก (เฉพาะแพทย์)</button>'
+         + ' <button class="med-act" onclick="openMedPanel(_medHN)">ยกเลิก</button></div></div>';
+      document.getElementById('medFormArea').innerHTML = h;
+    }).catch(e=>{ document.getElementById('medMsg').innerHTML='❌ เครือข่ายขัดข้อง'; });
+}
+function applyReconcile(sameIds){
+  const payload = {new: [], changed: [], missing_stop: [], dismiss: sameIds || []};
+  document.querySelectorAll('input.rc:checked').forEach(cb=>{
+    const gname = cb.getAttribute('data-g');
+    if(gname === 'changed'){ const p = cb.value.split(','); payload.changed.push([parseInt(p[0]), parseInt(p[1])]); }
+    else payload[gname].push(parseInt(cb.value));
+  });
+  hdFetch('/hd/api/v1/patients/'+_medHN+'/medications/reconcile/apply',
+    {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){ document.getElementById('medMsg').innerHTML='❌ '+_esc(d.error); return; }
+      _medDone(d, 'เทียบใบยาสำเร็จ — ยาใหม่ '+(d.new||0)+' · ปรับ '+(d.changed||0)+' · หยุด '+(d.stopped||0));
+    }).catch(e=>{ document.getElementById('medMsg').innerHTML='❌ เครือข่ายขัดข้อง'; });
 }
 function syncMedPhotos(){
   /* ดึงรูปยาหมวด rx/medication ที่ส่งเข้า LINE OA (3 วันล่าสุด ทุก HN) มาอ่านทันที

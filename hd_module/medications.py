@@ -173,6 +173,47 @@ def read_meds_photo(img_bytes):
     return None, err
 
 
+def _norm_txt(s):
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def reconcile(cur, patient_id):
+    """ข้อ 2 (แพทย์สั่ง): เทียบ 'ร่างยาจากใบใหม่ (ai_draft)' กับ 'รายการปัจจุบัน'
+    คืน {new, changed, same, missing} — จับคู่ด้วยชื่อยาแบบตัดขนาด (_drugkey)."""
+    cur.execute("""SELECT id, drug_name, dose, frequency, route, source_doc
+                   FROM hd_medication_orders
+                   WHERE patient_id = %s AND verify_status = %s
+                   ORDER BY id""", (patient_id, ST_AI))
+    drafts = [{"id": r[0], "drug": r[1], "dose": r[2] or "", "frequency": r[3] or "",
+               "route": r[4] or "", "source_doc": r[5]} for r in cur.fetchall()]
+    cur.execute("""SELECT id, drug_name, dose, frequency, intra_hd
+                   FROM hd_medication_orders
+                   WHERE patient_id = %s AND is_active = TRUE AND verify_status != %s
+                   ORDER BY drug_name""", (patient_id, ST_AI))
+    current = [{"id": r[0], "drug": r[1], "dose": r[2] or "", "frequency": r[3] or "",
+                "intra_hd": bool(r[4])} for r in cur.fetchall()]
+    cur_by_key = {}
+    for c in current:
+        cur_by_key.setdefault(_drugkey(c["drug"]), c)
+    out = {"new": [], "changed": [], "same": [], "missing": []}
+    matched_ids = set()
+    for d in drafts:
+        c = cur_by_key.get(_drugkey(d["drug"]))
+        if not c:
+            out["new"].append(d)
+            continue
+        matched_ids.add(c["id"])
+        if _norm_txt(d["dose"]) == _norm_txt(c["dose"]) and \
+                _norm_txt(d["frequency"]) == _norm_txt(c["frequency"]) and \
+                _norm_txt(d["drug"]) == _norm_txt(c["drug"]):
+            out["same"].append({"draft": d, "current": c})
+        else:
+            out["changed"].append({"draft": d, "current": c})
+    if drafts:   # "หายไปจากใบใหม่" มีความหมายเฉพาะเมื่อมีใบใหม่ให้เทียบ
+        out["missing"] = [c for c in current if c["id"] not in matched_ids]
+    return out
+
+
 MED_SEEN_SQL = """
 CREATE TABLE IF NOT EXISTS hd_med_doc_seen (
     doc_id TEXT PRIMARY KEY,
@@ -253,10 +294,10 @@ def sync_med_photos(conn, storage, doc_index, push_fn=None, days=3, max_docs=60)
                 cur.execute("""
                     INSERT INTO hd_medication_orders
                         (patient_id, drug_name, dose, route, frequency, drug_category,
-                         is_active, verify_status, source, notes, updated_at)
-                    VALUES (%s,%s,%s,%s,%s,'other',FALSE,%s,'line_photo',%s,NOW())
+                         is_active, verify_status, source, notes, updated_at, source_doc)
+                    VALUES (%s,%s,%s,%s,%s,'other',FALSE,%s,'line_photo',%s,NOW(),%s)
                 """, (pid, it["drug"], it["dose"], it["route"], it["frequency"],
-                      ST_AI, ("; ".join(warns))[:300] or None))
+                      ST_AI, ("; ".join(warns))[:300] or None, doc_id))
             cur.execute("INSERT INTO hd_med_doc_seen (doc_id, hn, n_items) VALUES (%s,%s,%s) "
                         "ON CONFLICT DO NOTHING", (doc_id, hn, len(items)))
             seen.add(doc_id)

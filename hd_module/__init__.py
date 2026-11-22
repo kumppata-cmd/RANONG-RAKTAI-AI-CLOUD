@@ -282,6 +282,8 @@ def _run_hd_migrations():
             fixes.append("ALTER TABLE hd_medication_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
             fixes.append("ALTER TABLE hd_medication_orders ADD COLUMN IF NOT EXISTS updated_by INTEGER")
             fixes.append("ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS drug_allergies TEXT")
+            # 22 พ.ย. 2569 (บ่าย): อ้างอิงรูปต้นฉบับของร่างยาจาก LINE (เทียบตอนยืนยัน)
+            fixes.append("ALTER TABLE hd_medication_orders ADD COLUMN IF NOT EXISTS source_doc TEXT")
             # ── กันเตียงซ้อนระดับ DB: 1 เตียง/วัน/รอบ มี session ทำงานได้ 1 เดียว ──
             # (ปิดช่องโหว่ 2 คนกด submit พร้อมกันเสี้ยววินาที — app เช็คอยู่แล้ว นี่คือชั้นสุดท้าย)
             fixes.append("""

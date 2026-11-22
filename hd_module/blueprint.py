@@ -2690,6 +2690,129 @@ def run_med_photo_sync():
         conn.close()
 
 
+@hd_bp.route("/medications/source/<doc_id>", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def medication_source_image(doc_id):
+    """ข้อ 1 (แพทย์สั่ง): รูปใบยาต้นฉบับของร่างยา — เปิดเทียบตอนยืนยัน."""
+    from flask import current_app, Response
+    di = current_app.config.get("DOC_INDEX")
+    storage = current_app.config.get("STORAGE_OBJ")
+    if not di or not storage:
+        return jsonify({"error": "ระบบเอกสารยังไม่พร้อม"}), 503
+    try:
+        di._ensure_fresh()
+        doc = next((d for d in list(di._docs) if (d.get("document_id") or "") == doc_id), None)
+    except Exception:
+        doc = None
+    if not doc:
+        return jsonify({"error": "ไม่พบรูปต้นฉบับ"}), 404
+    path = doc.get("gcs_object_path") or ""
+    try:
+        raw = storage.get(path)
+    except Exception:
+        raw = None
+    if not raw:
+        return jsonify({"error": "อ่านไฟล์ไม่สำเร็จ"}), 404
+    mt = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+    return Response(raw, mimetype=mt, headers={"Cache-Control": "private, max-age=600"})
+
+
+@hd_bp.route("/patients/<hn>/medications/reconcile", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def medication_reconcile_view(hn):
+    """ข้อ 2: เทียบร่างยาจากใบใหม่กับรายการปัจจุบัน (new/changed/same/missing)."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            pr = cur.fetchone()
+            if not pr:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            from .medications import reconcile
+            out = reconcile(cur, pr[0])
+        conn.close()
+        return jsonify(out)
+    except Exception as e:
+        logger.error("med reconcile: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/patients/<hn>/medications/reconcile/apply", methods=["POST"])
+@require_role("physician", "admin")
+def medication_reconcile_apply(hn):
+    """ยืนยันผลเทียบทั้งชุด (แพทย์/แอดมินเท่านั้น):
+    new=[draft_id] รับยาใหม่ · changed=[[draft_id,target_id]] ปรับตามใบใหม่
+    · missing_stop=[order_id] หยุดยาที่หายไปจากใบ · dismiss=[draft_id] ปิดร่างซ้ำ."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    data = request.get_json(silent=True) or {}
+    uid = g.get("hd_user_id")
+    n = {"new": 0, "changed": 0, "stopped": 0, "dismissed": 0}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            pr = cur.fetchone()
+            if not pr:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            pid = pr[0]
+            for did in (data.get("new") or [])[:50]:
+                cur.execute("""UPDATE hd_medication_orders
+                               SET is_active = TRUE, verify_status = 'confirmed',
+                                   updated_at = NOW(), updated_by = %s
+                               WHERE id = %s AND patient_id = %s AND verify_status = 'ai_draft'""",
+                            (uid, int(did), pid))
+                n["new"] += cur.rowcount
+            for pair in (data.get("changed") or [])[:50]:
+                try:
+                    did, tid = int(pair[0]), int(pair[1])
+                except (TypeError, ValueError, IndexError):
+                    continue
+                cur.execute("""SELECT drug_name, dose, frequency, route, source_doc
+                               FROM hd_medication_orders
+                               WHERE id = %s AND patient_id = %s AND verify_status = 'ai_draft'""",
+                            (did, pid))
+                dr = cur.fetchone()
+                if not dr:
+                    continue
+                cur.execute("""UPDATE hd_medication_orders
+                               SET drug_name = %s, dose = %s, frequency = %s, route = %s,
+                                   source_doc = COALESCE(%s, source_doc),
+                                   verify_status = 'confirmed', updated_at = NOW(), updated_by = %s
+                               WHERE id = %s AND patient_id = %s""",
+                            (dr[0], dr[1], dr[2], dr[3], dr[4], uid, tid, pid))
+                cur.execute("""UPDATE hd_medication_orders SET verify_status = 'merged',
+                               updated_at = NOW(), updated_by = %s WHERE id = %s AND patient_id = %s""",
+                            (uid, did, pid))
+                n["changed"] += 1
+            for oid in (data.get("missing_stop") or [])[:50]:
+                cur.execute("""UPDATE hd_medication_orders
+                               SET is_active = FALSE, stop_reason = 'ไม่อยู่ในใบยาล่าสุด (เทียบใบยา)',
+                                   verify_status = 'confirmed', updated_at = NOW(), updated_by = %s
+                               WHERE id = %s AND patient_id = %s""", (uid, int(oid), pid))
+                n["stopped"] += cur.rowcount
+            for did in (data.get("dismiss") or [])[:50]:
+                cur.execute("""UPDATE hd_medication_orders SET verify_status = 'merged',
+                               updated_at = NOW(), updated_by = %s
+                               WHERE id = %s AND patient_id = %s AND verify_status = 'ai_draft'""",
+                            (uid, int(did), pid))
+                n["dismissed"] += cur.rowcount
+        conn.commit()
+        conn.close()
+        log_action(user_id=uid, action="med.reconcile", resource_type="patient",
+                   new_values={"hn": hn, **n}, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, **n})
+    except Exception as e:
+        logger.error("med reconcile apply: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/medications/sync-selftest", methods=["GET"])
 def medications_sync_selftest():
     """ตรวจ med-photo-sync บน production (ADMIN_SECRET gate เหมือน food/selftest):
@@ -10696,7 +10819,7 @@ def get_patient_medications(hn):
                 SELECT o.id, o.drug_name, o.drug_category, o.dose, o.route,
                        o.frequency, o.is_standing, o.is_active, o.notes, o.ordered_at,
                        o.verify_status, o.intra_hd, o.stop_reason, o.source, o.updated_at,
-                       p.drug_allergies
+                       p.drug_allergies, o.source_doc
                 FROM hd_medication_orders o
                 JOIN hd_patient_mapping p ON p.id = o.patient_id
                 WHERE p.hn = %s """ + ("" if show_all else "AND (o.is_active = TRUE OR o.verify_status = 'ai_draft')") + """
@@ -10710,7 +10833,8 @@ def get_patient_medications(hn):
                    "ordered_at": r[9].isoformat() if r[9] else None,
                    "verify_status": r[10] or "confirmed", "intra_hd": bool(r[11]),
                    "stop_reason": r[12], "source": r[13] or "manual",
-                   "updated_at": r[14].isoformat() if r[14] else None} for r in rows]
+                   "updated_at": r[14].isoformat() if r[14] else None,
+                   "source_doc": r[16] if len(r) > 16 else None} for r in rows]
         allergies = rows[0][15] if rows else None
         if allergies is None:
             try:
