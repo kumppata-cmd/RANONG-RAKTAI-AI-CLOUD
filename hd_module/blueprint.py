@@ -3515,7 +3515,9 @@ def get_patient_labs_unified(hn):
             cur.execute(f"""SELECT l.lab_date, l._table, l.source, {', '.join('l.' + c for c in _UNIFIED_COLS)}
                             FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
                             WHERE p.hn = %s AND l.lab_date IS NOT NULL
-                            ORDER BY l.lab_date DESC, l._table DESC LIMIT 80""", (hn,))
+                              AND (l.verified_status IS DISTINCT FROM 'rejected')
+                            ORDER BY l.lab_date DESC, l._table DESC, l.doc_row_id DESC NULLS LAST
+                            LIMIT 80""", (hn,))
             rows = cur.fetchall()
         conn.close()
         labs, seen = [], set()

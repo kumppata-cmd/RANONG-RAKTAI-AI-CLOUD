@@ -324,7 +324,7 @@ def latest_for_patients(cur, patient_ids):
                    verified_status, delta_flags, doc_row_id
             FROM hd_labs WHERE patient_id = ANY(%s)
               AND (verified_status IS DISTINCT FROM 'rejected')
-            ORDER BY patient_id, lab_date DESC NULLS LAST
+            ORDER BY patient_id, lab_date DESC NULLS LAST, doc_row_id DESC NULLS LAST
         """, (list(patient_ids),))
         for r in cur.fetchall():
             pid, lab_date, src = r[0], r[1], r[2]
