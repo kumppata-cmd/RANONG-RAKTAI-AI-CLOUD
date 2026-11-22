@@ -3540,6 +3540,34 @@ def get_patient_labs_unified(hn):
         return jsonify({"labs": [], "error": str(e)})
 
 
+# ═══════════════ SEROLOGY UNIT SUMMARY (2026-11-22, แพทย์สั่ง) ═══════════════
+
+
+@hd_web.route("/serology")
+def serology_page():
+    """🛡 หน้าสรุป serology ทั้งหน่วยไตเทียม."""
+    return render_template("hd_serology.html")
+
+
+@hd_bp.route("/serology/summary", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def serology_summary():
+    """สถานะ HBsAg/Anti-HBs/Anti-HCV/Anti-HIV ล่าสุดทุกราย + หมวดที่ต้องสนใจ."""
+    import os, psycopg2
+    from .serology import unit_summary
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            data = unit_summary(cur)
+        conn.close()
+        return jsonify(data)
+    except Exception as e:
+        logger.error("serology_summary: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ═══════════════ LAB VERIFY GATE (2026-11-22) ═══════════════
 # ค่าแล็บจากรูปถ่าย (OCR) ต้องให้แพทย์/แอดมินยืนยันก่อนถือเป็นค่าที่เชื่อถือได้
 # — เหมือนด่านยืนยันยา: verify = ✅ ใช้ได้ · reject = ❌ อ่านผิด ซ่อนจาก bed card

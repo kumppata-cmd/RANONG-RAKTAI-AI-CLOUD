@@ -187,3 +187,56 @@ class TestSerologyExtractor:
         got, _ = self._extract("Platelet 245 x10^3/uL\nHCO3 21.5 mEq/L")
         assert got.get("Platelet") == 245.0
         assert got.get("Bicarbonate") == 21.5
+
+
+class TestSerologyClassify:
+    """จัดกลุ่ม serology ทั้งหน่วย (serology.classify) — 22 พ.ย. 2569"""
+
+    def _c(self, rec, today="2026-11-22"):
+        from datetime import date
+        from hd_module.serology import classify
+        return classify(dict(rec), date.fromisoformat(today))
+
+    def test_hbsag_positive_grouped(self):
+        g = self._c({"hbsag": "positive", "hbsag_date": "2026-10-01"})
+        assert "hbsag_pos" in g
+
+    def test_hiv_hcv_positive_grouped(self):
+        g = self._c({"antihcv": "positive", "antihiv": "positive",
+                     "antihcv_date": "2026-10-01", "antihiv_date": "2026-10-01",
+                     "antihbs": "positive"})
+        assert "antihcv_pos" in g and "antihiv_pos" in g
+
+    def test_no_immunity_when_antihbs_negative_or_missing(self):
+        assert "no_immunity" in self._c({"hbsag": "negative", "antihbs": "negative",
+                                         "hbsag_date": "2026-10-01"})
+        assert "no_immunity" in self._c({"hbsag": "negative", "hbsag_date": "2026-10-01"})
+
+    def test_carrier_not_flagged_for_vaccine(self):
+        # HBsAg+ = พาหะ — วัคซีนไม่ช่วย ไม่ควรติดหมวดภูมิไม่ขึ้น
+        assert "no_immunity" not in self._c({"hbsag": "positive", "hbsag_date": "2026-10-01"})
+
+    def test_immune_patient_clean(self):
+        g = self._c({"hbsag": "negative", "antihbs": "positive", "antihcv": "negative",
+                     "antihiv": "negative", "hbsag_date": "2026-06-01",
+                     "antihbs_date": "2026-06-01", "antihcv_date": "2026-06-01",
+                     "antihiv_date": "2026-06-01"})
+        assert g == []
+
+    def test_annual_due_at_365_days(self):
+        g = self._c({"hbsag": "negative", "antihbs": "positive",
+                     "hbsag_date": "2025-11-22", "antihbs_date": "2025-11-22"})
+        assert "annual_due" in g
+        g2 = self._c({"hbsag": "negative", "antihbs": "positive",
+                      "hbsag_date": "2025-11-23", "antihbs_date": "2025-11-23"})
+        assert "annual_due" not in g2
+
+    def test_never_tested(self):
+        g = self._c({})
+        assert "never_tested" in g and "no_immunity" in g
+
+    def test_newest_date_across_fields_used(self):
+        # HBsAg เก่าเกินปี แต่ Anti-HBs เพิ่งตรวจ → ยังไม่ครบกำหนด
+        g = self._c({"hbsag": "negative", "hbsag_date": "2024-01-01",
+                     "antihbs": "positive", "antihbs_date": "2026-09-01"})
+        assert "annual_due" not in g

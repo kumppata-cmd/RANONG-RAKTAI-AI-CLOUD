@@ -81,6 +81,94 @@ def latest_for(cur, patient_ids):
     return out
 
 
+# ═══════════ สรุป serology ทั้งหน่วย (22 Nov 2026, แพทย์สั่ง) ═══════════
+
+ANNUAL_DUE_DAYS = 365  # ตรวจประจำปี — ปรับได้ตามนโยบายหน่วย
+SERO_FIELDS = ("hbsag", "antihcv", "antihbs", "antihiv")
+
+
+def classify(rec, today):
+    """จัดหมวดผู้ป่วย 1 รายจากสถานะ serology ล่าสุด → list ของรหัสหมวด.
+
+    rec: {"hbsag"|"antihcv"|"antihbs"|"antihiv": 'positive'|'negative'|None,
+          "<field>_date": 'YYYY-MM-DD'|None}
+    Pure function — unit-tested. แจ้ง/จัดกลุ่มเท่านั้น ไม่ใช่คำสั่งการรักษา.
+    """
+    groups = []
+    if rec.get("hbsag") == "positive":
+        groups.append("hbsag_pos")
+    if rec.get("antihcv") == "positive":
+        groups.append("antihcv_pos")
+    if rec.get("antihiv") == "positive":
+        groups.append("antihiv_pos")
+    # HBsAb (ภูมิคุ้มกัน): คนที่ไม่ใช่พาหะ แต่ภูมิยังไม่ขึ้น/ไม่เคยตรวจ → พิจารณาวัคซีน
+    if rec.get("hbsag") != "positive" and rec.get("antihbs") != "positive":
+        groups.append("no_immunity")
+    # ครบกำหนดตรวจประจำปี: ดูวันที่ล่าสุดของทุก field
+    dates = [rec.get(f + "_date") for f in SERO_FIELDS if rec.get(f + "_date")]
+    if not dates:
+        groups.append("never_tested")
+    else:
+        newest = max(dates)
+        try:
+            age = (today - date.fromisoformat(newest[:10])).days
+        except (ValueError, TypeError):
+            age = None
+        if age is not None and age >= ANNUAL_DUE_DAYS:
+            groups.append("annual_due")
+        rec["last_test"], rec["last_test_days"] = newest, age
+    return groups
+
+
+def unit_summary(cur, today=None):
+    """สถานะ serology ล่าสุด 4 ตัวของผู้ป่วย HD ทุกราย + หมวดที่ต้องสนใจ.
+
+    อ่านจาก hd_labs VIEW (รวมกรอกมือ + รูปถ่าย LINE, ข้ามแถว rejected)
+    — ไม่เขียนอะไรลงฐานข้อมูล.
+    """
+    today = today or date.today()
+    cur.execute("SELECT id, hn, patient_name FROM hd_patient_mapping WHERE is_active = TRUE ORDER BY hn")
+    pts = cur.fetchall()
+    ids = [p[0] for p in pts]
+    latest = {}
+    if ids:
+        try:
+            cur.execute("SAVEPOINT sero_sum")
+            cur.execute("""SELECT patient_id, lab_date, hbsag, antihcv, antihbs, antihiv
+                           FROM hd_labs WHERE patient_id = ANY(%s)
+                             AND (hbsag IS NOT NULL OR antihcv IS NOT NULL
+                                  OR antihbs IS NOT NULL OR antihiv IS NOT NULL)
+                             AND (verified_status IS DISTINCT FROM 'rejected')
+                           ORDER BY lab_date DESC NULLS LAST""", (ids,))
+            rows = cur.fetchall()
+            cur.execute("RELEASE SAVEPOINT sero_sum")
+        except Exception:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT sero_sum")
+            except Exception:
+                pass
+            rows = []
+        for pid, d, b, c, s, h in rows:
+            rec = latest.setdefault(pid, {})
+            d_iso = d.isoformat() if hasattr(d, "isoformat") else (str(d)[:10] if d else None)
+            for f, v in zip(SERO_FIELDS, (b, c, s, h)):
+                nv = normalize(v)
+                if nv is not None and rec.get(f) is None:  # rows มาจากใหม่→เก่า: ตัวแรก = ล่าสุด
+                    rec[f], rec[f + "_date"] = nv, d_iso
+    out = []
+    for pid, hn, name in pts:
+        rec = latest.get(pid, {})
+        row = {"hn": hn, "name": name or ""}
+        for f in SERO_FIELDS:
+            row[f], row[f + "_date"] = rec.get(f), rec.get(f + "_date")
+        row["groups"] = classify(row, today)
+        out.append(row)
+    counts = {g: sum(1 for r in out if g in r["groups"])
+              for g in ("hbsag_pos", "antihcv_pos", "antihiv_pos", "no_immunity", "annual_due", "never_tested")}
+    counts["total"] = len(out)
+    return {"patients": out, "counts": counts}
+
+
 def text(rec):
     """Short Thai/English status line: 'HBsAg+ · Anti-HCV−' (positives first)."""
     if not rec:

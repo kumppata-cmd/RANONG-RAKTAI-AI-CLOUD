@@ -1,0 +1,96 @@
+{% extends "hd_base.html" %}
+{% block title %}Serology ทั้งหน่วย{% endblock %}
+{% block page_title %}🛡 Serology ทั้งหน่วย{% endblock %}
+
+{% block extra_css %}
+<style>
+.sr-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.sr-chip{border-radius:999px;padding:6px 14px;font-size:.82rem;font-weight:700;border:1px solid var(--border);background:var(--bg-card);color:var(--fg);cursor:pointer}
+.sr-chip.active{outline:2px solid var(--accent)}
+.sr-chip b{font-size:1rem}
+.sr-chip.red{background:#fde8e8;color:#9b1c1c;border-color:#f3b4b4}
+.sr-chip.amber{background:#fef3c7;color:#92400e;border-color:#f6d98a}
+.sr-note{font-size:.72rem;color:var(--fg-muted);margin-bottom:10px;line-height:1.6}
+.sr-table{width:100%;border-collapse:collapse;font-size:.8rem;background:var(--bg-card);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.sr-table th{background:var(--bg);padding:7px 6px;text-align:left;font-size:.72rem;color:var(--fg-muted);position:sticky;top:0}
+.sr-table td{padding:7px 6px;border-top:1px solid var(--border)}
+.sr-pos{color:#b91c1c;font-weight:800}
+.sr-neg{color:var(--fg-muted)}
+.sr-none{color:var(--fg-dim)}
+.sr-tag{display:inline-block;border-radius:6px;padding:1px 6px;font-size:.66rem;font-weight:700;margin:1px 2px 1px 0}
+.sr-tag.red{background:#fde8e8;color:#9b1c1c}
+.sr-tag.amber{background:#fef3c7;color:#92400e}
+.sr-tag.blue{background:#dbeafe;color:#1e40af}
+.sr-date{font-size:.66rem;color:var(--fg-dim);display:block}
+.sr-wrap{overflow-x:auto}
+@media print { .sr-chips,.btn,nav,header{display:none!important} }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="sr-note">
+  สถานะล่าสุดจากทุกแหล่ง (กรอกมือ/Excel + รูปถ่าย LINE ที่ไม่ถูกปฏิเสธ) · ตัวบวกแสดง<b class="sr-pos">แดงหนา</b>ตามข้อตกลง 14 พ.ย.
+  · หน้านี้<b>จัดกลุ่มเพื่อช่วยงาน IC เท่านั้น ไม่ใช่คำสั่งการรักษา</b> · Anti-HIV เห็นเฉพาะผู้ login ไม่ส่งออก LINE
+</div>
+<div class="sr-chips" id="srChips">กำลังโหลด...</div>
+<div class="sr-wrap">
+<table class="sr-table">
+  <thead><tr><th>HN</th><th>ชื่อ</th><th>HBsAg</th><th>Anti-HBs</th><th>Anti-HCV</th><th>Anti-HIV</th><th>ตรวจล่าสุด</th><th>หมวด</th></tr></thead>
+  <tbody id="srBody"><tr><td colspan="8">กำลังโหลด...</td></tr></tbody>
+</table>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const G_LABEL = {
+  hbsag_pos:   ['🔴 HBsAg+ (แยกโซน/เครื่องตาม IC)', 'red'],
+  antihcv_pos: ['🟠 Anti-HCV+', 'red'],
+  antihiv_pos: ['🔺 Anti-HIV+', 'red'],
+  no_immunity: ['💉 HBsAb ยังไม่ขึ้น → พิจารณาวัคซีน/เข็มกระตุ้น', 'amber'],
+  annual_due:  ['⏰ ครบกำหนดตรวจประจำปี (≥365 วัน)', 'amber'],
+  never_tested:['❓ ไม่เคยมีผลในระบบ', 'amber'],
+};
+let _srData = null, _srFilter = '';
+
+function srCell(v, d){
+  if(v === 'positive') return '<td><span class="sr-pos">+</span><span class="sr-date">' + (d || '') + '</span></td>';
+  if(v === 'negative') return '<td><span class="sr-neg">−</span><span class="sr-date">' + (d || '') + '</span></td>';
+  return '<td><span class="sr-none">?</span></td>';
+}
+function srTags(groups){
+  return (groups || []).map(g => {
+    const L = G_LABEL[g] || [g, 'blue'];
+    return '<span class="sr-tag ' + L[1] + '">' + L[0].split(' (')[0] + '</span>';
+  }).join('');
+}
+function srRender(){
+  const d = _srData; if(!d) return;
+  const c = d.counts || {};
+  const chip = (key, label, cls) =>
+    '<span class="sr-chip ' + cls + (_srFilter === key ? ' active' : '') + '" onclick="srSetFilter(\'' + key + '\')">' +
+    label + ' <b>' + (c[key] != null ? c[key] : 0) + '</b></span>';
+  document.getElementById('srChips').innerHTML =
+    '<span class="sr-chip' + (_srFilter === '' ? ' active' : '') + '" onclick="srSetFilter(\'\')">ทั้งหมด <b>' + (c.total || 0) + '</b></span>' +
+    chip('hbsag_pos', '🔴 HBsAg+', 'red') +
+    chip('antihcv_pos', '🟠 HCV+', 'red') +
+    chip('antihiv_pos', '🔺 HIV+', 'red') +
+    chip('no_immunity', '💉 ภูมิ HBs ยังไม่ขึ้น', 'amber') +
+    chip('annual_due', '⏰ ครบปี', 'amber') +
+    chip('never_tested', '❓ ไม่เคยตรวจ', 'amber');
+  const rows = (d.patients || []).filter(p => !_srFilter || (p.groups || []).includes(_srFilter));
+  document.getElementById('srBody').innerHTML = rows.length ? rows.map(p =>
+    '<tr><td><b>' + p.hn + '</b></td><td>' + (p.name || '') + '</td>' +
+    srCell(p.hbsag, p.hbsag_date) + srCell(p.antihbs, p.antihbs_date) +
+    srCell(p.antihcv, p.antihcv_date) + srCell(p.antihiv, p.antihiv_date) +
+    '<td>' + (p.last_test ? p.last_test + (p.last_test_days != null ? '<span class="sr-date">(' + p.last_test_days + ' วัน)</span>' : '') : '—') + '</td>' +
+    '<td>' + srTags(p.groups) + '</td></tr>').join('')
+    : '<tr><td colspan="8" style="color:var(--fg-muted)">ไม่มีรายการในหมวดนี้</td></tr>';
+}
+function srSetFilter(g){ _srFilter = g; srRender(); }
+hdFetch('/hd/api/v1/serology/summary').then(r => r.json()).then(d => {
+  if(d.error){ document.getElementById('srChips').textContent = 'โหลดไม่สำเร็จ: ' + d.error; return; }
+  _srData = d; srRender();
+}).catch(e => { document.getElementById('srChips').textContent = 'โหลดไม่สำเร็จ: ' + e; });
+</script>
+{% endblock %}

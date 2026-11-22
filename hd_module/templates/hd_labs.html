@@ -51,6 +51,9 @@
     <button class="btn btn-sm" onclick="drawTrend('phosphate','PO4','mg/dL')" style="font-size:.75rem;padding:4px 10px">PO4</button>
     <button class="btn btn-sm" onclick="drawTrend('ipth','iPTH','pg/mL')" style="font-size:.75rem;padding:4px 10px">iPTH</button>
     <button class="btn btn-sm" onclick="drawTrend('ferritin','Ferritin','ng/mL')" style="font-size:.75rem;padding:4px 10px">Ferritin</button>
+    <button class="btn btn-sm" onclick="drawTrend('plt','PLT','×10³/µL')" style="font-size:.75rem;padding:4px 10px">PLT</button>
+    <button class="btn btn-sm" onclick="drawTrend('hco3','HCO3','mEq/L')" style="font-size:.75rem;padding:4px 10px">HCO3</button>
+    <button class="btn btn-sm" onclick="drawTrend('wbc','WBC','×10³/µL')" style="font-size:.75rem;padding:4px 10px">WBC</button>
   </div>
   <canvas id="trendCanvas" width="700" height="220" style="width:100%;max-width:700px;background:var(--bg-card);border:1px solid var(--border);border-radius:8px"></canvas>
 </div>
@@ -64,7 +67,7 @@
 <div class="lab-history">
   <h4 style="margin:0 0 8px;font-size:.9rem">📋 ประวัติ Lab</h4>
   <table class="lab-tbl">
-    <thead><tr><th>วันที่</th><th>ที่มา</th><th>BUN</th><th>Cr</th><th>K</th><th>Na</th><th>Ca</th><th>PO4</th><th>Alb</th><th>Hb</th><th>Ferritin</th><th>iPTH</th><th>Kt/V</th><th>HBsAg</th></tr></thead>
+    <thead><tr><th>วันที่</th><th>ที่มา</th><th>BUN</th><th>Cr</th><th>K</th><th>Na</th><th>Ca</th><th>PO4</th><th>Alb</th><th>Hb</th><th>PLT</th><th>HCO3</th><th>WBC</th><th>Ferritin</th><th>iPTH</th><th>Kt/V</th><th>HBsAg</th></tr></thead>
     <tbody id="labHistoryBody"><tr><td colspan="11" style="color:var(--fg-muted)">กำลังโหลด...</td></tr></tbody>
   </table>
 </div>
@@ -114,9 +117,9 @@
 {% block extra_js %}
 <script>
 const HN='{{ patient_hn }}';
-const RANGES={bun:[7,20],creatinine:[0.6,1.2],potassium:[3.5,5.0],sodium:[136,145],calcium:[8.5,10.5],phosphate:[2.5,4.5],albumin:[3.5,5.0],ipth:[150,600],hemoglobin:[10,12],hematocrit:[30,36],ferritin:[200,500],tsat:[20,50],kt_v:[1.2,2.5],urr:[65,100]};
-const UNITS={bun:'mg/dL',creatinine:'mg/dL',potassium:'mEq/L',sodium:'mEq/L',calcium:'mg/dL',phosphate:'mg/dL',albumin:'g/dL',ipth:'pg/mL',hemoglobin:'g/dL',hematocrit:'%',ferritin:'ng/mL',tsat:'%',kt_v:'',urr:'%'};
-const LABELS={bun:'BUN',creatinine:'Cr',potassium:'K',sodium:'Na',calcium:'Ca',phosphate:'PO4',albumin:'Alb',ipth:'iPTH',hemoglobin:'Hb',hematocrit:'Hct',ferritin:'Ferritin',tsat:'TSAT',kt_v:'Kt/V',urr:'URR'};
+const RANGES={bun:[7,20],creatinine:[0.6,1.2],potassium:[3.5,5.0],sodium:[136,145],calcium:[8.5,10.5],phosphate:[2.5,4.5],albumin:[3.5,5.0],ipth:[150,600],hemoglobin:[10,12],hematocrit:[30,36],ferritin:[200,500],tsat:[20,50],kt_v:[1.2,2.5],urr:[65,100],plt:[150,400],hco3:[20,26],wbc:[4,11]};
+const UNITS={bun:'mg/dL',creatinine:'mg/dL',potassium:'mEq/L',sodium:'mEq/L',calcium:'mg/dL',phosphate:'mg/dL',albumin:'g/dL',ipth:'pg/mL',hemoglobin:'g/dL',hematocrit:'%',ferritin:'ng/mL',tsat:'%',kt_v:'',urr:'%',plt:'×10³/µL',hco3:'mEq/L',wbc:'×10³/µL'};
+const LABELS={bun:'BUN',creatinine:'Cr',potassium:'K',sodium:'Na',calcium:'Ca',phosphate:'PO4',albumin:'Alb',ipth:'iPTH',hemoglobin:'Hb',hematocrit:'Hct',ferritin:'Ferritin',tsat:'TSAT',kt_v:'Kt/V',urr:'URR',plt:'PLT',hco3:'HCO3',wbc:'WBC'};
 
 function flagClass(key,val){
   if(!val||!RANGES[key]) return '';
@@ -181,11 +184,11 @@ loadLabs = function(){
       cards.innerHTML+=`<div class="lab-card ${cls}"><div class="name">${label}</div><div class="val">${v!=null?v:'—'}</div><div class="unit">${UNITS[k]||''}</div><div class="range">${r?r[0]+'-'+r[1]:''}</div></div>`;
     }
     const tbody=document.getElementById('labHistoryBody');
-    if(!d.labs||!d.labs.length){tbody.innerHTML='<tr><td colspan="11" style="color:var(--fg-muted)">ยังไม่มีผล Lab</td></tr>';return}
+    if(!d.labs||!d.labs.length){tbody.innerHTML='<tr><td colspan="17" style="color:var(--fg-muted)">ยังไม่มีผล Lab</td></tr>';return}
     tbody.innerHTML=d.labs.map(l=>{
       function cell(k){const v=l[k];if(v==null)return'<td>—</td>';const c=flagClass(k,v);return'<td class="'+(c==='high'?'flag-high':c==='low'?'flag-low':'')+'">'+v+'</td>'}
       const srcTag = l.source_type==='photo' ? '<td title="จากรูปถ่าย/LINE">📸</td>' : '<td title="กรอกมือ/Excel">✍️</td>';
-      return'<tr><td>'+l.date+'</td>'+srcTag+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('ferritin')+cell('ipth')+cell('kt_v')+'<td>'+(l.hep_b?(l.hep_b==='positive'?'<span style="color:var(--danger);font-weight:700">+</span>':'−'):'')+'</td></tr>';
+      return'<tr><td>'+l.date+'</td>'+srcTag+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('plt')+cell('hco3')+cell('wbc')+cell('ferritin')+cell('ipth')+cell('kt_v')+'<td>'+(l.hep_b?(l.hep_b==='positive'?'<span style="color:var(--danger);font-weight:700">+</span>':'−'):'')+'</td></tr>';
     }).join('');
     /* Store for trend + compare */
     _labHistory = (d.labs||[]).slice().reverse(); // oldest first for chart
