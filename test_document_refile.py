@@ -34,8 +34,24 @@ class TestMoveCommandParsing(unittest.TestCase):
     def test_tolerates_extra_whitespace(self):
         self.assertEqual(
             self.parse("  ย้ายเอกสาร   a1b2c3d4   57042  "),
-            ("a1b2c3d4", "57042"),
+            ("a1b2c3d4", "57042", None),
         )
+
+    def test_target_category_suffix(self):
+        """22 พ.ย. 2569: ระบุหมวดปลายทางเพื่อย้ายเอกสาร 'review' พร้อมจัดหมวด"""
+        for text, cat in (("ย้ายเอกสาร a1b2c3d4 57042 แล็บ", "lab"),
+                          ("ย้ายเอกสาร a1b2c3d4 57042 แลบ", "lab"),
+                          ("ย้ายเอกสาร a1b2c3d4 57042 ยา", "rx"),
+                          ("ย้าย a1b2c3d4 57042 ฟอก", "dialysis"),
+                          ("move a1b2c3d4 57042 lab", "lab"),
+                          ("ย้ายเอกสาร a1b2c3d4 57042", None)):
+            with self.subTest(text=text):
+                got = self.parse(text)
+                self.assertIsNotNone(got, f"ต้องรับ: {text!r}")
+                self.assertEqual(got[2], cat)
+
+    def test_unknown_category_suffix_rejected(self):
+        self.assertIsNone(self.parse("ย้ายเอกสาร a1b2c3d4 57042 บิล"))
 
     def test_rejects_incomplete_commands(self):
         for text in ("ย้ายเอกสาร a1b2c3d4",     # ไม่มี HN
