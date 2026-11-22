@@ -2671,6 +2671,37 @@ def announce_deploy_once():
 
 # ── B6: Lab results → bed card ─────────────────────────────
 
+def run_med_photo_sync():
+    """รูปยาจาก LINE (หมวด rx/medication) → AI อ่าน → ร่างยารอแพทย์ยืนยัน + แจ้งกลุ่ม."""
+    import os
+    import psycopg2
+    from flask import current_app
+    from .medications import sync_med_photos
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"error": "no database"}
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        def _push(msg):
+            return push_nurse_group(msg)
+        return sync_med_photos(conn, current_app.config.get("STORAGE_OBJ"),
+                               current_app.config.get("DOC_INDEX"), push_fn=_push)
+    finally:
+        conn.close()
+
+
+@hd_bp.route("/medications/sync-photos", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def medications_sync_photos_now():
+    """ปุ่ม 'ดึงรูปยาจาก LINE ตอนนี้' — รัน sync ทันทีไม่ต้องรอรอบ 15 นาที."""
+    try:
+        st = run_med_photo_sync()
+        return jsonify(st)
+    except Exception as e:
+        logger.error("med sync now: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 def run_lab_sync():
     """Copy recent lab documents' extracted results into hd_lab_docs."""
     import os

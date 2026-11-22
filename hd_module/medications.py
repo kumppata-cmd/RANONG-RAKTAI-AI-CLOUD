@@ -173,6 +173,111 @@ def read_meds_photo(img_bytes):
     return None, err
 
 
+MED_SEEN_SQL = """
+CREATE TABLE IF NOT EXISTS hd_med_doc_seen (
+    doc_id TEXT PRIMARY KEY,
+    hn TEXT,
+    n_items INTEGER,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+)
+"""
+
+
+def sync_med_photos(conn, storage, doc_index, push_fn=None, days=3, max_docs=60):
+    """รูปยาที่ส่งเข้า LINE OA (classifier จัดหมวด rx/medication แล้ว) → AI อ่าน
+    → สร้างรายการ 'ai_draft' ของ HN นั้น รอแพทย์ยืนยัน → แจ้งกลุ่มพยาบาล.
+    ทำงานใน hd scheduler ทุก 15 นาที — idempotent ด้วยตาราง hd_med_doc_seen.
+    AI ล้มทั้งระบบ (เครดิต/คีย์) = ไม่ mark seen เพื่อให้รอบหน้าลองใหม่."""
+    from datetime import timedelta
+    from .lab_sync import _doc_hn, _thai_today
+    stats = {"scanned": 0, "drafted": 0, "no_hn": 0, "skipped": 0, "errors": 0, "notified": 0}
+    if doc_index is None or storage is None:
+        return stats
+    try:
+        doc_index._ensure_fresh()
+        docs = [d for d in list(doc_index._docs) if d.get("category") in ("rx", "medication")]
+    except Exception as e:
+        logger.warning("med_photo_sync: doc index unavailable: %s", e)
+        return stats
+    cutoff = (_thai_today() - timedelta(days=days)).isoformat()
+    docs.sort(key=lambda d: (d.get("submitted_at") or d.get("received_at") or d.get("upload_date") or ""),
+              reverse=True)
+    with conn.cursor() as cur:
+        cur.execute(MED_SEEN_SQL)
+        cur.execute("SELECT doc_id FROM hd_med_doc_seen")
+        seen = {r[0] for r in cur.fetchall()}
+        cur.execute("SELECT id, hn FROM hd_patient_mapping")
+        pid_by_hn = {str(r[1]).strip().upper(): r[0] for r in cur.fetchall()}
+        for d in docs[:max_docs]:
+            doc_id = d.get("document_id") or ""
+            if not doc_id or doc_id in seen:
+                stats["skipped"] += 1
+                continue
+            ddate = (d.get("submitted_at") or d.get("received_at") or d.get("upload_date") or "")[:10]
+            if ddate and ddate < cutoff:
+                continue
+            path = d.get("gcs_object_path") or ""
+            if not path.lower().endswith((".jpg", ".jpeg", ".png")):
+                cur.execute("INSERT INTO hd_med_doc_seen (doc_id, hn, n_items) VALUES (%s,%s,-2) "
+                            "ON CONFLICT DO NOTHING", (doc_id, ""))
+                continue
+            stats["scanned"] += 1
+            hn = _doc_hn(d)
+            if not hn or hn not in pid_by_hn:
+                stats["no_hn"] += 1
+                cur.execute("INSERT INTO hd_med_doc_seen (doc_id, hn, n_items) VALUES (%s,%s,-1) "
+                            "ON CONFLICT DO NOTHING", (doc_id, hn or ""))
+                continue
+            try:
+                raw = storage.get(path)
+            except Exception:
+                raw = None
+            if not raw:
+                stats["errors"] += 1
+                cur.execute("INSERT INTO hd_med_doc_seen (doc_id, hn, n_items) VALUES (%s,%s,-3) "
+                            "ON CONFLICT DO NOTHING", (doc_id, hn))
+                continue
+            items, err = read_meds_photo(raw)
+            if items is None:
+                # ระบบ AI ล่มทั้งกระดาน — อย่า mark seen, เลิกทั้งรอบ รอรอบหน้า
+                if err in ("no_api_key", "no_credit") or str(err).startswith(("net:", "api:")):
+                    logger.warning("med_photo_sync: AI down (%s) — จะลองใหม่รอบหน้า", err)
+                    break
+                stats["errors"] += 1
+                cur.execute("INSERT INTO hd_med_doc_seen (doc_id, hn, n_items) VALUES (%s,%s,-4) "
+                            "ON CONFLICT DO NOTHING", (doc_id, hn))
+                continue
+            pid = pid_by_hn[hn]
+            for it in items:
+                warns = med_warnings(cur, pid, it["drug"])
+                cur.execute("""
+                    INSERT INTO hd_medication_orders
+                        (patient_id, drug_name, dose, route, frequency, drug_category,
+                         is_active, verify_status, source, notes, updated_at)
+                    VALUES (%s,%s,%s,%s,%s,'other',FALSE,%s,'line_photo',%s,NOW())
+                """, (pid, it["drug"], it["dose"], it["route"], it["frequency"],
+                      ST_AI, ("; ".join(warns))[:300] or None))
+            cur.execute("INSERT INTO hd_med_doc_seen (doc_id, hn, n_items) VALUES (%s,%s,%s) "
+                        "ON CONFLICT DO NOTHING", (doc_id, hn, len(items)))
+            seen.add(doc_id)
+            stats["drafted"] += len(items)
+            if push_fn and items:
+                try:
+                    names = " · ".join(i["drug"] for i in items[:5])
+                    more = f" และอีก {len(items) - 5} ตัว" if len(items) > 5 else ""
+                    push_fn(f"📸💊 รูปยาใหม่จาก LINE — HN {hn}\n"
+                            f"AI อ่านได้ {len(items)} รายการ: {names}{more}\n"
+                            f"👉 แดชบอร์ด → แท็บ 💊 ยา → จัดการยา → กด ✔ ยืนยันทีละรายการ (แพทย์)")
+                    stats["notified"] += 1
+                except Exception as pe:
+                    logger.warning("med_photo_sync push: %s", pe)
+    try:
+        conn.commit()
+    except Exception:
+        pass
+    return stats
+
+
 def meds_list_command(cur, body):
     """คำสั่งกลุ่มพยาบาล: 'ยา <HN>' — รายการยาปัจจุบันแบบย่อ. คืนข้อความตอบเสมอ."""
     m = re.search(r"(\d{3,9})", body or "")

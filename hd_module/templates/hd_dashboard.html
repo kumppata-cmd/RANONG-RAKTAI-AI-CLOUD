@@ -1293,6 +1293,7 @@ function renderMedPanel(d){
      + '<button class="med-act" style="background:var(--accent,#1d6fb8);color:#fff" onclick="addMedForm()">➕ เพิ่มยา</button>'
      + '<button class="med-act" onclick="document.getElementById(\'medPhoto\').click()">📸 อ่านยาจากรูป (AI)</button>'
      + '<button class="med-act" onclick="window.open(\'/hd/api/v1/patients/\'+_medHN+\'/medications/pdf\',\'_blank\')">🖨 ใบรายการยา</button>'
+     + '<button class="med-act" onclick="syncMedPhotos()">📥 ดึงรูปยาจาก LINE</button>'
      + '</div><div id="medFormArea"></div><div id="medMsg" style="font-size:.8rem;margin-top:6px"></div>';
   body.innerHTML = h;
 }
@@ -1310,12 +1311,39 @@ function medRow(o, draft){
        + '<div style="color:var(--fg-muted);font-size:.74rem">'+_esc(o.dose||'')+' '+_esc(o.frequency||'')+(o.notes?' · '+_esc(o.notes):'')+'</div>'
        + '<div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap">'+btns+'</div></div>';
 }
+/* แถบเลือกขนาด/วิธี (22 พ.ย. 2569 — แพทย์ขอ): เลือกจากชุดที่ใช้บ่อย หรือ "พิมพ์เอง" */
+const MF_DOSES = ['ครึ่งเม็ด','1 เม็ด','1.5 เม็ด','2 เม็ด','3 เม็ด','1 แคปซูล','2 แคปซูล','1 ซอง','1 ช้อนชา','1 หลอด'];
+const MF_FREQS = ['วันละครั้ง เช้า','วันละครั้ง เย็น','วันละครั้ง ก่อนนอน',
+  'วันละ 2 ครั้ง เช้า-เย็น','วันละ 3 ครั้ง หลังอาหาร','พร้อมอาหารทุกมื้อ (คำแรกของมื้อ)',
+  'ก่อนอาหาร เช้า','หลังอาหาร เช้า-เย็น','เฉพาะวันฟอก','สัปดาห์ละครั้ง','เมื่อมีอาการ'];
+function _selCombo(id, opts, cur){
+  cur = cur || '';
+  const inList = !cur || opts.indexOf(cur) >= 0;
+  let h = '<select id="'+id+'" style="width:100%;padding:6px" onchange="_selToggle(\''+id+'\')">'
+        + '<option value=""'+(cur?'':' selected')+'>— เลือก —</option>';
+  opts.forEach(x=>{ h += '<option value="'+_esc(x)+'"'+(x===cur?' selected':'')+'>'+_esc(x)+'</option>'; });
+  h += '<option value="__custom"'+(!inList?' selected':'')+'>✏️ พิมพ์เอง...</option></select>'
+     + '<input id="'+id+'Txt" value="'+_esc(inList?'':cur)+'" placeholder="พิมพ์เอง" '
+     + 'style="width:100%;padding:6px;margin-top:3px;display:'+(inList?'none':'block')+'">';
+  return '<div style="flex:1">'+h+'</div>';
+}
+function _selToggle(id){
+  const s = document.getElementById(id), t = document.getElementById(id+'Txt');
+  t.style.display = (s.value === '__custom') ? 'block' : 'none';
+  if(s.value === '__custom') t.focus();
+}
+function _selVal(id){
+  const s = document.getElementById(id);
+  return s.value === '__custom' ? document.getElementById(id+'Txt').value.trim() : s.value;
+}
 function _medForm(o){
   o = o || {};
   return '<div style="border:2px solid var(--accent,#1d6fb8);border-radius:8px;padding:8px;margin-top:8px;font-size:.8rem">'
    + '<input id="mfDrug" placeholder="ชื่อยา + ความแรง เช่น Amlodipine 10 mg" value="'+_esc(o.drug||'')+'" style="width:100%;margin-bottom:4px;padding:6px">'
-   + '<div style="display:flex;gap:4px"><input id="mfDose" placeholder="ขนาด/ครั้ง" value="'+_esc(o.dose||'')+'" style="flex:1;padding:6px">'
-   + '<input id="mfFreq" placeholder="วิธี/เวลา เช่น วันละครั้ง เช้า" value="'+_esc(o.frequency||'')+'" style="flex:2;padding:6px"></div>'
+   + '<div style="display:flex;gap:4px">'
+   + _selCombo('mfDose', MF_DOSES, o.dose||'')
+   + _selCombo('mfFreq', MF_FREQS, o.frequency||'')
+   + '</div>'
    + '<div style="margin-top:4px;display:flex;gap:8px;align-items:center">'
    + '<label><input type="checkbox" id="mfIntra" '+(o.intra_hd?'checked':'')+'> 💉 ให้ระหว่างฟอก</label>'
    + '<input id="mfNotes" placeholder="หมายเหตุ" value="'+_esc(o.notes||'')+'" style="flex:1;padding:6px"></div>'
@@ -1334,7 +1362,7 @@ function _medDone(d, okMsg){
 }
 function saveMedForm(id){
   const payload = { drug_name: document.getElementById('mfDrug').value.trim(),
-    dose: document.getElementById('mfDose').value.trim(), frequency: document.getElementById('mfFreq').value.trim(),
+    dose: _selVal('mfDose'), frequency: _selVal('mfFreq'),
     intra_hd: document.getElementById('mfIntra').checked, notes: document.getElementById('mfNotes').value.trim() };
   if(!payload.drug_name){ alert('ต้องระบุชื่อยา'); return; }
   const url = id ? '/hd/api/v1/patients/'+_medHN+'/medications/'+id : '/hd/api/v1/patients/'+_medHN+'/medications';
@@ -1358,6 +1386,18 @@ function editAllergies(){
   if(v === null) return;
   hdFetch('/hd/api/v1/patients/'+_medHN+'/allergies', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({allergies:v})})
     .then(r=>r.json()).then(d=>_medDone(d, 'บันทึกแพ้ยาแล้ว'));
+}
+function syncMedPhotos(){
+  /* ดึงรูปยาหมวด rx/medication ที่ส่งเข้า LINE OA (3 วันล่าสุด ทุก HN) มาอ่านทันที
+     — ปกติระบบทำเองทุก 15 นาทีอยู่แล้ว ปุ่มนี้คือ "เอาเดี๋ยวนี้" */
+  document.getElementById('medMsg').innerHTML = '📥 กำลังดึงรูปยาจาก LINE + ให้ AI อ่าน... (อาจใช้ 10–60 วิ)';
+  hdFetch('/hd/api/v1/medications/sync-photos', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){ document.getElementById('medMsg').innerHTML = '❌ '+_esc(d.error); return; }
+      const m = 'สแกน '+(d.scanned||0)+' รูป · ได้ร่างยา '+(d.drafted||0)+' รายการ'
+              + ((d.no_hn)?' · ระบุ HN ไม่ได้ '+d.no_hn+' รูป':'');
+      _medDone(d, m);
+    }).catch(e=>{ document.getElementById('medMsg').innerHTML='❌ เครือข่ายขัดข้อง'; });
 }
 function medPhotoPicked(inp){
   const f = inp.files && inp.files[0]; if(!f) return;

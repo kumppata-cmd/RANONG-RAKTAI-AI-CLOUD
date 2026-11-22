@@ -735,6 +735,13 @@ def _start_daily_reminder_scheduler(app):
                         st = ops.run_guarded("lab_sync", run_lab_sync, timeout=180) or {}
                         if st.get("inserted"):
                             logger.info("Lab sync: %s", st)
+                # 💊 ทุก 15 นาที: รูปยาจาก LINE → AI อ่าน → ร่างยารอแพทย์ยืนยัน (22 พ.ย. 2569)
+                if lab_tick % 3 == 0:
+                    with app.app_context():
+                        from .blueprint import run_med_photo_sync
+                        ms = ops.run_guarded("med_photo_sync", run_med_photo_sync, timeout=300) or {}
+                        if ms.get("drafted"):
+                            logger.info("Med photo sync: %s", ms)
                         # ว้าว #3: new Hb → ESA proposals (once per hour window, 06:00–20:00 Thai)
                         if lab_tick % 12 == 0 and 6 <= now.hour <= 20:
                             from .blueprint import run_esa_autopilot
