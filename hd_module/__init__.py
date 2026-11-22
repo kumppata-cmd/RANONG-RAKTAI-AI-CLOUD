@@ -762,6 +762,17 @@ def _start_daily_reminder_scheduler(app):
                         st = ops.run_guarded("lab_sync", run_lab_sync, timeout=180) or {}
                         if st.get("inserted"):
                             logger.info("Lab sync: %s", st)
+                        # 🛡 22 พ.ย. 2569: ใบแล็บใหม่มีผลบวก/ค่าติดธง → แจ้ง LINE ทันที
+                        _lab_alerts = st.get("alerts") or []
+                        if _lab_alerts:
+                            _lp = app.config.get("LINE_PUSH_FN")
+                            if _lp:
+                                try:
+                                    _lp("🧪 ใบแล็บใหม่จาก LINE ต้องดู:\n" + "\n".join(_lab_alerts[:10])
+                                        + ("\n…และอีก " + str(len(_lab_alerts) - 10) + " รายการ" if len(_lab_alerts) > 10 else "")
+                                        + "\n👉 เปิด 🗂 กล่องรอหมอ เพื่อยืนยัน")
+                                except Exception as _le:
+                                    logger.warning("lab alert push: %s", _le)
                 # 💊 ทุก 15 นาที: รูปยาจาก LINE → AI อ่าน → ร่างยารอแพทย์ยืนยัน (22 พ.ย. 2569)
                 if lab_tick % 3 == 0:
                     with app.app_context():

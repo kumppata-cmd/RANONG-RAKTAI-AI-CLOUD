@@ -23,6 +23,12 @@
 .sr-tag.blue{background:#dbeafe;color:#1e40af}
 .sr-date{font-size:.66rem;color:var(--fg-dim);display:block}
 .sr-wrap{overflow-x:auto}
+.sr-act{border:1px solid var(--border);background:var(--bg);border-radius:6px;padding:3px 7px;font-size:.8rem;cursor:pointer}
+#srModal{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:950;overflow:auto;padding:20px}
+#srModal .box{background:var(--bg-card);color:var(--fg);max-width:420px;margin:30px auto;border-radius:14px;padding:16px}
+#srModal label{display:block;font-size:.78rem;margin:8px 0 3px;color:var(--fg-muted)}
+#srModal select,#srModal input{width:100%;padding:8px;border:1px solid var(--border);border-radius:8px;font-size:.95rem;background:var(--bg);color:var(--fg)}
+#srModal .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 @media print { .sr-chips,.btn,nav,header{display:none!important} }
 </style>
 {% endblock %}
@@ -32,12 +38,38 @@
   สถานะล่าสุดจากทุกแหล่ง (กรอกมือ/Excel + รูปถ่าย LINE ที่ไม่ถูกปฏิเสธ) · ตัวบวกแสดง<b class="sr-pos">แดงหนา</b>ตามข้อตกลง 14 พ.ย.
   · หน้านี้<b>จัดกลุ่มเพื่อช่วยงาน IC เท่านั้น ไม่ใช่คำสั่งการรักษา</b> · Anti-HIV เห็นเฉพาะผู้ login ไม่ส่งออก LINE
 </div>
+<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+  <button class="sr-chip" onclick="srExport()">📥 Export Excel</button>
+  <button class="sr-chip" onclick="srOpenManual('')">✍️ กรอกผลเอง</button>
+</div>
 <div class="sr-chips" id="srChips">กำลังโหลด...</div>
 <div class="sr-wrap">
 <table class="sr-table">
-  <thead><tr><th>HN</th><th>ชื่อ</th><th>HBsAg</th><th>Anti-HBs</th><th>Anti-HCV</th><th>Anti-HIV</th><th>ตรวจล่าสุด</th><th>หมวด</th></tr></thead>
-  <tbody id="srBody"><tr><td colspan="8">กำลังโหลด...</td></tr></tbody>
+  <thead><tr><th>HN</th><th>ชื่อ</th><th>HBsAg</th><th>Anti-HBs</th><th>Anti-HCV</th><th>Anti-HIV</th><th>ตรวจล่าสุด</th><th>หมวด</th><th></th></tr></thead>
+  <tbody id="srBody"><tr><td colspan="9">กำลังโหลด...</td></tr></tbody>
 </table>
+</div>
+<div id="srModal" onclick="if(event.target===this)this.style.display='none'">
+  <div class="box">
+    <h3 style="margin:0 0 4px">✍️ กรอกผล Serology เอง</h3>
+    <div style="font-size:.72rem;color:var(--fg-muted)">สำหรับผลที่ไม่มีใบแล็บในระบบ · พยาบาลกรอกได้ แต่จะรอแพทย์ยืนยันในกล่องรอหมอ · กรอกเฉพาะตัวที่มีผลจริง</div>
+    <div class="row2">
+      <div><label>HN *</label><input id="smHn" inputmode="numeric"></div>
+      <div><label>วันที่ตรวจ</label><input id="smDate" type="date"></div>
+    </div>
+    <div class="row2">
+      <div><label>HBsAg</label><select id="smHbsag"><option value="">— ไม่กรอก —</option><option value="negative">ลบ (−)</option><option value="positive">บวก (+)</option></select></div>
+      <div><label>Anti-HBs</label><select id="smAntihbs"><option value="">— ไม่กรอก —</option><option value="negative">ลบ (−)</option><option value="positive">บวก (+)</option></select></div>
+    </div>
+    <div class="row2">
+      <div><label>Anti-HCV</label><select id="smAntihcv"><option value="">— ไม่กรอก —</option><option value="negative">ลบ (−)</option><option value="positive">บวก (+)</option></select></div>
+      <div><label>Anti-HIV</label><select id="smAntihiv"><option value="">— ไม่กรอก —</option><option value="negative">ลบ (−)</option><option value="positive">บวก (+)</option></select></div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button class="sr-chip" style="flex:1;background:var(--accent);color:#fff" onclick="srSaveManual()">💾 บันทึก</button>
+      <button class="sr-chip" onclick="document.getElementById('srModal').style.display='none'">ยกเลิก</button>
+    </div>
+  </div>
 </div>
 {% endblock %}
 
@@ -84,13 +116,67 @@ function srRender(){
     srCell(p.hbsag, p.hbsag_date) + srCell(p.antihbs, p.antihbs_date) +
     srCell(p.antihcv, p.antihcv_date) + srCell(p.antihiv, p.antihiv_date) +
     '<td>' + (p.last_test ? p.last_test + (p.last_test_days != null ? '<span class="sr-date">(' + p.last_test_days + ' วัน)</span>' : '') : '—') + '</td>' +
-    '<td>' + srTags(p.groups) + '</td></tr>').join('')
-    : '<tr><td colspan="8" style="color:var(--fg-muted)">ไม่มีรายการในหมวดนี้</td></tr>';
+    '<td>' + srTags(p.groups) + '</td>' +
+    '<td style="white-space:nowrap">' +
+      '<button class="sr-act" title="กรอกผลเอง" onclick="srOpenManual(\'' + p.hn + '\')">✍️</button> ' +
+      '<button class="sr-act" title="ระงับรายชื่อ (เสียชีวิต/ย้ายที่ฟอก)" onclick="srDeact(\'' + p.hn + '\',\'' + (p.name || '').replace(/'/g, '') + '\')">🚫</button>' +
+    '</td></tr>').join('')
+    : '<tr><td colspan="9" style="color:var(--fg-muted)">ไม่มีรายการในหมวดนี้</td></tr>';
 }
 function srSetFilter(g){ _srFilter = g; srRender(); }
-hdFetch('/hd/api/v1/serology/summary').then(r => r.json()).then(d => {
-  if(d.error){ document.getElementById('srChips').textContent = 'โหลดไม่สำเร็จ: ' + d.error; return; }
-  _srData = d; srRender();
-}).catch(e => { document.getElementById('srChips').textContent = 'โหลดไม่สำเร็จ: ' + e; });
+
+function srLoad(){
+  hdFetch('/hd/api/v1/serology/summary').then(r => r.json()).then(d => {
+    if(d.error){ document.getElementById('srChips').textContent = 'โหลดไม่สำเร็จ: ' + d.error; return; }
+    _srData = d; srRender();
+  }).catch(e => { document.getElementById('srChips').textContent = 'โหลดไม่สำเร็จ: ' + e; });
+}
+
+/* 📥 Export Excel */
+function srExport(){
+  location.href = '/hd/api/v1/serology/export?token=' + encodeURIComponent(getHdToken());
+}
+
+/* ✍️ กรอกผลเอง */
+function srOpenManual(hn){
+  document.getElementById('smHn').value = hn || '';
+  document.getElementById('smDate').value = new Date().toISOString().slice(0, 10);
+  ['smHbsag','smAntihbs','smAntihcv','smAntihiv'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('srModal').style.display = 'block';
+}
+function srSaveManual(){
+  const body = {
+    hn: document.getElementById('smHn').value.trim(),
+    date: document.getElementById('smDate').value,
+    hbsag: document.getElementById('smHbsag').value,
+    antihbs: document.getElementById('smAntihbs').value,
+    antihcv: document.getElementById('smAntihcv').value,
+    antihiv: document.getElementById('smAntihiv').value
+  };
+  if(!body.hn){ showToast('กรุณาระบุ HN', 'warning'); return; }
+  hdFetch('/hd/api/v1/serology/manual', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  }).then(r => r.json().then(d => ({ ok: r.ok, d })))
+    .then(x => {
+      if(!x.ok){ showToast(x.d.error || 'บันทึกไม่สำเร็จ', 'error'); return; }
+      document.getElementById('srModal').style.display = 'none';
+      showToast(x.d.message || 'บันทึกแล้ว', 'success');
+      srLoad();
+    }).catch(e => showToast('ผิดพลาด: ' + e, 'error'));
+}
+
+/* 🚫 ระงับรายชื่อ (เสียชีวิต/ย้ายที่ฟอก) — soft delete, กู้คืนได้ */
+function srDeact(hn, name){
+  if(!confirm('ระงับรายชื่อ ' + name + ' (HN ' + hn + ')?\n\n• ใช้กรณีเสียชีวิตหรือย้ายที่ฟอก\n• ไม่ใช่การลบ — ข้อมูลทั้งหมดยังอยู่ กู้คืนได้โดยแพทย์/แอดมิน\n• รายชื่อจะหายจากทุกหน้า (dashboard, รอบฟอก, serology)')) return;
+  hdFetch('/hd/api/v1/patients/' + encodeURIComponent(hn) + '/deactivate', { method: 'POST' })
+    .then(r => r.json().then(d => ({ ok: r.ok, status: r.status, d })))
+    .then(x => {
+      if(!x.ok){ showToast(x.status === 403 ? 'เฉพาะแพทย์/แอดมินเท่านั้น' : (x.d.error || 'ไม่สำเร็จ'), 'error'); return; }
+      showToast(x.d.message || 'ระงับแล้ว', 'success');
+      srLoad();
+    }).catch(e => showToast('ผิดพลาด: ' + e, 'error'));
+}
+
+srLoad();
 </script>
 {% endblock %}

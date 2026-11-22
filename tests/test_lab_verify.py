@@ -240,3 +240,36 @@ class TestSerologyClassify:
         g = self._c({"hbsag": "negative", "hbsag_date": "2024-01-01",
                      "antihbs": "positive", "antihbs_date": "2026-09-01"})
         assert "annual_due" not in g
+
+
+class TestUnitSummaryAutocommit:
+    """Regression: SAVEPOINT ใน autocommit เคยทำให้ serology ทั้งหน่วยเป็น '?' (22 พ.ย.)"""
+
+    class FakeCur:
+        """cursor แบบ autocommit: SAVEPOINT/RELEASE/ROLLBACK ล้มเสมอ แต่ SELECT ทำงานปกติ"""
+        def __init__(self):
+            self._rows = []
+        def execute(self, sql, params=None):
+            s = sql.strip().upper()
+            if s.startswith(("SAVEPOINT", "RELEASE", "ROLLBACK")):
+                raise RuntimeError("SAVEPOINT can only be used in transaction blocks")
+            if "FROM HD_PATIENT_MAPPING" in s:
+                self._rows = [(1, "67385", "นาย ก"), (2, "67383", "นาย ข")]
+            elif "FROM HD_LABS" in s:
+                from datetime import date
+                self._rows = [(1, date(2026, 11, 19), "negative", None, "positive", None)]
+            else:
+                self._rows = []
+        def fetchall(self):
+            return self._rows
+
+    def test_summary_survives_autocommit(self):
+        from datetime import date
+        from hd_module.serology import unit_summary
+        out = unit_summary(self.FakeCur(), today=date(2026, 11, 22))
+        assert out["counts"]["total"] == 2
+        by_hn = {p["hn"]: p for p in out["patients"]}
+        assert by_hn["67385"]["hbsag"] == "negative"
+        assert by_hn["67385"]["antihbs"] == "positive"
+        assert "never_tested" not in by_hn["67385"]["groups"]
+        assert "never_tested" in by_hn["67383"]["groups"]

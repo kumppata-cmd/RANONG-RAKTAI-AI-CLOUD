@@ -219,7 +219,8 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
 
     Returns {"scanned", "inserted", "skipped", "no_hn", "no_json"}.
     """
-    stats = {"scanned": 0, "inserted": 0, "skipped": 0, "no_hn": 0, "no_json": 0, "errors": 0}
+    stats = {"scanned": 0, "inserted": 0, "skipped": 0, "no_hn": 0, "no_json": 0, "errors": 0,
+             "alerts": []}  # ข้อความแจ้ง LINE (22 พ.ย. 2569): serology บวก / ค่าติดธง
     if doc_index is None or storage is None:
         return stats
     import json
@@ -283,6 +284,16 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
                 cur.execute("RELEASE SAVEPOINT lab_ins")
                 stats["inserted"] += 1
                 have.add(doc_id)
+                # ── แจ้ง LINE (ผ่าน caller): ผลบวก/ค่าติดธงจากใบใหม่ ──
+                if row.get("hbsag") == "positive":
+                    stats["alerts"].append(f"🔴 HN {hn}: HBsAg+ จากใบแล็บใหม่ — ทบทวนการแยกโซน/เครื่อง")
+                if row.get("antihcv") == "positive":
+                    stats["alerts"].append(f"🟠 HN {hn}: Anti-HCV+ จากใบแล็บใหม่")
+                if row.get("antihiv") == "positive":
+                    # ความเป็นส่วนตัว: ไม่ระบุชนิดการตรวจบน LINE — ดูในระบบเท่านั้น
+                    stats["alerts"].append(f"🛡 HN {hn}: มีผลซีโรโลยีสำคัญ รอดูในกล่องรอหมอ")
+                if pflags:
+                    stats["alerts"].append(f"🚨 HN {hn}: ค่าแล็บน่าสงสัย {len(pflags)} จุด — ตรวจรูปซ้ำในกล่องรอหมอ")
             except Exception as e:
                 stats["errors"] += 1
                 try:

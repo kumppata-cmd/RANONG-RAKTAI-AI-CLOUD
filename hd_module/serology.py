@@ -132,8 +132,14 @@ def unit_summary(cur, today=None):
     ids = [p[0] for p in pts]
     latest = {}
     if ids:
+        # SAVEPOINT ใช้ได้เฉพาะใน transaction — ใน autocommit จะ error เอง
+        # จึงพยายามแบบ "มีก็ดี ไม่มีก็ไม่เป็นไร" (บทเรียน 22 พ.ย.: SAVEPOINT
+        # ที่บังคับใน autocommit ทำให้ทั้งหน้าเป็น "?" ทั้งหน่วย)
         try:
             cur.execute("SAVEPOINT sero_sum")
+        except Exception:
+            pass
+        try:
             cur.execute("""SELECT patient_id, lab_date, hbsag, antihcv, antihbs, antihiv
                            FROM hd_labs WHERE patient_id = ANY(%s)
                              AND (hbsag IS NOT NULL OR antihcv IS NOT NULL
@@ -141,7 +147,10 @@ def unit_summary(cur, today=None):
                              AND (verified_status IS DISTINCT FROM 'rejected')
                            ORDER BY lab_date DESC NULLS LAST""", (ids,))
             rows = cur.fetchall()
-            cur.execute("RELEASE SAVEPOINT sero_sum")
+            try:
+                cur.execute("RELEASE SAVEPOINT sero_sum")
+            except Exception:
+                pass
         except Exception:
             try:
                 cur.execute("ROLLBACK TO SAVEPOINT sero_sum")

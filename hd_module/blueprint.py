@@ -3568,6 +3568,122 @@ def serology_summary():
         return jsonify({"error": str(e)}), 500
 
 
+_SERO_TH = {"hbsag": "HBsAg", "antihbs": "Anti-HBs", "antihcv": "Anti-HCV", "antihiv": "Anti-HIV"}
+_SERO_GROUP_TH = {"hbsag_pos": "HBsAg+", "antihcv_pos": "Anti-HCV+", "antihiv_pos": "Anti-HIV+",
+                  "no_immunity": "ภูมิ HBs ยังไม่ขึ้น", "annual_due": "ครบกำหนดตรวจประจำปี",
+                  "never_tested": "ไม่เคยมีผลในระบบ"}
+
+
+@hd_bp.route("/serology/export", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def serology_export():
+    """📥 Export ตาราง serology ทั้งหน่วยเป็น Excel (.xlsx)."""
+    import io as _io
+    import os, psycopg2
+    from flask import Response
+    from datetime import date as _date
+    from .serology import unit_summary, SERO_FIELDS
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            data = unit_summary(cur)
+        conn.close()
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Serology"
+        head = ["HN", "ชื่อ"]
+        for f in SERO_FIELDS:
+            head += [_SERO_TH[f], "วันที่"]
+        head += ["ตรวจล่าสุด", "หมวดที่ต้องสนใจ"]
+        ws.append(head)
+        bold = Font(bold=True)
+        red = Font(bold=True, color="B91C1C")
+        fill = PatternFill("solid", fgColor="FDE8E8")
+        for c in ws[1]:
+            c.font = bold
+        for p in data.get("patients", []):
+            row = [p["hn"], p["name"]]
+            for f in SERO_FIELDS:
+                v = p.get(f)
+                row += ["+" if v == "positive" else ("-" if v == "negative" else "?"),
+                        p.get(f + "_date") or ""]
+            row += [p.get("last_test") or "",
+                    " · ".join(_SERO_GROUP_TH.get(g, g) for g in p.get("groups", []))]
+            ws.append(row)
+            for i, f in enumerate(SERO_FIELDS):
+                if p.get(f) == "positive":
+                    cell = ws.cell(row=ws.max_row, column=3 + i * 2)
+                    cell.font, cell.fill = red, fill
+        widths = [12, 26] + [10, 12] * len(SERO_FIELDS) + [12, 40]
+        for i, w in enumerate(widths, 1):
+            ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+        buf = _io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        fname = f"serology_{_date.today().isoformat()}.xlsx"
+        return Response(buf.read(),
+                        mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        headers={"Content-Disposition": f"attachment; filename={fname}"})
+    except Exception as e:
+        logger.error("serology_export: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/serology/manual", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def serology_manual():
+    """✍️ กรอกผล serology เอง (ไม่มีใบแล็บ/ผลจากที่อื่น).
+
+    {hn, date?, hbsag?, antihbs?, antihcv?, antihiv?} ค่า positive|negative
+    แพทย์/แอดมิน → verified ทันที · พยาบาล → pending เข้ากล่องรอหมอให้แพทย์ยืนยัน."""
+    import os, time, psycopg2
+    from .serology import normalize, SERO_FIELDS
+    data = request.get_json(silent=True) or {}
+    hn = (data.get("hn") or "").strip()
+    if not hn:
+        return jsonify({"error": "ต้องระบุ HN"}), 400
+    vals = {}
+    for f in SERO_FIELDS:
+        v = normalize(data.get(f))
+        if v is not None:
+            vals[f] = v
+    if not vals:
+        return jsonify({"error": "ต้องกรอกผลอย่างน้อย 1 รายการ (positive/negative)"}), 400
+    from datetime import date as _date
+    d = (data.get("date") or "").strip()[:10] or _date.today().isoformat()
+    role = g.get("hd_role") or ""
+    uid = g.get("hd_user_id")
+    v_status = "verified" if role in ("physician", "admin") else "pending"
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            pr = cur.fetchone()
+            if not pr:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            doc_id = f"manual:{hn}:{int(time.time())}"
+            cols = ["patient_id", "hn", "doc_id", "specimen_date", "doc_date", "status",
+                    "verified_status", "verified_by"] + list(vals.keys())
+            ph = ["%s"] * len(cols)
+            cur.execute(f"INSERT INTO hd_lab_docs ({', '.join(cols)}) VALUES ({', '.join(ph)})",
+                        [pr[0], hn, doc_id, d, d, "manual_entry", v_status,
+                         f"hd_user:{uid}"] + list(vals.values()))
+            conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "hn": hn, "saved": vals, "verified_status": v_status,
+                        "message": ("บันทึกและยืนยันแล้ว" if v_status == "verified"
+                                    else "บันทึกแล้ว — รอแพทย์ยืนยันในกล่องรอหมอ")})
+    except Exception as e:
+        logger.error("serology_manual: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 # ═══════════════ LAB VERIFY GATE (2026-11-22) ═══════════════
 # ค่าแล็บจากรูปถ่าย (OCR) ต้องให้แพทย์/แอดมินยืนยันก่อนถือเป็นค่าที่เชื่อถือได้
 # — เหมือนด่านยืนยันยา: verify = ✅ ใช้ได้ · reject = ❌ อ่านผิด ซ่อนจาก bed card
