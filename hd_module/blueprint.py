@@ -2899,6 +2899,97 @@ def documents_cleanup_report():
         return jsonify({"error": str(e)}), 500
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# 🗂 กล่องรอหมอ — รวมทุกอย่างที่รอยืนยันไว้ที่เดียว (22 พ.ย. 2569, แพทย์อนุมัติ)
+#    ① ร่างยา (ai_draft/pending) ② ค่าแล็บ OCR รอยืนยัน ③ เอกสารกองกลางรอย้าย
+# ═══════════════════════════════════════════════════════════════════════════
+
+@hd_web.route("/pending-inbox")
+def pending_inbox_page():
+    """หน้า UI กล่องรอหมอ."""
+    return render_template("hd_pending_inbox.html")
+
+
+@hd_bp.route("/pending-inbox", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def pending_inbox():
+    """ทุกรายการที่รอคนยืนยัน — ?counts=1 เอาเฉพาะตัวเลขไปทำ badge."""
+    import os, psycopg2
+    from flask import current_app
+    counts_only = (request.args.get("counts") or "") == "1"
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    out = {"meds": [], "labs": [], "review_docs": [],
+           "counts": {"med": 0, "lab": 0, "review": 0, "total": 0}}
+    # ① + ② จากฐานข้อมูล
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute("""SELECT m.id, p.hn, p.patient_name, m.drug_name, m.dose,
+                                  m.frequency, m.verify_status, m.source_doc, m.updated_at
+                           FROM hd_medication_orders m
+                           JOIN hd_patient_mapping p ON p.id = m.patient_id
+                           WHERE m.verify_status IN ('ai_draft', 'pending')
+                           ORDER BY p.hn, m.id DESC LIMIT 300""")
+            med_rows = cur.fetchall()
+            out["counts"]["med"] = len(med_rows)
+            if not counts_only:
+                out["meds"] = [{"id": r[0], "hn": r[1], "name": r[2] or "",
+                                "drug": r[3], "dose": r[4] or "", "freq": r[5] or "",
+                                "status": r[6], "source_doc": r[7] or "",
+                                "at": r[8].isoformat()[:16] if r[8] else None}
+                               for r in med_rows]
+            cur.execute("""SELECT d.id, d.hn, p.patient_name, d.specimen_date, d.delta_flags,
+                                  d.hb, d.hct, d.k, d.na, d.ca, d.phos, d.doc_id
+                           FROM hd_lab_docs d
+                           LEFT JOIN hd_patient_mapping p ON p.id = d.patient_id
+                           WHERE COALESCE(d.verified_status, 'pending') = 'pending'
+                             AND COALESCE(d.specimen_date, d.doc_date) >= CURRENT_DATE - 180
+                           ORDER BY d.specimen_date DESC NULLS LAST LIMIT 300""")
+            lab_rows = cur.fetchall()
+            out["counts"]["lab"] = len(lab_rows)
+            if not counts_only:
+                def _f(v):
+                    return float(v) if v is not None else None
+                out["labs"] = [{"id": r[0], "hn": r[1], "name": r[2] or "",
+                                "date": r[3].isoformat() if r[3] else None,
+                                "flags": r[4] or "", "hb": _f(r[5]), "hct": _f(r[6]),
+                                "k": _f(r[7]), "na": _f(r[8]), "ca": _f(r[9]),
+                                "phos": _f(r[10]), "doc8": (r[11] or "")[:8]}
+                               for r in lab_rows]
+        conn.close()
+    except Exception as e:
+        logger.warning("pending_inbox db: %s", e)
+        out["db_error"] = str(e)
+    # ③ เอกสารกองกลาง (06_AI_REVIEW) จากดัชนีเอกสารกลาง
+    try:
+        di = current_app.config.get("DOC_INDEX")
+        if di is not None:
+            di._ensure_fresh()
+            rev = [d for d in list(di._docs) if (d.get("category") or "") == "review"]
+            rev.sort(key=lambda d: (d.get("submitted_at") or d.get("received_at")
+                                    or d.get("upload_date") or ""), reverse=True)
+            out["counts"]["review"] = len(rev)
+            if not counts_only:
+                items = []
+                for d in rev[:100]:
+                    doc_id = d.get("document_id") or d.get("doc_id") or ""
+                    path = d.get("gcs_object_path") or ""
+                    low = path.lower()
+                    items.append({"doc8": doc_id[:8],
+                                  "date": (d.get("submitted_at") or d.get("received_at")
+                                           or d.get("upload_date") or "")[:10],
+                                  "filename": (d.get("original_filename") or path.rsplit("/", 1)[-1])[:60],
+                                  "is_image": low.endswith((".jpg", ".jpeg", ".png"))})
+                out["review_docs"] = items
+    except Exception as e:
+        logger.warning("pending_inbox review: %s", e)
+    out["counts"]["total"] = out["counts"]["med"] + out["counts"]["lab"] + out["counts"]["review"]
+    if counts_only:
+        return jsonify({"counts": out["counts"]})
+    return jsonify(out)
+
+
 @hd_bp.route("/medications/source/<doc_id>", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def medication_source_image(doc_id):
@@ -3440,6 +3531,54 @@ def get_patient_labs_unified(hn):
     except Exception as e:
         logger.error("labs-unified: %s", e)
         return jsonify({"labs": [], "error": str(e)})
+
+
+# ═══════════════ LAB VERIFY GATE (2026-11-22) ═══════════════
+# ค่าแล็บจากรูปถ่าย (OCR) ต้องให้แพทย์/แอดมินยืนยันก่อนถือเป็นค่าที่เชื่อถือได้
+# — เหมือนด่านยืนยันยา: verify = ✅ ใช้ได้ · reject = ❌ อ่านผิด ซ่อนจาก bed card
+
+
+@hd_bp.route("/labs/doc-rows/<int:row_id>/verify", methods=["POST"])
+@require_role("physician", "admin")
+def lab_doc_verify(row_id):
+    """ยืนยันหรือปฏิเสธค่าแล็บ OCR หนึ่งชุด: {action: 'verify'|'reject', reason?}.
+
+    reject → แถวถูกซ่อนจาก bed card/ค่าแล่าสุด (แต่ยังอยู่ในฐานข้อมูล ตรวจย้อนได้)."""
+    import os, psycopg2
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "verify").strip()
+    if action not in ("verify", "reject"):
+        return jsonify({"error": "action ต้องเป็น verify หรือ reject"}), 400
+    reason = (data.get("reason") or "").strip()[:300]
+    if action == "reject" and not reason:
+        return jsonify({"error": "การปฏิเสธต้องระบุเหตุผล (เช่น OCR อ่านเลขผิด)"}), 400
+    uid = g.get("hd_user_id")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            new_status = "verified" if action == "verify" else "rejected"
+            note_sql = ""
+            params = [new_status, f"hd_user:{uid}"]
+            if action == "reject":
+                note_sql = ", delta_flags = TRIM(BOTH '; ' FROM COALESCE(delta_flags,'') || %s)"
+                params.append(f"; ปฏิเสธโดยแพทย์: {reason}")
+            params.append(row_id)
+            cur.execute(f"""UPDATE hd_lab_docs
+                            SET verified_status = %s, verified_by = %s, verified_at = NOW(){note_sql}
+                            WHERE id = %s
+                            RETURNING hn, doc_id, specimen_date""", params)
+            r = cur.fetchone()
+            conn.commit()
+        conn.close()
+        if not r:
+            return jsonify({"error": "ไม่พบรายการแล็บนี้"}), 404
+        return jsonify({"ok": True, "id": row_id, "verified_status": new_status,
+                        "hn": r[0], "doc_id": r[1],
+                        "specimen_date": r[2].isoformat() if r[2] else None})
+    except Exception as e:
+        logger.error("lab_doc_verify: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 @hd_bp.route("/labs/read-photo", methods=["POST"])

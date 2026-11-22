@@ -1,0 +1,201 @@
+{% extends "hd_base.html" %}
+{% block title %}กล่องรอหมอ{% endblock %}
+{% block page_title %}🗂 กล่องรอหมอ{% endblock %}
+
+{% block extra_css %}
+<style>
+.ib-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.ib-chip{border-radius:999px;padding:6px 14px;font-size:.85rem;font-weight:700;border:1px solid var(--border);background:var(--bg-card);color:var(--fg)}
+.ib-chip b{font-size:1rem}
+.ib-sec{background:var(--bg-card);border:1px solid var(--border);border-radius:12px;padding:12px;margin-bottom:14px}
+.ib-sec h3{margin:0 0 10px;font-size:1rem}
+.ib-row{border-top:1px solid var(--border);padding:9px 2px;font-size:.84rem;line-height:1.7}
+.ib-row:first-of-type{border-top:none}
+.ib-hn{font-weight:800}
+.ib-flag{display:block;color:#b91c1c;background:#fde8e8;border-radius:8px;padding:4px 9px;margin:4px 0;font-size:.78rem;font-weight:600}
+.ib-vals{color:var(--fg-muted);font-size:.78rem}
+.ib-acts{display:flex;gap:6px;flex-wrap:wrap;margin-top:5px}
+.ib-btn{border:1px solid var(--border);background:var(--bg);border-radius:8px;padding:5px 10px;font-size:.76rem;cursor:pointer;color:var(--fg)}
+.ib-btn.ok{background:#16a34a;color:#fff;border-color:#16a34a}
+.ib-btn.bad{background:#fff;color:#b91c1c;border-color:#b91c1c}
+.ib-empty{color:var(--fg-muted);font-size:.84rem;padding:6px 2px}
+.ib-note{font-size:.72rem;color:var(--fg-muted);margin-top:6px}
+.ib-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:10px}
+.ib-card{border:1px solid var(--border);border-radius:10px;padding:7px;background:var(--bg)}
+.ib-thumb{width:100%;height:130px;object-fit:cover;border-radius:6px;cursor:zoom-in;display:block;background:var(--bg-card)}
+.ib-meta{font-size:.68rem;color:var(--fg-muted);margin-top:4px;word-break:break-all}
+#ibLightbox{display:none;position:fixed;inset:0;background:rgba(0,0,0,.82);z-index:950;overflow:auto;padding:16px;text-align:center}
+#ibLightbox img{max-width:96%;max-height:92vh;border-radius:8px}
+.ib-close{position:fixed;top:10px;right:14px;font-size:1.6rem;color:#fff;cursor:pointer;z-index:951}
+.ib-done{color:#16a34a;font-weight:700}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="ib-chips" id="ibChips">กำลังโหลด...</div>
+
+<div class="ib-sec">
+  <h3>🧪 ค่าแล็บจากรูปถ่าย — รอยืนยัน <span id="ibLabCount"></span></h3>
+  <div class="ib-note">AI อ่านค่าจากรูปแล้ว แต่ยังไม่นับเป็นค่าที่ยืนยัน — แตะ 🖼 เทียบใบจริงก่อนกดยืนยันทุกครั้ง · 🚨 = ระบบสงสัยว่า OCR อาจอ่านพลาด</div>
+  <div id="ibLabs"></div>
+</div>
+
+<div class="ib-sec">
+  <h3>💊 ร่างยาใหม่ — รอยืนยัน <span id="ibMedCount"></span></h3>
+  <div class="ib-note">ร่างยายังไม่มีผลใด ๆ จนกว่าจะกดรับ · กด 🖼 เปิดใบยาต้นฉบับเทียบก่อนเสมอ · จัดการละเอียด (แก้ขนาด/เทียบทั้งชุด) ทำได้ที่แท็บ 💊 ใน Dashboard</div>
+  <div id="ibMeds"></div>
+</div>
+
+<div class="ib-sec">
+  <h3>📥 เอกสารกองกลาง — รอจัดเข้าแฟ้ม <span id="ibRevCount"></span></h3>
+  <div class="ib-note">ใบที่ระบบหาเจ้าของไม่ได้ — ดูรูปแล้วกด ↪️ เพื่อย้ายเข้า HN ที่ถูกต้อง</div>
+  <div class="ib-grid" id="ibReview"></div>
+</div>
+
+<div id="ibLightbox" onclick="this.style.display='none'">
+  <span class="ib-close">✕</span><img id="ibLightImg" src="" alt="">
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function ibImg(doc8){ return '/hd/api/v1/documents/' + doc8 + '/image?token=' + encodeURIComponent(getHdToken()); }
+function ibMedImg(docId){ return '/hd/api/v1/medications/source/' + docId + '?token=' + encodeURIComponent(getHdToken()); }
+function ibZoom(url){ document.getElementById('ibLightImg').src = url; document.getElementById('ibLightbox').style.display = 'block'; }
+function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+let _ibData = null;
+
+function ibLoad(){
+  hdFetch('/hd/api/v1/pending-inbox').then(r => r.json()).then(d => {
+    _ibData = d;
+    const c = d.counts || {};
+    document.getElementById('ibChips').innerHTML =
+      '<span class="ib-chip">🧪 แล็บ <b>' + (c.lab || 0) + '</b></span>' +
+      '<span class="ib-chip">💊 ยา <b>' + (c.med || 0) + '</b></span>' +
+      '<span class="ib-chip">📥 กองกลาง <b>' + (c.review || 0) + '</b></span>' +
+      '<span class="ib-chip" style="background:var(--accent);color:#fff">รวม <b>' + (c.total || 0) + '</b> รายการ</span>';
+    renderLabs(d.labs || []);
+    renderMeds(d.meds || []);
+    renderReview(d.review_docs || []);
+  }).catch(e => { document.getElementById('ibChips').textContent = 'โหลดไม่สำเร็จ: ' + e; });
+}
+
+/* ── ② แล็บรอยืนยัน ── */
+function renderLabs(rows){
+  document.getElementById('ibLabCount').textContent = rows.length ? '(' + rows.length + ')' : '';
+  const el = document.getElementById('ibLabs');
+  if(!rows.length){ el.innerHTML = '<div class="ib-empty">✅ ไม่มีค่าแล็บค้างยืนยัน</div>'; return; }
+  el.innerHTML = rows.map(r => {
+    const vals = [['Hb', r.hb], ['Hct', r.hct], ['K', r.k], ['Na', r.na], ['Ca', r.ca], ['P', r.phos]]
+      .filter(v => v[1] != null).map(v => v[0] + ' ' + v[1]).join(' · ');
+    const flags = (r.flags || '').split(';').map(s => s.trim()).filter(Boolean)
+      .map(f => '<span class="ib-flag">🚨 ' + esc(f) + '</span>').join('');
+    return '<div class="ib-row" id="ibLab' + r.id + '">' +
+      '<span class="ib-hn">' + esc(r.hn) + '</span> ' + esc(r.name) +
+      ' <span class="ib-vals">· เจาะ ' + esc(r.date || '-') + '</span><br>' +
+      '<span class="ib-vals">' + esc(vals || '(ไม่มีค่าตัวเลข)') + '</span>' + flags +
+      '<div class="ib-acts">' +
+        (r.doc8 ? '<button class="ib-btn" onclick="ibZoom(ibImg(\'' + r.doc8 + '\'))">🖼 ดูใบแล็บ</button>' : '') +
+        '<button class="ib-btn ok" onclick="ibLabVerify(' + r.id + ',\'verify\')">✅ ยืนยันค่า</button>' +
+        '<button class="ib-btn bad" onclick="ibLabVerify(' + r.id + ',\'reject\')">❌ อ่านผิด</button>' +
+        '<a class="ib-btn" href="/hd/patient/' + encodeURIComponent(r.hn) + '/360">👤 Patient 360</a>' +
+      '</div></div>';
+  }).join('');
+}
+function ibLabVerify(id, action){
+  let body = { action: action };
+  if(action === 'reject'){
+    const reason = prompt('เหตุผลที่ปฏิเสธค่าแล็บชุดนี้ (เช่น OCR อ่านเลขผิด / ใบของคนอื่น):');
+    if(!reason) return;
+    body.reason = reason;
+  } else if(!confirm('ยืนยันว่าเทียบกับใบแล็บจริงแล้ว ค่าถูกต้อง?')) return;
+  hdFetch('/hd/api/v1/labs/doc-rows/' + id + '/verify', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  }).then(r => r.json().then(d => ({ ok: r.ok, status: r.status, d })))
+    .then(x => {
+      if(!x.ok){ showToast(x.status === 403 ? 'เฉพาะแพทย์/แอดมินเท่านั้น' : (x.d.error || 'ไม่สำเร็จ'), 'error'); return; }
+      const row = document.getElementById('ibLab' + id);
+      if(row) row.innerHTML = '<span class="ib-done">' + (action === 'verify' ? '✅ ยืนยันแล้ว' : '❌ ปฏิเสธแล้ว (ซ่อนจาก bed card)') + '</span>';
+      showToast(action === 'verify' ? 'ยืนยันค่าแล็บแล้ว' : 'ปฏิเสธแล้ว — ค่าชุดนี้จะไม่แสดงบน bed card', 'success');
+    }).catch(e => showToast('ผิดพลาด: ' + e, 'error'));
+}
+
+/* ── ① ร่างยา ── */
+function renderMeds(rows){
+  document.getElementById('ibMedCount').textContent = rows.length ? '(' + rows.length + ')' : '';
+  const el = document.getElementById('ibMeds');
+  if(!rows.length){ el.innerHTML = '<div class="ib-empty">✅ ไม่มีร่างยาค้างยืนยัน</div>'; return; }
+  const byHn = {};
+  rows.forEach(r => { (byHn[r.hn] = byHn[r.hn] || { name: r.name, items: [] }).items.push(r); });
+  el.innerHTML = Object.keys(byHn).map(hn => {
+    const g = byHn[hn];
+    return '<div class="ib-row"><span class="ib-hn">' + esc(hn) + '</span> ' + esc(g.name) +
+      ' <span class="ib-vals">(' + g.items.length + ' รายการ)</span>' +
+      g.items.map(m =>
+        '<div id="ibMed' + m.id + '" style="margin:4px 0 0 10px">· ' + esc(m.drug) +
+        ' <span class="ib-vals">' + esc(m.dose) + ' ' + esc(m.freq) +
+        (m.status === 'pending' ? ' — พยาบาลแก้ รอแพทย์รับทราบ' : ' — ร่างจาก AI') + '</span>' +
+        '<div class="ib-acts">' +
+          (m.source_doc ? '<button class="ib-btn" onclick="ibZoom(ibMedImg(\'' + esc(m.source_doc) + '\'))">🖼 ใบยา</button>' : '') +
+          '<button class="ib-btn ok" onclick="ibMedConfirm(\'' + esc(hn) + '\',' + m.id + ')">✅ รับยา</button>' +
+          '<button class="ib-btn bad" onclick="ibMedDismiss(\'' + esc(hn) + '\',' + m.id + ')">🗑 ปิดร่าง</button>' +
+        '</div></div>').join('') +
+      '</div>';
+  }).join('');
+}
+function _ibMedApply(hn, payload, id, doneText){
+  hdFetch('/hd/api/v1/patients/' + encodeURIComponent(hn) + '/medications/reconcile/apply', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+  }).then(r => r.json().then(d => ({ ok: r.ok, status: r.status, d })))
+    .then(x => {
+      if(!x.ok){ showToast(x.status === 403 ? 'เฉพาะแพทย์/แอดมินเท่านั้น' : (x.d.error || 'ไม่สำเร็จ'), 'error'); return; }
+      const row = document.getElementById('ibMed' + id);
+      if(row) row.innerHTML = '<span class="ib-done">' + doneText + '</span>';
+    }).catch(e => showToast('ผิดพลาด: ' + e, 'error'));
+}
+function ibMedConfirm(hn, id){
+  if(!confirm('ยืนยันว่าเทียบกับใบยาจริงแล้ว รับยารายการนี้เข้าระบบ?')) return;
+  _ibMedApply(hn, { new: [id] }, id, '✅ รับยาแล้ว');
+}
+function ibMedDismiss(hn, id){
+  if(!confirm('ปิดร่างนี้ (ไม่รับเข้าระบบ)?')) return;
+  _ibMedApply(hn, { dismiss: [id] }, id, '🗑 ปิดร่างแล้ว');
+}
+
+/* ── ③ เอกสารกองกลาง ── */
+function renderReview(rows){
+  document.getElementById('ibRevCount').textContent = rows.length ? '(' + rows.length + ')' : '';
+  const el = document.getElementById('ibReview');
+  if(!rows.length){ el.innerHTML = '<div class="ib-empty">✅ กองกลางว่าง — ทุกใบมีเจ้าของแล้ว</div>'; return; }
+  el.innerHTML = rows.map(d =>
+    '<div class="ib-card" id="ibRev' + d.doc8 + '">' +
+    (d.is_image
+      ? '<img class="ib-thumb" loading="lazy" src="' + ibImg(d.doc8) + '" onclick="ibZoom(this.src)">'
+      : '<div class="ib-thumb" style="display:flex;align-items:center;justify-content:center;font-size:2rem" onclick="window.open(ibImg(\'' + d.doc8 + '\'))">📄</div>') +
+    '<div class="ib-meta">' + esc(d.doc8) + ' · ' + esc(d.date || '-') + '<br>' + esc(d.filename) + '</div>' +
+    '<div class="ib-acts"><button class="ib-btn ok" onclick="ibRefile(\'' + d.doc8 + '\')">↪️ ย้ายเข้า HN...</button></div>' +
+    '</div>').join('');
+}
+function ibRefile(doc8){
+  const hn = prompt('ย้ายเอกสาร ' + doc8 + ' เข้าแฟ้ม HN:');
+  if(!hn || !hn.trim()) return;
+  const cat = prompt('หมวด (พิมพ์: แล็บ / ยา / ฟอก — เว้นว่าง = ให้ระบบจัดเอง):') || '';
+  const catMap = { 'แล็บ': 'lab', 'แลบ': 'lab', 'lab': 'lab', 'ยา': 'rx', 'rx': 'rx', 'ฟอก': 'dialysis', 'dialysis': 'dialysis' };
+  const body = { hn: hn.trim() };
+  const c = catMap[cat.trim().toLowerCase()] || catMap[cat.trim()];
+  if(c) body.category = c;
+  hdFetch('/hd/api/v1/documents/' + doc8 + '/refile', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+  }).then(r => r.json().then(d => ({ ok: r.ok, status: r.status, d })))
+    .then(x => {
+      if(!x.ok){ showToast(x.status === 403 ? 'เฉพาะแพทย์/แอดมินเท่านั้น' : (x.d.error || 'ไม่สำเร็จ'), 'error'); return; }
+      const card = document.getElementById('ibRev' + doc8);
+      if(card) card.innerHTML = '<div class="ib-done" style="padding:20px 6px;text-align:center">✅ ย้ายเข้า HN ' + esc(hn.trim()) + ' แล้ว</div>';
+      showToast('ย้ายเอกสารเรียบร้อย', 'success');
+    }).catch(e => showToast('ผิดพลาด: ' + e, 'error'));
+}
+
+ibLoad();
+</script>
+{% endblock %}

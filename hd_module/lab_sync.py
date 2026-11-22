@@ -45,7 +45,11 @@ CREATE TABLE IF NOT EXISTS hd_lab_docs (
     tsat NUMERIC(5,1), ktv NUMERIC(4,2), urr NUMERIC(5,1), creatinine NUMERIC(6,2),
     bun NUMERIC(6,1), glucose NUMERIC(6,1),
     hbsag VARCHAR(20), antihcv VARCHAR(20), antihbs VARCHAR(20),
-    synced_at TIMESTAMP DEFAULT NOW()
+    synced_at TIMESTAMP DEFAULT NOW(),
+    verified_status VARCHAR(20) DEFAULT 'pending',
+    verified_by VARCHAR(80),
+    verified_at TIMESTAMP,
+    delta_flags TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_hd_lab_docs_hn_date ON hd_lab_docs(hn, specimen_date DESC);
 """
@@ -128,6 +132,83 @@ def flags_for(row):
     return f
 
 
+# ── Precision guards (OCR-suspicion, never auto-treat) ─────────────────
+# 1) physiologic plausibility  2) Hb/Hct internal consistency (Hct ≈ 3×Hb)
+# 3) delta vs. the patient's previous lab
+# Any hit → stored in delta_flags and the row stays "pending" until the
+# physician verifies against the source photo.
+PLAUSIBLE_RANGE = {
+    "hb": (3, 20), "hct": (9, 60), "k": (1.5, 9.0), "na": (110, 170),
+    "ca": (4, 16), "phos": (0.5, 15), "albumin": (1, 6),
+    "glucose": (20, 1000), "creatinine": (0.5, 30), "bun": (2, 200),
+}
+DELTA_LIMIT = {
+    "k": 1.5, "hb": 2.5, "hct": 8.0, "ca": 2.5, "phos": 4.0,
+    "na": 10.0, "albumin": 1.5,
+}
+_LAB_TH = {"hb": "Hb", "hct": "Hct", "k": "K", "na": "Na", "ca": "Ca",
+           "phos": "P", "albumin": "Alb", "glucose": "Glucose",
+           "creatinine": "Cr", "bun": "BUN"}
+
+
+def precision_flags(row, prev=None):
+    """OCR-suspicion flags for one new lab row. Returns list of Thai strings.
+
+    row/prev: dicts with numeric analyte columns (floats or None).
+    Pure function — unit-tested in tests/test_lab_verify.py.
+    """
+    out = []
+    for c, (lo, hi) in PLAUSIBLE_RANGE.items():
+        v = row.get(c)
+        if v is None:
+            continue
+        v = float(v)
+        if v < lo or v > hi:
+            out.append(f"{_LAB_TH[c]} {v:g} เกินช่วงที่เป็นไปได้ ({lo:g}–{hi:g}) — สงสัย OCR อ่านพลาด")
+    hb, hct = row.get("hb"), row.get("hct")
+    if hb is not None and hct is not None and abs(float(hct) - 3.0 * float(hb)) > 6.0:
+        out.append(f"Hb {float(hb):g} / Hct {float(hct):g} ไม่สอดคล้องกัน (Hct ควร ≈ 3×Hb) — ตรวจรูปซ้ำ")
+    if prev:
+        for c, lim in DELTA_LIMIT.items():
+            v, p = row.get(c), prev.get(c)
+            if v is None or p is None:
+                continue
+            if abs(float(v) - float(p)) >= lim:
+                out.append(f"{_LAB_TH[c]} เปลี่ยน {float(p):g} → {float(v):g} (ต่างเกิน {lim:g}) — ตรวจรูปซ้ำก่อนใช้ค่า")
+    return out
+
+
+def prev_lab_row(cur, patient_id, before_date):
+    """Newest non-rejected lab row for the patient before before_date (dict or None)."""
+    cols = list(DELTA_LIMIT.keys())
+    try:
+        cur.execute("SAVEPOINT prev_lab")
+    except Exception:
+        pass
+    try:
+        cur.execute(f"""
+            SELECT {', '.join(cols)} FROM hd_labs
+            WHERE patient_id = %s AND lab_date IS NOT NULL AND lab_date < %s
+              AND (verified_status IS DISTINCT FROM 'rejected')
+            ORDER BY lab_date DESC LIMIT 1
+        """, (patient_id, before_date))
+        r = cur.fetchone()
+        try:
+            cur.execute("RELEASE SAVEPOINT prev_lab")
+        except Exception:
+            pass
+        if not r:
+            return None
+        return {c: (float(v) if v is not None else None) for c, v in zip(cols, r)}
+    except Exception as e:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT prev_lab")
+        except Exception:
+            pass
+        logger.warning("prev_lab_row: %s", e)
+        return None
+
+
 def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
     """Copy lab JSONs of recent lab documents into hd_lab_docs.
 
@@ -177,9 +258,20 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
                 if all(row[c] is None for c in NUMERIC_COLS + TEXT_COLS):
                     stats["no_json"] += 1
                     continue
-                cols = ["patient_id", "hn", "doc_id", "specimen_date", "doc_date", "status"] + NUMERIC_COLS + TEXT_COLS
-                vals = [pid_by_hn[hn], hn, doc_id, _parse_date(rep.get("specimen_date")) or _parse_date(ddate),
-                        _parse_date(ddate), rep.get("status", "")] + [row[c] for c in NUMERIC_COLS + TEXT_COLS]
+                spec_date = _parse_date(rep.get("specimen_date")) or _parse_date(ddate)
+                # ── Precision guards: compare with the patient's previous lab ──
+                prev = prev_lab_row(cur, pid_by_hn[hn], spec_date or _thai_today())
+                pflags = precision_flags(row, prev)
+                # doc-system "approved" = physician already reviewed it there
+                v_status = "verified" if rep.get("status") == "approved" and not pflags else "pending"
+                v_by = "doc_system" if v_status == "verified" else None
+                cols = (["patient_id", "hn", "doc_id", "specimen_date", "doc_date", "status"]
+                        + NUMERIC_COLS + TEXT_COLS
+                        + ["verified_status", "verified_by", "delta_flags"])
+                vals = ([pid_by_hn[hn], hn, doc_id, spec_date,
+                         _parse_date(ddate), rep.get("status", "")]
+                        + [row[c] for c in NUMERIC_COLS + TEXT_COLS]
+                        + [v_status, v_by, "; ".join(pflags) if pflags else None])
                 cur.execute("SAVEPOINT lab_ins")
                 cur.execute(f"INSERT INTO hd_lab_docs ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "
                             f"ON CONFLICT (doc_id) DO NOTHING", vals)
@@ -212,13 +304,15 @@ def latest_for_patients(cur, patient_ids):
     try:
         cur.execute(f"""
             SELECT DISTINCT ON (patient_id) patient_id, lab_date, source,
-                   {', '.join(NUMERIC_COLS + TEXT_COLS)}
+                   {', '.join(NUMERIC_COLS + TEXT_COLS)},
+                   verified_status, delta_flags, doc_row_id
             FROM hd_labs WHERE patient_id = ANY(%s)
+              AND (verified_status IS DISTINCT FROM 'rejected')
             ORDER BY patient_id, lab_date DESC NULLS LAST
         """, (list(patient_ids),))
         for r in cur.fetchall():
             pid, lab_date, src = r[0], r[1], r[2]
-            row = dict(zip(NUMERIC_COLS + TEXT_COLS, r[3:]))
+            row = dict(zip(NUMERIC_COLS + TEXT_COLS + ["verified_status", "delta_flags", "doc_row_id"], r[3:]))
             for c in NUMERIC_COLS:
                 if row[c] is not None:
                     row[c] = float(row[c])

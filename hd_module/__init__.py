@@ -294,6 +294,19 @@ def _run_hd_migrations():
             # ── Unified Lab VIEW: hd_labs ──────────────────────────
             # Merge hd_lab_results (manual) + hd_lab_docs (OCR) into one VIEW
             # with standardised column names so every query uses one source.
+            # Lab verify gate (2026-11-22): verified_status/by/at + delta_flags
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS verified_status VARCHAR(20) DEFAULT 'pending'")
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS verified_by VARCHAR(80)")
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP")
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS delta_flags TEXT")
+            # one-time seed for rows that existed before the gate (idempotent):
+            # doc-system "approved" means the physician already reviewed them there
+            fixes.append("""
+                UPDATE hd_lab_docs
+                SET verified_status = CASE WHEN status = 'approved' THEN 'verified' ELSE 'pending' END,
+                    verified_by     = CASE WHEN status = 'approved' THEN 'doc_system' ELSE NULL END
+                WHERE verified_status IS NULL
+            """)
             fixes.append("""
                 CREATE OR REPLACE VIEW hd_labs AS
                 SELECT patient_id, lab_date,
@@ -306,7 +319,9 @@ def _run_hd_migrations():
                        bun, creatinine,
                        NULL::NUMERIC AS glucose,
                        hepatitis_b AS hbsag, hepatitis_c AS antihcv, NULL::VARCHAR AS antihbs,
-                       source, 'lab_results' AS _table
+                       source, 'lab_results' AS _table,
+                       'manual'::VARCHAR AS verified_status, NULL::TEXT AS delta_flags,
+                       NULL::INTEGER AS doc_row_id
                 FROM hd_lab_results
                 UNION ALL
                 SELECT patient_id, COALESCE(specimen_date, doc_date) AS lab_date,
@@ -319,7 +334,9 @@ def _run_hd_migrations():
                        bun, creatinine,
                        glucose,
                        hbsag, antihcv, antihbs,
-                       'ocr' AS source, 'lab_docs' AS _table
+                       'ocr' AS source, 'lab_docs' AS _table,
+                       COALESCE(verified_status, 'pending') AS verified_status, delta_flags,
+                       id AS doc_row_id
                 FROM hd_lab_docs
             """)
 

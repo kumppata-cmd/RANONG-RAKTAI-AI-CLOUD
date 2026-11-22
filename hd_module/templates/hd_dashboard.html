@@ -204,6 +204,7 @@ body.tv-mode #todayPatientsList, body.tv-mode .quick-vital-btn { display: none !
   <button class="filter-tab" data-filter="va" onclick="setFilter('va')">🩺 Vascular</button>
   <button class="filter-tab" data-filter="lab" onclick="setFilter('lab')">🧪 Lab</button>
   <button class="filter-tab" data-filter="med" onclick="setFilter('med')">💊 ยา<span id="medPendingBadge" style="display:none;background:#e67e22;color:#fff;border-radius:8px;padding:0 5px;font-size:.6rem;margin-left:3px"></span></button>
+  <button class="filter-tab" onclick="location.href='/hd/pending-inbox'" title="ทุกรายการที่รอยืนยัน: ร่างยา · แล็บ OCR · เอกสารกองกลาง">🗂 รอหมอ<span id="inboxBadge" style="display:none;background:#c0392b;color:#fff;border-radius:8px;padding:0 5px;font-size:.6rem;margin-left:3px"></span></button>
 </div>
 
 <!-- 💊 Med panel (22 พ.ย. 2569) -->
@@ -433,8 +434,27 @@ function labLine(b){
   if(L.hbsag==='positive') parts.push('<span style="color:var(--danger);font-weight:700">HBsAg+</span>');
   if(!parts.length) return '';
   const old = L.age_days!=null && L.age_days > 45;
-  return `<div class="bed-chk" style="margin-top:3px;${old?'opacity:.6':''}">🧪 ${parts.join(' · ')}${L.age_days!=null?' <span style="opacity:.7">('+L.age_days+'ว.)</span>':''}${L.status&&L.status!=='approved'?' ⏳':''}</div>`;
+  /* ด่านยืนยันแล็บ: pending = ยังไม่มีคนเทียบกับใบจริง · delta_flags = สงสัย OCR อ่านพลาด */
+  let vb = '';
+  if(L.verified_status === 'pending')
+    vb += ` <a href="/hd/pending-inbox" style="text-decoration:none;background:#fef3c7;color:#92400e;border-radius:6px;padding:0 5px;font-size:.68rem;font-weight:700">⏳ รอยืนยัน</a>`;
+  if(L.delta_flags)
+    vb += ` <span title="${String(L.delta_flags).replace(/"/g,'&quot;')}" style="cursor:help;background:#fde8e8;color:#b91c1c;border-radius:6px;padding:0 5px;font-size:.68rem;font-weight:700">🚨</span>`;
+  return `<div class="bed-chk" style="margin-top:3px;${old?'opacity:.6':''}">🧪 ${parts.join(' · ')}${L.age_days!=null?' <span style="opacity:.7">('+L.age_days+'ว.)</span>':''}${vb}</div>`;
 }
+/* 🗂 กล่องรอหมอ — badge รวม (ยา+แล็บ+กองกลาง), ดึงไม่ถี่กว่า 3 นาที */
+let _ibBadgeAt = 0;
+function refreshInboxBadge(){
+  const now = Date.now();
+  if(now - _ibBadgeAt < 180000) return;
+  _ibBadgeAt = now;
+  hdFetch('/hd/api/v1/pending-inbox?counts=1').then(r=>r.ok?r.json():null).then(d=>{
+    if(!d || !d.counts) return;
+    const el = document.getElementById('inboxBadge');
+    if(el){ el.style.display = d.counts.total ? 'inline-block' : 'none'; el.textContent = d.counts.total; }
+  }).catch(()=>{});
+}
+
 function checklist(b){
   if(!(b.status==='active'||b.status==='warning'||b.status==='critical')) return '';
   const esa = b.esa_given===true ? '<span class="ok">✓ESA</span>' : (b.patient&&b.patient.esa_drug ? '<span class="no">⏳ESA</span>' : '');
@@ -889,6 +909,7 @@ function fetchBeds(){
         const _pb = document.getElementById('medPendingBadge');
         if(_pb){ _pb.style.display = _pend ? 'inline-block' : 'none'; _pb.textContent = _pend; }
       }catch(e){}
+      refreshInboxBadge();
       /* Always render — the grid must reflect the current shift state */
       renderBeds(beds);
       renderCompleted(data.completed_sessions || [], 'completedPanel', document.getElementById('bedGrid'));
