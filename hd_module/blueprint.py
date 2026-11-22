@@ -2857,6 +2857,20 @@ def medications_sync_selftest():
             request.args.get("secret", "") != os.environ.get("ADMIN_SECRET", ""):
         return jsonify({"error": "forbidden"}), 403
     out = {}
+    # ?reset_empty=1 — ลบรอยจำของใบที่อ่านได้ 0/ผิดพลาด เพื่อให้รอบนี้อ่านซ้ำ
+    # (ใช้ตอนปรับปรุง prompt แล้วอยากให้ AI ลองใบเดิมอีกครั้ง — ไม่แตะใบที่อ่านสำเร็จ)
+    if request.args.get("reset_empty") == "1":
+        try:
+            import psycopg2 as _pg
+            _db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+            _c = _pg.connect(_db, connect_timeout=5)
+            with _c.cursor() as _cu:
+                _cu.execute("DELETE FROM hd_med_doc_seen WHERE n_items <= 0")
+                out["reset_empty"] = _cu.rowcount
+            _c.commit()
+            _c.close()
+        except Exception as _re:
+            out["reset_empty_error"] = str(_re)
     try:
         out["sync"] = run_med_photo_sync()
     except Exception as e:
