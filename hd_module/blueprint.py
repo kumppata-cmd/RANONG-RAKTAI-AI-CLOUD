@@ -2690,6 +2690,51 @@ def run_med_photo_sync():
         conn.close()
 
 
+@hd_bp.route("/medications/sync-selftest", methods=["GET"])
+def medications_sync_selftest():
+    """ตรวจ med-photo-sync บน production (ADMIN_SECRET gate เหมือน food/selftest):
+    รัน sync จริง 1 รอบ แล้วรายงานสถิติ + เอกสารที่เพิ่งเห็น + ร่างยาที่รอยืนยัน."""
+    import os
+    if not os.environ.get("ADMIN_SECRET") or \
+            request.args.get("secret", "") != os.environ.get("ADMIN_SECRET", ""):
+        return jsonify({"error": "forbidden"}), 403
+    out = {}
+    try:
+        out["sync"] = run_med_photo_sync()
+    except Exception as e:
+        out["sync"] = {"error": str(e)}
+    try:
+        import psycopg2
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT LEFT(doc_id,8), hn, n_items, created_at
+                           FROM hd_med_doc_seen ORDER BY created_at DESC LIMIT 10""")
+            out["recent_docs"] = [{"doc": r[0], "hn": r[1], "items": r[2],
+                                   "at": r[3].isoformat()[:16] if r[3] else None} for r in cur.fetchall()]
+            cur.execute("""SELECT p.hn, COUNT(*) FROM hd_medication_orders o
+                           JOIN hd_patient_mapping p ON p.id = o.patient_id
+                           WHERE o.verify_status = 'ai_draft' GROUP BY p.hn ORDER BY 2 DESC LIMIT 10""")
+            out["drafts_waiting"] = [{"hn": r[0], "n": r[1]} for r in cur.fetchall()]
+            # หมวดเอกสารยาใน index (ให้รู้ว่า classifier เห็นกี่ใบ)
+            try:
+                from flask import current_app
+                di = current_app.config.get("DOC_INDEX")
+                if di:
+                    di._ensure_fresh()
+                    cats = {}
+                    for d in list(di._docs):
+                        c = d.get("category", "other")
+                        cats[c] = cats.get(c, 0) + 1
+                    out["doc_categories"] = cats
+            except Exception as de:
+                out["doc_categories"] = {"error": str(de)}
+        conn.close()
+    except Exception as e:
+        out["db_error"] = str(e)
+    return jsonify(out)
+
+
 @hd_bp.route("/medications/sync-photos", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def medications_sync_photos_now():
