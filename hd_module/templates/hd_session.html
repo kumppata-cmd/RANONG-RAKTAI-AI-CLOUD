@@ -80,6 +80,8 @@
         <label class="form-label">ผู้ป่วย <small id="patientCount" style="color:var(--fg-muted);">
           {% if server_patients %}{{ server_patients|length }} คน{% elif db_err %}⚠️ DB: {{ db_err[:50] }}{% else %}กำลังโหลด...{% endif %}
         </small></label>
+        <input type="text" class="form-control" id="patientSearch" placeholder="🔍 พิมพ์ HN หรือชื่อ เพื่อกรองรายชื่อ"
+               autocomplete="off" inputmode="search" oninput="filterPatientOptions()" style="margin-bottom:6px;">
         <select class="form-control" id="patientSelect" onchange="onPatientSelect()">
           <option value="">-- เลือกผู้ป่วย ({{ server_patients|length if server_patients else 0 }} คน) --</option>
           {% for p in (server_patients or []) %}
@@ -866,6 +868,37 @@ if(params.get('bed')) document.getElementById('bedSelect').value = params.get('b
       document.getElementById('patientCount').textContent = 'โหลดไม่ได้ — ลอง login ใหม่';
     });
 })();
+
+/* ─── ค้นหาผู้ป่วยในหน้านี้ (กรองเฉพาะหน้าจอ ไม่เรียก API เพิ่ม) ─── */
+let _pSearchAll = null;
+function filterPatientOptions(){
+  const sel = document.getElementById('patientSelect');
+  const box = document.getElementById('patientSearch');
+  if(!sel || !box) return;
+  const q = (box.value || '').trim().toLowerCase();
+  if(_pSearchAll === null){
+    const seen = {};
+    _pSearchAll = Array.from(sel.options).slice(1)
+      .filter(o => o.value && !seen[o.value] && (seen[o.value] = 1))
+      .map(o => ({ v: o.value, t: o.textContent }));
+  }
+  const cur = sel.value;
+  const matches = q
+    ? _pSearchAll.filter(o => o.v.toLowerCase().includes(q) || o.t.toLowerCase().includes(q))
+    : _pSearchAll;
+  while(sel.options.length > 1) sel.remove(1);
+  /* คงรายการที่เลือกอยู่เสมอ แม้ไม่ตรงคำค้น — กันการเลือกหลุดกลางคัน */
+  if(cur && !matches.some(o => o.v === cur)){
+    const kept = _pSearchAll.find(o => o.v === cur);
+    if(kept){ const op = document.createElement('option'); op.value = kept.v; op.textContent = kept.t; sel.appendChild(op); }
+  }
+  matches.forEach(o => { const op = document.createElement('option'); op.value = o.v; op.textContent = o.t; sel.appendChild(op); });
+  if(cur) sel.value = cur;
+  sel.options[0].textContent = q
+    ? ('-- พบ ' + matches.length + ' คน — แตะเลือกจากรายการ --')
+    : ('-- เลือกผู้ป่วย (' + _pSearchAll.length + ' คน) --');
+  if(!q) _pSearchAll = null; /* ล้าง cache เมื่อเคลียร์คำค้น เผื่อรายชื่อถูกเติมเพิ่มภายหลัง */
+}
 
 function _showSero(sr){
   let el = document.getElementById('seroFlag');
