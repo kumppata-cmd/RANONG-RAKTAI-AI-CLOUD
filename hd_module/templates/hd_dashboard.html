@@ -630,6 +630,7 @@ function renderBeds(beds){
       default:
         filterContent = `${dialyzerBadge}${anticoagBadge}${vitals}${vitalAge(b)}${timeLeft}${sparkline(b)}${ufBar(b)}${ufWatchLine(b)}${idhLine(b)}${checklist(b)}${labLine(b)}`;
     }
+    if(_activeFilter !== 'med') filterContent = _alChip(b) + filterContent;   /* 🚨 แพ้ยาเห็นทุกแท็บ */
     if(b.status === 'available') filterContent = '';   /* เตียงว่าง: ไม่ต้องขึ้น "ไม่มีข้อมูล" */
     if(vitalAgeMin(b) !== null && vitalAgeMin(b) >= VITAL_DUE_MIN && (b.status==='active')) _cls += ' vital-overdue';
     if(b.status==='critical') _cls += ' bed-pulse';
@@ -1159,6 +1160,7 @@ function fetchAllRounds(){
       .then(r=>r.json())
       .then(data=>{
         const beds = data.beds || [];
+        if(data.meds) window._medsMap = Object.assign(window._medsMap||{}, data.meds);
         _allRoundAlerts[shift] = collectAlerts(beds, shift);
         renderAlertCenter([].concat(..._allRoundAlerts.morning||[], ..._allRoundAlerts.afternoon||[], ..._allRoundAlerts.evening||[])
           .sort((x,y)=> (x.severity==='critical'?0:1)-(y.severity==='critical'?0:1)));
@@ -1201,6 +1203,7 @@ function fetchAllRounds(){
           else if(_activeFilter==='lab') extraLine = labLine(b)||'<span style="font-size:.6rem;color:var(--fg-dim)">ไม่มีผลแล็บในระบบ</span>';
           else if(_activeFilter==='va') extraLine = va?'<span class="bed-access '+vaC(va)+'" style="font-size:.7rem;padding:3px 8px;">'+va+'</span>':'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
           else if(_activeFilter==='med') extraLine = medLine(b, '.62rem');
+          if(_activeFilter !== 'med') extraLine = _alChip(b, '.58rem') + extraLine;
 
           const seroB = seroBadge(b.serology,'.62rem');
           const card = document.createElement('div');
@@ -1234,6 +1237,15 @@ function fetchAllRounds(){
 const _origFetchBeds = fetchBeds;
 
 /* ══════════ 💊 ระบบยา (22 พ.ย. 2569 — แพทย์สั่ง) ══════════ */
+function _alChip(b, fs){
+  /* 🚨 ป้ายแพ้ยา — ความปลอดภัย: โชว์บนการ์ดเตียงทุกแท็บ ไม่ใช่แค่แท็บยา */
+  const hn = b.patient_hn || (b.patient && b.patient.hn) || '';
+  const m = hn && (window._medsMap||{})[hn];
+  if(!m || !m.allergy) return '';
+  return '<div style="font-size:'+(fs||'.64rem')+';color:#fff;background:#dc2626;border-radius:6px;'
+       + 'padding:1px 6px;display:inline-block;margin:2px 0;font-weight:700">🚨 แพ้: '
+       + m.allergy.substring(0,30) + '</div>';
+}
 function medLine(b, fs){
   const hn = b.patient_hn || (b.patient && b.patient.hn) || '';
   if(!hn) return '<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
