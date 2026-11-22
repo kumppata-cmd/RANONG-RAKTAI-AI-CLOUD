@@ -142,6 +142,11 @@ body.tv-mode #todayPatientsList, body.tv-mode .quick-vital-btn { display: none !
 .qv-sheet { background: var(--bg-card); border-radius: 16px 16px 0 0; width: 100%; max-width: 420px; padding: 20px; padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px)); }
 .qv-sheet h3 { margin: 0 0 12px; font-size: 1rem; }
 .qv-sheet input:focus { border-color: var(--accent); outline: none; }
+.med-open-btn{background:#ede9fe;border:1px solid #c4b5fd;border-radius:6px;padding:2px 8px;font-size:.66rem;cursor:pointer}
+.med-mini{background:var(--bg,#f3f4f6);border:1px solid var(--border,#d1d5db);border-radius:6px;padding:2px 7px;font-size:.7rem;cursor:pointer}
+.med-act{background:var(--bg,#f3f4f6);border:1px solid var(--border,#d1d5db);border-radius:8px;padding:7px 10px;font-size:.8rem;cursor:pointer}
+#medOverlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:900;align-items:flex-end;justify-content:center}
+#medPanel{background:var(--card,#fff);width:100%;max-width:520px;max-height:86vh;overflow-y:auto;border-radius:16px 16px 0 0;padding:14px 16px 28px}
 </style>
 {% endblock %}
 
@@ -198,7 +203,20 @@ body.tv-mode #todayPatientsList, body.tv-mode .quick-vital-btn { display: none !
   <button class="filter-tab" data-filter="epo" onclick="setFilter('epo')">💊 ESA/EPO</button>
   <button class="filter-tab" data-filter="va" onclick="setFilter('va')">🩺 Vascular</button>
   <button class="filter-tab" data-filter="lab" onclick="setFilter('lab')">🧪 Lab</button>
+  <button class="filter-tab" data-filter="med" onclick="setFilter('med')">💊 ยา<span id="medPendingBadge" style="display:none;background:#e67e22;color:#fff;border-radius:8px;padding:0 5px;font-size:.6rem;margin-left:3px"></span></button>
 </div>
+
+<!-- 💊 Med panel (22 พ.ย. 2569) -->
+<div id="medOverlay" onclick="if(event.target===this)closeMedPanel()">
+  <div id="medPanel">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+      <b id="medPanelTitle">💊 ยา</b>
+      <button class="med-mini" onclick="closeMedPanel()">✕ ปิด</button>
+    </div>
+    <div id="medPanelBody"></div>
+  </div>
+</div>
+<input type="file" id="medPhoto" accept="image/*" style="display:none" onchange="medPhotoPicked(this)">
 
 <!-- Shift selector (single mode) -->
 <div class="shift-selector" id="shiftSelector">
@@ -591,6 +609,9 @@ function renderBeds(beds){
     /* Filter-aware content: show different info based on active filter */
     let filterContent = '';
     switch(_activeFilter){
+      case 'med':
+        filterContent = medLine(b, '.68rem');
+        break;
       case 'dialyzer':
         filterContent = dialyzerBadge || '<span style="font-size:.65rem;color:var(--fg-dim)">ไม่มี dialyzer</span>';
         break;
@@ -861,6 +882,12 @@ function fetchBeds(){
     })
     .then(data=>{
       const beds = data.beds || [];
+      window._medsMap = data.meds || {};
+      try{
+        const _pend = Object.values(window._medsMap).reduce((a,m)=>a+(m.pending||0),0);
+        const _pb = document.getElementById('medPendingBadge');
+        if(_pb){ _pb.style.display = _pend ? 'inline-block' : 'none'; _pb.textContent = _pend; }
+      }catch(e){}
       /* Always render — the grid must reflect the current shift state */
       renderBeds(beds);
       renderCompleted(data.completed_sessions || [], 'completedPanel', document.getElementById('bedGrid'));
@@ -1173,6 +1200,7 @@ function fetchAllRounds(){
           else if(_activeFilter==='epo') extraLine = eBadge||'<span style="font-size:.6rem;color:var(--fg-dim)">ไม่มีคำสั่ง ESA</span>';
           else if(_activeFilter==='lab') extraLine = labLine(b)||'<span style="font-size:.6rem;color:var(--fg-dim)">ไม่มีผลแล็บในระบบ</span>';
           else if(_activeFilter==='va') extraLine = va?'<span class="bed-access '+vaC(va)+'" style="font-size:.7rem;padding:3px 8px;">'+va+'</span>':'<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
+          else if(_activeFilter==='med') extraLine = medLine(b, '.62rem');
 
           const seroB = seroBadge(b.serology,'.62rem');
           const card = document.createElement('div');
@@ -1204,6 +1232,132 @@ function fetchAllRounds(){
 
 /* ── fetchBeds: add date param ── */
 const _origFetchBeds = fetchBeds;
+
+/* ══════════ 💊 ระบบยา (22 พ.ย. 2569 — แพทย์สั่ง) ══════════ */
+function medLine(b, fs){
+  const hn = b.patient_hn || (b.patient && b.patient.hn) || '';
+  if(!hn) return '<span style="font-size:.6rem;color:var(--fg-dim)">-</span>';
+  const m = (window._medsMap||{})[hn];
+  let parts = [];
+  if(m && m.allergy) parts.push('<div style="color:#dc2626;font-weight:700">🚨 แพ้: '+m.allergy.substring(0,28)+'</div>');
+  if(m && m.n) parts.push('💊 '+m.n+' รายการ'+(m.intra?' · 💉 ระหว่างฟอก '+m.intra:''));
+  else parts.push('<span style="color:var(--fg-dim)">ยังไม่มีทะเบียนยา</span>');
+  if(m && m.pending) parts.push('<span style="color:#e67e22;font-weight:700">⏳ รอยืนยัน '+m.pending+'</span>');
+  return '<div style="font-size:'+(fs||'.68rem')+';margin-top:2px" onclick="event.stopPropagation();openMedPanel(\''+hn+'\')">'
+       + parts.join(' · ') + '<div style="margin-top:3px"><button class="med-open-btn" onclick="event.stopPropagation();openMedPanel(\''+hn+'\')">💊 จัดการยา</button></div></div>';
+}
+let _medHN = null;
+function openMedPanel(hn){
+  _medHN = hn;
+  document.getElementById('medOverlay').style.display = 'flex';
+  document.getElementById('medPanelTitle').textContent = '💊 ยาของ HN ' + hn;
+  document.getElementById('medPanelBody').innerHTML = '<div style="text-align:center;padding:20px">กำลังโหลด...</div>';
+  hdFetch('/hd/api/v1/patients/'+hn+'/medications')
+    .then(r=>r.json()).then(renderMedPanel)
+    .catch(e=>{ document.getElementById('medPanelBody').innerHTML = '❌ โหลดไม่สำเร็จ'; });
+}
+function closeMedPanel(){ document.getElementById('medOverlay').style.display='none'; _medHN=null; fetchBeds(); }
+function _esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;'); }
+function renderMedPanel(d){
+  const body = document.getElementById('medPanelBody');
+  const orders = d.orders || [];
+  let h = '';
+  /* ข้อ 1: ป้ายแพ้ยา + แก้ไข */
+  h += '<div style="background:'+(d.allergies?'#fee2e2':'var(--bg)')+';border-radius:8px;padding:8px 10px;margin-bottom:8px;font-size:.85rem">'
+     + (d.allergies ? '🚨 <b style="color:#dc2626">แพ้ยา: '+_esc(d.allergies)+'</b>' : 'ไม่มีบันทึกแพ้ยา')
+     + ' <button class="med-mini" onclick="editAllergies()">✏️ แก้</button></div>';
+  /* ร่างจาก AI รอยืนยัน */
+  const drafts = orders.filter(o=>o.verify_status==='ai_draft');
+  const rest = orders.filter(o=>o.verify_status!=='ai_draft');
+  if(drafts.length){
+    h += '<div style="font-weight:700;color:#7c3aed;font-size:.85rem;margin:6px 0 4px">🤖 จาก AI อ่านรูป — รอแพทย์ยืนยัน ('+drafts.length+')</div>';
+    drafts.forEach(o=>{ h += medRow(o, true); });
+  }
+  h += '<div style="font-weight:700;font-size:.85rem;margin:8px 0 4px">รายการยา ('+rest.filter(o=>o.active).length+')</div>';
+  if(!rest.length) h += '<div style="color:var(--fg-dim);font-size:.8rem">ยังไม่มี</div>';
+  rest.forEach(o=>{ h += medRow(o, false); });
+  /* ปุ่มรวม */
+  h += '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:10px">'
+     + '<button class="med-act" style="background:var(--accent,#1d6fb8);color:#fff" onclick="addMedForm()">➕ เพิ่มยา</button>'
+     + '<button class="med-act" onclick="document.getElementById(\'medPhoto\').click()">📸 อ่านยาจากรูป (AI)</button>'
+     + '<button class="med-act" onclick="window.open(\'/hd/api/v1/patients/\'+_medHN+\'/medications/pdf\',\'_blank\')">🖨 ใบรายการยา</button>'
+     + '</div><div id="medFormArea"></div><div id="medMsg" style="font-size:.8rem;margin-top:6px"></div>';
+  body.innerHTML = h;
+}
+function medRow(o, draft){
+  const st = o.verify_status==='pending' ? ' <span style="color:#e67e22;font-size:.68rem;font-weight:700">⏳ รอแพทย์รับทราบ</span>'
+           : (draft ? '' : '');
+  const stopTag = !o.active ? ' <span style="color:#991b1b;font-size:.68rem">⏸ หยุด'+(o.stop_reason?' — '+_esc(o.stop_reason):'')+'</span>' : '';
+  let btns = '<button class="med-mini" onclick="editMedForm('+o.id+')">✏️</button>';
+  if(o.active) btns += '<button class="med-mini" onclick="stopMed('+o.id+')">⏸ หยุด</button>';
+  else btns += '<button class="med-mini" onclick="medAct('+o.id+',\'resume\')">▶️ ใช้ต่อ</button>';
+  if(o.verify_status==='pending' || draft) btns += '<button class="med-mini" style="background:#16a34a;color:#fff" onclick="medAct('+o.id+',\'ack\')">✔ ยืนยัน</button>';
+  window._medOrders = window._medOrders || {}; window._medOrders[o.id] = o;
+  return '<div style="border:1px solid var(--border,#e5e7eb);border-radius:8px;padding:7px 9px;margin-bottom:5px;font-size:.82rem;'+(draft?'background:#f5f3ff;':'')+(o.active?'':'opacity:.65;')+'">'
+       + '<b>'+_esc(o.drug)+'</b>'+(o.intra_hd?' <span style="font-size:.66rem;background:#dbeafe;border-radius:6px;padding:1px 5px">💉 ระหว่างฟอก</span>':'')+st+stopTag
+       + '<div style="color:var(--fg-muted);font-size:.74rem">'+_esc(o.dose||'')+' '+_esc(o.frequency||'')+(o.notes?' · '+_esc(o.notes):'')+'</div>'
+       + '<div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap">'+btns+'</div></div>';
+}
+function _medForm(o){
+  o = o || {};
+  return '<div style="border:2px solid var(--accent,#1d6fb8);border-radius:8px;padding:8px;margin-top:8px;font-size:.8rem">'
+   + '<input id="mfDrug" placeholder="ชื่อยา + ความแรง เช่น Amlodipine 10 mg" value="'+_esc(o.drug||'')+'" style="width:100%;margin-bottom:4px;padding:6px">'
+   + '<div style="display:flex;gap:4px"><input id="mfDose" placeholder="ขนาด/ครั้ง" value="'+_esc(o.dose||'')+'" style="flex:1;padding:6px">'
+   + '<input id="mfFreq" placeholder="วิธี/เวลา เช่น วันละครั้ง เช้า" value="'+_esc(o.frequency||'')+'" style="flex:2;padding:6px"></div>'
+   + '<div style="margin-top:4px;display:flex;gap:8px;align-items:center">'
+   + '<label><input type="checkbox" id="mfIntra" '+(o.intra_hd?'checked':'')+'> 💉 ให้ระหว่างฟอก</label>'
+   + '<input id="mfNotes" placeholder="หมายเหตุ" value="'+_esc(o.notes||'')+'" style="flex:1;padding:6px"></div>'
+   + '<div style="margin-top:6px"><button class="med-act" style="background:#16a34a;color:#fff" onclick="saveMedForm('+(o.id||0)+')">💾 บันทึก</button>'
+   + ' <button class="med-act" onclick="document.getElementById(\'medFormArea\').innerHTML=\'\'">ยกเลิก</button></div></div>';
+}
+function addMedForm(){ document.getElementById('medFormArea').innerHTML = _medForm(null); }
+function editMedForm(id){ document.getElementById('medFormArea').innerHTML = _medForm((window._medOrders||{})[id]); }
+function _medDone(d, okMsg){
+  const msg = document.getElementById('medMsg');
+  if(d && d.error){ msg.innerHTML = '❌ '+_esc(d.error); return; }
+  let warn = (d && d.warnings && d.warnings.length) ? '<div style="color:#b45309">'+d.warnings.map(_esc).join('<br>')+'</div>' : '';
+  msg.innerHTML = '✅ '+okMsg+(d&&d.verify_status==='pending'?' (รอแพทย์รับทราบ)':'')+warn;
+  openMedPanel(_medHN);
+  setTimeout(()=>{ const m=document.getElementById('medMsg'); if(m) m.innerHTML = warn; }, 400);
+}
+function saveMedForm(id){
+  const payload = { drug_name: document.getElementById('mfDrug').value.trim(),
+    dose: document.getElementById('mfDose').value.trim(), frequency: document.getElementById('mfFreq').value.trim(),
+    intra_hd: document.getElementById('mfIntra').checked, notes: document.getElementById('mfNotes').value.trim() };
+  if(!payload.drug_name){ alert('ต้องระบุชื่อยา'); return; }
+  const url = id ? '/hd/api/v1/patients/'+_medHN+'/medications/'+id : '/hd/api/v1/patients/'+_medHN+'/medications';
+  hdFetch(url, {method: id?'PUT':'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)})
+    .then(r=>r.json()).then(d=>_medDone(d, id?'แก้ไขแล้ว':'เพิ่มยาแล้ว'));
+}
+function stopMed(id){
+  const reason = prompt('เหตุผลที่หยุดยา (เช่น หมอสั่งหยุด / แพ้ยา / ปรับตามแล็บ)');
+  if(reason === null) return;
+  hdFetch('/hd/api/v1/patients/'+_medHN+'/medications/'+id+'/stop',
+    {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({reason:reason})})
+    .then(r=>r.json()).then(d=>_medDone(d, 'หยุดยาแล้ว'));
+}
+function medAct(id, act){
+  hdFetch('/hd/api/v1/patients/'+_medHN+'/medications/'+id+'/'+act, {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+    .then(r=>r.json()).then(d=>_medDone(d, act==='ack'?'ยืนยันแล้ว':'กลับมาใช้แล้ว'));
+}
+function editAllergies(){
+  const cur = (((window._medsMap||{})[_medHN])||{}).allergy || '';
+  const v = prompt('ยาที่แพ้ (คั่นด้วย , ) — เว้นว่าง = ไม่มี', cur);
+  if(v === null) return;
+  hdFetch('/hd/api/v1/patients/'+_medHN+'/allergies', {method:'PUT', headers:{'Content-Type':'application/json'}, body: JSON.stringify({allergies:v})})
+    .then(r=>r.json()).then(d=>_medDone(d, 'บันทึกแพ้ยาแล้ว'));
+}
+function medPhotoPicked(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  document.getElementById('medMsg').innerHTML = '🤖 AI กำลังอ่านรูปยา... (10–20 วิ)';
+  const fd = new FormData(); fd.append('hn', _medHN); fd.append('image', f);
+  hdFetch('/hd/api/v1/medications/read-photo', {method:'POST', body: fd})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){ document.getElementById('medMsg').innerHTML = '❌ '+_esc(d.error); return; }
+      _medDone(d, d.message || 'อ่านรูปแล้ว');
+    }).catch(e=>{ document.getElementById('medMsg').innerHTML='❌ เครือข่ายขัดข้อง'; });
+  inp.value = '';
+}
 
 /* Initial load + auto refresh */
 initDayButtons();

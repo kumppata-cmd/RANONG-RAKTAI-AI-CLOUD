@@ -274,6 +274,14 @@ def _run_hd_migrations():
             """)
             # ── เหตุผลการยกเลิกรอบฟอก (สถิติ no-show + audit) ──
             fixes.append("ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS cancel_reason TEXT")
+            # ── 22 พ.ย. 2569 ระบบยาครบวงจร (แพทย์สั่ง): สถานะยืนยัน/ยาระหว่างฟอก/แพ้ยา ──
+            fixes.append("ALTER TABLE hd_medication_orders ADD COLUMN IF NOT EXISTS verify_status VARCHAR(20) DEFAULT 'confirmed'")
+            fixes.append("ALTER TABLE hd_medication_orders ADD COLUMN IF NOT EXISTS intra_hd BOOLEAN DEFAULT FALSE")
+            fixes.append("ALTER TABLE hd_medication_orders ADD COLUMN IF NOT EXISTS stop_reason VARCHAR(200)")
+            fixes.append("ALTER TABLE hd_medication_orders ADD COLUMN IF NOT EXISTS source VARCHAR(20) DEFAULT 'manual'")
+            fixes.append("ALTER TABLE hd_medication_orders ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP")
+            fixes.append("ALTER TABLE hd_medication_orders ADD COLUMN IF NOT EXISTS updated_by INTEGER")
+            fixes.append("ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS drug_allergies TEXT")
             # ── กันเตียงซ้อนระดับ DB: 1 เตียง/วัน/รอบ มี session ทำงานได้ 1 เดียว ──
             # (ปิดช่องโหว่ 2 คนกด submit พร้อมกันเสี้ยววินาที — app เช็คอยู่แล้ว นี่คือชั้นสุดท้าย)
             fixes.append("""

@@ -64,6 +64,18 @@
   </div>
   {% endif %}
 
+  {% if meds or allergies %}
+  <div class="card">
+    <div style="font-weight:700;margin-bottom:6px">💊 ยาปัจจุบันของท่าน</div>
+    {% if allergies %}<div style="background:#fee2e2;color:#991b1b;border-radius:8px;padding:6px 10px;font-size:.85rem;font-weight:700;margin-bottom:6px">🚨 แพ้ยา: {{ allergies }}</div>{% endif %}
+    {% for m in meds %}
+    <div class="kv"><span>{{ m.drug }}{% if m.intra %} 💉{% endif %}</span><b>{{ m.dose }} {{ m.freq }}</b></div>
+    {% endfor %}
+    {% if not meds %}<div class="muted">ยังไม่มีรายการยาในระบบ</div>{% endif %}
+    <div class="muted" style="margin-top:4px">💉 = ยาที่ให้ระหว่างฟอกที่คลินิก · รายการนี้อ่านอย่างเดียว เปลี่ยนแปลงยาต้องปรึกษาแพทย์</div>
+  </div>
+  {% endif %}
+
   {% if rec['pre_hd_note'] %}
   <div class="card"><div style="font-weight:700">📝 บันทึกก่อนฟอก</div>
     <div style="font-size:.88rem;margin-top:4px">{{ rec['pre_hd_note'] }}</div></div>

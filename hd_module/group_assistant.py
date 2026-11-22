@@ -29,7 +29,8 @@ HELP = ("🤖 รักษ์ไต ช่วยตอบได้ (พิมพ
         "• HN 1234 หรือ ชื่อผู้ป่วย — ข้อมูลผู้ป่วย\n"
         "• รหัสญาติ <HN> — ออกรหัสให้ญาติรับสรุปหลังฟอก · ยกเลิกญาติ <HN>\n"
         "• ลิงก์อาหาร <HN> — ออกลิงก์โค้ชอาหาร (ถ่ายรูปถาม AI) ส่งต่อผู้ป่วย\n"
-        "• แล็บบ้าน <HN> — ดูตัวอย่างแล็บภาษาบ้าน · ส่งแล็บบ้าน <HN> — ส่งเข้า LINE ผู้ป่วย\n\n"
+        "• แล็บบ้าน <HN> — ดูตัวอย่างแล็บภาษาบ้าน · ส่งแล็บบ้าน <HN> — ส่งเข้า LINE ผู้ป่วย\n"
+        "• ยา <HN> — รายการยาปัจจุบัน + แพ้ยา\n\n"
         "ตอบจากข้อมูลในระบบเท่านั้น ไม่สั่งการรักษา")
 
 
@@ -226,6 +227,9 @@ def answer(conn, body, base_url=""):
         if low.startswith("แล็บบ้าน") or low.startswith("ส่งแล็บบ้าน") or low.startswith("แลบบ้าน") or low.startswith("ส่งแลบบ้าน"):
             from .patient_engage import lab_friendly_command
             return lab_friendly_command(cur, b)
+        if re.match(r"^ยา\s*\d", low):
+            from .medications import meds_list_command
+            return meds_list_command(cur, b)
         if any(w in low for w in ("เตียง", "ว่าง", "bed")):
             return _beds(cur, today)
         if any(w in low for w in ("พรุ่งนี้", "tomorrow")):

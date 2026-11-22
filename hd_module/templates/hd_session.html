@@ -423,6 +423,13 @@
     </div>
   </div>
 
+  <!-- 💊 ยาระหว่างฟอก (22 พ.ย. 2569) -->
+  <div class="card" style="margin-bottom:16px;" id="intraMedCard">
+    <div class="card-header">💊 ยาระหว่างฟอกของรอบนี้</div>
+    <div id="intraMedAllergy" style="display:none;padding:7px 12px;background:#fee2e2;color:#991b1b;border-radius:var(--radius-sm);margin-bottom:8px;font-size:.85rem;font-weight:700;"></div>
+    <div id="intraMedList" style="font-size:.88rem;color:var(--fg-muted);">กำลังโหลด...</div>
+  </div>
+
   <!-- ESA Injection + Lab -->
   <div class="card" style="margin-bottom:16px;">
     <div class="card-header">💉 ยากระตุ้นเม็ดเลือดแดง (ESA)</div>
@@ -2619,7 +2626,50 @@ function getEsaData(){
   return data;
 }
 
+/* 💊 ยาระหว่างฟอก: due = คำสั่งยืน intra_hd ที่ยังไม่ให้ในรอบนี้ */
+function loadIntraMeds(){
+  const sid = sessionData.id || sessionData.session_id;
+  if(!sid) return;
+  hdFetch('/hd/api/v1/sessions/'+sid+'/medications')
+    .then(r=>r.json())
+    .then(d=>{
+      const el = document.getElementById('intraMedList');
+      if(!el) return;
+      const due = d.due || [], given = d.given || [];
+      let h = '';
+      due.forEach(m=>{
+        h += '<div style="display:flex;justify-content:space-between;align-items:center;border:1px solid var(--border);border-radius:8px;padding:7px 10px;margin-bottom:5px;">'
+           + '<span><b>'+(m.drug||'')+'</b> '+(m.dose||'')+' <span style="color:var(--fg-muted);font-size:.78rem">'+(m.route||'')+'</span></span>'
+           + '<button class="btn" style="padding:6px 12px;font-size:.8rem" onclick="giveIntraMed('+m.order_id+',this)">✓ ให้แล้ว</button></div>';
+      });
+      given.forEach(m=>{
+        h += '<div style="color:var(--fg-muted);font-size:.8rem;padding:3px 2px;">✅ '+(m.drug||'')+' '+(m.dose||'')+' — ให้แล้ว'+(m.slot?' '+m.slot:'')+'</div>';
+      });
+      if(!h) h = '<span style="font-size:.82rem;color:var(--fg-muted)">ไม่มียาที่ต้องให้ระหว่างฟอกในทะเบียนยา (เพิ่มได้ที่แดชบอร์ด → แท็บ 💊 ยา)</span>';
+      el.innerHTML = h;
+      /* ป้ายแพ้ยา */
+      if(sessionData.hn){
+        hdFetch('/hd/api/v1/patients/'+sessionData.hn+'/medications')
+          .then(r=>r.json()).then(md=>{
+            const a = document.getElementById('intraMedAllergy');
+            if(a && md.allergies){ a.style.display='block'; a.textContent='🚨 แพ้ยา: '+md.allergies; }
+          }).catch(()=>{});
+      }
+    }).catch(()=>{});
+}
+function giveIntraMed(orderId, btn){
+  btn.disabled = true;
+  const m = {order_id: orderId};
+  hdFetch('/hd/api/v1/sessions/'+(sessionData.id||sessionData.session_id)+'/medications',
+    {method:'POST', headers:{'Content-Type':'application/json'},
+     body: JSON.stringify({order_id: orderId,
+       drug_name: (btn.parentElement.querySelector('b')||{}).textContent || '',
+       slot_time: new Date().toTimeString().slice(0,5)})})
+    .then(r=>r.json()).then(d=>{ loadIntraMeds(); })
+    .catch(()=>{ btn.disabled=false; });
+}
 function loadEsaHistory(){
+  loadIntraMeds();
   if(!sessionData.hn) return;
   hdFetch('/hd/api/v1/patients/'+sessionData.hn+'/esa-history')
     .then(r=>r.json())

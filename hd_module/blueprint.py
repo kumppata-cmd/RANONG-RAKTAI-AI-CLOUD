@@ -7232,6 +7232,7 @@ def bed_dashboard():
     # Get today's scheduled patients from DB
     today_count = 0
     today_patients = []
+    meds_map = {}
     if db_url:
         try:
             import psycopg2
@@ -7277,6 +7278,27 @@ def bed_dashboard():
                                 tp["checkin"] = _ci[tp["hn"]]
                     except Exception as _ci_e:
                         logger.warning("checkin badge query: %s", _ci_e)
+                    # 💊 แผนที่ยาต่อ HN (additive — ล้มได้ไม่กระทบ): ใช้กับแท็บ "ยา" บนแดชบอร์ด
+                    try:
+                        cur.execute("""
+                            SELECT p.hn, COALESCE(a.n,0), COALESCE(a.intra,0), COALESCE(a.pending,0),
+                                   COALESCE(p.drug_allergies,'')
+                            FROM hd_patient_mapping p
+                            LEFT JOIN (
+                                SELECT patient_id,
+                                       COUNT(*) FILTER (WHERE is_active) AS n,
+                                       COUNT(*) FILTER (WHERE is_active AND intra_hd) AS intra,
+                                       COUNT(*) FILTER (WHERE COALESCE(verify_status,'confirmed') IN ('pending','ai_draft')) AS pending
+                                FROM hd_medication_orders GROUP BY patient_id
+                            ) a ON a.patient_id = p.id
+                            WHERE a.patient_id IS NOT NULL
+                               OR (p.drug_allergies IS NOT NULL AND p.drug_allergies <> '')
+                        """)
+                        meds_map = {r[0]: {"n": r[1], "intra": r[2], "pending": r[3],
+                                           "allergy": r[4]} for r in cur.fetchall()}
+                    except Exception as _md_e:
+                        logger.warning("meds map query: %s", _md_e)
+                        meds_map = {}
                 conn2.close()
                 today_count = len(today_patients)
         except Exception as e:
@@ -7329,6 +7351,7 @@ def bed_dashboard():
         "completed_in_shift": len(completed_sessions),
         "today_scheduled": today_count,
         "today_patients": today_patients,
+        "meds": meds_map,
         "_debug_sessions_today": debug_total,
         "_debug_detail": debug_detail,
         "_debug_error": _dash_error,
@@ -9536,9 +9559,32 @@ def session_record_view(token):
         except Exception as e:
             logger.warning("record view %s: %s", sid, e)
             rec = None
+    meds = []
+    allergies = ""
     if rec:
         from .hd_worksheet import _sheet_total_uf, _thai_time, _thai_date
         uf_total = _sheet_total_uf(rec) or (int(rec["actual_uf"]) if rec.get("actual_uf") else None)
+        # 💊 ยาปัจจุบัน (ยืนยันแล้วเท่านั้น) — อ่านอย่างเดียว
+        try:
+            import psycopg2 as _pg2
+            conn = _pg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("""SELECT o.drug_name, o.dose, o.frequency, o.intra_hd, p.drug_allergies
+                               FROM hd_medication_orders o JOIN hd_patient_mapping p ON p.id = o.patient_id
+                               WHERE p.hn = %s AND o.is_active = TRUE
+                                 AND COALESCE(o.verify_status,'confirmed') = 'confirmed'
+                               ORDER BY o.intra_hd DESC, o.drug_name""", (rec.get("hn"),))
+                rows = cur.fetchall()
+                meds = [{"drug": r[0], "dose": r[1] or "", "freq": r[2] or "",
+                         "intra": bool(r[3])} for r in rows]
+                allergies = rows[0][4] if rows and rows[0][4] else ""
+                if not allergies:
+                    cur.execute("SELECT drug_allergies FROM hd_patient_mapping WHERE hn = %s", (rec.get("hn"),))
+                    ar = cur.fetchone()
+                    allergies = (ar[0] or "") if ar else ""
+            conn.close()
+        except Exception as me:
+            logger.warning("record view meds: %s", me)
         for v in (rec.get("vitals") or []):
             vit_rows.append({
                 "time": _thai_time(v[6]) if v[6] else "",
@@ -9552,7 +9598,8 @@ def session_record_view(token):
         rec["_t_start"] = _thai_time(rec.get("started_at"))
         rec["_t_end"] = _thai_time(rec.get("ended_at"))
     return render_template("hd_record_view.html", rec=rec, sid=sid,
-                           uf_total=uf_total, vit_rows=vit_rows)
+                           uf_total=uf_total, vit_rows=vit_rows,
+                           meds=meds, allergies=allergies)
 
 
 @hd_bp.route("/food/selftest", methods=["GET"])
@@ -10568,30 +10615,49 @@ def get_patient_medications(hn):
         import psycopg2
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
+            show_all = request.args.get("all") == "1"
             cur.execute("""
                 SELECT o.id, o.drug_name, o.drug_category, o.dose, o.route,
-                       o.frequency, o.is_standing, o.is_active, o.notes, o.ordered_at
+                       o.frequency, o.is_standing, o.is_active, o.notes, o.ordered_at,
+                       o.verify_status, o.intra_hd, o.stop_reason, o.source, o.updated_at,
+                       p.drug_allergies
                 FROM hd_medication_orders o
                 JOIN hd_patient_mapping p ON p.id = o.patient_id
-                WHERE p.hn = %s AND o.is_active = TRUE
-                ORDER BY o.drug_category, o.drug_name
+                WHERE p.hn = %s """ + ("" if show_all else "AND (o.is_active = TRUE OR o.verify_status = 'ai_draft')") + """
+                ORDER BY o.is_active DESC, o.drug_category, o.drug_name
             """, (hn,))
             rows = cur.fetchall()
         conn.close()
         orders = [{"id": r[0], "drug": r[1], "category": r[2], "dose": r[3],
                    "route": r[4], "frequency": r[5], "standing": r[6],
                    "active": r[7], "notes": r[8],
-                   "ordered_at": r[9].isoformat() if r[9] else None} for r in rows]
-        return jsonify({"orders": orders})
+                   "ordered_at": r[9].isoformat() if r[9] else None,
+                   "verify_status": r[10] or "confirmed", "intra_hd": bool(r[11]),
+                   "stop_reason": r[12], "source": r[13] or "manual",
+                   "updated_at": r[14].isoformat() if r[14] else None} for r in rows]
+        allergies = rows[0][15] if rows else None
+        if allergies is None:
+            try:
+                conn = psycopg2.connect(db_url, connect_timeout=5)
+                with conn.cursor() as cur:
+                    cur.execute("SELECT drug_allergies FROM hd_patient_mapping WHERE hn = %s", (hn,))
+                    ar = cur.fetchone()
+                    allergies = ar[0] if ar else None
+                conn.close()
+            except Exception:
+                allergies = None
+        return jsonify({"orders": orders, "allergies": allergies or "",
+                        "pending": sum(1 for o in orders if o["verify_status"] in ("pending", "ai_draft"))})
     except Exception as e:
         logger.error("get_medications error: %s", e)
         return jsonify({"orders": [], "error": str(e)})
 
 
 @hd_bp.route("/patients/<hn>/medications", methods=["POST"])
-@require_role("physician", "admin")
+@require_role("physician", "nurse", "admin")
 def create_medication_order(hn):
-    """Create a new medication order."""
+    """Create a new medication order.
+    22 พ.ย. 2569 (แพทย์สั่ง): พยาบาลเพิ่มได้ — มีผลทันทีแต่ติดสถานะ 'pending' รอแพทย์รับทราบ."""
     import os
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not db_url:
@@ -10609,20 +10675,241 @@ def create_medication_order(hn):
             if not pr:
                 conn.close()
                 return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            from .medications import med_warnings, ST_PENDING, ST_OK
+            vstat = ST_OK if g.get("hd_role") in ("physician", "admin") else ST_PENDING
+            warns = med_warnings(cur, pr[0], drug)
             cur.execute("""
                 INSERT INTO hd_medication_orders
                     (patient_id, drug_name, drug_category, dose, route, frequency,
-                     is_standing, ordered_by, notes)
-                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id
+                     is_standing, ordered_by, notes, verify_status, intra_hd, source, updated_at, updated_by)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),%s) RETURNING id
             """, (pr[0], drug, data.get("category", "other"),
-                  data.get("dose"), data.get("route", "IV"),
+                  data.get("dose"), data.get("route", "PO"),
                   data.get("frequency"), data.get("standing", False),
-                  g.get("hd_user_id"), data.get("notes")))
+                  g.get("hd_user_id"), data.get("notes"), vstat,
+                  bool(data.get("intra_hd")), "manual", g.get("hd_user_id")))
             oid = cur.fetchone()[0]
         conn.commit()
         conn.close()
-        return jsonify({"id": oid, "drug": drug}), 201
+        log_action(user_id=g.get("hd_user_id"), action="med.create", resource_type="medication",
+                   resource_id=oid, new_values={"hn": hn, "drug": drug, "status": vstat},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"id": oid, "drug": drug, "verify_status": vstat, "warnings": warns}), 201
     except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+def _med_touch(data, role, user_id):
+    """ฟิลด์ update ร่วม: พยาบาล → pending, แพทย์/แอดมิน → confirmed."""
+    from .medications import ST_PENDING, ST_OK
+    return (ST_OK if role in ("physician", "admin") else ST_PENDING), user_id
+
+
+@hd_bp.route("/patients/<hn>/medications/<int:oid>", methods=["PUT"])
+@require_role("physician", "nurse", "admin")
+def update_medication_order(hn, oid):
+    """แก้ไขยา (ขนาด/วิธี/หมายเหตุ/ระหว่างฟอก) — พยาบาลแก้ได้ ติดสถานะรอแพทย์รับทราบ."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    data = request.get_json(silent=True) or {}
+    allowed = {k: data[k] for k in ("drug_name", "dose", "route", "frequency", "notes",
+                                    "drug_category", "intra_hd") if k in data}
+    if not allowed:
+        return jsonify({"error": "ไม่มีฟิลด์ให้แก้"}), 400
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT o.id, o.patient_id, o.drug_name, o.dose, o.frequency, o.notes
+                           FROM hd_medication_orders o JOIN hd_patient_mapping p ON p.id = o.patient_id
+                           WHERE o.id = %s AND p.hn = %s""", (oid, hn))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบรายการยา"}), 404
+            old = {"drug": row[2], "dose": row[3], "frequency": row[4], "notes": row[5]}
+            vstat, uid = _med_touch(data, g.get("hd_role"), g.get("hd_user_id"))
+            sets, vals = [], []
+            for k, v in allowed.items():
+                sets.append(f"{k} = %s")
+                vals.append(bool(v) if k == "intra_hd" else v)
+            sets += ["verify_status = %s", "updated_at = NOW()", "updated_by = %s"]
+            vals += [vstat, uid, oid]
+            cur.execute(f"UPDATE hd_medication_orders SET {', '.join(sets)} WHERE id = %s", vals)
+            from .medications import med_warnings
+            warns = med_warnings(cur, row[1], allowed.get("drug_name", row[2]), exclude_id=oid)
+        conn.commit()
+        conn.close()
+        log_action(user_id=uid, action="med.update", resource_type="medication", resource_id=oid,
+                   old_values=old, new_values=allowed, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "verify_status": vstat, "warnings": warns})
+    except Exception as e:
+        logger.error("update med: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/patients/<hn>/medications/<int:oid>/stop", methods=["POST"])
+@hd_bp.route("/patients/<hn>/medications/<int:oid>/resume", methods=["POST"])
+@hd_bp.route("/patients/<hn>/medications/<int:oid>/ack", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def medication_action(hn, oid):
+    """หยุดยา (พร้อมเหตุผล) / กลับมาใช้ / แพทย์รับทราบ-ยืนยัน (ack: แพทย์/แอดมินเท่านั้น)."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    action = request.path.rstrip("/").rsplit("/", 1)[-1]
+    role = g.get("hd_role")
+    if action == "ack" and role not in ("physician", "admin"):
+        return jsonify({"error": "เฉพาะแพทย์/แอดมินเท่านั้นที่ยืนยันได้"}), 403
+    data = request.get_json(silent=True) or {}
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT o.id, o.drug_name, o.verify_status FROM hd_medication_orders o
+                           JOIN hd_patient_mapping p ON p.id = o.patient_id
+                           WHERE o.id = %s AND p.hn = %s""", (oid, hn))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบรายการยา"}), 404
+            from .medications import ST_PENDING, ST_OK
+            uid = g.get("hd_user_id")
+            if action == "stop":
+                vstat = ST_OK if role in ("physician", "admin") else ST_PENDING
+                cur.execute("""UPDATE hd_medication_orders SET is_active = FALSE, stop_reason = %s,
+                               verify_status = %s, updated_at = NOW(), updated_by = %s WHERE id = %s""",
+                            ((data.get("reason") or "")[:200], vstat, uid, oid))
+            elif action == "resume":
+                vstat = ST_OK if role in ("physician", "admin") else ST_PENDING
+                cur.execute("""UPDATE hd_medication_orders SET is_active = TRUE, stop_reason = NULL,
+                               verify_status = %s, updated_at = NOW(), updated_by = %s WHERE id = %s""",
+                            (vstat, uid, oid))
+            else:  # ack — ยืนยันร่าง AI / รับทราบการแก้ของพยาบาล
+                vstat = ST_OK
+                cur.execute("""UPDATE hd_medication_orders SET verify_status = %s, is_active = TRUE,
+                               updated_at = NOW(), updated_by = %s WHERE id = %s""", (vstat, uid, oid))
+        conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action=f"med.{action}", resource_type="medication",
+                   resource_id=oid, new_values={"hn": hn, "drug": row[1], "reason": data.get("reason")},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "verify_status": vstat})
+    except Exception as e:
+        logger.error("med action %s: %s", action, e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/patients/<hn>/allergies", methods=["PUT"])
+@require_role("physician", "nurse", "admin")
+def update_allergies(hn):
+    """ข้อ 1: บันทึก/แก้ยาที่แพ้ (คั่นด้วย , ) — โชว์ป้ายแดงทุกหน้า."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    data = request.get_json(silent=True) or {}
+    val = (data.get("allergies") or "").strip()[:500]
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("UPDATE hd_patient_mapping SET drug_allergies = %s WHERE hn = %s RETURNING id",
+                        (val, hn))
+            if not cur.fetchone():
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+        conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action="med.allergies", resource_type="patient",
+                   new_values={"hn": hn, "allergies": val}, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "allergies": val})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/medications/read-photo", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def medications_read_photo():
+    """AI อ่านรูปซองยา/ใบรายการยา → สร้างรายการ 'ai_draft' รอแพทย์ยืนยันทีละตัว.
+    form: hn, image. ร่างยังไม่นับเป็นยาปัจจุบันจนกว่าจะกดยืนยัน."""
+    import os
+    hn = (request.form.get("hn") or "").strip()
+    f = request.files.get("image")
+    if not hn or not f:
+        return jsonify({"error": "ต้องระบุ HN และรูป"}), 400
+    data = f.read()
+    if len(data) > 10 * 1024 * 1024:
+        return jsonify({"error": "รูปใหญ่เกิน 10MB"}), 413
+    from .medications import read_meds_photo, med_warnings, ST_AI
+    items, err = read_meds_photo(data)
+    if items is None:
+        msg = {"no_api_key": "ระบบ AI ยังไม่ได้ตั้งค่า — แจ้งแอดมิน",
+               "no_credit": "ระบบ AI ไม่พร้อม — เครดิตหมด แจ้งแอดมิน"}.get(
+            err, "อ่านรูปไม่สำเร็จ ลองถ่ายใหม่ให้ชัด/สว่างขึ้น")
+        return jsonify({"error": msg, "code": err}), 502
+    if not items:
+        return jsonify({"items": [], "message": "ไม่พบรายการยาในรูป — ถ่ายให้เห็นฉลาก/ชื่อยาชัด ๆ"}), 200
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            pr = cur.fetchone()
+            if not pr:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            out = []
+            for it in items:
+                warns = med_warnings(cur, pr[0], it["drug"])
+                cur.execute("""
+                    INSERT INTO hd_medication_orders
+                        (patient_id, drug_name, dose, route, frequency, drug_category,
+                         is_active, verify_status, source, ordered_by, updated_at, updated_by)
+                    VALUES (%s,%s,%s,%s,%s,'other',FALSE,%s,'photo',%s,NOW(),%s) RETURNING id
+                """, (pr[0], it["drug"], it["dose"], it["route"], it["frequency"],
+                      ST_AI, g.get("hd_user_id"), g.get("hd_user_id")))
+                it["id"] = cur.fetchone()[0]
+                it["warnings"] = warns
+                out.append(it)
+        conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action="med.ocr", resource_type="patient",
+                   new_values={"hn": hn, "n": len(out)}, ip_address=request.remote_addr or "")
+        return jsonify({"items": out,
+                        "message": f"อ่านได้ {len(out)} รายการ — เป็นฉบับร่าง รอแพทย์กดยืนยันทีละรายการ"})
+    except Exception as e:
+        logger.error("meds read-photo: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/patients/<hn>/medications/pdf", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def medications_pdf(hn):
+    """ข้อ 4: ใบรายการยาปัจจุบัน (PDF) — เฉพาะยา active ที่ยืนยันแล้ว."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT p.patient_name, p.drug_allergies FROM hd_patient_mapping p WHERE p.hn = %s""", (hn,))
+            pr = cur.fetchone()
+            if not pr:
+                conn.close()
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            cur.execute("""SELECT o.drug_name, o.dose, o.frequency, o.notes, o.intra_hd
+                           FROM hd_medication_orders o JOIN hd_patient_mapping p ON p.id = o.patient_id
+                           WHERE p.hn = %s AND o.is_active = TRUE AND COALESCE(o.verify_status,'confirmed') = 'confirmed'
+                           ORDER BY o.intra_hd DESC, o.drug_name""", (hn,))
+            orders = [{"drug": r[0], "dose": r[1], "frequency": r[2], "notes": r[3],
+                       "intra_hd": bool(r[4])} for r in cur.fetchall()]
+        conn.close()
+        from .medications import build_med_list_pdf
+        pdf = build_med_list_pdf({"name": pr[0], "hn": hn}, orders, pr[1] or "")
+        from flask import Response
+        return Response(pdf, mimetype="application/pdf",
+                        headers={"Content-Disposition": f"inline; filename=meds_{hn}.pdf"})
+    except Exception as e:
+        logger.error("meds pdf: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -10644,10 +10931,28 @@ def session_medications(sid):
                     FROM hd_medication_given WHERE session_id = %s ORDER BY given_at
                 """, (sid,))
                 rows = cur.fetchall()
+                # 💊 ข้อ 2: ยาระหว่างฟอกที่ "ถึงกำหนดวันนี้" = คำสั่งยืนที่ติ๊ก intra_hd
+                # และยังไม่ถูกบันทึกว่าให้แล้วในรอบนี้ (additive — ล้มได้ไม่กระทบ)
+                due = []
+                try:
+                    cur.execute("""
+                        SELECT o.id, o.drug_name, o.dose, o.route
+                        FROM hd_medication_orders o
+                        JOIN hd_sessions s ON s.patient_id = o.patient_id
+                        WHERE s.id = %s AND o.is_active = TRUE AND o.intra_hd = TRUE
+                          AND COALESCE(o.verify_status,'confirmed') = 'confirmed'
+                          AND o.id NOT IN (SELECT COALESCE(order_id, -1)
+                                           FROM hd_medication_given WHERE session_id = %s)
+                        ORDER BY o.drug_name
+                    """, (sid, sid))
+                    due = [{"order_id": r[0], "drug": r[1], "dose": r[2], "route": r[3]}
+                           for r in cur.fetchall()]
+                except Exception as _de:
+                    logger.warning("meds due query: %s", _de)
             conn.close()
             return jsonify({"given": [{"id": r[0], "drug": r[1], "dose": r[2],
                 "route": r[3], "time": r[4].isoformat() if r[4] else None,
-                "slot": r[5], "notes": r[6]} for r in rows]})
+                "slot": r[5], "notes": r[6]} for r in rows], "due": due})
         # POST
         data = request.get_json(silent=True) or {}
         with conn.cursor() as cur:
