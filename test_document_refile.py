@@ -54,6 +54,25 @@ class TestMoveCommandParsing(unittest.TestCase):
         self.assertIsNone(self.parse("ย้ายเอกสาร a1b2c3d4 57042 บิล"))
 
 
+    def test_rejects_incomplete_commands(self):
+        for text in ("ย้ายเอกสาร a1b2c3d4",     # ไม่มี HN
+                     "ย้ายเอกสาร",               # ไม่มีอะไรเลย
+                     "ย้ายเอกสาร zzzz 57042",    # รหัสไม่ใช่ hex
+                     "ย้ายเอกสาร abc 57042",     # รหัสสั้นเกินไป
+                     ""):
+            with self.subTest(text=text):
+                self.assertIsNone(self.parse(text))
+
+    def test_does_not_collide_with_other_commands(self):
+        """ต้องไม่จับคำสั่งอื่นผิด — อยู่ใน elif chain เดียวกัน"""
+        for text in ("ผู้ป่วย 57042", "รับทราบ a1b2c3d4",
+                     "แจ้งเตือนค้าง", "ล้างผู้ป่วย",
+                     "ค้นหา เบาหวาน", "ทะเบียนผู้ป่วย"):
+            with self.subTest(text=text):
+                self.assertIsNone(self.parse(text))
+
+
+
 class TestMoveBatchParsing(unittest.TestCase):
     """22 พ.ย. 2569: หลายคำสั่งย้ายใน 1 ข้อความ — กันข้อความหลุดไปเข้า FAQ"""
 
@@ -81,24 +100,6 @@ class TestMoveBatchParsing(unittest.TestCase):
     def test_single_line_still_works(self):
         got = self.batch("ย้ายเอกสาร a1b2c3d4 57042")
         self.assertEqual(got, [("a1b2c3d4", "57042", None)])
-
-    def test_rejects_incomplete_commands(self):
-        for text in ("ย้ายเอกสาร a1b2c3d4",     # ไม่มี HN
-                     "ย้ายเอกสาร",               # ไม่มีอะไรเลย
-                     "ย้ายเอกสาร zzzz 57042",    # รหัสไม่ใช่ hex
-                     "ย้ายเอกสาร abc 57042",     # รหัสสั้นเกินไป
-                     ""):
-            with self.subTest(text=text):
-                self.assertIsNone(self.parse(text))
-
-    def test_does_not_collide_with_other_commands(self):
-        """ต้องไม่จับคำสั่งอื่นผิด — อยู่ใน elif chain เดียวกัน"""
-        for text in ("ผู้ป่วย 57042", "รับทราบ a1b2c3d4",
-                     "แจ้งเตือนค้าง", "ล้างผู้ป่วย",
-                     "ค้นหา เบาหวาน", "ทะเบียนผู้ป่วย"):
-            with self.subTest(text=text):
-                self.assertIsNone(self.parse(text))
-
 
 class FakeBlob:
     def __init__(self, name, bucket):
