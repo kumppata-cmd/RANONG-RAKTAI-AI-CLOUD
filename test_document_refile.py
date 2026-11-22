@@ -53,6 +53,35 @@ class TestMoveCommandParsing(unittest.TestCase):
     def test_unknown_category_suffix_rejected(self):
         self.assertIsNone(self.parse("ย้ายเอกสาร a1b2c3d4 57042 บิล"))
 
+
+class TestMoveBatchParsing(unittest.TestCase):
+    """22 พ.ย. 2569: หลายคำสั่งย้ายใน 1 ข้อความ — กันข้อความหลุดไปเข้า FAQ"""
+
+    def setUp(self):
+        self.batch = _server()._parse_move_batch
+
+    def test_three_commands_one_message(self):
+        got = self.batch("ย้ายเอกสาร 8dfe9dbd 67367 ยา\n"
+                         "ย้ายเอกสาร d4f7c738 67379 ยา\n"
+                         "ย้ายเอกสาร e34eb1b3 67379 ยา")
+        self.assertEqual(len(got), 3)
+        self.assertEqual(got[0], ("8dfe9dbd", "67367", "rx"))
+        self.assertEqual(got[2], ("e34eb1b3", "67379", "rx"))
+
+    def test_mixed_lines_reported_not_dropped(self):
+        got = self.batch("ย้ายเอกสาร 8dfe9dbd 67367 แล็บ\nสวัสดีครับ")
+        self.assertEqual(got[0], ("8dfe9dbd", "67367", "lab"))
+        self.assertEqual(got[1], (None, "สวัสดีครับ", None))
+
+    def test_plain_text_returns_none(self):
+        for text in ("ยาคืออะไร", "สอบถามเรื่องยา\nกินยังไง", "", "  \n "):
+            with self.subTest(text=text):
+                self.assertIsNone(self.batch(text))
+
+    def test_single_line_still_works(self):
+        got = self.batch("ย้ายเอกสาร a1b2c3d4 57042")
+        self.assertEqual(got, [("a1b2c3d4", "57042", None)])
+
     def test_rejects_incomplete_commands(self):
         for text in ("ย้ายเอกสาร a1b2c3d4",     # ไม่มี HN
                      "ย้ายเอกสาร",               # ไม่มีอะไรเลย

@@ -16806,6 +16806,24 @@ def _parse_move_document(text: str):
     return (m.group(1), m.group(2), new_cat)
 
 
+def _parse_move_batch(text: str):
+    """หลายคำสั่งย้ายใน 1 ข้อความ (บรรทัดละคำสั่ง) — 22 พ.ย. 2569
+
+    workflow จริง: แพทย์พิมพ์ย้ายทีละหลายใบในข้อความเดียว ถ้า parser
+    รับแค่บรรทัดเดียว ข้อความจะหลุดไปเข้า FAQ (เช่นคำว่า "ยา" → คำแนะนำยา)
+    คืน list ของ (doc, hn, cat) ต่อบรรทัด — บรรทัดที่ไม่ใช่คำสั่งคืน
+    (None, ข้อความบรรทัดนั้น, None) เพื่อรายงานกลับ · คืน None เมื่อ
+    ไม่มีบรรทัดไหนเป็นคำสั่งย้ายเลย (ไม่แตะพฤติกรรมข้อความอื่น)"""
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+    if not lines:
+        return None
+    parsed = [_parse_move_document(ln) for ln in lines]
+    if not any(p is not None for p in parsed):
+        return None
+    return [p if p is not None else (None, ln, None)
+            for ln, p in zip(lines, parsed)]
+
+
 _CATEGORY_WORDS = {
     "lab": "lab", "แล็บ": "lab", "ผลแล็บ": "lab", "ผลตรวจ": "lab",
     "rx": "rx", "ยา": "rx", "ใบยา": "rx", "ใบสั่งยา": "rx",
@@ -19384,8 +19402,8 @@ def webhook():
                             reply_token,
                             _mb.get("message") or f"❌ {_mb.get('error', 'ย้ายไม่สำเร็จ')}",
                         )
-                elif _parse_move_document(text) is not None:
-                    _mv_doc, _mv_hn, _mv_cat = _parse_move_document(text)
+                elif _parse_move_batch(text) is not None:
+                    _mv_items = _parse_move_batch(text)
                     if (user_hash not in PHYSICIAN_USERS
                             and user_hash not in ADMIN_USERS):
                         audit_logger.log(
@@ -19397,17 +19415,25 @@ def webhook():
                             "ที่ย้ายเอกสารได้",
                         )
                     else:
-                        _mv_res = _move_document_to_patient(
-                            _mv_doc, _mv_hn, user_hash, new_cat=_mv_cat,
-                        )
-                        if _mv_res.get("error"):
-                            reply_message(
-                                reply_token, f"❌ {_mv_res['error']}"
+                        _mv_out = []
+                        for _mv_doc, _mv_hn, _mv_cat in _mv_items:
+                            if _mv_doc is None:
+                                _mv_out.append(f"⚠️ ไม่เข้าใจบรรทัด: {_mv_hn[:50]}")
+                                continue
+                            _mv_res = _move_document_to_patient(
+                                _mv_doc, _mv_hn, user_hash, new_cat=_mv_cat,
                             )
+                            _mv_out.append(
+                                f"❌ {_mv_res['error']}" if _mv_res.get("error")
+                                else _mv_res.get("message", "✅ ดำเนินการแล้ว")
+                            )
+                        if len(_mv_out) == 1:
+                            reply_message(reply_token, _mv_out[0])
                         else:
                             reply_message(
                                 reply_token,
-                                _mv_res.get("message", "✅ ดำเนินการแล้ว"),
+                                ("📦 ย้ายเอกสาร " + str(len(_mv_out)) + " รายการ\n\n"
+                                 + "\n\n".join(_mv_out))[:4900],
                             )
                 # ── เปลี่ยนประเภทเอกสารที่จัดหมวดไว้ผิด ─────────────
                 # ของเดิมแก้ได้เฉพาะตอนเพิ่งส่งเข้ามา (ตอบเลข 1-4)
