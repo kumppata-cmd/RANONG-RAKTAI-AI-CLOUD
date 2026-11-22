@@ -105,3 +105,85 @@ class TestCombined:
         flags = precision_flags({"k": 12, "hb": 10, "hct": 45}, {"k": 4})
         for f in flags:
             assert isinstance(f, str) and len(f) > 10
+
+
+class TestNewAnalytes2026_11_22:
+    """PLT / HCO3 / WBC / Anti-HIV — แพทย์สั่งเพิ่ม 22 พ.ย. 2569"""
+
+    def test_new_numeric_cols_registered(self):
+        from hd_module.lab_sync import NUMERIC_COLS, TEXT_COLS, ANALYTE_COL
+        for c in ("plt", "hco3", "wbc"):
+            assert c in NUMERIC_COLS
+        assert "antihiv" in TEXT_COLS
+        assert ANALYTE_COL["Platelet"] == "plt"
+        assert ANALYTE_COL["Bicarbonate"] == "hco3"
+        assert ANALYTE_COL["Anti-HIV"] == "antihiv"
+
+    def test_plt_hco3_plausibility(self):
+        assert precision_flags({"plt": 250, "hco3": 22, "wbc": 7.5}) == []
+        assert len(precision_flags({"plt": 2500})) == 1   # OCR อ่าน /uL ดิบ
+        assert len(precision_flags({"hco3": 220})) == 1   # จุดทศนิยมหาย
+
+    def test_report_to_row_serology(self):
+        from hd_module.lab_sync import report_to_row
+        rep = {"results": [
+            {"analyte": "Anti-HIV", "value": 0.0, "raw_text": "Anti HIV : Non-reactive"},
+            {"analyte": "HBsAg", "value": 1.0, "raw_text": "HBsAg : Reactive"},
+            {"analyte": "Platelet", "value": 245.0},
+            {"analyte": "Bicarbonate", "value": 21.5},
+        ]}
+        row = report_to_row(rep)
+        assert row["antihiv"] == "negative"
+        assert row["hbsag"] == "positive"
+        assert row["plt"] == 245.0
+        assert row["hco3"] == 21.5
+
+
+class TestSerologyExtractor:
+    """Strategy 5 ใน lab_extractor (root) — อ่านผลเชิงคุณภาพจากใบจริง"""
+
+    def _extract(self, text):
+        import lab_extractor
+        rep = lab_extractor.extract_lab_results_from_text(text, "testdoc1")
+        return {r.analyte: r.value for r in rep.results}, rep
+
+    def test_full_serology_block(self):
+        got, _ = self._extract(
+            "HBsAg : Non-reactive\nAnti-HBs : Reactive\n"
+            "Anti HCV : Non-reactive\nAnti-HIV : Non-reactive\n")
+        assert got.get("HBsAg") == 0.0
+        assert got.get("Anti-HBs") == 1.0
+        assert got.get("Anti-HCV") == 0.0
+        assert got.get("Anti-HIV") == 0.0
+
+    def test_positive_negative_words(self):
+        got, _ = self._extract("HBsAg: Positive\nAnti HIV Ab: Negative")
+        assert got.get("HBsAg") == 1.0
+        assert got.get("Anti-HIV") == 0.0
+
+    def test_thai_results(self):
+        got, _ = self._extract("HBsAg ผลลบ\nAnti-HCV ไม่พบ")
+        assert got.get("HBsAg") == 0.0
+        assert got.get("Anti-HCV") == 0.0
+
+    def test_result_on_next_line(self):
+        got, _ = self._extract("Anti-HCV\nNon-reactive")
+        assert got.get("Anti-HCV") == 0.0
+
+    def test_no_result_word_not_captured(self):
+        # มีแต่ชื่อการตรวจ ไม่มีคำบอกผล → ไม่เดา ไม่เก็บ
+        got, _ = self._extract("ส่งตรวจ Anti-HIV และ HBsAg พรุ่งนี้เช้า")
+        # "พบ" ไม่ได้ตามหลังชื่อใน 30 ตัวอักษร → ต้องไม่มีผล หรือถ้าจับได้ต้องไม่ใช่ positive มั่ว
+        assert "HBsAg" not in got or got.get("HBsAg") in (0.0,)
+
+    def test_numeric_labs_unaffected(self):
+        got, rep = self._extract(
+            "Creatinine 5.2 mg/dL\nPotassium 4.8 mEq/L\nHBsAg : Non-reactive")
+        assert got.get("Creatinine") == 5.2
+        assert got.get("Potassium") == 4.8
+        assert got.get("HBsAg") == 0.0
+
+    def test_plt_hco3_already_extracted_by_core(self):
+        got, _ = self._extract("Platelet 245 x10^3/uL\nHCO3 21.5 mEq/L")
+        assert got.get("Platelet") == 245.0
+        assert got.get("Bicarbonate") == 21.5

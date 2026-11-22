@@ -630,6 +630,59 @@ def _find_column_major_runs(text: str):
     return runs
 
 
+# ═══════════════════════════════════════════════════════════
+# Serology (qualitative) — 2026-11-22, แพทย์สั่งเพิ่ม
+# ═══════════════════════════════════════════════════════════
+
+# ชื่อบนใบแล็บ → canonical (ตรงกับ ANALYTE_COL ใน hd_module.lab_sync)
+_SERO_NAMES = [
+    (r"hbs\s*-?\s*ag|hbsag", "HBsAg"),
+    (r"anti\s*-?\s*hbs|hbs\s*-?\s*ab|hbsab", "Anti-HBs"),
+    (r"anti\s*-?\s*hcv|hcv\s*-?\s*ab", "Anti-HCV"),
+    (r"anti\s*-?\s*hiv|hiv\s*ag\s*/?\s*ab|hiv\s*-?\s*ab", "Anti-HIV"),
+]
+# คำบอกผล: ต้องเช็ค "ลบ" ก่อน "บวก" เพราะ non-reactive มีคำว่า reactive อยู่ข้างใน
+_SERO_NEG_RE = r"non[-\s]?reactive|negative|\bneg\b|ไม่พบ|ผลลบ|\bลบ\b"
+_SERO_POS_RE = r"reactive|positive|\bpos\b|ผลบวก|\bบวก\b|พบ"
+_SERO_RES_RE = re.compile(
+    r"(?P<res>" + _SERO_NEG_RE + r"|" + _SERO_POS_RE + r")", re.IGNORECASE)
+_SERO_NEG_CHECK = re.compile(r"^(" + _SERO_NEG_RE + r")$", re.IGNORECASE)
+
+
+def _extract_serology(text: str, extraction_method: str) -> list:
+    """ดึงผล serology เชิงคุณภาพจากข้อความทั้งฉบับ.
+
+    จับ "ชื่อการตรวจ" แล้วมองไปข้างหน้าไม่เกิน 30 ตัวอักษร (ข้ามบรรทัดได้ 1
+    บรรทัด) หาคำบอกผล — ไม่เจอคำบอกผล = ไม่เก็บ (ปลอดภัยกว่าเดา)
+    """
+    out = []
+    if not text:
+        return out
+    seen = set()
+    for name_pat, canonical in _SERO_NAMES:
+        if canonical in seen:
+            continue
+        m = re.search(r"(?:" + name_pat + r")\b[\s:=\-]{0,6}[\s\S]{0,30}?" +
+                      r"(?P<res>" + _SERO_NEG_RE + r"|" + _SERO_POS_RE + r")",
+                      text, re.IGNORECASE)
+        if not m:
+            continue
+        res_word = m.group("res").strip()
+        is_neg = bool(_SERO_NEG_CHECK.match(res_word))
+        out.append(LabResult(
+            analyte=canonical,
+            value=0.0 if is_neg else 1.0,
+            unit="",
+            reference_range="negative",
+            confidence=0.85,
+            extraction_method=extraction_method,
+            flags=[],
+            raw_text=" ".join(m.group(0).split())[:120],
+        ))
+        seen.add(canonical)
+    return out
+
+
 def extract_lab_results_from_text(
     text: str,
     source_document_id: str,
@@ -972,6 +1025,23 @@ def extract_lab_results_from_text(
         if "physiologic_impossible" in r.flags:
             r.confidence = 0.3
         r.confidence = round(r.confidence, 2)
+
+    # ── Strategy 5: Serology (ผลเชิงคุณภาพ) — HBsAg / Anti-HBs / Anti-HCV / Anti-HIV ──
+    #
+    # ผลพวกนี้ไม่ใช่ตัวเลขแต่เป็นคำ (Reactive/Non-reactive/Positive/Negative)
+    # strategy 1-4 ซึ่งบังคับค่าตัวเลขจึงอ่านไม่ได้เลย — pass นี้แยกต่างหาก
+    # ไม่แตะ ANALYTE_ALIASES เพื่อไม่กระทบ "ชุดชื่อ" guard ของ strategy เดิม
+    #
+    # การเก็บค่า: positive → value 1.0, negative → value 0.0 (คงชนิด float
+    # ของ LabResult ให้ทุกหน้าจอเดิมใช้ได้) และ raw_text เก็บข้อความจริงไว้
+    # ปลายทาง (hd_module.lab_sync.report_to_row) แปลงเป็น positive/negative
+    # ยกเว้น Anti-HBs ที่เจอเป็นตัวเลข titer: strategy เดิมอ่านไม่ได้อยู่แล้ว
+    # (ไม่อยู่ใน aliases) จึงมาเข้าทางนี้เมื่อมีคำกำกับผลเท่านั้น
+    for sero_result in _extract_serology(text, extraction_method):
+        if sero_result.analyte in seen_analytes:
+            continue
+        results.append(sero_result)
+        seen_analytes.add(sero_result.analyte)
 
     # Generate warnings
     if not results:

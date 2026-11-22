@@ -2940,7 +2940,8 @@ def pending_inbox():
                                 "at": r[8].isoformat()[:16] if r[8] else None}
                                for r in med_rows]
             cur.execute("""SELECT d.id, d.hn, p.patient_name, d.specimen_date, d.delta_flags,
-                                  d.hb, d.hct, d.k, d.na, d.ca, d.phos, d.doc_id
+                                  d.hb, d.hct, d.k, d.na, d.ca, d.phos, d.doc_id,
+                                  d.plt, d.hco3, d.hbsag, d.antihcv, d.antihiv
                            FROM hd_lab_docs d
                            LEFT JOIN hd_patient_mapping p ON p.id = d.patient_id
                            WHERE COALESCE(d.verified_status, 'pending') = 'pending'
@@ -2955,7 +2956,10 @@ def pending_inbox():
                                 "date": r[3].isoformat() if r[3] else None,
                                 "flags": r[4] or "", "hb": _f(r[5]), "hct": _f(r[6]),
                                 "k": _f(r[7]), "na": _f(r[8]), "ca": _f(r[9]),
-                                "phos": _f(r[10]), "doc8": (r[11] or "")[:8]}
+                                "phos": _f(r[10]), "doc8": (r[11] or "")[:8],
+                                "plt": _f(r[12]), "hco3": _f(r[13]),
+                                "sero": [s for s, v in (("HBsAg", r[14]), ("Anti-HCV", r[15]),
+                                                        ("Anti-HIV", r[16])) if v == "positive"]}
                                for r in lab_rows]
         conn.close()
     except Exception as e:
@@ -3484,11 +3488,14 @@ def labs_import_history():
 
 # ── Lab Unified (1+2+3): ลงครั้งเดียวเห็นทุกหน้า · อ่านจากรูปถ่าย · กันซ้ำข้ามแหล่ง ──
 _UNIFIED_COLS = ["hb", "hct", "k", "na", "ca", "phos", "albumin", "pth", "ferritin", "tsat",
-                 "ktv", "urr", "bun", "creatinine", "hbsag", "antihcv"]
+                 "ktv", "urr", "bun", "creatinine", "hbsag", "antihcv",
+                 "plt", "hco3", "wbc", "antihbs", "antihiv"]
 _UNIFIED_TO_TEMPLATE = {"hb": "hemoglobin", "hct": "hematocrit", "k": "potassium", "na": "sodium",
                         "ca": "calcium", "phos": "phosphate", "albumin": "albumin", "pth": "ipth",
                         "ferritin": "ferritin", "tsat": "tsat", "ktv": "kt_v", "urr": "urr",
-                        "bun": "bun", "creatinine": "creatinine", "hbsag": "hep_b", "antihcv": "hep_c"}
+                        "bun": "bun", "creatinine": "creatinine", "hbsag": "hep_b", "antihcv": "hep_c",
+                        "plt": "plt", "hco3": "hco3", "wbc": "wbc",
+                        "antihbs": "anti_hbs", "antihiv": "anti_hiv"}
 
 
 @hd_bp.route("/patients/hn/<hn>/labs-unified", methods=["GET"])
@@ -3523,7 +3530,7 @@ def get_patient_labs_unified(hn):
                      "source": r[2] or ""}
             for i, c in enumerate(_UNIFIED_COLS):
                 v = r[3 + i]
-                entry[_UNIFIED_TO_TEMPLATE[c]] = (float(v) if v is not None and c not in ("hbsag", "antihcv") else v)
+                entry[_UNIFIED_TO_TEMPLATE[c]] = (float(v) if v is not None and c not in ("hbsag", "antihcv", "antihbs", "antihiv") else v)
             labs.append(entry)
             if len(labs) >= 24:
                 break

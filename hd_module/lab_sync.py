@@ -26,10 +26,12 @@ ANALYTE_COL = {
     "Ferritin": "ferritin", "TSAT": "tsat", "Kt/V": "ktv", "URR": "urr",
     "Creatinine": "creatinine", "BUN": "bun", "Glucose": "glucose", "FBS": "glucose",
     "HBsAg": "hbsag", "Anti-HCV": "antihcv", "Anti-HBs": "antihbs",
+    # 2026-11-22 แพทย์สั่งเพิ่ม: PLT / HCO3 / WBC / Anti-HIV
+    "Platelet": "plt", "Bicarbonate": "hco3", "WBC": "wbc", "Anti-HIV": "antihiv",
 }
 NUMERIC_COLS = ["hb", "hct", "k", "na", "ca", "phos", "albumin", "pth", "ferritin", "tsat",
-                "ktv", "urr", "creatinine", "bun", "glucose"]
-TEXT_COLS = ["hbsag", "antihcv", "antihbs"]
+                "ktv", "urr", "creatinine", "bun", "glucose", "plt", "hco3", "wbc"]
+TEXT_COLS = ["hbsag", "antihcv", "antihbs", "antihiv"]
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS hd_lab_docs (
@@ -45,6 +47,7 @@ CREATE TABLE IF NOT EXISTS hd_lab_docs (
     tsat NUMERIC(5,1), ktv NUMERIC(4,2), urr NUMERIC(5,1), creatinine NUMERIC(6,2),
     bun NUMERIC(6,1), glucose NUMERIC(6,1),
     hbsag VARCHAR(20), antihcv VARCHAR(20), antihbs VARCHAR(20),
+    plt NUMERIC(7,1), hco3 NUMERIC(4,1), wbc NUMERIC(6,2), antihiv VARCHAR(20),
     synced_at TIMESTAMP DEFAULT NOW(),
     verified_status VARCHAR(20) DEFAULT 'pending',
     verified_by VARCHAR(80),
@@ -141,6 +144,7 @@ PLAUSIBLE_RANGE = {
     "hb": (3, 20), "hct": (9, 60), "k": (1.5, 9.0), "na": (110, 170),
     "ca": (4, 16), "phos": (0.5, 15), "albumin": (1, 6),
     "glucose": (20, 1000), "creatinine": (0.5, 30), "bun": (2, 200),
+    "plt": (10, 1000), "hco3": (5, 45), "wbc": (1, 60),
 }
 DELTA_LIMIT = {
     "k": 1.5, "hb": 2.5, "hct": 8.0, "ca": 2.5, "phos": 4.0,
@@ -148,7 +152,8 @@ DELTA_LIMIT = {
 }
 _LAB_TH = {"hb": "Hb", "hct": "Hct", "k": "K", "na": "Na", "ca": "Ca",
            "phos": "P", "albumin": "Alb", "glucose": "Glucose",
-           "creatinine": "Cr", "bun": "BUN"}
+           "creatinine": "Cr", "bun": "BUN",
+           "plt": "PLT", "hco3": "HCO3", "wbc": "WBC"}
 
 
 def precision_flags(row, prev=None):

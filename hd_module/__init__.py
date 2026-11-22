@@ -299,6 +299,11 @@ def _run_hd_migrations():
             fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS verified_by VARCHAR(80)")
             fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS verified_at TIMESTAMP")
             fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS delta_flags TEXT")
+            # Analyte expansion (2026-11-22): PLT / HCO3 / WBC / Anti-HIV
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS plt NUMERIC(7,1)")
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS hco3 NUMERIC(4,1)")
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS wbc NUMERIC(6,2)")
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS antihiv VARCHAR(20)")
             # one-time seed for rows that existed before the gate (idempotent):
             # doc-system "approved" means the physician already reviewed them there
             fixes.append("""
@@ -321,7 +326,9 @@ def _run_hd_migrations():
                        hepatitis_b AS hbsag, hepatitis_c AS antihcv, NULL::VARCHAR AS antihbs,
                        source, 'lab_results' AS _table,
                        'manual'::VARCHAR AS verified_status, NULL::TEXT AS delta_flags,
-                       NULL::INTEGER AS doc_row_id
+                       NULL::INTEGER AS doc_row_id,
+                       NULL::NUMERIC AS plt, NULL::NUMERIC AS hco3,
+                       NULL::NUMERIC AS wbc, NULL::VARCHAR AS antihiv
                 FROM hd_lab_results
                 UNION ALL
                 SELECT patient_id, COALESCE(specimen_date, doc_date) AS lab_date,
@@ -336,7 +343,8 @@ def _run_hd_migrations():
                        hbsag, antihcv, antihbs,
                        'ocr' AS source, 'lab_docs' AS _table,
                        COALESCE(verified_status, 'pending') AS verified_status, delta_flags,
-                       id AS doc_row_id
+                       id AS doc_row_id,
+                       plt, hco3, wbc, antihiv
                 FROM hd_lab_docs
             """)
 

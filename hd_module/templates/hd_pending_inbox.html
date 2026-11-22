@@ -87,14 +87,16 @@ function renderLabs(rows){
   const el = document.getElementById('ibLabs');
   if(!rows.length){ el.innerHTML = '<div class="ib-empty">✅ ไม่มีค่าแล็บค้างยืนยัน</div>'; return; }
   el.innerHTML = rows.map(r => {
-    const vals = [['Hb', r.hb], ['Hct', r.hct], ['K', r.k], ['Na', r.na], ['Ca', r.ca], ['P', r.phos]]
+    const vals = [['Hb', r.hb], ['Hct', r.hct], ['PLT', r.plt], ['K', r.k], ['HCO3', r.hco3], ['Na', r.na], ['Ca', r.ca], ['P', r.phos]]
       .filter(v => v[1] != null).map(v => v[0] + ' ' + v[1]).join(' · ');
+    const sero = (r.sero || []).map(s =>
+      '<b style="color:#b91c1c;background:#fde8e8;border-radius:6px;padding:0 6px;margin-left:4px">' + esc(s) + ' +</b>').join('');
     const flags = (r.flags || '').split(';').map(s => s.trim()).filter(Boolean)
       .map(f => '<span class="ib-flag">🚨 ' + esc(f) + '</span>').join('');
     return '<div class="ib-row" id="ibLab' + r.id + '">' +
       '<span class="ib-hn">' + esc(r.hn) + '</span> ' + esc(r.name) +
       ' <span class="ib-vals">· เจาะ ' + esc(r.date || '-') + '</span><br>' +
-      '<span class="ib-vals">' + esc(vals || '(ไม่มีค่าตัวเลข)') + '</span>' + flags +
+      '<span class="ib-vals">' + esc(vals || '(ไม่มีค่าตัวเลข)') + '</span>' + sero + flags +
       '<div class="ib-acts">' +
         (r.doc8 ? '<button class="ib-btn" onclick="ibZoom(ibImg(\'' + r.doc8 + '\'))">🖼 ดูใบแล็บ</button>' : '') +
         '<button class="ib-btn ok" onclick="ibLabVerify(' + r.id + ',\'verify\')">✅ ยืนยันค่า</button>' +
