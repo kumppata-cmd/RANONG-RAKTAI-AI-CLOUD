@@ -1086,10 +1086,10 @@ function startSession(){
   sessionData.pre_weight = parseFloat(document.getElementById('preWeight').value) || 0;
   sessionData.dry_weight = parseFloat(document.getElementById('dryWeight').value) || 0;
 
-  /* Calculate UF Goal from pre_weight - dry_weight */
-  const calcUfGoal = (sessionData.pre_weight && sessionData.dry_weight && sessionData.pre_weight > sessionData.dry_weight)
-    ? Math.round((sessionData.pre_weight - sessionData.dry_weight) * 1000)
-    : (sessionData.uf_goal || 2000);
+  /* UF Goal จากน้ำหนัก: pre = DW → เป้า 0 (ไม่ดึงน้ำ) — ห้ามเด้งเป็น 2000 (บั๊ก 22 พ.ย. 2569) */
+  const calcUfGoal = (sessionData.pre_weight > 0 && sessionData.dry_weight > 0)
+    ? Math.max(0, Math.round((sessionData.pre_weight - sessionData.dry_weight) * 1000))
+    : (sessionData.uf_goal != null ? sessionData.uf_goal : 2000);
 
   const data = {
     patient_hn: hn, bed_number: parseInt(bed),
@@ -1441,11 +1441,16 @@ function loadSessionRecords(sid, headers, live){
         document.getElementById('ufRemoved').textContent = Math.round(lastUf);
         document.getElementById('ufRate').textContent = lastRate ? Math.round(lastRate) : '-';
         document.getElementById('ufRemaining').textContent = lastRemaining ? Math.round(lastRemaining) : (lastRemaining === 0 ? 0 : '-');
-        const goal = ud.uf_goal || 2000;
-        const pct = Math.min(100, Math.round(lastUf/goal*100));
+        const goal = (ud.uf_goal != null) ? ud.uf_goal : 2000;
         const bar = document.getElementById('ufProgressBar');
-        bar.style.width = pct+'%'; bar.textContent = pct+'%';
-        bar.style.background = pct > 90 ? 'var(--warning)' : 'var(--success)';
+        if(goal > 0){
+          const pct = Math.min(100, Math.round(lastUf/goal*100));
+          bar.style.width = pct+'%'; bar.textContent = pct+'%';
+          bar.style.background = pct > 90 ? 'var(--warning)' : 'var(--success)';
+        } else {
+          bar.style.width = '100%'; bar.textContent = 'ไม่ดึงน้ำรอบนี้ (เป้า 0)';
+          bar.style.background = 'var(--fg-dim, #9ca3af)';
+        }
       }
       renderTimeline();
       try{ drawUfChart(); }catch(e){}
@@ -2439,7 +2444,8 @@ function saveUfRecord(){
   document.getElementById('ufRemoved').textContent = shown;
   document.getElementById('ufRemaining').textContent = remaining || '-';
   document.getElementById('ufRate').textContent = rate || '-';
-  const goal = parseInt(document.getElementById('ufGoal').textContent) || 2000;
+  const _gTxt = parseInt(document.getElementById('ufGoal').textContent);
+  const goal = isNaN(_gTxt) ? 2000 : _gTxt;
   const pct = Math.min(100, Math.round(shown/goal*100));
   const bar = document.getElementById('ufProgressBar');
   bar.style.width = pct+'%'; bar.textContent = pct+'%';

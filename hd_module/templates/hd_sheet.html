@@ -243,7 +243,7 @@ function initSheet(){
       const s = d.session || {};
       _sess = s;
       document.getElementById('sheetPatient').textContent = (s.patient_name||'-')+' — HN '+(s.hn||'-');
-      document.getElementById('sheetInfo').textContent = 'VA: '+(s.va||'-')+' | UF Goal: '+(s.uf_goal||2000)+' mL';
+      document.getElementById('sheetInfo').textContent = 'VA: '+(s.va||'-')+' | UF Goal: '+(s.uf_goal!=null?s.uf_goal:'-')+' mL';
       if(s.pre_hd_note) document.getElementById('preHdNote').value = s.pre_hd_note;
 
       /* Generate time slots from started_at */

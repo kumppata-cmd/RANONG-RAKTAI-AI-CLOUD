@@ -4111,19 +4111,24 @@ def create_session():
             shift = data.get("shift", "morning")
             if shift not in ("morning", "afternoon", "evening"):
                 shift = "morning"
-            # Auto-calculate UF Goal from pre_weight - dry_weight
+            # UF Goal: 0 คือค่าที่ตั้งใจ (DW = น้ำหนักก่อนฟอก → ไม่ดึงน้ำ) — 22 พ.ย. 2569
+            # ห้ามใช้ truthiness: fallback 2000 เฉพาะเมื่อ "ไม่ระบุเป้า และ ไม่มีน้ำหนักให้คำนวณ"
             pre_w = data.get("pre_weight")
             dry_w = data.get("dry_weight")
-            uf_goal = data.get("uf_goal")
-            if not uf_goal and pre_w and dry_w:
+            raw_goal = data.get("uf_goal")
+            uf_goal = None
+            if raw_goal is not None and str(raw_goal).strip() != "":
                 try:
-                    calc_uf = round((float(pre_w) - float(dry_w)) * 1000)
-                    if calc_uf > 0:
-                        uf_goal = calc_uf
+                    uf_goal = max(0, int(round(float(raw_goal))))
                 except (ValueError, TypeError):
-                    pass
-            if not uf_goal or uf_goal <= 0:
-                uf_goal = 2000  # fallback only when no weights given
+                    uf_goal = None
+            if uf_goal is None and pre_w not in (None, "", 0) and dry_w not in (None, "", 0):
+                try:
+                    uf_goal = max(0, round((float(pre_w) - float(dry_w)) * 1000))
+                except (ValueError, TypeError):
+                    uf_goal = None
+            if uf_goal is None:
+                uf_goal = 2000  # ไม่รู้ทั้งเป้าและน้ำหนักจริง ๆ เท่านั้น
 
             # Auto-link equipment: ดึงเครื่องฟอก active ที่ผูกเตียงนี้
             _eq_id = data.get("equipment_id")  # manual override
@@ -4418,7 +4423,7 @@ def get_session(session_id):
             "status": row[3], "pre_weight": float(row[4]) if row[4] else None,
             "post_weight": float(row[5]) if row[5] else None,
             "actual_uf": float(row[6]) if row[6] else None,
-            "uf_goal": float(row[7]) if row[7] else 2000,
+            "uf_goal": float(row[7]) if row[7] is not None else 2000,
             "started_at": (row[8].isoformat() + "Z") if row[8] else None,
             "ended_at": (row[9].isoformat() + "Z") if row[9] else None,
             "notes": row[10],
@@ -5053,7 +5058,7 @@ def _build_session_summary(session_id, post_data):
             "pre_weight": pre_w,
             "post_weight": post_w,
             "actual_uf": actual_uf,
-            "uf_goal": float(row[5]) if row[5] else 2000,
+            "uf_goal": float(row[5]) if row[5] is not None else 2000,
             "duration_hours": duration_h,
             "vital_count": len(vitals),
             "alert_count": len(alerts),
@@ -5520,7 +5525,7 @@ def record_uf(session_id):
             } for r in rows]
             return jsonify({
                 "records": records,
-                "uf_goal": int(srow[0]) if srow and srow[0] else 2000,
+                "uf_goal": int(srow[0]) if srow and srow[0] is not None else 2000,
                 "watch": watch,
             })
         except Exception as e:
@@ -10322,7 +10327,7 @@ def get_flowsheet(session_id):
         return jsonify({
             "rows": entries,
             "session": {
-                "uf_goal": int(srow[0]) if srow and srow[0] else 2000,
+                "uf_goal": int(srow[0]) if srow and srow[0] is not None else 2000,
                 "pre_hd_note": srow[1] if srow else None,
                 "started_at": srow[2].isoformat() if srow and srow[2] else None,
                 "patient_name": srow[3] if srow else None,
