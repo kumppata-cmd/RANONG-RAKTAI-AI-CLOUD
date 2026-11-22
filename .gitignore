@@ -57,3 +57,4 @@ server.py.backup.*
 # diff ค้างใน working tree ตลอด ซึ่งจะกวนการเปิด CI gate จริง
 # (ประวัติเดิมยังอยู่ใน git history — เลิก track เท่านั้น ไม่ได้ลบไฟล์)
 tests/phase14_3_results.json
+patient_dob_bfr.json
