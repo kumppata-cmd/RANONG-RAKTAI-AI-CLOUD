@@ -2690,6 +2690,41 @@ def run_med_photo_sync():
         conn.close()
 
 
+@hd_bp.route("/sessions/<int:sid>/uf-goal", methods=["PUT"])
+@require_role("physician", "nurse", "admin")
+def update_session_uf_goal(sid):
+    """แก้เป้า UF กลางรอบ (22 พ.ย. 2569) — รับ 0 ได้ (ไม่ดึงน้ำ). audit ครบ."""
+    import os
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    data = request.get_json(silent=True) or {}
+    try:
+        n = int(round(float(data.get("uf_goal"))))
+    except (TypeError, ValueError):
+        return jsonify({"error": "ค่าเป้า UF ไม่ถูกต้อง"}), 400
+    if n < 0 or n > 8000:
+        return jsonify({"error": "เป้า UF ต้องอยู่ระหว่าง 0–8000 mL"}), 400
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("SELECT uf_goal FROM hd_sessions WHERE id = %s", (sid,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบรอบฟอก"}), 404
+            old = float(row[0]) if row[0] is not None else None
+            cur.execute("UPDATE hd_sessions SET uf_goal = %s WHERE id = %s", (n, sid))
+        conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action="session.uf_goal", resource_type="session",
+                   resource_id=sid, old_values={"uf_goal": old}, new_values={"uf_goal": n},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "uf_goal": n})
+    except Exception as e:
+        logger.error("uf-goal update: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/medications/source/<doc_id>", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def medication_source_image(doc_id):

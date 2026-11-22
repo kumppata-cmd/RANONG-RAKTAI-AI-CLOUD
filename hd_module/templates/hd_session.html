@@ -338,7 +338,7 @@
     <div class="uf-progress-container">
       <div class="uf-progress-label">
         <span>UF Removed: <strong id="ufRemoved">0</strong> mL</span>
-        <span>UF Goal: <strong id="ufGoal">2000</strong> mL</span>
+        <span>UF Goal: <strong id="ufGoal">-</strong> mL <button type="button" onclick="editUfGoal()" style="border:1px solid var(--border);background:var(--bg);border-radius:6px;padding:1px 7px;font-size:.72rem;cursor:pointer">✏️ แก้เป้า</button></span>
       </div>
       <div class="progress">
         <div class="progress-bar" id="ufProgressBar" style="width:0%;background:var(--success);">0%</div>
@@ -1403,6 +1403,26 @@ function loadExistingSession(sid){
 
 /* ═══ โหลดบันทึกของรอบ (ใช้ทั้งรอบที่กำลังฟอกและรอบย้อนหลัง) ═══ */
 function _tsOf(iso){ const t = iso ? (hdParseUtc(iso) || new Date(iso)) : null; return t && !isNaN(t) ? t.getTime() : 0; }
+/* ✏️ แก้เป้า UF กลางรอบ — รับ 0 (ไม่ดึงน้ำ) · ใช้แก้รอบที่เป้าถูกตั้งผิดไว้ก่อนหน้า */
+function editUfGoal(){
+  const sid = sessionData.id || sessionData.session_id;
+  if(!sid){ showToast('ยังไม่มีรอบฟอก','warning'); return; }
+  const cur = document.getElementById('ufGoal').textContent.trim();
+  const v = prompt('เป้า UF ใหม่ (mL) — ใส่ 0 ถ้ารอบนี้ไม่ดึงน้ำ', cur === '-' ? '' : cur);
+  if(v === null) return;
+  const n = parseInt(v, 10);
+  if(isNaN(n) || n < 0 || n > 8000){ showToast('ค่าต้อง 0–8000 mL','warning'); return; }
+  hdFetch('/hd/api/v1/sessions/'+sid+'/uf-goal', {method:'PUT',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify({uf_goal:n})})
+    .then(r=>r.json()).then(d=>{
+      if(d.error){ showToast(d.error,'danger'); return; }
+      document.getElementById('ufGoal').textContent = n;
+      sessionData.uf_goal = n;
+      showToast('อัปเดตเป้า UF เป็น '+n+' mL แล้ว','success');
+      try{ loadSessionRecords(sid, {}, true); }catch(e){}
+      try{ loadUfCoach(); }catch(e){}
+    }).catch(()=>showToast('เครือข่ายขัดข้อง','danger'));
+}
 function loadSessionRecords(sid, headers, live){
   hdFetch('/hd/api/v1/sessions/'+sid+'/vitals')
     .then(r=>r.ok?r.json():Promise.reject())
@@ -1417,7 +1437,7 @@ function loadSessionRecords(sid, headers, live){
   hdFetch('/hd/api/v1/sessions/'+sid+'/uf')
     .then(r=>r.ok?r.json():Promise.reject())
     .then(ud=>{
-      if(ud.uf_goal) document.getElementById('ufGoal').textContent = ud.uf_goal;
+      if(ud.uf_goal != null) document.getElementById('ufGoal').textContent = ud.uf_goal;
       if(live && ud.watch){ _ufAdj = {target: ud.watch.reduced_ml ? ud.watch.target : null, extend: ud.watch.extend_min || 0}; showUfWatch(ud.watch); }
       let lastUf = 0, lastRate = 0, lastRemaining = 0;
       /* ตัวเลขอาจมาเป็นข้อความ ("800.0") → แปลงก่อนเทียบ ไม่งั้น '800.0' > '2400.0' (เทียบตัวอักษร) */
