@@ -5801,6 +5801,103 @@ def _process_vital_alerts(cur, session_id, sbp=None, dbp=None, hr=None, spo2=Non
             logger.warning("vital alert LINE push failed: %s", e)
     return created
 
+def _parse_entry_time(hhmm, anchor_utc=None):
+    """'HH:MM' (เวลาไทยที่พยาบาลตั้งใจ) → UTC timestamp โดยเลือกวันที่ให้ใกล้
+    anchor ที่สุด (รองรับรอบฟอกคร่อมเที่ยงคืน). format ผิด → None.
+
+    23 พ.ย. 2569: แพทย์รายงานว่าเวลาถูก fix ตามตอนกดบันทึก ทำให้ค่าลงผิดช่อง
+    เมื่อพยาบาลบันทึกช้า — ชั้นนี้เปิดให้ระบุ/แก้เวลาวัดจริงได้
+    """
+    import re as _re
+    from datetime import datetime, timedelta
+    if not hhmm:
+        return None
+    m = _re.match(r"^(\d{1,2}):(\d{2})$", str(hhmm).strip())
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if h > 23 or mi > 59:
+        return None
+    base = anchor_utc or datetime.utcnow()
+    thai_anchor = base + timedelta(hours=7)
+    cand = thai_anchor.replace(hour=h, minute=mi, second=0, microsecond=0)
+    for alt in (cand - timedelta(days=1), cand + timedelta(days=1)):
+        if abs((alt - thai_anchor).total_seconds()) < abs((cand - thai_anchor).total_seconds()):
+            cand = alt
+    return cand - timedelta(hours=7)
+
+
+def _record_time_edit(table, rid, session_id, hhmm, extra_set=""):
+    """แก้ recorded_at ของแถวใน table (ยึดวันที่เดิมเป็น anchor). คืน (old,new) หรือ (None, error)."""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT recorded_at FROM {table} WHERE id = %s AND session_id = %s",
+                        (rid, session_id))
+            row = cur.fetchone()
+            if not row:
+                return None, "ไม่พบรายการนี้ในรอบฟอกนี้"
+            old_ts = row[0]
+            new_ts = _parse_entry_time(hhmm, anchor_utc=old_ts)
+            if new_ts is None:
+                return None, "รูปแบบเวลาไม่ถูกต้อง (ต้องเป็น HH:MM เช่น 17:30)"
+            from datetime import timedelta as _td
+            thai_hhmm = (new_ts + _td(hours=7)).strftime("%H:%M")
+            cur.execute(f"UPDATE {table} SET recorded_at = %s{extra_set} WHERE id = %s",
+                        ([new_ts] + ([thai_hhmm] if extra_set else []) + [rid]))
+            conn.commit()
+            return (old_ts, new_ts), None
+    finally:
+        conn.close()
+
+
+@hd_bp.route("/sessions/<int:session_id>/vitals/<int:vital_id>/time", methods=["PUT"])
+@require_role("physician", "nurse", "admin")
+def vital_time_edit(session_id, vital_id):
+    """🕐 แก้เวลาวัด vital ย้อนหลัง {time: 'HH:MM'} — ช่องในแผ่น sheet ขยับตามอัตโนมัติ."""
+    data = request.get_json(silent=True) or {}
+    try:
+        res, err = _record_time_edit("hd_vital_signs", vital_id, session_id, data.get("time", ""))
+        if err:
+            return jsonify({"error": err}), 400
+        old_ts, new_ts = res
+        log_action(user_id=g.get("hd_user_id"), action="vital.time_edit",
+                   resource_type="vital_sign", resource_id=str(vital_id),
+                   old_values={"recorded_at": old_ts.isoformat()},
+                   new_values={"recorded_at": new_ts.isoformat()},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "id": vital_id,
+                        "old": old_ts.isoformat(), "new": new_ts.isoformat()})
+    except Exception as e:
+        logger.error("vital_time_edit: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/sessions/<int:session_id>/uf/<int:rec_id>/time", methods=["PUT"])
+@require_role("physician", "nurse", "admin")
+def uf_time_edit(session_id, rec_id):
+    """🕐 แก้เวลาบันทึก UF ย้อนหลัง {time: 'HH:MM'} — อัปเดต slot_time ให้ตรงกันด้วย."""
+    data = request.get_json(silent=True) or {}
+    try:
+        res, err = _record_time_edit("hd_uf_records", rec_id, session_id,
+                                     data.get("time", ""), extra_set=", slot_time = %s")
+        if err:
+            return jsonify({"error": err}), 400
+        old_ts, new_ts = res
+        log_action(user_id=g.get("hd_user_id"), action="uf.time_edit",
+                   resource_type="uf_record", resource_id=str(rec_id),
+                   old_values={"recorded_at": old_ts.isoformat()},
+                   new_values={"recorded_at": new_ts.isoformat()},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "id": rec_id,
+                        "old": old_ts.isoformat(), "new": new_ts.isoformat()})
+    except Exception as e:
+        logger.error("uf_time_edit: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/sessions/<int:session_id>/vitals", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def record_vital(session_id):
@@ -5842,6 +5939,26 @@ def record_vital(session_id):
             except Exception:
                 pass
 
+    # 23 พ.ย. 2569: พยาบาลระบุเวลาวัดจริงได้ (เว้นว่าง = ตอนนี้)
+    entry_ts = _parse_entry_time(data.get("time"))
+
+    def _apply_entry_ts(vid):
+        """best-effort: ตั้ง recorded_at ตามเวลาที่พยาบาลระบุ."""
+        if entry_ts is None or not vid:
+            return
+        try:
+            import os
+            import psycopg2 as _pg
+            _c = _pg.connect(os.environ.get("HD_DATABASE_URL", "")
+                             or os.environ.get("DATABASE_URL", ""), connect_timeout=5)
+            with _c.cursor() as _cu:
+                _cu.execute("UPDATE hd_vital_signs SET recorded_at = %s WHERE id = %s",
+                            (entry_ts, vid))
+                _c.commit()
+            _c.close()
+        except Exception as _te:
+            logger.warning("vital entry time set: %s", _te)
+
     # Use VitalRecorder for real-time recording + alert evaluation
     from flask import current_app
     recorder = current_app.config.get("HD_VITAL_RECORDER")
@@ -5860,6 +5977,7 @@ def record_vital(session_id):
             notes=data.get("notes", ""),
             recorded_by=str(g.get("hd_user_id", "")),
         )
+        _apply_entry_ts(result.get("vital_id"))
         return jsonify({
             "session_id": session_id,
             "phase": phase,
@@ -5897,6 +6015,9 @@ def record_vital(session_id):
                           data.get("sbp"), data.get("dbp"), data.get("hr"),
                           data.get("temp"), data.get("spo2")))
                 vid = cur_fb.fetchone()[0]
+                if entry_ts is not None:
+                    cur_fb.execute("UPDATE hd_vital_signs SET recorded_at = %s WHERE id = %s",
+                                   (entry_ts, vid))
                 new_alerts = _process_vital_alerts(
                     cur_fb, session_id, sbp=data.get("sbp"), dbp=data.get("dbp"),
                     hr=data.get("hr"), spo2=data.get("spo2"), temp=data.get("temp"))
@@ -6070,13 +6191,17 @@ def record_uf(session_id):
         import psycopg2
         conn = psycopg2.connect(db_url, connect_timeout=5)
         with conn.cursor() as cur:
-            # Insert UF record
+            # Insert UF record — 23 พ.ย. 2569: ระบุเวลาวัดจริงได้ ("time": HH:MM)
+            _uf_ts = _parse_entry_time(data.get("time"))
+            if _uf_ts is not None:
+                from datetime import timedelta as _td
+                slot_time = (_uf_ts + _td(hours=7)).strftime("%H:%M")
             cur.execute("""
                 INSERT INTO hd_uf_records
-                    (session_id, slot_time, uf_removed, uf_rate, uf_remaining, notes)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (session_id, slot_time, uf_removed, uf_rate, uf_remaining, notes, recorded_at)
+                VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
                 RETURNING id
-            """, (session_id, slot_time, uf_removed, uf_rate, uf_remaining, notes))
+            """, (session_id, slot_time, uf_removed, uf_rate, uf_remaining, notes, _uf_ts))
             rec_id = cur.fetchone()[0]
 
             # Update session's actual_uf to latest cumulative value

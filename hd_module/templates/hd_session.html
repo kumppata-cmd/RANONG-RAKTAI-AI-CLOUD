@@ -642,6 +642,11 @@
         <label>SpO2</label>
         <input type="number" class="form-control" id="modalSpo2" inputmode="numeric">
       </div>
+      <div class="vital-input">
+        <label>🕐 เวลาวัดจริง</label>
+        <input type="time" class="form-control" id="modalVitalTime">
+        <small style="color:var(--fg-muted);font-size:.68rem">เว้นว่าง = ตอนนี้ · ใช้เมื่อบันทึกย้อนหลัง</small>
+      </div>
     </div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal('vitalModal')">ยกเลิก</button>
@@ -679,6 +684,10 @@
     <div id="ufAutoOpts" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
     <div id="ufAdjLine" style="font-size:.78rem;margin-top:6px;font-weight:700;color:#e67e22"></div>
     <div id="ufSaveWarn" style="font-size:.8rem;margin-top:6px;font-weight:700;color:var(--danger)"></div>
+    <div style="margin-top:8px">
+      <label style="font-size:.8rem">🕐 เวลาที่อ่านค่าจริง <small style="color:var(--fg-muted)">(เว้นว่าง = ตอนนี้ · ใช้เมื่อบันทึกย้อนหลัง)</small></label>
+      <input type="time" class="form-control" id="modalUfTime" style="max-width:160px">
+    </div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal('ufModal')">ยกเลิก</button>
       <button class="btn btn-warning" id="ufSaveBtn" onclick="saveUfRecord()">💾 บันทึก</button>
@@ -1461,7 +1470,7 @@ function loadSessionRecords(sid, headers, live){
     .then(r=>r.ok?r.json():Promise.reject())
     .then(vd=>{
       (vd.vitals||[]).forEach(v=>{
-        timeline.push({ time: hdTime(v.recorded_at), ts:_tsOf(v.recorded_at), phase:v.phase,
+        timeline.push({ time: hdTime(v.recorded_at), ts:_tsOf(v.recorded_at), phase:v.phase, vid:v.id,
                         type:'vital', sbp:v.sbp, dbp:v.dbp, hr:v.hr||v.heart_rate, spo2:v.spo2, temp:v.temp });
       });
       renderTimeline();
@@ -1485,7 +1494,7 @@ function loadSessionRecords(sid, headers, live){
         if(u.uf_rate) lastRate = u.uf_rate;
         if(u.uf_remaining) lastRemaining = u.uf_remaining;
         if(!(u.uf_removed > 0)) return;   /* แถว 0 จาก Sheet รุ่นเก่า (บันทึกแค่ UFR) */
-        timeline.push({ time: hdTime(u.recorded_at), slot: u.slot_time, ts:_tsOf(u.recorded_at),
+        timeline.push({ time: hdTime(u.recorded_at), slot: u.slot_time, ts:_tsOf(u.recorded_at), rid:u.id,
                         type:'uf', removed:u.uf_removed, rate:u.uf_rate, remaining:u.uf_remaining });
       });
       /* รอบที่จบแล้ว: ใช้ Actual UF ที่บันทึกตอนปิดรอบ ถ้ามากกว่าค่าสะสมล่าสุด */
@@ -1625,8 +1634,9 @@ function saveIntraVital(){
   const temp = document.getElementById('modalTemp').value;
   const spo2 = document.getElementById('modalSpo2').value;
 
+  const vTime = (document.getElementById('modalVitalTime')||{}).value || '';
   const entry = {
-    time: new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}),
+    time: vTime || new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}),
     ts: Date.now(), type: 'vital', sbp, dbp, hr, spo2, temp,
   };
 
@@ -1639,16 +1649,16 @@ function saveIntraVital(){
   try{ drawUfChart(); }catch(e){}
   closeModal('vitalModal');
   showToast('บันทึก Vital Signs สำเร็จ','success');
-  ['modalSbp','modalDbp','modalHr','modalTemp','modalSpo2'].forEach(id=>{document.getElementById(id).value='';});
+  ['modalSbp','modalDbp','modalHr','modalTemp','modalSpo2','modalVitalTime'].forEach(id=>{const el=document.getElementById(id); if(el) el.value='';});
 
   /* POST to API — ใช้ hdFetch เพื่อจัดการ token + 401 */
   if(sessionData.session_id){
     hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
       method:'POST',
-      body:JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null, temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null})
+      body:JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null, temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null, time: vTime || undefined})
     }).then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(e)))
     .then(d=>{
-      if(d.vital_id) showToast('Vital #'+d.vital_id+' บันทึกลง DB สำเร็จ','info');
+      if(d.vital_id){ entry.vid = d.vital_id; showToast('Vital #'+d.vital_id+' บันทึกลง DB สำเร็จ','info'); renderTimeline(); }
       loadSessionAlerts();
       loadIdhRisk();
       if(d.alerts && d.alerts.length){
@@ -2507,8 +2517,10 @@ function saveUfRecord(){
   /* POST UF to API — ใช้ hdFetch เพื่อจัดการ token + 401 */
   if(sessionData.session_id){
     const now = new Date();
-    const slotTime = String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0');
+    const ufTimeChosen = (document.getElementById('modalUfTime')||{}).value || '';
+    const slotTime = ufTimeChosen || (String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0'));
     const ufPayload = {uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0, slot_time:slotTime};
+    if(ufTimeChosen) ufPayload.time = ufTimeChosen;
     if(_ufPending.target) ufPayload.machine_target = _ufPending.target;
     else if(_ufAdj.target) ufPayload.machine_target = _ufAdj.target;
     if(_ufPending.extend) ufPayload.extend_min = _ufPending.extend;
@@ -2519,8 +2531,9 @@ function saveUfRecord(){
     const ufBody = JSON.stringify(ufPayload);
     /* อัปเดต UI ทันที (optimistic) แต่แจ้งสถานะ DB ชัดเจน */
     _ufRecords.push({t:new Date().toISOString(), removed:parseInt(removed)||0}); drawUfChart();
-    timeline.push({time: now.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}), type:'uf', removed, remaining, rate});
+    timeline.push({time: slotTime, type:'uf', removed, remaining, rate});
     renderTimeline();
+    const _ufT = document.getElementById('modalUfTime'); if(_ufT) _ufT.value='';
     closeModal('ufModal');
     showToast('💧 กำลังบันทึก UF...','info');
     hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/uf',{
@@ -2545,6 +2558,26 @@ function saveUfRecord(){
   }
 }
 
+/* 🕐 แก้เวลาวัดย้อนหลัง — ช่องในแผ่น HD Monitoring Sheet ขยับตามอัตโนมัติ */
+function editRecTime(kind, id, cur){
+  const t = prompt('เวลาวัดจริง (HH:MM เช่น 17:30):', cur || '');
+  if(t === null) return;
+  if(!/^\d{1,2}:\d{2}$/.test(t.trim())){ showToast('รูปแบบเวลาไม่ถูกต้อง — ใช้ HH:MM เช่น 17:30','warning'); return; }
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/'+kind+'/'+id+'/time',{
+    method:'PUT', body: JSON.stringify({time: t.trim()})
+  }).then(r=>r.json().then(d=>({ok:r.ok, status:r.status, d})))
+  .then(x=>{
+    if(!x.ok){ showToast(x.d.error || (x.status===403?'ไม่มีสิทธิ์แก้เวลา':'แก้เวลาไม่สำเร็จ'),'error'); return; }
+    /* อัปเดตแถวในหน้าโดยไม่ต้องโหลดใหม่ */
+    const key = kind==='vitals' ? 'vid' : 'rid';
+    const e = timeline.find(x2=>x2[key]===id);
+    if(e){ e.time = hdTime(x.d.new); e.ts = _tsOf(x.d.new); if(kind==='uf') e.slot = null; }
+    renderTimeline();
+    try{ drawUfChart(); }catch(_e){}
+    showToast('🕐 แก้เวลาเป็น '+hdTime(x.d.new)+' แล้ว — ช่องใน Monitoring Sheet ขยับตามอัตโนมัติ','success');
+  }).catch(e=>showToast('ผิดพลาด: '+e,'error'));
+}
+
 /* บันทึกระหว่างฟอก — แยก 2 กลุ่ม: ❤️ Vital Signs และ 💧 UF (ใหม่ → เก่า) */
 function renderTimeline(){
   const el = document.getElementById('intraTimeline');
@@ -2555,10 +2588,13 @@ function renderTimeline(){
   const c = (v, bad, warn) => v==null||v==='' ? '-' : (bad ? `<b style="color:var(--danger)">${v}</b>` : warn ? `<b style="color:#e67e22">${v}</b>` : v);
   const th = 'style="text-align:left;text-transform:none;letter-spacing:0;padding:6px 8px;font-size:.72rem;color:var(--fg-muted);border-bottom:1px solid var(--border);white-space:nowrap"';
   const td = 'style="padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap"';
-  const vRows = vit.map(e=>`<tr><td ${td}>${e.time}${PH[e.phase]?' <span style="font-size:.68rem;padding:1px 6px;border-radius:8px;background:rgba(52,152,219,.12)">'+PH[e.phase]+'</span>':''}</td>
+  /* 🕐 แก้เวลาวัดย้อนหลังได้ (23 พ.ย. 2569) — เฉพาะแถวที่บันทึกลง DB แล้ว (มี id) */
+  const tbtn = (kind, id, t) => id ? ` <button onclick="event.stopPropagation();editRecTime('${kind}',${id},'${t}')" title="แก้เวลาวัด"
+      style="border:1px solid var(--border);background:var(--bg);border-radius:6px;padding:0 5px;font-size:.7rem;cursor:pointer">🕐</button>` : '';
+  const vRows = vit.map(e=>`<tr><td ${td}>${e.time}${PH[e.phase]?' <span style="font-size:.68rem;padding:1px 6px;border-radius:8px;background:rgba(52,152,219,.12)">'+PH[e.phase]+'</span>':''}${e.phase==='intra'||!e.phase?tbtn('vitals',e.vid,e.time):''}</td>
       <td ${td}>${c(e.sbp, e.sbp!=null&&e.sbp<90, e.sbp!=null&&e.sbp<100)}/${e.dbp??'-'}</td><td ${td}>${c(e.hr, e.hr!=null&&(e.hr>120||e.hr<50))}</td>
       <td ${td}>${c(e.spo2, e.spo2!=null&&e.spo2<92)}</td><td ${td}>${c(e.temp, e.temp!=null&&e.temp>=37.8)}</td></tr>`).join('');
-  const uRows = uf.map(e=>`<tr><td ${td}>${e.time}${e.slot&&e.slot!==e.time?' <span style="font-size:.66rem;color:var(--fg-muted)">(ช่อง '+e.slot+')</span>':''}</td>
+  const uRows = uf.map(e=>`<tr><td ${td}>${e.time}${e.slot&&e.slot!==e.time?' <span style="font-size:.66rem;color:var(--fg-muted)">(ช่อง '+e.slot+')</span>':''}${tbtn('uf',e.rid,e.time)}</td>
       <td ${td}><b>${e.removed!=null?Math.round(e.removed):'-'}</b></td><td ${td}>${e.remaining!=null?Math.round(e.remaining):'-'}</td><td ${td}>${e.rate!=null?Math.round(e.rate):'-'}</td></tr>`).join('');
   const box = (title, n, head, rows, empty) => `<div style="margin-bottom:14px">
       <div style="font-weight:800;font-size:.9rem;margin:2px 0 6px">${title} <span style="font-weight:500;font-size:.75rem;color:var(--fg-muted)">${n} ครั้ง</span></div>
