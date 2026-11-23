@@ -67,7 +67,7 @@
 const ACT_TH = {increase:'⬆️ เพิ่ม', decrease:'⬇️ ลด', hold:'⏸ งดชั่วคราว', resume:'▶️ กลับมาให้', review:'🔍 ทบทวน'};
 const ST_TH = {pending:'รออนุมัติ', approved:'อนุมัติแล้ว', rejected:'ไม่ปรับ', superseded:'ยกเลิกอัตโนมัติ — DW เปลี่ยน'};
 let tab = 'pending';
-const ROLE = (function(){ try { return JSON.parse(atob((getHdToken()||'').split('.')[1]||'')).role || ''; } catch(e){ return ''; } })();
+const ROLE = (function(){ try { let p=((getHdToken()||'').split('.')[1]||'').replace(/-/g,'+').replace(/_/g,'/'); p+='='.repeat((4-p.length%4)%4); return JSON.parse(atob(p)).role || ''; } catch(e){ return ''; } })();
 
 function setTab(t){ tab = t; document.querySelectorAll('.esa-tabs button').forEach(b=>b.classList.toggle('on', b.dataset.tab===t));
   const isDw = t.startsWith('dw'); document.getElementById('dwNote').style.display = isDw ? '' : 'none';
@@ -85,7 +85,7 @@ async function loadDw(){
     if (tab==='dw') document.getElementById('cntDw').textContent = items.length ? `(${items.length})` : '';
     if (!items.length){ list.innerHTML = `<div class="esa-empty">${tab==='dw'?'✅ ไม่มีข้อเสนอปรับ Dry Weight':'ยังไม่มีประวัติ'}</div>`; return; }
     list.innerHTML = items.map(it=>{
-      const canAct = it.status==='pending' && ROLE==='physician';
+      const canAct = it.status==='pending' && (ROLE==='physician'||ROLE==='admin'); /* 23 พ.ย.: ให้ตรง backend (physician, admin) */
       const ev = it.evidence || {};
       const arrow = it.direction==='up' ? '⬆️' : (it.direction==='set' ? '🆕' : '⬇️');
       return `<div class="esa-item ${it.direction==='up'?'increase':(it.direction==='set'?'':'decrease')}">
@@ -133,7 +133,7 @@ async function load(){
     if (tab==='pending') document.getElementById('cntPending').textContent = items.length ? `(${items.length})` : '';
     if (!items.length){ list.innerHTML = `<div class="esa-empty">${tab==='pending'?'✅ ไม่มีรายการรออนุมัติ — ระบบจะเสนอเมื่อมี Hb ใหม่':'ยังไม่มีประวัติ'}</div>`; return; }
     list.innerHTML = items.map(it=>{
-      const canAct = it.status==='pending' && ROLE==='physician';
+      const canAct = it.status==='pending' && (ROLE==='physician'||ROLE==='admin'); /* 23 พ.ย.: ให้ตรง backend (physician, admin) */
       const dose = it.action==='hold' ? `<span class="new">งดชั่วคราว</span>` :
         (it.proposed_dose ? `<span class="new">${esc(it.proposed_dose)}</span>` : `<span class="new" style="color:var(--fg-muted)">ระบุขนาด</span>`);
       return `<div class="esa-item ${it.action}">

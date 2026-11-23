@@ -1688,7 +1688,13 @@ function saveIntraVital(){
 
 /* ── Alerts & physician orders panel ── */
 function _hdRole(){
-  try{ const t=getHdToken(); return JSON.parse(atob(t.split('.')[1].replace(/-/g,'+').replace(/_/g,'/'))).role||''; }catch(e){ return ''; }
+  /* 23 พ.ย. 2569: เติม base64 padding — บาง browser atob เข้มงวด ทำให้อ่าน role ไม่ได้
+     แล้วปุ่มสั่งการรักษาหายทั้งที่สิทธิ์ถูกต้อง */
+  try{
+    let p = getHdToken().split('.')[1].replace(/-/g,'+').replace(/_/g,'/');
+    p += '='.repeat((4 - p.length % 4) % 4);
+    return JSON.parse(atob(p)).role||'';
+  }catch(e){ return ''; }
 }
 /* ── ว้าว #1: IDH risk ── */
 function loadIdhRisk(){
@@ -2234,7 +2240,10 @@ function loadSessionAlerts(){
     const open=list.filter(a=>!a.acknowledged).length;
     _openAlertCount = open;
     document.getElementById('alertsCount').textContent = open ? `(${open} รายการยังไม่รับทราบ)` : '(รับทราบครบแล้ว)';
-    const isDoc = _hdRole()==='physician';
+    /* 23 พ.ย. 2569: ให้ตรงกับฝั่ง server (@require_role physician, admin) —
+       เดิมเช็คแค่ physician ทำให้บัญชี admin เห็นแต่ปุ่มรับทราบ ปุ่มสั่งการรักษาหาย */
+    const _r = _hdRole();
+    const isDoc = _r==='physician' || _r==='admin';
     document.getElementById('alertsList').innerHTML = list.map(a=>{
       const sev = a.severity==='critical' ? ['🔴','var(--danger)','วิกฤต'] : a.severity==='warning' ? ['🟡','var(--warning)','เฝ้าระวัง'] : ['🔵','var(--info)','ข้อมูล'];
       const when = a.created_at ? hdTime(a.created_at) : '-';
