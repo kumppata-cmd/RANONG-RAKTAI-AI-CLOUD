@@ -118,12 +118,17 @@
     </div>
 
     <div class="param-group">
-      <div class="param-group-title">💧 UF</div>
+      <div class="param-group-title">💧 UF <span style="font-weight:400;font-size:.72rem;color:var(--fg-muted)">(คำนวณอัตโนมัติ — ระบบเดียวกับหน้ารอบฟอก)</span></div>
+      <div id="eUfPlan" style="font-size:.74rem;color:var(--fg-muted);line-height:1.45;margin-bottom:6px;"></div>
       <div class="param-row">
-        <div class="param-field"><label>UFR</label><input type="number" id="eUfr" inputmode="numeric" oninput="ufSheetCalc('ufr')"><span class="unit">ml/hr</span></div>
         <div class="param-field"><label>Total UF</label><input type="number" id="eTotalUf" inputmode="numeric" oninput="ufSheetCalc('total')"><span class="unit">ml</span></div>
+        <div class="param-field"><label>เหลือ</label><input type="number" id="eUfRemain" inputmode="numeric" oninput="ufSheetCalc('remaining')"><span class="unit">ml</span></div>
+        <div class="param-field"><label>UFR</label><input type="number" id="eUfr" inputmode="numeric" oninput="ufSheetCalc('ufr')"><span class="unit">ml/hr</span></div>
       </div>
       <div id="ufLinkInfo" style="display:none;margin-top:8px;padding:8px 10px;font-size:.8rem;line-height:1.5;background:var(--bg);border-radius:6px;color:var(--fg);"></div>
+      <div id="eUfOpts" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;"></div>
+      <div id="eUfAdj" style="font-size:.76rem;color:#e67e22;font-weight:600;margin-top:4px;"></div>
+      <div id="eUfWarn" style="font-size:.8rem;color:var(--danger);font-weight:600;margin-top:4px;"></div>
     </div>
 
     <div class="param-group">
@@ -179,8 +184,11 @@ let _currentSlot = '';
 let _currentIdx = -1;
 let _sess = {};              /* d.session จาก GET /flowsheet (uf_goal, duration_hours, started_at) */
 let _ufSheetManual = false;  /* ช่องนี้มี UFR ที่พยาบาลกรอก/บันทึกเอง — ห้ามคำนวณทับ */
+/* 24 พ.ย. 2569: สมอง UF ตัวเดียวกับหน้ารอบฟอก (บันทึก UF / ฟอร์มรวม) — ดู _uf_brain.html */
+let sessionData = {session_id: SESSION_ID, uf_goal: 0, duration_hours: 4, dry_weight: 0, start_time: null};
+{% include "_uf_brain.html" %}
 
-/* ── UF link: UFR ↔ Total UF คำนวณเชื่อมกัน + เทียบเป้า (ตรรกะเดียวกับหน้ารอบฟอก) ── */
+/* ── UF link: ช่องเวลาก่อนหน้า + เวลาของช่องที่กำลังกรอก (ใช้ป้อนสมอง UF) ── */
 function _slotH(t){ const p = String(t||'').split(':'); return (parseInt(p[0])||0) + (parseInt(p[1])||0)/60; }
 function _slotDiffH(a, b){ let d = _slotH(b) - _slotH(a); if(d < 0) d += 24; return d; }
 function _prevUfTotal(){
@@ -192,47 +200,37 @@ function _prevUfTotal(){
   }
   return null;
 }
+function _slotAsOf(slot){
+  /* เวลาจริงของช่อง HH:MM บนวันที่เริ่มฟอก (ข้ามเที่ยงคืนได้) — ถ้าไม่รู้เวลาเริ่ม ใช้วันนี้ */
+  const p = String(slot||'').split(':'); const h = parseInt(p[0]), m = parseInt(p[1]);
+  if(isNaN(h) || isNaN(m)) return null;
+  let st = null; try{ st = sessionData.start_time ? new Date(sessionData.start_time) : null; }catch(e){}
+  const d = st && !isNaN(st.getTime()) ? new Date(st.getTime()) : new Date();
+  d.setHours(h, m, 0, 0);
+  if(st && d.getTime() < st.getTime() - 60000) d.setDate(d.getDate() + 1);
+  return d;
+}
 function ufSheetCalc(src){
   const box = document.getElementById('ufLinkInfo'); if(!box) return;
-  if(src === 'ufr') _ufSheetManual = true;
-  const goal = parseInt(_sess.uf_goal) || 0;
-  const dur = parseFloat(_sess.duration_hours) || 4;
-  const first = sheetData.length ? sheetData[0].slot_time : _currentSlot;
-  const elapsed = Math.min(_slotDiffH(first, _currentSlot), dur);
-  const totEl = document.getElementById('eTotalUf'), ufrEl = document.getElementById('eUfr');
-  const tot = parseInt(totEl.value), ufr = parseInt(ufrEl.value);
+  _ufIds = _UF_IDS_SHEET;
+  _ufAsOf = _slotAsOf(_currentSlot);
   const prev = _prevUfTotal();
-  let h = '', col = 'var(--accent)';
-  if(!isNaN(tot) && tot > 0){
-    totEl.placeholder = '';
-    const dt = prev ? _slotDiffH(prev.slot, _currentSlot) : elapsed;
-    const base = prev ? prev.total : 0;
-    const rateSince = dt > 0.05 ? Math.round((tot - base) / dt) : null;
-    if(!_ufSheetManual && rateSince != null && rateSince >= 0){
-      ufrEl.value = rateSince; ufrEl.classList.add('filled');
+  _lastUfRemoved = prev ? prev.total : 0;
+  if(src === 'ufr') _ufSheetManual = true;
+  const map = {total:'removed', ufr:'rate', remaining:'remaining', init:'init'};
+  _ufRenderPlan();
+  ufAutoCalc(map[src] || src);
+  /* เสริมเฉพาะ Sheet: อัตราเฉลี่ยของช่วงหลังช่องก่อนหน้า (ช่วยตรวจกับหน้าจอเครื่อง) */
+  const tot = parseInt(document.getElementById('eTotalUf').value);
+  if(!isNaN(tot) && tot > 0 && prev){
+    const dt = _slotDiffH(prev.slot, _currentSlot);
+    if(dt > 0.05){
+      const rateSince = Math.round((tot - prev.total) / dt);
+      box.innerHTML += `<br><span style="color:var(--fg-muted)">อัตราช่วงหลัง ${prev.slot} ≈ <b>${rateSince}</b> mL/ชม. (จาก ${prev.total} → ${tot} mL)</span>`;
     }
-    h = goal ? `ทำได้ <b>${tot}</b>/${goal} mL (${Math.round(tot/goal*100)}%) · เหลือ <b>${Math.max(0, goal - tot)}</b> mL`
-             : `Total UF <b>${tot}</b> mL (ยังไม่มีเป้า UF ของรอบนี้)`;
-    if(rateSince != null && rateSince >= 0)
-      h += `<br>อัตราช่วง${prev ? 'หลัง ' + prev.slot : 'ที่ผ่านมา'} ≈ <b>${rateSince}</b> mL/ชม.` +
-           (_ufSheetManual ? '' : ' — ใส่ในช่อง UFR ให้แล้ว ตรวจกับหน้าจอเครื่องอีกครั้ง');
-    if(prev && tot < prev.total){ col = 'var(--danger)'; h += `<br>⚠️ <b>น้อยกว่าช่อง ${prev.slot} (${prev.total} mL)</b> — Total UF ปกติต้องเพิ่มขึ้น ตรวจตัวเลขอีกครั้ง`; }
-    else if(goal && tot > goal){ col = '#e67e22'; h += `<br>⚠️ เกินเป้า UF — ตรวจตัวเลข หรือเป้าบนเครื่องถูกปรับ`; }
-  } else if(!isNaN(ufr) && ufr > 0){
-    const base = prev ? prev.total : 0;
-    const dt = prev ? _slotDiffH(prev.slot, _currentSlot) : elapsed;
-    const est = Math.round(base + ufr * dt);
-    if(est > 0) totEl.placeholder = '≈ ' + est;
-    col = '#e67e22';
-    h = `ถ้าอัตรา ${ufr} mL/ชม. คงที่ → Total UF ตอนนี้ควร ≈ <b>${est || '-'}</b> mL` +
-        `<br>💡 กรอก <b>Total UF</b> จากหน้าจอเครื่องด้วย — หน้ารอบฟอกและแดชบอร์ดใช้ค่านี้ตามความคืบหน้า UF`;
-  } else if(goal){
-    const expected = Math.round(goal * elapsed / dur);
-    h = `เป้า UF <b>${goal}</b> mL ใน ${dur} ชม. (ตามแผน ≈ ${Math.round(goal/dur)} mL/ชม.) · ณ ${_currentSlot} ควรดึงได้แล้ว ≈ <b>${expected}</b> mL`;
+    if(tot < prev.total) box.innerHTML += `<br>⚠️ <b style="color:var(--danger)">น้อยกว่าช่อง ${prev.slot} (${prev.total} mL)</b> — Total UF ปกติต้องเพิ่มขึ้น ตรวจตัวเลขอีกครั้ง`;
   }
-  box.innerHTML = h;
-  box.style.display = h ? 'block' : 'none';
-  box.style.borderLeft = '3px solid ' + col;
+  box.style.display = box.innerHTML ? 'block' : 'none';
 }
 
 function initSheet(){
@@ -242,6 +240,13 @@ function initSheet(){
       /* Patient header */
       const s = d.session || {};
       _sess = s;
+      /* ป้อนสมอง UF ให้เหมือนหน้ารอบฟอก: เป้า, ชั่วโมงที่สั่ง, น้ำหนักแห้ง, เวลาเริ่ม, เป้า/เวลาที่ปรับบนเครื่องแล้ว */
+      sessionData.uf_goal = parseInt(s.uf_goal) || 0;
+      sessionData.duration_hours = parseFloat(s.duration_hours) || 4;
+      sessionData.dry_weight = parseFloat(s.dry_weight) || 0;
+      try{ const _st = s.started_at ? hdParseUtc(s.started_at) : null; sessionData.start_time = _st ? _st.toISOString() : null; }catch(e){ sessionData.start_time = null; }
+      if(s.uf_adj){ _ufAdj = {target: s.uf_adj.target || null, extend: s.uf_adj.extend || 0}; }
+      if(s.hn) loadUfCoach(s.hn);
       document.getElementById('sheetPatient').textContent = (s.patient_name||'-')+' — HN '+(s.hn||'-');
       document.getElementById('sheetInfo').textContent = 'VA: '+(s.va||'-')+' | UF Goal: '+(s.uf_goal!=null?s.uf_goal:'-')+' mL';
       if(s.pre_hd_note) document.getElementById('preHdNote').value = s.pre_hd_note;
@@ -311,6 +316,13 @@ function openEntry(slot, idx){
   const r = sheetData[idx] || {};
   /* UF link: UFR ที่บันทึกไว้แล้วในช่องนี้ถือว่าพยาบาลตั้งใจกรอก — ไม่คำนวณทับ */
   _ufSheetManual = !!(parseInt(r.ufr) > 0);
+  _ufIds = _UF_IDS_SHEET;
+  _ufManual = {remaining:false, rate:_ufSheetManual};
+  _ufPending = {target:null, extend:0};
+  _ufSaveConfirm = false;
+  document.getElementById('eUfWarn').textContent = '';
+  document.getElementById('eUfAdj').textContent = '';
+  document.getElementById('eUfRemain').value = '';
   document.getElementById('eTotalUf').placeholder = '';
 
   /* Fill fields */
@@ -383,6 +395,22 @@ function closeEntry(){
 
 function saveEntry(){
   const btn = document.getElementById('entrySaveBtn');
+  /* ด่านตรวจค่า UF ผิดปกติ 2 ขั้น — เหมือนปุ่มบันทึก UF หน้ารอบฟอก */
+  const warnEl = document.getElementById('eUfWarn');
+  const _tot = document.getElementById('eTotalUf').value;
+  if(_tot !== '' && !isNaN(parseInt(_tot))){
+    _ufIds = _UF_IDS_SHEET; _ufAsOf = _slotAsOf(_currentSlot);
+    const _prev = _prevUfTotal();
+    const w = _ufSafetyWarn(parseInt(_tot), _prev ? _prev.total : 0);
+    if(w && !_ufSaveConfirm){ warnEl.textContent = '⚠️ ' + w; btn.textContent = '✔ ยืนยันบันทึกค่านี้'; _ufSaveConfirm = true; return; }
+    /* แก้ช่อง "เหลือ" เอง → ถือเป็นเป้าบนเครื่องใหม่ (ถ้าต่ำกว่าเป้าเดิม) — กติกาเดียวกับหน้ารอบฟอก */
+    const _remV = document.getElementById('eUfRemain').value;
+    if(_ufManual.remaining && !_ufPending.target && _remV !== ''){
+      const c0 = _ufCtx(); const t = parseInt(_tot) + (parseInt(_remV)||0);
+      if(c0.goal && t < c0.goal - 50) _ufPending.target = t;
+    }
+  }
+  _ufSaveConfirm = false; warnEl.textContent = '';
   btn.disabled = true; btn.textContent = '⏳ กำลังบันทึก...';
 
   const data = {
@@ -399,8 +427,10 @@ function saveEntry(){
     dialysate_temp: parseFloat(document.getElementById('eDTemp').value)||null,
     ufr: parseInt(document.getElementById('eUfr').value)||null,
     total_uf: parseInt(document.getElementById('eTotalUf').value)||null,
+    uf_remaining: (document.getElementById('eUfRemain').value !== '' ? parseInt(document.getElementById('eUfRemain').value) : null),
     remark: document.getElementById('eRemark').value||null,
   };
+  if(data.total_uf) _ufAdjPayload(data);
 
   hdFetch('/hd/api/v1/sessions/'+SESSION_ID+'/flowsheet',{
     method:'POST',
@@ -422,7 +452,9 @@ function saveEntry(){
       });
     }
     renderSummary();
+    if(data.total_uf) _ufAdjCommit();
     if(d.alert) showToast('⚠️ '+d.alert.title,'danger');
+    if(d.watch && d.watch.flag && d.watch.flag !== 'ok' && d.watch.flag !== 'no_goal' && d.watch.text) showToast('💧 UF Watch: '+d.watch.text, d.watch.flag==='high_rate' ? 'danger' : 'warning', 8000);
     showToast('✅ บันทึก '+_currentSlot+' สำเร็จ','success');
     closeEntry();
   })

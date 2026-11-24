@@ -2458,16 +2458,8 @@ function showUfWatch(w){
     pj.textContent = '🔮 ' + w.projection_text;
   } else pj.textContent = '';
 }
-/* ── 🧮 UF Auto-Calc (14 พ.ย. 2569) ──
-   รู้: เป้า UF, น้ำหนักแห้ง, เวลาเริ่ม, ชั่วโมงที่สั่ง → คำนวณให้:
-   ควรดึงได้แล้วเท่าไรตามแผน (เส้นตรง), เหลือเท่าไร, อัตราที่ต้องใช้ต่อจากนี้ให้ครบตามเวลา,
-   เทียบเพดาน 13 mL/kg/h (ระวัง >10), ช้า/เร็วกว่าแผน, ทางเลือกยืดเวลา/ลดเป้า — เป็นข้อเสนอ พยาบาล/แพทย์ตัดสินใจ */
-/* ข้อ 1 + 9: ข้อมูลเฉพาะราย (เพดาน UF / เกณฑ์น้ำหนักขึ้น) */
-let _ufCoach = null;
-function loadUfCoach(hn){
-  if(!hn) return;
-  hdFetch('/hd/api/v1/patients/'+encodeURIComponent(hn)+'/uf-coach').then(r=>r.ok?r.json():null).then(d=>{ _ufCoach = d; }).catch(()=>{});
-}
+{# 24 พ.ย. 2569: สมอง UF ตัวเดียวสำหรับ 3 หน้าจอ — ดู _uf_brain.html #}
+{% include "_uf_brain.html" %}
 /* ข้อ 8: รูปหน้าจอเครื่องฟอก → เติมค่า (ไม่บันทึกเอง) */
 function readMachineScreen(inp){
   const f = inp.files && inp.files[0]; if(!f) return;
@@ -2486,38 +2478,6 @@ function readMachineScreen(inp){
     st.innerHTML = '✅ อ่านได้: <b>' + got.join(' · ') + '</b> — <u>ตรวจกับหน้าจอก่อนกดบันทึก</u>'; st.style.color = 'var(--success)';
   }).catch(()=>{ inp.value=''; st.textContent = '❌ อ่านรูปไม่สำเร็จ — กรอกเอง'; st.style.color = 'var(--danger)'; });
 }
-let _ufManual = {remaining:false, rate:false};
-let _ufAdj = {target:null, extend:0};      /* เป้า/เวลาที่ตั้งบนเครื่องแล้ว (บันทึกไว้ใน UF record) */
-let _ufPending = {target:null, extend:0};  /* ที่เลือกในหน้าต่างนี้ ยังไม่บันทึก */
-/* 24 พ.ย. 2569: สมอง UF ตัวเดียวใช้ได้ทั้ง "UF ละเอียด" (modalUf*) และ "ฟอร์มรวม" (imUf*) ผ่านแผนที่ id */
-const _UF_IDS_LEGACY  = {removed:'modalUfRemoved', remaining:'modalUfRemaining', rate:'modalUfRate', info:'ufAutoInfo', opts:'ufAutoOpts', warn:'ufSaveWarn', btn:'ufSaveBtn', plan:'ufPlanLine', adj:'ufAdjLine', btnLabel:'💾 บันทึก'};
-const _UF_IDS_UNIFIED = {removed:'imUfRemoved', remaining:'imUfRemaining', rate:'imUfRate', info:'imUfInfo', opts:'imUfOpts', warn:'imWarn', btn:'imSaveBtn', plan:'imUfPlan', adj:'imUfAdj', btnLabel:'💾 บันทึกทั้งหมด'};
-let _ufIds = _UF_IDS_LEGACY;
-function _ufEl(k){ return document.getElementById(_ufIds[k]); }
-function _ufRenderPlan(){
-  const c = _ufCtx();
-  const expected = c.dur ? Math.round(c.goal * c.elapsed / c.dur) : 0;
-  const rem = _ufEl('removed');
-  if(rem){ rem.placeholder = c.goal ? `ตามแผนควร ≈ ${expected}` : ''; }
-  const hhmm = h => { const m = Math.round(h*60); return `${Math.floor(m/60)} ชม. ${m%60} นาที`; };
-  const plan = _ufEl('plan'); if(!plan) return c;
-  plan.innerHTML = c.goal
-    ? `เป้า <b>${c.goal}</b> mL ใน ${c.dur} ชม. · ผ่านไป ${hhmm(c.elapsed)} (${Math.round(c.elapsed/c.dur*100)}%) · ตามแผนควรดึงได้แล้ว <b>${expected}</b> mL · อัตราตามแผน ${Math.round(c.goal/c.dur)} mL/ชม.${c.dw?` (${(c.goal/c.dur/c.dw).toFixed(1)} mL/kg/ชม.)`:''}`
-    : 'ยังไม่มีเป้า UF — กำหนดใน UF Planner ด้านบนก่อน ระบบจะคำนวณให้อัตโนมัติ';
-  if(c.goal && c.goal < c.rx) plan.innerHTML += `<br><b style="color:#e67e22">🎯 ตั้งเป้าบนเครื่องไว้ ${c.goal} mL (แพทย์สั่ง ${c.rx} mL)</b>`;
-  if(_ufAdj.extend) plan.innerHTML += `<br><b style="color:#e67e22">⏱ ยืดเวลาแล้ว +${_ufAdj.extend} นาที</b>`;
-  return c;
-}
-function _ufCtx(){
-  const rx = parseInt(document.getElementById('ufGoal').textContent) || sessionData.uf_goal || 0;
-  const tgt = _ufAdj.target && _ufAdj.target < rx ? _ufAdj.target : 0;
-  const goal = tgt || rx;
-  const dur = (parseFloat(sessionData.duration_hours) || 4) + (_ufAdj.extend||0)/60;
-  const dw = parseFloat(sessionData.dry_weight) || parseFloat((document.getElementById('dryWeight')||{}).value) || 0;
-  let elapsed = 0;
-  if(sessionData.start_time){ elapsed = Math.max(0, (Date.now() - new Date(sessionData.start_time).getTime())/3600000); }
-  return {goal, rx, dur, dw, elapsed: Math.min(elapsed, dur), left: Math.max(0, dur - Math.min(elapsed, dur))};
-}
 function openUfModal(){
   _ufIds = _UF_IDS_LEGACY;
   _ufManual = {remaining:false, rate:false};
@@ -2530,73 +2490,6 @@ function openUfModal(){
   ufAutoCalc('removed');
   openModal('ufModal');
 }
-function ufAutoCalc(src){
-  const c = _ufCtx();
-  const removedEl = _ufEl('removed'), remEl = _ufEl('remaining'), rateEl = _ufEl('rate');
-  if(!removedEl || !remEl || !rateEl) return;
-  if(src==='remaining') _ufManual.remaining = true;
-  _ufSaveConfirm = false; if(_ufEl('warn')) _ufEl('warn').textContent = ''; if(_ufEl('btn')) _ufEl('btn').textContent = _ufIds.btnLabel;
-  if(src==='rate') _ufManual.rate = true;
-  const removed = parseInt(removedEl.value);
-  const info = _ufEl('info'), opts = _ufEl('opts');
-  if(!info || !opts) return;
-  if(!c.goal || isNaN(removed)){ info.innerHTML = c.goal ? 'กรอก UF Removed จากหน้าจอเครื่อง → ระบบจะคำนวณที่เหลือและอัตราให้' : ''; opts.innerHTML=''; if(!isNaN(removed)&&!_ufManual.remaining) remEl.value = c.goal? Math.max(0,c.goal-removed):''; return; }
-  const remaining = Math.max(0, c.goal - removed);
-  if(!_ufManual.remaining) remEl.value = remaining;
-  const needRate = c.left > 0.05 ? Math.round(remaining / c.left) : null;         // อัตราที่ต้องใช้ต่อจากนี้
-  const curRate = c.elapsed > 0.1 ? Math.round(removed / c.elapsed) : null;        // อัตราเฉลี่ยที่ทำได้
-  if(!_ufManual.rate) rateEl.value = needRate != null ? needRate : (curRate || '');
-  const expected = Math.round(c.goal * c.elapsed / c.dur);
-  const diff = removed - expected;
-  const kg = c.dw ? (needRate != null ? needRate / c.dw : null) : null;
-  const lim = {max:13, caution:10};
-  const pcl = (_ufCoach && _ufCoach.tolerance && _ufCoach.tolerance.personal_ceiling) || null;   /* ข้อ 1 */
-  let lvl = 'ok', col = 'var(--success)';
-  if(kg != null && kg > lim.max){ lvl='high'; col='var(--danger)'; } else if(kg != null && kg > lim.caution){ lvl='caution'; col='#e67e22'; }
-  const pct = Math.round(removed / c.goal * 100);
-  let h = `ทำได้ <b>${removed}</b>/${c.goal} mL (${pct}%) เมื่อเวลาผ่าน ${Math.round(c.elapsed/c.dur*100)}% → `;
-  h += Math.abs(diff) < Math.max(100, c.goal*0.05) ? '<b style="color:var(--success)">ตามแผน ✅</b>' : (diff < 0 ? `<b style="color:#e67e22">ช้ากว่าแผน ${-diff} mL</b>` : `<b style="color:var(--accent)">เร็วกว่าแผน ${diff} mL</b>`);
-  if(curRate) h += ` · อัตราเฉลี่ยที่ผ่านมา ${curRate} mL/ชม.`;
-  if(needRate != null && c.left > 0.05){
-    h += `<br>เหลือ <b>${remaining}</b> mL ใน ${Math.round(c.left*60)} นาที → ต้องใช้ <b style="color:${col}">${needRate} mL/ชม.</b>` + (kg != null ? ` = <b style="color:${col}">${kg.toFixed(1)} mL/kg/ชม.</b> ${lvl==='high'?'⛔ เกินเพดาน 13 (เสี่ยง IDH/ตะคริว)':(lvl==='caution'?'⚠️ ระวัง (10–13)':'✅ ในเกณฑ์')}` : ' (ไม่มี DW — คำนวณต่อ kg ไม่ได้)');
-  } else if(c.left <= 0.05){ h += `<br>หมดเวลาตามแผนแล้ว · ${remaining>0?`ยังเหลือ ${remaining} mL`:'ครบเป้า ✅'}`; }
-  /* ข้อ 1: เพดานเฉพาะรายจากประวัติ (ข้อมูลประกอบ แพทย์ตัดสินใจ) */
-  if(pcl && kg != null && kg > pcl && lvl !== 'high'){
-    h += `<br><b style="color:#e67e22">🧍 สูงกว่าเพดานเฉพาะรายของผู้ป่วยคนนี้ (~${pcl} mL/kg/ชม.)</b>`;
-    if(lvl === 'ok'){ lvl = 'caution'; col = '#e67e22'; }
-  }
-  if(_ufCoach && _ufCoach.tolerance && _ufCoach.tolerance.text) h += `<br><span style="font-size:.72rem;color:var(--fg-muted)">🧍 ${_ufCoach.tolerance.text}</span>`;
-  info.innerHTML = h; info.style.borderLeft = `4px solid ${col}`;
-  // ทางเลือก (เป็นข้อเสนอ) เมื่ออัตราที่ต้องใช้สูงเกิน
-  let o = '';
-  if(lvl !== 'ok' && c.dw && remaining > 0){
-    const safeRate = lim.caution * c.dw;                       // mL/ชม. ที่ 10 mL/kg/h
-    const extraMin = Math.ceil((remaining / safeRate - c.left) * 60 / 15) * 15;
-    const residual = Math.max(0, Math.round(remaining - safeRate * c.left));
-    if(extraMin > 0) o += `<button type="button" class="btn btn-outline" style="font-size:.75rem;padding:4px 8px" onclick="ufApplyOpt('time',${extraMin})">⏱ ยืดเวลา +${extraMin} นาที (อัตรา ≤10 mL/kg/ชม.)</button>`;
-    if(residual > 0) o += `<button type="button" class="btn btn-outline" style="font-size:.75rem;padding:4px 8px" onclick="ufApplyOpt('cap',${residual})">🎯 คงอัตราปลอดภัย เหลือค้าง ${residual} mL (น้ำหนักหลังฟอกสูงกว่า DW ${(residual/1000).toFixed(1)} kg)</button>`;
-    o += `<span style="font-size:.7rem;color:var(--fg-muted);align-self:center">ข้อเสนอจากการคำนวณ — ปรึกษาแพทย์ก่อนปรับเครื่อง</span>`;
-  }
-  opts.innerHTML = o;
-}
-function _ufAdjText(){
-  const el = _ufEl('adj'); if(!el) return;
-  const t = [];
-  if(_ufPending.target) t.push(`🎯 จะบันทึกเป้าใหม่บนเครื่อง ${_ufPending.target} mL`);
-  if(_ufPending.extend) t.push(`⏱ จะบันทึกการยืดเวลา +${_ufPending.extend} นาที`);
-  el.textContent = t.length ? t.join(' · ') + ' (ตามที่แพทย์อนุมัติ)' : '';
-}
-function ufApplyOpt(type, v){
-  const c = _ufCtx();
-  const removed = parseInt(_ufEl('removed').value) || 0;
-  const remaining = Math.max(0, c.goal - removed);
-  if(type==='time'){ _ufPending = {target:null, extend:(_ufAdj.extend||0) + v}; } else { _ufPending = {target: removed + Math.max(0, remaining - v), extend:0}; }
-  _ufAdjText();
-  if(type==='time'){ const left = c.left + v/60; _ufEl('rate').value = Math.round(remaining/left); _ufManual.rate = true; showToast(`คำนวณอัตราใหม่เมื่อยืดเวลา +${v} นาที — บันทึกเวลาที่ยืดใน Sheet ด้วย`,'info'); }
-  else { _ufEl('remaining').value = Math.max(0, remaining - v); _ufEl('rate').value = c.left>0.05? Math.round(Math.max(0, remaining - v)/c.left):0; _ufManual.remaining = _ufManual.rate = true; showToast(`ตั้งเป้าใหม่: เหลือดึงอีก ${Math.max(0, remaining - v)} mL`,'info'); }
-  ufAutoCalc('opt');
-}
-let _ufSaveConfirm = false;
 function saveUfRecord(){
   _ufIds = _UF_IDS_LEGACY;
   const removed = document.getElementById('modalUfRemoved').value;
@@ -2919,7 +2812,6 @@ function renderTimeline(){
 let _sessionSummary = null;
 let _esaGiven = null; /* null=not set, true=given, false=skipped */
 let _openAlertCount = 0;   /* for the end-of-session gate */
-let _lastUfRemoved = 0;
 
 function setEsaGiven(val, fromUser){
   /* เตือนฉีดถี่เกิน — เฉพาะตอนพยาบาลกดปุ่มเอง (ไม่เด้งตอนโหลด session เก่า) */

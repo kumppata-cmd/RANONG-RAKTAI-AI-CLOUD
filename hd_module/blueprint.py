@@ -11263,6 +11263,22 @@ def flowsheet_entries(conn, session_id):
                         pass
                     logger.warning("flowsheet duration lookup failed: %s", de)
                 srow = tuple(srow) + (dur_h,)
+                # 24 พ.ย. 2569: น้ำหนักแห้ง + สถานะรอบ ให้ Sheet ใช้สมอง UF ตัวเดียวกับหน้ารอบฟอก (index 7, 8)
+                dw_v, st_v = None, None
+                try:
+                    cur.execute("""SELECT p.dry_weight, s.status FROM hd_sessions s
+                                   JOIN hd_patient_mapping p ON p.id = s.patient_id WHERE s.id = %s""", (session_id,))
+                    xr = cur.fetchone()
+                    if xr:
+                        dw_v = float(xr[0]) if xr[0] is not None else None
+                        st_v = xr[1]
+                except Exception as xe:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    logger.warning("flowsheet dw lookup failed: %s", xe)
+                srow = srow + (dw_v, st_v)
             # Everything recorded elsewhere for this session (session page,
             # quick "วัด BP" on the dashboard, UF button) — merged into slots below
             cur.execute("""SELECT sbp, dbp, heart_rate, temperature, spo2, recorded_at
@@ -11363,6 +11379,20 @@ def get_flowsheet(session_id):
         conn = psycopg2.connect(db_url, connect_timeout=5)
         try:
             entries, srow = flowsheet_entries(conn, session_id)
+            # เป้า/เวลาที่ปรับบนเครื่องล่าสุด (จากปุ่มบันทึก UF ทุกหน้า) — Sheet แสดงบรรทัดแผนเดียวกัน
+            uf_adj = None
+            try:
+                from .uf_watch import latest_adjustment as _lat
+                with conn.cursor() as _c:
+                    _t, _e = _lat(_c, session_id)
+                if _t or _e:
+                    uf_adj = {"target": int(_t) if _t else None, "extend": int(_e or 0)}
+            except Exception as ae:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+                logger.debug("flowsheet uf_adj: %s", ae)
         finally:
             conn.close()
 
@@ -11376,6 +11406,9 @@ def get_flowsheet(session_id):
                 "hn": srow[4] if srow else None,
                 "va": srow[5] if srow else None,
                 "duration_hours": float(srow[6]) if srow and len(srow) > 6 and srow[6] else 4,
+                "dry_weight": srow[7] if srow and len(srow) > 7 else None,
+                "status": srow[8] if srow and len(srow) > 8 else None,
+                "uf_adj": uf_adj,
             } if srow else {},
         })
     except Exception as e:
@@ -11489,6 +11522,7 @@ def save_flowsheet_row(session_id):
             # Mirror UF to hd_uf_records so the session page UF progress updates
             # 16 พ.ย. 2569: ใช้ค่ารวมของแถวช่องเวลานั้น (ไม่ใช่เฉพาะช่องที่เพิ่งพิมพ์) และ 1 ช่องเวลา = 1 record
             # เดิมบันทึกแค่ UFR → แทรก UF removed = 0, แก้ช่องเดิมซ้ำ → แทรกเพิ่ม → กราฟขึ้นลง + เตือนอัตราเกินผิด
+            uf_watch = None
             if params["total_uf"] is not None or params["ufr"] is not None:
                 cur.execute("SAVEPOINT sp_sheet_uf")
                 try:
@@ -11498,22 +11532,51 @@ def save_flowsheet_row(session_id):
                     if tot is not None and float(tot) > 0:
                         removed = int(float(tot))
                         rate = int(float(fr[1])) if fr[1] is not None else 0
-                        cur.execute("SELECT uf_goal FROM hd_sessions WHERE id = %s", (session_id,))
+                        cur.execute("SELECT uf_goal, started_at, status FROM hd_sessions WHERE id = %s", (session_id,))
                         gr = cur.fetchone()
                         goal = int(gr[0]) if gr and gr[0] else 0
-                        rem_ml = max(goal - removed, 0) if goal else 0
+                        # 24 พ.ย. 2569: ระบบ UF เดียวกันทั้ง 3 หน้า —
+                        #  • "เหลือ" ที่พยาบาลกรอก/ระบบคำนวณ ใช้ค่านั้น (ไม่ใช่ goal−removed เสมอ)
+                        #  • เวลาบันทึก = เวลาของช่อง (ไม่ใช่เวลากดบันทึก) → กราฟ/ไทม์ไลน์หน้ารอบฟอกตรงช่อง
+                        #  • เป้า/เวลาที่ปรับบนเครื่อง (target=/extend=) เก็บใน notes ให้ UF Watch เหมือนปุ่มบันทึก UF
+                        try:
+                            rem_ml = int(float(data.get("uf_remaining")))
+                            if rem_ml < 0:
+                                raise ValueError
+                        except (TypeError, ValueError):
+                            rem_ml = max(goal - removed, 0) if goal else 0
+                        slot_ts = _parse_entry_time(slot_time, anchor_utc=(gr[1] if gr else None))
+                        try:
+                            _mt = int(float(data.get("machine_target") or 0))
+                            _ex = int(float(data.get("extend_min") or 0))
+                        except (TypeError, ValueError):
+                            _mt, _ex = 0, 0
+                        _adj = ";".join(x for x in (f"target={_mt}" if 0 < _mt <= 10000 else "",
+                                                    f"extend={_ex}" if 0 < _ex <= 240 else "") if x)
+                        notes_v = f"sheet;{_adj}" if _adj else "sheet"
                         cur.execute("""SELECT id FROM hd_uf_records WHERE session_id = %s AND slot_time = %s
-                                       AND notes = 'sheet' ORDER BY id DESC LIMIT 1""", (session_id, slot_time))
+                                       AND notes LIKE 'sheet%%' ORDER BY id DESC LIMIT 1""", (session_id, slot_time))
                         ex = cur.fetchone()
                         if ex:
                             cur.execute("""UPDATE hd_uf_records SET uf_removed = %s, uf_rate = %s, uf_remaining = %s,
-                                           recorded_at = NOW() WHERE id = %s""", (removed, rate, rem_ml, ex[0]))
+                                           notes = %s, recorded_at = COALESCE(%s, recorded_at) WHERE id = %s""",
+                                        (removed, rate, rem_ml, notes_v, slot_ts, ex[0]))
                         else:
                             cur.execute("""
                                 INSERT INTO hd_uf_records (session_id, slot_time, uf_removed, uf_rate, uf_remaining,
                                                            notes, recorded_at)
-                                VALUES (%s, %s, %s, %s, %s, 'sheet', NOW())
-                            """, (session_id, slot_time, removed, rate, rem_ml))
+                                VALUES (%s, %s, %s, %s, %s, %s, COALESCE(%s, NOW()))
+                            """, (session_id, slot_time, removed, rate, rem_ml, notes_v, slot_ts))
+                        # actual_uf = ค่าสะสมสูงสุดของรอบ (แก้ช่องเก่าไม่ทำให้ถอยหลัง) — กติกาเดียวกับ UF Watch
+                        cur.execute("""UPDATE hd_sessions SET actual_uf = (SELECT MAX(uf_removed) FROM hd_uf_records
+                                       WHERE session_id = %s AND uf_removed > 0) WHERE id = %s""", (session_id, session_id))
+                        if gr and gr[2] == "in_progress":
+                            try:
+                                from .uf_watch import for_session as _ufw
+                                uf_watch = _ufw(cur, session_id, _uf_watch_limits())
+                                _uf_idh_alert(cur, session_id, uf_watch)
+                            except Exception as we:
+                                logger.warning("sheet uf watch: %s", we)
                     cur.execute("RELEASE SAVEPOINT sp_sheet_uf")
                 except Exception as ue:
                     cur.execute("ROLLBACK TO SAVEPOINT sp_sheet_uf")
@@ -11551,6 +11614,7 @@ def save_flowsheet_row(session_id):
             "id": row_id, "slot_time": slot_time,
             "saved": True, "alert": alert,
             "prev_row": prev_row,
+            "watch": uf_watch,
         }), 201
     except Exception as e:
         logger.error("save_flowsheet error: %s", e)
