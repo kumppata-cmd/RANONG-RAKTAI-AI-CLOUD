@@ -385,6 +385,7 @@
   <a id="hdSheetLink" href="#" class="btn btn-outline" style="width:100%;text-align:center;margin-bottom:16px;padding:12px;font-size:.9rem;display:none;" onclick="return true;">
     📋 เปิด HD Monitoring Sheet (บันทึกครบทุกค่า)
   </a>
+  <a id="hdBlackboxLink" href="#" class="btn btn-outline" style="width:100%;text-align:center;margin:-8px 0 16px;padding:10px;font-size:.85rem;display:none;">📼 ย้อนรอบฟอก (เส้นเวลา · จุดที่ควรทบทวน)</a>
 
   <!-- Timeline -->
   <div class="card">
@@ -1501,6 +1502,7 @@ function loadExistingSession(sid){
         const sl = document.getElementById('hdSheetLink');
         sl.href = '/hd/sheet/'+sid;
         sl.style.display = 'block';
+        _bbLinkMaybe(sid);
         loadSessionRecords(sid, {}, true);
         fillPreHd(d);
         lockPreHd('✅ ข้อมูลก่อนฟอกบันทึกแล้วตอนเริ่มฟอก (ดูอย่างเดียว)');
@@ -1691,7 +1693,7 @@ function showSessionHistory(d, sid, headers){
     document.getElementById('timerStartTime').textContent = tt(t0);
     document.getElementById('timerEndTime').textContent = tt(t1) + ' (จบจริง)';
   }
-  const sl = document.getElementById('hdSheetLink'); sl.href = '/hd/sheet/'+sid; sl.style.display = 'block';
+  const sl = document.getElementById('hdSheetLink'); sl.href = '/hd/sheet/'+sid; sl.style.display = 'block'; _bbLinkMaybe(sid);
   sl.textContent = '📋 เปิด HD Monitoring Sheet ของรอบนี้';
   sessionData.actual_uf = d.actual_uf;
   loadSessionRecords(sid, headers, false);
@@ -2459,6 +2461,14 @@ function showUfWatch(w){
     pj.style.color = d != null && d > 0.5 ? '#e67e22' : 'var(--fg-muted)';
     pj.textContent = '🔮 ' + w.projection_text;
   } else pj.textContent = '';
+}
+/* 📼 ย้อนรอบฟอก (Kidney Black Box) — ลิงก์โผล่เฉพาะเมื่อเปิด flag (ไม่เปลี่ยนหน้าจอพยาบาลเมื่อปิด) */
+let _bbStatus = null;
+function _bbLinkMaybe(sid){
+  const a = document.getElementById('hdBlackboxLink'); if(!a || !sid) return;
+  const show = ()=>{ a.href = '/hd/blackbox/'+sid; a.style.display = 'block'; };
+  if(_bbStatus === true){ show(); return; } if(_bbStatus === false) return;
+  hdFetch('/hd/api/v1/blackbox/status').then(r=>r.ok?r.json():{enabled:false}).then(d=>{ _bbStatus = !!(d&&d.enabled); if(_bbStatus) show(); }).catch(()=>{ _bbStatus = false; });
 }
 {# 24 พ.ย. 2569: สมอง UF ตัวเดียวสำหรับ 3 หน้าจอ — ดู _uf_brain.html #}
 {% include "_uf_brain.html" %}

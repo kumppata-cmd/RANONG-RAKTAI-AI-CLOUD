@@ -242,6 +242,11 @@ body.tv-mode #todayPatientsList, body.tv-mode .quick-vital-btn { display: none !
   <div style="font-weight:800;font-size:.85rem;margin-bottom:6px">🕓 รอสรุป Post-HD <span id="psCount"></span> <span style="font-weight:400;font-size:.7rem;color:var(--fg-muted)">— ปล่อยเตียงแล้ว เวชระเบียนยังเปิดอยู่ กดเข้าไปสรุปเพื่อปิดรอบ</span></div>
   <div id="psList" style="display:flex;flex-wrap:wrap;gap:8px"></div>
 </div>
+<!-- 📼 Black Box (25 พ.ย. 2569): รอบเมื่อวานที่ควรทบทวน — โผล่เฉพาะเมื่อ flag เปิด และมีรายการ -->
+<div id="bbReviewTray" style="display:none;margin:0 0 12px;padding:10px 12px;border:1px dashed #9b59b6;border-radius:12px;background:rgba(155,89,182,.06)">
+  <div style="font-weight:800;font-size:.85rem;margin-bottom:6px">📼 รอบเมื่อวานที่ควรทบทวน <span id="bbrCount"></span> <a href="/hd/blackbox/quality" style="font-weight:400;font-size:.7rem;margin-left:8px">ดูทั้งหมด / คุณภาพรายเดือน</a></div>
+  <div id="bbrList" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+</div>
 <div class="bed-grid" id="bedGrid">
   {% for i in range(1, config.TOTAL_BEDS + 1 if config else 26) %}
   <div class="bed-card bed-available" onclick="window.location.href='/hd/session/new?bed={{ i }}&shift='+currentShift">
@@ -1522,6 +1527,19 @@ function medPhotoPicked(inp){
 initDayButtons();
 if(_viewMode === 'all') fetchAllRounds(); else fetchBeds();
 /* 15 วิ — diff-render อัปเดตเฉพาะเตียงที่เปลี่ยน จอไม่กระพริบ */
+/* ── 📼 Black Box: ถาด "รอบเมื่อวานที่ควรทบทวน" (โหลดครั้งเดียวตอนเปิดหน้า; flag ปิด = ไม่แสดง) ── */
+function bbReviewTray(){
+  hdFetch('/hd/api/v1/blackbox/review-queue').then(r=>r.ok?r.json():null).then(d=>{
+    if(!d || d.error || !d.to_review || !d.to_review.length) return;
+    const tray = document.getElementById('bbReviewTray'); if(!tray) return;
+    document.getElementById('bbrCount').textContent = '(' + d.to_review.length + '/' + d.sessions + ' รอบ · ' + d.date + ')';
+    document.getElementById('bbrList').innerHTML = d.to_review.slice(0,8).map(x =>
+      `<a href="/hd/blackbox/${x.session_id}" style="padding:6px 10px;border-radius:10px;background:var(--card);border:1px solid var(--border);font-size:.78rem;text-decoration:none;color:var(--fg)">📼 เตียง ${x.bed} ${(x.patient_name||'').slice(0,14)} · ทบทวน ${x.hypotheses} · ช่องว่าง ${x.gaps}</a>`).join('');
+    tray.style.display = 'block';
+  }).catch(()=>{});
+}
+setTimeout(bbReviewTray, 2500);
+
 /* ── ⏰ เตือนใกล้ครบเวลาฟอก (24 พ.ย. 2569 — ข้อเสนอพยาบาลวันทดสอบแรก) ──
    3 ช่วง: 30 นาที (เขียว/เสียงระฆัง 2 โน้ต) · 15 นาที (เหลือง/บี๊บ 3 ครั้ง) · 5 นาที (แดง/เสียงด่วนสลับโน้ต)
    เวลาครบ = เวลาเริ่ม + ชั่วโมงตามใบสั่ง + เวลาที่ยืดบนเครื่อง · เตือน 1 ครั้งต่อเตียงต่อช่วง (จำในเครื่องนี้)

@@ -1,0 +1,96 @@
+{% extends "hd_base.html" %}
+{% block title %}📊 คุณภาพรายเดือน (ย้อนรอบฟอก){% endblock %}
+{% block extra_css %}
+<style>
+.q-wrap{max-width:1000px;margin:0 auto;padding:10px}
+.q-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin:10px 0}
+.q-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px}
+.q-card .v{font-size:1.5rem;font-weight:800} .q-card .l{font-size:.78rem;color:var(--fg-muted)} .q-card .s{font-size:.72rem;color:var(--fg-muted)}
+.q-note{font-size:.76rem;color:var(--fg-muted);margin-top:10px;line-height:1.5}
+.q-list{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:10px;font-size:.84rem}
+.q-item{display:flex;gap:8px;align-items:center;padding:6px 0;border-bottom:1px solid var(--border)} .q-item:last-child{border-bottom:none}
+.q-item a{font-weight:700}
+</style>
+{% endblock %}
+{% block content %}
+<div class="q-wrap">
+{% if disabled %}
+  <div class="q-card">📼 ย้อนรอบฟอก ยังไม่เปิดใช้งาน — ⚙️ <code>blackbox_enabled = 1</code></div>
+{% else %}
+  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between">
+    <h2 style="margin:0">📊 คุณภาพรายเดือน <span style="font-weight:400;font-size:.9rem">(ระดับหน่วย — ไม่ระบุตัวบุคคล)</span></h2>
+    <div><input type="month" id="qMonth" class="form-control" style="width:160px;display:inline-block" onchange="qLoad()"> <button class="btn btn-outline" onclick="qLoad()">โหลด</button></div>
+  </div>
+  <div id="qWarn" style="display:none;margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(243,156,18,.1);border:1px solid var(--warning);font-size:.8rem"></div>
+  <div class="q-grid" id="qGrid"></div>
+  <div class="q-list">
+    <div style="font-weight:800;margin-bottom:4px">🧭 รอบที่ควรทบทวน <span id="rqDate" style="font-weight:400;font-size:.78rem;color:var(--fg-muted)"></span>
+      <input type="date" id="rqDay" class="form-control" style="width:150px;display:inline-block;margin-left:8px" onchange="rqLoad()"></div>
+    <div id="rqList">กำลังโหลด…</div>
+  </div>
+  <div class="q-list">
+    <div style="font-weight:800;margin-bottom:4px">🔏 ความคงสภาพของ audit log (hash รายวัน)</div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><input type="date" id="ahDay" class="form-control" style="width:150px"> <button class="btn btn-outline" onclick="ahVerify()">ตรวจสอบ</button> <button class="btn btn-outline" onclick="ahRun()" title="คำนวณและเก็บ hash ของวันนี้ทันที (ปกติทำอัตโนมัติ 22:40)">คำนวณเก็บตอนนี้</button></div>
+    <div id="ahOut" style="margin-top:6px;font-size:.8rem"></div>
+  </div>
+  <div class="q-note">ตัวชี้วัดคำนวณจากตารางเดิมด้วย SQL (ไม่มี AI) · "ไม่เพียงพอ" = รอบในเดือน &lt; 20 · ใช้เพื่อพัฒนาระบบและกระบวนการ ไม่ใช่ประเมินรายบุคคล · เกณฑ์ปรับได้ใน ⚙️ (bb_*)</div>
+{% endif %}
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+const Q_DISABLED = {{ 'true' if disabled else 'false' }};
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+function _thaiDate(off){ const d = new Date(Date.now()+7*3600000+off*86400000); return d.toISOString().slice(0,10); }
+function qLoad(){
+  const m = document.getElementById('qMonth').value || _thaiDate(0).slice(0,7);
+  hdFetch('/hd/api/v1/blackbox/quality?month='+m).then(r=>r.json()).then(d=>{
+    const g = document.getElementById('qGrid'), w = document.getElementById('qWarn');
+    if(d.error){ g.innerHTML = '<div class="q-card">'+esc(d.error)+'</div>'; return; }
+    w.style.display = d.insufficient ? 'block' : 'none'; w.textContent = d.insufficient ? `⚠️ ข้อมูลไม่เพียงพอ (${d.sessions} รอบ) — แสดงตัวเลขดิบเพื่อติดตาม ยังไม่ควรสรุปแนวโน้ม` : '';
+    const n = d.sessions || 0, r = d.rates || {};
+    const card = (v,l,s) => `<div class="q-card"><div class="v">${v}</div><div class="l">${l}</div>${s?`<div class="s">${s}</div>`:''}</div>`;
+    g.innerHTML = card(n,'รอบฟอกในเดือน',`ปิดรอบมีน้ำหนักหลัง ${d.with_post_weight??0} · ปล่อยเตียงก่อน ${d.released_bed??0}`)
+      + card((r.sessions_sbp_low??0)+'%','รอบที่มี SBP ต่ำกว่าเกณฑ์',`${d.sessions_sbp_low??0} รอบ`)
+      + card(d.alerts??0,'แจ้งเตือน',`รับทราบ ${d.alerts_acked??0} · ช้ากว่าเกณฑ์ ${d.alerts_ack_late??0} · median ${d.ack_median_min??'-'} นาที`)
+      + card((r.sessions_with_vital_gap??0)+'%','รอบที่มีช่องว่าง vital',`${d.sessions_with_vital_gap??0} รอบ`)
+      + card((r.sessions_uf_rate_high??0)+'%','รอบที่อัตรา UF เกินเพดาน',`${d.sessions_uf_rate_high??0} รอบ`)
+      + card((r.sessions_post_over_dw??0)+'%','น้ำหนักหลังฟอกสูงกว่า DW',`${d.sessions_post_over_dw??0} รอบ`)
+      + card(d.edits??0,'การแก้ไขย้อนหลัง','ครั้ง (audit)')
+      + card(d.incidents??0,'incident ที่รายงาน','');
+  }).catch(e=>{ document.getElementById('qGrid').innerHTML = '<div class="q-card">โหลดไม่สำเร็จ: '+esc(e.message)+'</div>'; });
+}
+function rqLoad(){
+  const day = document.getElementById('rqDay').value || _thaiDate(-1);
+  document.getElementById('rqDate').textContent = day;
+  hdFetch('/hd/api/v1/blackbox/review-queue?date='+day).then(r=>r.json()).then(d=>{
+    const el = document.getElementById('rqList');
+    if(d.error){ el.textContent = d.error; return; }
+    if(!d.to_review.length){ el.innerHTML = `<div style="color:var(--fg-muted)">ไม่พบรอบที่เข้าเกณฑ์ (ทั้งหมด ${d.sessions} รอบ)</div>`; return; }
+    el.innerHTML = d.to_review.map(x=>`<div class="q-item"><a href="/hd/blackbox/${x.session_id}">📼 เตียง ${x.bed} · ${esc(x.patient_name||'')} (HN ${esc(x.hn||'')})</a><span style="font-size:.76rem;color:var(--fg-muted)">ทบทวน ${x.hypotheses} · ช่องว่าง ${x.gaps} · alert ${x.alerts}</span><span style="font-size:.76rem">${esc(x.top)}</span></div>`).join('')
+      + `<div style="font-size:.72rem;color:var(--fg-muted);margin-top:4px">จากทั้งหมด ${d.sessions} รอบ</div>`;
+  }).catch(e=>{ document.getElementById('rqList').textContent = 'โหลดไม่สำเร็จ: '+e.message; });
+}
+function ahVerify(){
+  const day = document.getElementById('ahDay').value || _thaiDate(-1);
+  hdFetch('/hd/api/v1/blackbox/audit-hash?date='+day).then(r=>r.json()).then(d=>{
+    const o = document.getElementById('ahOut');
+    if(d.error){ o.textContent = d.error; return; }
+    if(d.match === null){ o.textContent = d.note || 'ยังไม่มี hash'; return; }
+    o.innerHTML = d.match ? `✅ ${day}: ตรงกับ hash ที่เก็บไว้ (${d.rows_now} แถว) — ไม่พบการแก้ไข audit log ย้อนหลัง` : `⛔ ${day}: <b>ไม่ตรง</b> (ตอนเก็บ ${d.rows_then} แถว · ตอนนี้ ${d.rows_now} แถว) — audit log ของวันนี้ถูกเปลี่ยนหลังเก็บ hash ควรตรวจสอบ`;
+  });
+}
+function ahRun(){
+  const day = document.getElementById('ahDay').value || _thaiDate(0);
+  hdFetch('/hd/api/v1/blackbox/audit-hash', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({date: day})}).then(r=>r.json()).then(d=>{
+    document.getElementById('ahOut').textContent = d.error ? d.error : `เก็บแล้ว ${d.date}: ${d.rows} แถว · hash ${d.hash.slice(0,16)}… · GCS ${d.gcs?'✓':'—'}`;
+  });
+}
+if(!Q_DISABLED){
+  document.getElementById('qMonth').value = _thaiDate(0).slice(0,7);
+  document.getElementById('rqDay').value = _thaiDate(-1);
+  document.getElementById('ahDay').value = _thaiDate(-1);
+  qLoad(); rqLoad();
+}
+</script>
+{% endblock %}

@@ -319,6 +319,199 @@ def hd_sheet_page(session_id):
     return render_template("hd_sheet.html", session_id=session_id)
 
 
+@hd_web.route("/blackbox/<int:session_id>")
+def hd_blackbox_page(session_id):
+    """📼 ย้อนรอบฟอก (Kidney Black Box) — อ่านอย่างเดียว · flag blackbox_enabled (24 พ.ย. 2569)"""
+    from .blackbox import enabled as _bb_on
+    if not _bb_on():
+        return render_template("hd_blackbox.html", session_id=session_id, disabled=True)
+    return render_template("hd_blackbox.html", session_id=session_id, disabled=False)
+
+
+@hd_bp.route("/blackbox/status", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def blackbox_status():
+    from .blackbox import enabled as _bb_on
+    return jsonify({"enabled": bool(_bb_on())})
+
+
+@hd_bp.route("/sessions/<int:session_id>/blackbox", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def session_blackbox(session_id):
+    """เส้นเวลารวมทุกตาราง + ข้อเท็จจริง/ข้อมูลที่ขาด/ข้อสันนิษฐาน(กฎ) — ไม่เขียนอะไร"""
+    import os
+    from .blackbox import enabled as _bb_on, build as _bb_build, rule_limits as _bb_limits
+    if not _bb_on():
+        return jsonify({"error": "blackbox_disabled", "hint": "ตั้งค่า blackbox_enabled=1 ใน ⚙️ settings"}), 404
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            tl = _bb_build(conn, session_id, _bb_limits(get_setting_value))
+        finally:
+            conn.close()
+        if not tl:
+            return jsonify({"error": "ไม่พบรอบฟอก"}), 404
+        log_action(user_id=g.get("hd_user_id"), action="blackbox.view", resource_type="session",
+                   resource_id=session_id, ip_address=request.remote_addr or "")
+        return jsonify(tl)
+    except Exception as e:
+        logger.error("blackbox error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_web.route("/blackbox/quality")
+def hd_blackbox_quality_page():
+    from .blackbox import enabled as _bb_on
+    return render_template("hd_blackbox_quality.html", disabled=not _bb_on())
+
+
+@hd_bp.route("/sessions/<int:session_id>/blackbox/incident-draft", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def session_blackbox_incident_draft(session_id):
+    """ร่าง incident จากเส้นเวลา — คืนข้อมูลให้เติมฟอร์ม ไม่บันทึกอะไร"""
+    import os
+    from .blackbox import enabled as _bb_on, build as _bb_build, rule_limits as _bb_limits, incident_draft as _bb_draft
+    if not _bb_on():
+        return jsonify({"error": "blackbox_disabled"}), 404
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            tl = _bb_build(conn, session_id, _bb_limits(get_setting_value))
+        finally:
+            conn.close()
+        if not tl:
+            return jsonify({"error": "ไม่พบรอบฟอก"}), 404
+        return jsonify(_bb_draft(tl, _safe_int(request.args.get("alert_id"))))
+    except Exception as e:
+        logger.error("blackbox draft: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/sessions/<int:session_id>/blackbox/narrative", methods=["POST"])
+@require_role("physician", "admin")
+def session_blackbox_narrative(session_id):
+    """ชั้น AI เรียบเรียง 'ข้อสันนิษฐาน' — flag แยก (blackbox_ai_enabled) · แพทย์/แอดมินเท่านั้น · ไม่ส่งชื่อ/HN"""
+    import os
+    from .blackbox import enabled as _bb_on, ai_enabled as _ai_on, build as _bb_build, rule_limits as _bb_limits, ai_narrative as _ai
+    if not _bb_on():
+        return jsonify({"error": "blackbox_disabled"}), 404
+    if not _ai_on():
+        return jsonify({"error": "ai_disabled", "hint": "ตั้งค่า blackbox_ai_enabled=1 ใน ⚙️ settings"}), 404
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            tl = _bb_build(conn, session_id, _bb_limits(get_setting_value))
+        finally:
+            conn.close()
+        if not tl:
+            return jsonify({"error": "ไม่พบรอบฟอก"}), 404
+        res = _ai(tl)
+        log_action(user_id=g.get("hd_user_id"), action="blackbox.ai_narrative", resource_type="session",
+                   resource_id=session_id, new_values={"ok": "text" in res}, ip_address=request.remote_addr or "")
+        return jsonify(res), (200 if "text" in res else 502)
+    except Exception as e:
+        logger.error("blackbox narrative: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/blackbox/quality", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def blackbox_quality():
+    """ตัวชี้วัดคุณภาพรายเดือนระดับหน่วย (SQL ล้วน) ?month=YYYY-MM"""
+    import os
+    from .blackbox import enabled as _bb_on, quality_metrics as _qm, rule_limits as _bb_limits
+    if not _bb_on():
+        return jsonify({"error": "blackbox_disabled"}), 404
+    m = (request.args.get("month") or _thai_today().strftime("%Y-%m")).strip()
+    try:
+        y, mo = int(m[:4]), int(m[5:7])
+    except ValueError:
+        return jsonify({"error": "month=YYYY-MM"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            out = _qm(conn, y, mo, _bb_limits(get_setting_value))
+        finally:
+            conn.close()
+        return jsonify(out)
+    except Exception as e:
+        logger.error("blackbox quality: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/blackbox/review-queue", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def blackbox_review_queue():
+    """รอบของวัน (?date=YYYY-MM-DD, ค่าเริ่มต้น = เมื่อวาน) ที่มีจุดที่ควรทบทวน/ช่องว่างข้อมูล"""
+    import os
+    from datetime import timedelta as _td
+    from .blackbox import enabled as _bb_on, review_queue as _rq, rule_limits as _bb_limits
+    if not _bb_on():
+        return jsonify({"error": "blackbox_disabled", "enabled": False}), 404
+    ds = (request.args.get("date") or "").strip()
+    try:
+        day = datetime.strptime(ds, "%Y-%m-%d").date() if ds else (_thai_today() - _td(days=1))
+    except ValueError:
+        return jsonify({"error": "date=YYYY-MM-DD"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            out = _rq(conn, day, _bb_limits(get_setting_value))
+        finally:
+            conn.close()
+        return jsonify(out)
+    except Exception as e:
+        logger.error("blackbox review queue: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/blackbox/audit-hash", methods=["GET", "POST"])
+@require_role("physician", "admin", "auditor")
+def blackbox_audit_hash():
+    """GET ?date= → ตรวจว่า audit log ของวันนั้นตรงกับ hash ที่เก็บไว้ · POST {date} → คำนวณ+เก็บตอนนี้ (admin)"""
+    import os
+    from datetime import timedelta as _td
+    from flask import current_app
+    from .blackbox import audit_hash_verify as _verify, audit_hash_run as _run
+    ds = ((request.get_json(silent=True) or {}).get("date") if request.method == "POST" else request.args.get("date")) or ""
+    try:
+        day = datetime.strptime(ds, "%Y-%m-%d").date() if ds else (_thai_today() - _td(days=1))
+    except ValueError:
+        return jsonify({"error": "date=YYYY-MM-DD"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            if request.method == "POST":
+                if g.get("hd_role") not in ("admin", "physician"):
+                    return jsonify({"error": "forbidden"}), 403
+                bucket = getattr(current_app.config.get("STORAGE_OBJ"), "_bucket", None)
+                out = _run(conn, day, bucket)
+                log_action(user_id=g.get("hd_user_id"), action="blackbox.audit_hash", resource_type="audit",
+                           new_values={"date": day.isoformat(), "rows": out["rows"]}, ip_address=request.remote_addr or "")
+            else:
+                out = _verify(conn, day)
+        finally:
+            conn.close()
+        return jsonify(out)
+    except Exception as e:
+        logger.error("blackbox audit hash: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_web.route("/worksheet/<int:session_id>")
 def hd_worksheet_page(session_id):
     """HD Work Sheet Interactive — พยาบาลกรอก checklist."""
@@ -14714,6 +14907,9 @@ def save_incident():
                 col_map.append(('action_taken', data.get("action")))
             if 'reported_by' in cols:
                 col_map.append(('reported_by', reported_name))
+            # 25 พ.ย. 2569 (📼 Black Box): ผูก incident กับผู้ป่วย เพื่อให้โผล่ในเส้นเวลาของรอบนั้น
+            if 'patient_hn' in cols and data.get("hn"):
+                col_map.append(('patient_hn', str(data.get("hn"))[:20]))
 
             col_names = ', '.join(c[0] for c in col_map)
             placeholders = ', '.join(['%s'] * len(col_map))
