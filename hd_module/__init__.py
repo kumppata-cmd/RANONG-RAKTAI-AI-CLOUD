@@ -34,9 +34,15 @@ def register_hd_module(app):
         logger.info("HD Smart Monitoring module registered at /hd/api/v1/ + /hd/ (web)")
 
         # Auto-run database migrations (idempotent — CREATE IF NOT EXISTS)
-        _run_hd_migrations()
+        # 24 พ.ย. 2569: รันครั้งเดียวต่อ instance (worker ตัวถัดไป/ที่สร้างใหม่ข้าม) → worker บูตเร็ว
+        from .boot_once import run_once_per_instance as _once
+        try:
+            from .migrations import SCHEMA_VERSION as _sv
+        except Exception:
+            _sv = "0"
+        _once("hd_migrations", _run_hd_migrations, version=str(_sv))
 
-        # Auto-complete stale sessions from previous day (safety reset)
+        # Auto-complete stale sessions from previous day (safety reset) — query เดียว เร็ว คงไว้ทุกบูตตามเดิม
         _auto_complete_stale_sessions()
 
         # Auto-backup HD tables to GCS now runs from the scheduler thread

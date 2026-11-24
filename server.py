@@ -103,6 +103,8 @@ import fcntl
 import os
 import re
 import secrets
+import time as _boot_time
+_BOOT_T0 = _boot_time.time()   # 24 พ.ย. 2569: วัดเวลาบูตของ worker (ดูใน log "boot ⏱")
 import sys
 import hmac
 import hashlib
@@ -430,12 +432,24 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+def _boot_mark(label):
+    """log เวลาที่ผ่านไปตั้งแต่เริ่ม import server.py — ใช้หาว่าขั้นไหนทำให้ worker บูตช้า"""
+    try:
+        logger.info("boot ⏱ %-26s %6.1fs", label, _boot_time.time() - _BOOT_T0)
+    except Exception:
+        pass
+
+
+_boot_mark("imports + logging")
+
 # ─── Flask App ───────────────────────────────────────────
 app = Flask(__name__)
 
 # ─── HD Smart Monitoring Module (Feature Flag) ─────────────────
 from hd_module import register_hd_module, sync_patients_to_hd_db, create_default_hd_users
 register_hd_module(app)
+_boot_mark("hd module registered")
 
 # ─── CORS for Admin API (เฉพาะ /admin/api/ endpoints) ──────────
 # อนุญาตเฉพาะ claude.ai artifact เรียกใช้งาน admin API ได้
@@ -1419,8 +1433,12 @@ if master_registry and os.path.exists(_SEED_FILE):
 app.config["MASTER_REGISTRY"] = master_registry
 
 # ─── HD Patient Sync: GCS Registry → PostgreSQL ─────────
-sync_patients_to_hd_db(master_registry)
-create_default_hd_users()
+# 24 พ.ย. 2569: ครั้งเดียวต่อ instance (งาน idempotent อยู่แล้ว) — worker ใหม่ไม่ต้องทำซ้ำ
+_boot_mark("registries loaded")
+from hd_module.boot_once import run_once_per_instance as _boot_once
+_boot_once("hd_patient_sync", lambda: sync_patients_to_hd_db(master_registry))
+_boot_once("hd_default_users", create_default_hd_users)
+_boot_mark("hd patient sync/users")
 
 # ─── HD Alert Push + Vital Recorder: initialized later (after push_message def) ──
 hd_alert_push = None
@@ -13207,6 +13225,7 @@ def _hd_patient_line_id(hn: str) -> str:
 app.config["PATIENT_LINE_ID_FN"] = _hd_patient_line_id
 app.config["STORAGE_OBJ"] = storage        # HD daily-record export / backup reuse the same GCS auth
 app.config["DOC_INDEX"] = doc_index        # HD lab sync reads lab documents → bed cards
+_boot_mark("doc index + storage wired")
 
 try:
     from hd_module.alert_push import HdAlertPushService
@@ -23659,6 +23678,8 @@ init();
 </html>"""
     return page, 200, {"Content-Type": "text/html; charset=utf-8"}
 
+
+_boot_mark("READY (module import done)")
 
 # ═══════════════════════════════════════════════════════════
 # Main (สำหรับทดสอบ local เท่านั้น — Render ใช้ Gunicorn)
