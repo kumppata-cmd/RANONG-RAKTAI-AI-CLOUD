@@ -230,6 +230,11 @@ body.tv-mode #todayPatientsList, body.tv-mode .quick-vital-btn { display: none !
 <!-- 🚨 Alert strip: เตียงที่ต้องดูด่วน — แตะเพื่อเลื่อนไปที่เตียง -->
 <div id="alertStrip" style="display:none;margin-bottom:10px;padding:8px 12px;border-radius:12px;background:rgba(231,76,60,.08);border:1px solid rgba(231,76,60,.3);font-size:.82rem;font-weight:700;display:none;flex-wrap:wrap;gap:8px;align-items:center"></div>
 
+<!-- แบบ C (24 พ.ย. 2569): ถาดรอบที่ปล่อยเตียงแล้ว รอสรุป Post-HD -->
+<div id="pendingSummaryTray" style="display:none;margin:0 0 12px;padding:10px 12px;border:1px dashed var(--warning);border-radius:12px;background:rgba(243,156,18,.07)">
+  <div style="font-weight:800;font-size:.85rem;margin-bottom:6px">🕓 รอสรุป Post-HD <span id="psCount"></span> <span style="font-weight:400;font-size:.7rem;color:var(--fg-muted)">— ปล่อยเตียงแล้ว เวชระเบียนยังเปิดอยู่ กดเข้าไปสรุปเพื่อปิดรอบ</span></div>
+  <div id="psList" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+</div>
 <div class="bed-grid" id="bedGrid">
   {% for i in range(1, config.TOTAL_BEDS + 1 if config else 26) %}
   <div class="bed-card bed-available" onclick="window.location.href='/hd/session/new?bed={{ i }}&shift='+currentShift">
@@ -504,6 +509,20 @@ function ackFromCenter(id){
       showToast('รับทราบแล้ว','success');
       if(_viewMode==='all') fetchAllRounds(); else fetchBeds();
     }).catch(()=>showToast('รับทราบไม่สำเร็จ','danger'));
+}
+
+/* แบบ C: ถาด 🕓 รอสรุป Post-HD (ปล่อยเตียงแล้ว รอบยังเปิด) */
+function renderPendingSummary(items){
+  const tray = document.getElementById('pendingSummaryTray');
+  if(!tray) return;
+  if(!items.length){ tray.style.display = 'none'; return; }
+  tray.style.display = 'block';
+  document.getElementById('psCount').textContent = '(' + items.length + ' ราย)';
+  const t = s => { try{ let x=s; if(x && !x.endsWith('Z') && !x.includes('+')) x+='Z'; const d=new Date(x); return d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});}catch(e){ return '-'; } };
+  document.getElementById('psList').innerHTML = items.map(p =>
+    '<a href="/hd/session/' + p.session_id + '" style="text-decoration:none;color:var(--fg);border:1px solid var(--border);border-radius:10px;padding:6px 10px;font-size:.76rem;background:var(--bg-card)">' +
+    '🕓 <b>' + (p.name || p.hn) + '</b> · HN ' + p.hn + ' · เตียงเดิม ' + p.bed_number +
+    ' · ปล่อย ' + t(p.released_at) + ' น. <span style="color:var(--info);font-weight:700">→ สรุปเลย</span></a>').join('');
 }
 
 function renderBeds(beds){
@@ -912,6 +931,7 @@ function fetchBeds(){
       refreshInboxBadge();
       /* Always render — the grid must reflect the current shift state */
       renderBeds(beds);
+      renderPendingSummary(data.pending_summary || []);
       renderCompleted(data.completed_sessions || [], 'completedPanel', document.getElementById('bedGrid'));
       renderCancelledToday(data.cancelled_sessions || []);
       /* Show debug info */

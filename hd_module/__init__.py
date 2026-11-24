@@ -189,6 +189,21 @@ def _run_hd_migrations():
                 *[stmt.strip() for stmt in __import__("hd_module.water_check", fromlist=["CREATE_SQL"]).CREATE_SQL.split(";") if stmt.strip()],
                 # 18 พ.ย. 2569: Machine-Bed Link — เตียง 28 เตียง + ผูกเครื่องฟอกกับ session
                 "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS equipment_id INTEGER REFERENCES hd_equipment(id)",
+                # แบบ C (24 พ.ย. 2569): ปล่อยเตียงก่อน สรุป Post-HD ทีหลัง
+                "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS bed_released_at TIMESTAMP",
+                "ALTER TABLE hd_sessions ADD COLUMN IF NOT EXISTS released_by VARCHAR(80)",
+                # index กันเตียงซ้อนต้องไม่นับรอบที่ปล่อยเตียงแล้ว — ถ้า index เก่า
+                # (ไม่มีเงื่อนไข bed_released_at) ยังอยู่ ให้ถอนก่อนแล้วสร้างใหม่
+                """DO $$ BEGIN
+                     IF EXISTS (SELECT 1 FROM pg_indexes
+                                WHERE indexname = 'ux_hd_sessions_bed_active'
+                                  AND indexdef NOT LIKE '%bed_released_at%') THEN
+                       DROP INDEX ux_hd_sessions_bed_active;
+                     END IF;
+                   END $$""",
+                """CREATE UNIQUE INDEX IF NOT EXISTS ux_hd_sessions_bed_active
+                   ON hd_sessions (bed_number, session_date, COALESCE(shift, 'morning'))
+                   WHERE status IN ('scheduled', 'in_progress') AND bed_released_at IS NULL""",
                 # 18 พ.ย. 2569: วันเกิด + เพศ สำหรับ Work Sheet PDF
                 "ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS date_of_birth DATE",
                 "ALTER TABLE hd_patient_mapping ADD COLUMN IF NOT EXISTS gender VARCHAR(10)",
@@ -814,6 +829,37 @@ def _start_daily_reminder_scheduler(app):
                                 from .patient_engage import send_prehd_checkins
                                 _r_ci = ops.run_guarded("prehd_checkin", send_prehd_checkins, _pf_ci, _dbu_ci, timeout=300)
                                 logger.info("Pre-HD checkin: %s", _r_ci)
+                # แบบ C (24 พ.ย. 2569): 21:00 เตือนรอบที่ยังไม่ปิด/ค้างสรุป Post-HD
+                if now.hour == 21 and now.minute < 5:
+                    if _claim_once(app, "pending_summary_reminder", now.date()):
+                        try:
+                            import os as _os_ps
+                            import psycopg2 as _pg_ps
+                            _dbu_ps = _os_ps.environ.get("HD_DATABASE_URL", "") or _os_ps.environ.get("DATABASE_URL", "")
+                            _pf_ps = app.config.get("LINE_PUSH_FN")
+                            if _dbu_ps and _pf_ps:
+                                _c_ps = _pg_ps.connect(_dbu_ps, connect_timeout=5)
+                                with _c_ps.cursor() as _cu_ps:
+                                    _cu_ps.execute("""SELECT p.hn, p.patient_name, s.bed_number,
+                                                             s.bed_released_at IS NOT NULL
+                                                      FROM hd_sessions s
+                                                      JOIN hd_patient_mapping p ON p.id = s.patient_id
+                                                      WHERE s.status = 'in_progress'
+                                                        AND (s.bed_released_at IS NOT NULL
+                                                             OR s.started_at < NOW() - INTERVAL '6 hours')
+                                                      ORDER BY s.bed_released_at NULLS LAST""")
+                                    _rows_ps = _cu_ps.fetchall()
+                                _c_ps.close()
+                                if _rows_ps:
+                                    _ls_ps = "\n".join(
+                                        f"• HN {r[0]} {r[1] or ''} (เตียง {r[2]}"
+                                        + (" · ปล่อยเตียงแล้ว รอสรุป" if r[3] else " · ยังไม่ปิดรอบ") + ")"
+                                        for r in _rows_ps[:12])
+                                    _pf_ps("🕓 รอบค้างสรุป Post-HD " + str(len(_rows_ps)) + " ราย — ปิดรอบให้เอกสารครบ 100% ด้วยครับ:\n"
+                                           + _ls_ps + "\n👉 เปิด Dashboard ดูถาด 🕓 รอสรุป")
+                        except Exception as _ps_e:
+                            logger.warning("pending summary reminder: %s", _ps_e)
+
                 # Send at 18:00 Thai time
                 if now.hour == 18 and now.minute < 5 and last_sent_date != now.date():
                     last_sent_date = now.date()

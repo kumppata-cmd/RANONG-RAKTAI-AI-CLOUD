@@ -4603,20 +4603,29 @@ def create_session():
             # ⚠️ ป้องกันเตียงซ้อน:
             # 1. in_progress: เช็คทุกรอบ — เตียงยังไม่ว่างจนกว่าจะฟอกเสร็จ
             # 2. scheduled: เช็คเฉพาะรอบเดียวกัน
+            # แบบ C (24 พ.ย. 2569): รอบที่ "ปล่อยเตียงแล้ว" (bed_released_at) ไม่นับครองเตียง
             cur.execute("""
-                SELECT id, status, shift FROM hd_sessions
+                SELECT id, status, shift, started_at FROM hd_sessions
                 WHERE bed_number = %s
                   AND session_date = %s
                   AND status IN ('scheduled', 'in_progress')
+                  AND bed_released_at IS NULL
                 ORDER BY status
             """, (bed, sess_day.isoformat()))
             existing = cur.fetchall()
-            for ex_id, ex_status, ex_shift in existing:
+            for ex_id, ex_status, ex_shift, ex_started in existing:
                 if ex_status == "in_progress":
                     # เตียงมีคนฟอกอยู่ — ห้ามเริ่มรอบใหม่ ไม่ว่าจะรอบไหน
                     sn = {"morning": "เช้า", "afternoon": "บ่าย", "evening": "ค่ำ"}.get(ex_shift, ex_shift or "")
                     conn.close()
-                    return jsonify({"error": f"เตียง {bed} มีคนไข้กำลังฟอกอยู่ (รอบ{sn})"}), 409
+                    resp = {"error": f"เตียง {bed} มีคนไข้กำลังฟอกอยู่ (รอบ{sn})"}
+                    # ครบ/ใกล้ครบเวลาแล้ว → บอกหน้าเว็บให้เสนอ "ปล่อยเตียง (สรุปทีหลัง)"
+                    try:
+                        if ex_started and (datetime.utcnow() - ex_started).total_seconds() >= 3.5 * 3600:
+                            resp["overdue_session_id"] = ex_id
+                    except Exception:
+                        pass
+                    return jsonify(resp), 409
                 if init_status == "scheduled" and ex_status == "scheduled" and (ex_shift == shift or (ex_shift is None and shift == 'morning')):
                     conn.close()
                     return jsonify({"error": f"เตียง {bed} วันที่ {sess_day.strftime('%d/%m')} รอบนี้มีคนจองแล้ว"}), 409
@@ -4948,7 +4957,7 @@ def get_session(session_id):
                        s.pre_weight, s.post_weight, s.actual_uf, s.uf_goal,
                        s.started_at, s.ended_at, s.notes,
                        p.hn, p.patient_name, p.vascular_access, p.schedule_days,
-                       p.dry_weight, p.esa_drug, p.id
+                       p.dry_weight, p.esa_drug, p.id, s.bed_released_at
                 FROM hd_sessions s
                 JOIN hd_patient_mapping p ON p.id = s.patient_id
                 WHERE s.id = %s
@@ -4973,6 +4982,7 @@ def get_session(session_id):
             "vascular_access": row[13], "schedule_days": row[14],
             "dry_weight": float(row[15]) if row[15] else None,
             "esa_drug": row[16], "duration_hours": 4, "patient_id": row[17],
+            "bed_released_at": (row[18].isoformat() + "Z") if row[18] else None,
         })
     except Exception as e:
         logger.error("get_session error: %s", e)
@@ -5895,6 +5905,53 @@ def _record_time_edit(table, rid, session_id, hhmm, extra_set=""):
             return (old_ts, new_ts), None
     finally:
         conn.close()
+
+
+@hd_bp.route("/sessions/<int:session_id>/release-bed", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def release_bed(session_id):
+    """🛏 แบบ C (24 พ.ย. 2569): ปล่อยเตียงให้คนถัดไปโดยยังไม่ปิดรอบ.
+
+    รอบยังเป็น in_progress (เวชระเบียนเปิดรอสรุป Post-HD ให้ครบแล้วปิดตามปกติ)
+    แต่เตียงว่างทันที — ใช้เมื่อคนไข้ลงจากเตียงแล้วจริงเท่านั้น"""
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT status, bed_released_at, started_at, bed_number
+                           FROM hd_sessions WHERE id = %s""", (session_id,))
+            row = cur.fetchone()
+            if not row:
+                conn.close()
+                return jsonify({"error": "ไม่พบรอบฟอกนี้"}), 404
+            status, released, started, bed = row
+            if released:
+                conn.close()
+                return jsonify({"ok": True, "already": True, "bed_number": bed,
+                                "message": "รอบนี้ปล่อยเตียงไปแล้ว"})
+            if status != "in_progress":
+                conn.close()
+                return jsonify({"error": "ปล่อยเตียงได้เฉพาะรอบที่กำลังฟอก"}), 400
+            # กันปล่อยเตียงกลางรอบ: ต้องฟอกมาแล้วอย่างน้อย 3 ชม.
+            # (จบก่อนกำหนดจริง ๆ ให้ใช้ขั้นตอนจบรอบใน Post-HD ซึ่งบันทึกเหตุผลครบ)
+            if started and (datetime.utcnow() - started).total_seconds() < 3 * 3600:
+                conn.close()
+                return jsonify({"error": "ยังฟอกไม่ถึง 3 ชม. — ถ้าต้องหยุดก่อนกำหนด ใช้การจบรอบในแท็บ Post-HD"}), 400
+            cur.execute("""UPDATE hd_sessions
+                           SET bed_released_at = NOW(), released_by = %s
+                           WHERE id = %s""", (f"hd_user:{g.get('hd_user_id')}", session_id))
+            conn.commit()
+        conn.close()
+        log_action(user_id=g.get("hd_user_id"), action="session.release_bed",
+                   resource_type="hd_session", resource_id=str(session_id),
+                   old_values={}, new_values={"bed_number": bed},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "bed_number": bed,
+                        "message": f"ปล่อยเตียง {bed} แล้ว — อย่าลืมกลับมาสรุป Post-HD เพื่อปิดรอบ"})
+    except Exception as e:
+        logger.error("release_bed: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 @hd_bp.route("/sessions/<int:session_id>/vitals/<int:vital_id>/time", methods=["PUT"])
@@ -7772,6 +7829,7 @@ def bed_dashboard():
     from .config import HdConfig
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     current_shift = request.args.get("shift", "morning")
+    pending_summary = []  # แบบ C: ถาดรอสรุป — ต้องมีค่าเสมอแม้ query ล้ม
     # Allow date override for day-of-week navigation (YYYY-MM-DD)
     date_str = request.args.get("date", "")
     if date_str:
@@ -7840,6 +7898,8 @@ def bed_dashboard():
                         -- in_progress จากรอบก่อนหน้า (ฟอกยังไม่เสร็จ)
                         (s.status = 'in_progress' AND COALESCE(s.shift,'morning') = ANY(%s))
                       )
+                      -- แบบ C: รอบที่ปล่อยเตียงแล้วไม่ครองการ์ดเตียง (ไปอยู่ถาด 🕓 รอสรุป)
+                      AND NOT (s.status = 'in_progress' AND s.bed_released_at IS NOT NULL)
                     ORDER BY s.bed_number,
                              CASE s.status
                                WHEN 'scheduled' THEN 0
@@ -7850,6 +7910,23 @@ def bed_dashboard():
                 rows = cur.fetchall()
                 logger.info("bed_dashboard: date=%s shift=%s rows=%d",
                             target_date.isoformat(), current_shift, len(rows))
+                # แบบ C: ถาด 🕓 รอสรุป — ปล่อยเตียงแล้วแต่ยังไม่ปิดรอบ (Post-HD ค้าง)
+                try:
+                    cur.execute("""SELECT s.id, s.bed_number, p.hn, p.patient_name,
+                                          s.started_at, s.bed_released_at
+                                   FROM hd_sessions s
+                                   JOIN hd_patient_mapping p ON p.id = s.patient_id
+                                   WHERE s.session_date = %s AND s.status = 'in_progress'
+                                     AND s.bed_released_at IS NOT NULL
+                                   ORDER BY s.bed_released_at""", (target_date.isoformat(),))
+                    pending_summary = [{"session_id": r[0], "bed_number": r[1], "hn": r[2],
+                                        "name": r[3] or "",
+                                        "started_at": (r[4].isoformat() + "Z") if r[4] else None,
+                                        "released_at": (r[5].isoformat() + "Z") if r[5] else None}
+                                       for r in cur.fetchall()]
+                except Exception as _pse:
+                    logger.warning("pending_summary list: %s", _pse)
+                    pending_summary = []
                 session_ids = []
                 for row in rows:
                     bed_num = row[0]
@@ -8230,6 +8307,7 @@ def bed_dashboard():
 
     return jsonify({
         "beds": beds,
+        "pending_summary": pending_summary,
         "total": HdConfig.TOTAL_BEDS,
         "shift": current_shift,
         "date": target_date.isoformat(),

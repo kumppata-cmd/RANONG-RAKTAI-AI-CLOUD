@@ -128,4 +128,9 @@ EXPOSE 10000
 
 # รัน Gunicorn (ใช้ PORT จาก Render ENV, fallback 10000)
 # --threads 4: รองรับพยาบาลหลายคนพร้อมกัน — งานช้า (OCR รูป) ไม่บล็อกคำขออื่น
-CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --threads 4 --timeout 120 --access-logfile -
+# เสถียรภาพ (24 พ.ย. 2569 — 502 ตอนพยาบาลใช้พร้อมกัน):
+# --max-requests: รีไซเคิล worker เป็นระยะ ล้าง memory ที่ค่อย ๆ บวมจากงานรูป/PDF/Excel
+#   (jitter กันสอง worker รีสตาร์ทพร้อมกัน → มี worker ให้บริการเสมอ ไม่สะดุด)
+# --worker-tmp-dir /dev/shm: heartbeat บน RAM — กัน worker โดนมองว่าค้างเพราะดิสก์ช้า
+CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --threads 4 --timeout 120 \
+    --max-requests 300 --max-requests-jitter 60 --worker-tmp-dir /dev/shm --access-logfile -

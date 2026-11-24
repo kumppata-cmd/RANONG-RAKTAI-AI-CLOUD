@@ -276,6 +276,12 @@
     <div class="timer-value" id="timerDisplay">4:00:00</div>
     <div class="timer-bar"><div class="timer-bar-fill" id="timerBarFill" style="width:0%;"></div></div>
     <div class="timer-label" style="margin-top:6px;">เริ่ม: <span id="timerStartTime">-</span> | สิ้นสุดโดยประมาณ: <span id="timerEndTime">-</span></div>
+    <!-- แบบ C (24 พ.ย. 2569): ครบเวลา → ปล่อยเตียงให้คนถัดไปได้ โดยยังไม่ปิดรอบ -->
+    <div id="bedReleaseBox" style="display:none;margin-top:10px;padding:10px;border:1px dashed var(--warning);border-radius:10px;background:rgba(243,156,18,.07);text-align:left">
+      <div style="font-size:.82rem;font-weight:700">⏰ ครบเวลาฟอกตามแผนแล้ว</div>
+      <div style="font-size:.74rem;color:var(--fg-muted);margin:4px 0 8px">ถ้าคนไข้ลงจากเตียงแล้วแต่ยังไม่ว่างสรุป Post-HD — ปล่อยเตียงให้คนถัดไปก่อนได้ รอบนี้จะย้ายไปถาด "🕓 รอสรุป" บน dashboard แล้วค่อยกลับมาปิดรอบให้ครบ</div>
+      <button class="btn btn-warning" style="width:100%" onclick="releaseBed()">🛏 ปล่อยเตียงให้คนถัดไป (สรุป Post-HD ทีหลัง)</button>
+    </div>
     <button class="btn btn-success" id="completeBtn" style="display:none;margin-top:12px;width:100%;" onclick="switchTab('session','post')">
       ✅ ฟอกครบแล้ว — กรอก Post-HD
     </button>
@@ -829,6 +835,9 @@ function updateTimer(){
     document.getElementById('timerDisplay').textContent = '0:00:00 ครบเวลา!';
     timerEl.classList.add('urgent');
     document.getElementById('completeBtn').style.display = 'block';
+    /* แบบ C: ครบเวลา → เสนอปล่อยเตียง (ถ้ายังไม่ปล่อย) */
+    const rb = document.getElementById('bedReleaseBox');
+    if(rb && !sessionData.bed_released) rb.style.display = 'block';
     if(!_timerAlertedDone){ playAlertSound('critical'); vibrateAlert('critical'); _timerAlertedDone=true; }
     clearInterval(timerInterval);
     return;
@@ -1160,7 +1169,7 @@ function startSession(){
   sessionData.hn = hn;
   hdFetch('/hd/api/v1/sessions',{method:'POST',body:JSON.stringify(data)})
     .then(r=>{
-      if(!r.ok) return r.json().then(d=>Promise.reject(d.error || 'API error '+r.status));
+      if(!r.ok) return r.json().then(d=>Promise.reject(d && d.error ? d : {error:'API error '+r.status}));
       return r.json();
     })
     .then(d=>{
@@ -1183,7 +1192,16 @@ function startSession(){
       sheetLink.style.display = 'block';
     })
     .catch(e=>{
-      const msg = typeof e === 'string' ? e : (e && e.message ? e.message : 'ไม่สามารถเริ่มรอบฟอกได้');
+      /* แบบ C: เตียงนี้มีรอบก่อนที่ครบเวลาแล้วค้างอยู่ → เสนอปล่อยเตียงแล้วเริ่มต่อทันที */
+      if(e && e.overdue_session_id && !window._releasedRetry){
+        if(confirm((e.error||'เตียงนี้มีรอบก่อนค้างอยู่')+'\n\nรอบก่อนครบเวลาฟอกแล้ว และคนไข้รอบก่อนลงจากเตียงแล้วจริงใช่ไหม?\nปล่อยเตียงรอบก่อน (ย้ายไป 🕓 รอสรุป) แล้วเริ่มคนใหม่ทันที')){
+          releaseBed(e.overdue_session_id).then(ok=>{
+            if(ok){ window._releasedRetry = true; startSession(); setTimeout(()=>{ window._releasedRetry = false; }, 5000); }
+          });
+          return;
+        }
+      }
+      const msg = typeof e === 'string' ? e : (e && (e.error || e.message) ? (e.error || e.message) : 'ไม่สามารถเริ่มรอบฟอกได้');
       showToast('❌ '+msg, 'danger');
     });
 }
@@ -1412,6 +1430,14 @@ function loadExistingSession(sid){
           document.getElementById('timerEndTime').textContent = endTime.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
           updateTimer();
           timerInterval = setInterval(updateTimer, 1000);
+        }
+        /* แบบ C: รอบที่ปล่อยเตียงแล้ว — แสดงสถานะรอสรุป */
+        if(d.bed_released_at){
+          sessionData.bed_released = true;
+          const rb = document.getElementById('bedReleaseBox');
+          if(rb){ rb.style.display='block'; rb.innerHTML = '<div style="font-size:.8rem;font-weight:700;color:var(--warning)">🕓 ปล่อยเตียงแล้ว ('+hdTime(d.bed_released_at)+' น.) — มาสรุป Post-HD เพื่อปิดรอบให้เอกสารครบ</div>'; }
+          document.getElementById('sessionStatus').textContent = 'รอสรุป Post-HD';
+          document.getElementById('sessionStatus').className = 'badge badge-warning';
         }
         switchTab('session','intra');
         /* Show HD Sheet link */
@@ -2574,6 +2600,26 @@ function saveUfRecord(){
     closeModal('ufModal');
     showToast('❌ ไม่มี session — เริ่มฟอกก่อนบันทึก UF','danger');
   }
+}
+
+/* 🛏 แบบ C (24 พ.ย. 2569): ปล่อยเตียงให้คนถัดไป โดยยังไม่ปิดรอบ (รอสรุป Post-HD) */
+function releaseBed(fromConflictSessionId){
+  const sid = fromConflictSessionId || sessionData.session_id;
+  if(!sid) return Promise.resolve(false);
+  /* ถ้ามาจาก flow เริ่มคนใหม่ทับเตียงค้าง — ยืนยันจากกล่องก่อนหน้าแล้ว ไม่ถามซ้ำ */
+  if(!fromConflictSessionId && !confirm('ยืนยัน: คนไข้ลงจากเตียงแล้วจริง?\n\n• เตียงจะว่างให้คนถัดไปทันที\n• รอบนี้ย้ายไปถาด "🕓 รอสรุป" บน dashboard\n• ต้องกลับมาสรุป Post-HD เพื่อปิดรอบให้เอกสารครบ 100%')) return Promise.resolve(false);
+  return hdFetch('/hd/api/v1/sessions/'+sid+'/release-bed',{method:'POST',body:'{}'})
+    .then(r=>r.json().then(d=>({ok:r.ok, d})))
+    .then(x=>{
+      if(!x.ok){ showToast(x.d.error||'ปล่อยเตียงไม่สำเร็จ','danger'); return false; }
+      showToast('🛏 '+(x.d.message||'ปล่อยเตียงแล้ว'),'success');
+      if(!fromConflictSessionId){
+        sessionData.bed_released = true;
+        const rb = document.getElementById('bedReleaseBox');
+        if(rb) rb.innerHTML = '<div style="font-size:.8rem;font-weight:700;color:var(--warning)">🕓 ปล่อยเตียงแล้ว — รอบนี้ยังเปิดอยู่ อย่าลืมสรุป Post-HD เพื่อปิดรอบ</div>';
+      }
+      return true;
+    }).catch(e=>{ showToast('ผิดพลาด: '+e,'danger'); return false; });
 }
 
 /* 🕐 แก้เวลาวัดย้อนหลัง — ช่องในแผ่น HD Monitoring Sheet ขยับตามอัตโนมัติ */
