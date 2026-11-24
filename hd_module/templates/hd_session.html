@@ -2698,7 +2698,7 @@ function openIntraModal(){
   }catch(e){}
   const g = _imGoal();
   document.getElementById('imUfPlan').textContent = g ? ('· เป้า '+g+' mL' + (_lastUfRemoved ? ' · ครั้งก่อนสะสม '+_lastUfRemoved : '')) : '· ยังไม่มีเป้า UF';
-  document.getElementById('imSlotHint').textContent = '';
+  document.getElementById('intraSlotHint').textContent = '';
   openModal('intraModal');
   setTimeout(()=>{ try{ document.getElementById('imSbp').focus(); }catch(e){} }, 150);
 }
@@ -2768,7 +2768,7 @@ function _imMark(key, status, extra){
       if(e.type==='vital' && extra.vital_id) e.vid = extra.vital_id;
       if(e.type==='uf' && extra.uf_id) e.rid = extra.uf_id;
       if(extra.slot_time) e.slot = extra.slot_time;
-      if(extra.recorded_at){ e.time = hdTime(extra.recorded_at); e.ts = _tsOf(extra.recorded_at); }
+      if(extra.recorded_at){ try{ e.time = hdTime(extra.recorded_at); e.ts = _tsOf(extra.recorded_at); }catch(_te){} }
       if(extra.err) e.err = extra.err;
     }
   });
@@ -2779,41 +2779,46 @@ function _sendIntra(key){
   _imInFlight = true;
   const btn = document.getElementById('intraOpenBtn'); if(btn){ btn.disabled = true; btn.style.opacity='.7'; }
   const done = ()=>{ _imInFlight=false; if(btn){ btn.disabled=false; btn.style.opacity=''; } };
+  let gotResponse = false;
   hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/intra-record', {
     method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(p)
-  }).then(r=>r.json().then(d=>({ok:r.ok, status:r.status, d})))
-  .then(x=>{
+  }).then(r => r.json().catch(()=>({})).then(d => { gotResponse = true; return {ok:r.ok, status:r.status, d:d}; }))
+  .then(x => {
     done();
     if(!x.ok){ _imMark(key,'failed',{err:x.d.error||('HTTP '+x.status)}); showToast('❌ บันทึกไม่สำเร็จ: '+(x.d.error||x.status)+' — กด "ส่งซ้ำ" ที่แถวนั้น','danger'); return; }
-    const d = x.d;
-    _imMark(key,'ok',d);
+    _imMark(key,'ok',x.d);
     delete _imPayloads[key];
-    showToast(d.duplicate ? '✅ รายการนี้บันทึกไว้แล้ว (ไม่สร้างซ้ำ)' : '✅ บันทึกครบแล้ว'+(d.slot_time?' → ช่อง '+d.slot_time+' ใน Monitoring Sheet':''),'success');
-    /* อัปเดต UF progress + กราฟ เหมือนปุ่ม UF เดิม */
-    if(p.uf_removed!=null){
-      const rv = parseInt(p.uf_removed); if(rv > (_lastUfRemoved||0)) _lastUfRemoved = rv;
-      try{
-        const g=_imGoal(); const shown=Math.max(rv,_lastUfRemoved||0);
-        document.getElementById('ufRemoved').textContent = shown;
-        document.getElementById('ufRemaining').textContent = p.uf_remaining!=null ? p.uf_remaining : (g?Math.max(0,g-shown):'-');
-        if(p.uf_rate!=null) document.getElementById('ufRate').textContent = p.uf_rate;
-        if(g){ const pct=Math.min(100,Math.round(shown/g*100)); const bar=document.getElementById('ufProgressBar'); bar.style.width=pct+'%'; bar.textContent=pct+'%'; }
-        _ufRecords.push({t:new Date().toISOString(), removed:rv}); drawUfChart();
-      }catch(e){}
-      if(d.idh_alert_sent) showToast('🚨 แจ้งหัวหน้าเวรแล้ว: อัตรา UF เกินเพดาน + เสี่ยง IDH สูง','danger');
-    }
-    if((d.alerts||[]).length){
-      showToast('⚠️ มีการแจ้งเตือน '+d.alerts.length+' รายการ — ดูในการ์ดแจ้งเตือน','warning');
-      try{ playAlertSound('warning'); vibrateAlert('warning'); }catch(e){}
-      try{ loadSessionAlerts(); }catch(e){}
-    }
-  }).catch(e=>{
+    showToast(x.d.duplicate ? '✅ รายการนี้บันทึกไว้แล้ว (ไม่สร้างซ้ำ)' : '✅ บันทึกครบแล้ว'+(x.d.slot_time?' → ช่อง '+x.d.slot_time+' ใน Monitoring Sheet':''),'success');
+    try{ _imAfterSave(p, x.d); }catch(err){ console.warn('post-save UI:', err); }
+  }).catch(e => {
     done();
-    /* เครือข่ายล่ม: เข้าคิว offline (ส่งซ้ำอัตโนมัติด้วย key เดิม → ไม่ซ้ำ) */
+    if(gotResponse){ console.warn('intra post-processing:', e); return; }
+    /* เครือข่ายล่มจริง: เข้าคิว offline (ส่งซ้ำอัตโนมัติด้วย key เดิม → ไม่ซ้ำ) */
     _imMark(key,'queued');
     _pushOffline('/hd/api/v1/sessions/'+sessionData.session_id+'/intra-record','POST',JSON.stringify(p));
     showToast('⚠️ เน็ตหลุด — เก็บไว้ส่งอัตโนมัติเมื่อกลับมาออนไลน์','warning');
   });
+}
+/* อัปเดต UF progress/กราฟ/alert หลังบันทึกสำเร็จ — แต่ละส่วนแยก try กันพังทั้งก้อน */
+function _imAfterSave(p, d){
+  if(p.uf_removed!=null){
+    const rv = parseInt(p.uf_removed); if(rv > (_lastUfRemoved||0)) _lastUfRemoved = rv;
+    try{
+      const g=_imGoal(); const shown=Math.max(rv,_lastUfRemoved||0);
+      const el=(id)=>document.getElementById(id);
+      if(el('ufRemoved')) el('ufRemoved').textContent = shown;
+      if(el('ufRemaining')) el('ufRemaining').textContent = p.uf_remaining!=null ? p.uf_remaining : (g?Math.max(0,g-shown):'-');
+      if(p.uf_rate!=null && el('ufRate')) el('ufRate').textContent = p.uf_rate;
+      if(g && el('ufProgressBar')){ const pct=Math.min(100,Math.round(shown/g*100)); el('ufProgressBar').style.width=pct+'%'; el('ufProgressBar').textContent=pct+'%'; }
+    }catch(e){ console.warn('uf progress ui', e); }
+    try{ _ufRecords.push({t:new Date().toISOString(), removed:rv}); drawUfChart(); }catch(e){ console.warn('uf chart', e); }
+    if(d.idh_alert_sent) showToast('🚨 แจ้งหัวหน้าเวรแล้ว: อัตรา UF เกินเพดาน + เสี่ยง IDH สูง','danger');
+  }
+  if((d.alerts||[]).length){
+    showToast('⚠️ มีการแจ้งเตือน '+d.alerts.length+' รายการ — ดูในการ์ดแจ้งเตือน','warning');
+    try{ playAlertSound('warning'); vibrateAlert('warning'); }catch(e){}
+    try{ loadSessionAlerts(); }catch(e){}
+  }
 }
 function retryIntra(key){ if(!_imPayloads[key]){ showToast('ไม่พบข้อมูลสำหรับส่งซ้ำ — กรอกใหม่','warning'); return; } _imMark(key,'pending'); _sendIntra(key); }
 
