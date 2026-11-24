@@ -47,3 +47,23 @@ class TestParseEntryTime:
         for hhmm in ("00:00", "06:30", "12:00", "17:49", "23:59"):
             out = _parse_entry_time(hhmm, anchor)
             assert (out + timedelta(hours=7)).strftime("%H:%M") == hhmm
+
+
+class TestShiftForThaiHour:
+    """เกณฑ์รอบฟอก (24 พ.ย. 2569): หน่วยเริ่มรอบแรกได้ตั้งแต่ ~05:00"""
+
+    def test_early_morning_is_morning(self):
+        from hd_module.blueprint import _shift_for_thai_hour as f
+        # บั๊กจริง: 05:30 เคยถูกจัดเป็นรอบค่ำ
+        for h in (3, 4, 5, 6, 7, 10, 12):
+            assert f(h) == "morning", h
+
+    def test_afternoon(self):
+        from hd_module.blueprint import _shift_for_thai_hour as f
+        for h in (13, 14, 16):
+            assert f(h) == "afternoon", h
+
+    def test_evening_and_night(self):
+        from hd_module.blueprint import _shift_for_thai_hour as f
+        for h in (17, 19, 22, 23, 0, 1, 2):
+            assert f(h) == "evening", h

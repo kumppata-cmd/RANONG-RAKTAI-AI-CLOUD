@@ -4660,32 +4660,58 @@ def create_session():
                 except Exception:
                     cur.execute("ROLLBACK TO SAVEPOINT sp_eq_lookup")
 
-            try:
-                cur.execute(f"""
-                    INSERT INTO hd_sessions
-                        (patient_id, bed_number, session_date, status,
-                         pre_weight, post_weight, uf_goal,
-                         started_at, nurse_id, shift, equipment_id)
-                    VALUES (%s, %s, %s, '{init_status}',
-                            %s, NULL, %s,
-                            {started}, %s, %s, %s)
-                    RETURNING id
-                """, (
-                    patient_id, bed,
-                    sess_day.isoformat(),
-                    pre_w,
-                    uf_goal,
-                    g.get("hd_user_id"),
-                    shift,
-                    _eq_id,
-                ))
-            except Exception as ins_err:
-                # unique index ux_hd_sessions_bed_active: 2 คนกดลงเตียงเดียวกันพร้อมกันเป๊ะ
-                if "ux_hd_sessions_bed_active" in str(ins_err) or "duplicate key" in str(ins_err).lower():
-                    conn.close()
-                    return jsonify({"error": f"เตียง {bed} ถูกจองพร้อมกันโดยผู้ใช้อีกคน — รีเฟรช dashboard แล้วเลือกเตียงใหม่"}), 409
-                raise
-            session_id = cur.fetchone()[0]
+            # ── 24 พ.ย. 2569 (วันทดสอบจริงวันแรก) ──
+            # 1) เริ่มฟอกคนที่ "จองไว้" = แปลงรอบจองเป็นรอบจริง ไม่สร้างแถวใหม่
+            #    เดิม INSERT เสมอ → รอบจองค้างเป็นผี "จองไว้—รอเริ่ม" คู่กับรอบจริง
+            # 2) รอบ (เช้า/บ่าย/ค่ำ) ของการเริ่มจริง ให้ server คำนวณจากเวลาไทย
+            #    ตอนกดเริ่ม — ไม่เชื่อ client ซึ่งอาจเปิดหน้าค้างข้ามคืน (รอบติดมาจากเมื่อวาน)
+            session_id = None
+            if not is_schedule:
+                shift = _shift_for_thai_hour((datetime.utcnow() + timedelta(hours=7)).hour)
+                cur.execute("""SELECT id FROM hd_sessions
+                               WHERE patient_id = %s AND session_date = %s AND status = 'scheduled'
+                               ORDER BY id DESC LIMIT 1""",
+                            (patient_id, sess_day.isoformat()))
+                _booked = cur.fetchone()
+                if _booked:
+                    cur.execute("""UPDATE hd_sessions
+                                   SET status = 'in_progress', bed_number = %s, started_at = NOW(),
+                                       pre_weight = %s, uf_goal = %s, nurse_id = %s, shift = %s,
+                                       equipment_id = COALESCE(%s, equipment_id)
+                                   WHERE id = %s AND status = 'scheduled'
+                                   RETURNING id""",
+                                (bed, pre_w, uf_goal, g.get("hd_user_id"), shift,
+                                 _eq_id, _booked[0]))
+                    _conv = cur.fetchone()
+                    if _conv:
+                        session_id = _conv[0]
+            if session_id is None:
+                try:
+                    cur.execute(f"""
+                        INSERT INTO hd_sessions
+                            (patient_id, bed_number, session_date, status,
+                             pre_weight, post_weight, uf_goal,
+                             started_at, nurse_id, shift, equipment_id)
+                        VALUES (%s, %s, %s, '{init_status}',
+                                %s, NULL, %s,
+                                {started}, %s, %s, %s)
+                        RETURNING id
+                    """, (
+                        patient_id, bed,
+                        sess_day.isoformat(),
+                        pre_w,
+                        uf_goal,
+                        g.get("hd_user_id"),
+                        shift,
+                        _eq_id,
+                    ))
+                except Exception as ins_err:
+                    # unique index ux_hd_sessions_bed_active: 2 คนกดลงเตียงเดียวกันพร้อมกันเป๊ะ
+                    if "ux_hd_sessions_bed_active" in str(ins_err) or "duplicate key" in str(ins_err).lower():
+                        conn.close()
+                        return jsonify({"error": f"เตียง {bed} ถูกจองพร้อมกันโดยผู้ใช้อีกคน — รีเฟรช dashboard แล้วเลือกเตียงใหม่"}), 409
+                    raise
+                session_id = cur.fetchone()[0]
 
             # Save Dialyzer tracking (upsert active dialyzer).
             # Each optional save runs inside a SAVEPOINT: in PostgreSQL a failed
@@ -5800,6 +5826,16 @@ def _process_vital_alerts(cur, session_id, sbp=None, dbp=None, hr=None, spo2=Non
         except Exception as e:
             logger.warning("vital alert LINE push failed: %s", e)
     return created
+
+def _shift_for_thai_hour(h):
+    """ชั่วโมง (เวลาไทย 0-23) → รอบฟอก. หน่วยเริ่มรอบแรกได้ตั้งแต่ ~05:00
+    จึงนับ 03:00-12:59 เป็นรอบเช้า (บั๊ก 24 พ.ย. 2569: 05:30 เคยถูกจัดเป็นรอบค่ำ)."""
+    if 3 <= h < 13:
+        return "morning"
+    if 13 <= h < 17:
+        return "afternoon"
+    return "evening"
+
 
 def _parse_entry_time(hhmm, anchor_utc=None):
     """'HH:MM' (เวลาไทยที่พยาบาลตั้งใจ) → UTC timestamp โดยเลือกวันที่ให้ใกล้

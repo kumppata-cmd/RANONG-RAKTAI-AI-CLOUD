@@ -705,7 +705,8 @@ function _autoDetectShift(){
   const now = new Date();
   const utc = now.getTime() + now.getTimezoneOffset() * 60000;
   const h = new Date(utc + 7 * 3600000).getHours();
-  if(h >= 7 && h < 13) return 'morning';
+  /* 24 พ.ย. 2569: หน่วยเริ่มรอบแรก ~05:00-05:30 — เดิมเช้าเริ่ม 07:00 ทำให้ 05:30 กลายเป็นรอบค่ำ */
+  if(h >= 3 && h < 13) return 'morning';
   if(h >= 13 && h < 17) return 'afternoon';
   return 'evening';
 }
@@ -1171,6 +1172,8 @@ function startSession(){
       showToast('✅ เริ่มฟอกเลือดสำเร็จ (รอบ #'+d.session_id+')','success');
       startTimer();
       switchTab('session','intra');
+      /* 24 พ.ย. 2569: ล็อก Pre-HD ทันที — กันกดเริ่มซ้ำ/แก้ข้อมูลก่อนฟอกหลังเริ่มแล้ว */
+      lockPreHd('✅ เริ่มฟอกแล้ว — ข้อมูลก่อนฟอกถูกล็อก (ดูอย่างเดียว)');
       document.getElementById('cancelBtn').style.display = 'inline-flex';
       loadEsaHistory();
       /* Show HD Sheet link */
@@ -1547,7 +1550,12 @@ function fillPreHd(d){
 function lockPreHd(note){
   const pre = document.querySelector('[data-tab-content="pre"]'); if(!pre) return;
   pre.querySelectorAll('input, select, textarea').forEach(el=>{ el.disabled = true; });
-  pre.querySelectorAll('button[onclick^="startSession"], button[onclick^="openBooking"]').forEach(b=>{ b.style.display = 'none'; });
+  /* 24 พ.ย. 2569: ปุ่มเริ่มฟอกไม่ซ่อน แต่กลายเป็นสีอ่อน+กดไม่ได้ ให้รู้ชัดว่าคนไข้เริ่มฟอกแล้ว */
+  pre.querySelectorAll('button[onclick^="startSession"]').forEach(b=>{
+    b.disabled = true; b.style.opacity = '.45'; b.style.pointerEvents = 'none';
+    b.textContent = '✅ เริ่มฟอกแล้ว — กำลังฟอกอยู่';
+  });
+  pre.querySelectorAll('button[onclick^="openBooking"]').forEach(b=>{ b.style.display = 'none'; });
   if(note && !document.getElementById('preLockNote')){
     const n = document.createElement('div'); n.id = 'preLockNote';
     n.style.cssText = 'margin-bottom:12px;padding:8px 12px;border-radius:8px;background:rgba(39,174,96,.08);font-size:.8rem;font-weight:600;color:var(--success)';
