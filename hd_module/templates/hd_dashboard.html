@@ -117,6 +117,12 @@ body.tv-mode .ac-head { font-size: 1.1rem; }
 .bed-card.vital-overdue { border-color: var(--warning); }
 /* 🚨 Critical bed pulse */
 .bed-card.bed-pulse { animation: bedPulse 1.4s ease-in-out infinite; }
+/* ⏰ เตือนใกล้ครบเวลาฟอก (24 พ.ย. 2569): ไฟกระพริบ ~10 ครั้ง เขียว 30 นาที / เหลือง 15 นาที / แดง 5 นาที */
+@keyframes endwarnBlink { 0%,49%{ outline:5px solid var(--ew); box-shadow:0 0 18px 4px var(--ew); } 50%,100%{ outline:5px solid transparent; box-shadow:none; } }
+.bed-card.endwarn-30 { --ew:#2ecc71; animation: endwarnBlink .6s steps(1,end) 10; }
+.bed-card.endwarn-15 { --ew:#f1c40f; animation: endwarnBlink .6s steps(1,end) 10; }
+.bed-card.endwarn-5  { --ew:#e74c3c; animation: endwarnBlink .5s steps(1,end) 12; }
+.bed-card.endwarn-30, .bed-card.endwarn-15, .bed-card.endwarn-5 { z-index:2; position:relative; }
 @keyframes bedPulse { 0%,100%{box-shadow:0 0 0 0 rgba(231,76,60,.45)} 50%{box-shadow:0 0 0 7px rgba(231,76,60,0)} }
 .bed-card.bed-flash { outline: 3px solid var(--danger); transition: outline .3s; }
 /* 📺 TV Mode — จอใหญ่ติดผนัง อ่านข้ามห้องได้ */
@@ -192,6 +198,7 @@ body.tv-mode #todayPatientsList, body.tv-mode .quick-vital-btn { display: none !
   <button class="btn btn-outline" onclick="shiftHandover()" style="color:var(--warning);border-color:var(--warning);font-size:.8rem;">📋 ส่งเวร</button>
   <button class="btn btn-outline" onclick="autoAssignBeds()" style="color:var(--info);border-color:var(--info);font-size:.8rem;">🤖 จัดเตียง</button>
   <button class="btn btn-outline" onclick="toggleTvMode()" id="tvModeBtn" style="font-size:.8rem;">📺 TV</button>
+  <button class="btn btn-outline" onclick="toggleEndwarnSound()" id="endwarnBtn" style="font-size:.8rem;" title="เสียงเตือนใกล้ครบเวลาฟอก (30/15/5 นาที)">🔔 ครบเวลา</button>
   <a id="newSessionLink" href="/hd/session/new" class="btn btn-success" style="font-size:.85rem;" onclick="this.href='/hd/session/new?shift='+currentShift">➕ เริ่มฟอก</a>
 </div>
 
@@ -708,6 +715,8 @@ function renderBeds(beds){
     const _sig = _cls + '||' + inner;
     if(card._sig !== _sig){ card.className = _cls; card.innerHTML = inner; card._sig = _sig; }
     card.onclick = _onclick;
+    card.dataset.sid = b.session_id || '';
+    { const _fw = b.session_id && _endwarnFlash[b.session_id]; if(_fw && _fw.until > Date.now()) card.classList.add(_fw.cls); }
     grid.appendChild(card);
 
     if(b.status==='active' || b.status==='warning' || b.status==='critical') counts.active++;
@@ -923,6 +932,7 @@ function fetchBeds(){
     .then(data=>{
       const beds = data.beds || [];
       window._medsMap = data.meds || {};
+      _endwarnBeds = {}; _endwarnBeds[currentShift] = beds;
       try{
         const _pend = Object.values(window._medsMap).reduce((a,m)=>a+(m.pending||0),0);
         const _pb = document.getElementById('medPendingBadge');
@@ -1203,6 +1213,7 @@ function fetchAllRounds(){
         const beds = data.beds || [];
         if(data.meds) window._medsMap = Object.assign(window._medsMap||{}, data.meds);
         _allRoundAlerts[shift] = collectAlerts(beds, shift);
+        _endwarnBeds[shift] = beds;
         renderAlertCenter([].concat(..._allRoundAlerts.morning||[], ..._allRoundAlerts.afternoon||[], ..._allRoundAlerts.evening||[])
           .sort((x,y)=> (x.severity==='critical'?0:1)-(y.severity==='critical'?0:1)));
         const active = beds.filter(b=>b.status && b.status!=='available');
@@ -1511,6 +1522,95 @@ function medPhotoPicked(inp){
 initDayButtons();
 if(_viewMode === 'all') fetchAllRounds(); else fetchBeds();
 /* 15 วิ — diff-render อัปเดตเฉพาะเตียงที่เปลี่ยน จอไม่กระพริบ */
+/* ── ⏰ เตือนใกล้ครบเวลาฟอก (24 พ.ย. 2569 — ข้อเสนอพยาบาลวันทดสอบแรก) ──
+   3 ช่วง: 30 นาที (เขียว/เสียงระฆัง 2 โน้ต) · 15 นาที (เหลือง/บี๊บ 3 ครั้ง) · 5 นาที (แดง/เสียงด่วนสลับโน้ต)
+   เวลาครบ = เวลาเริ่ม + ชั่วโมงตามใบสั่ง + เวลาที่ยืดบนเครื่อง · เตือน 1 ครั้งต่อเตียงต่อช่วง (จำในเครื่องนี้)
+   เพิ่มอย่างเดียว: ไม่แตะ alert วิกฤต/การ์ดเตียง/การรีเฟรชเดิม · ปิดเสียงได้ที่ปุ่ม 🔔 ครบเวลา */
+const ENDWARN_STAGES = [
+  {min:30, cls:'endwarn-30', label:'30 นาที', sound:'chime',  toast:'success'},
+  {min:15, cls:'endwarn-15', label:'15 นาที', sound:'triple', toast:'warning'},
+  {min:5,  cls:'endwarn-5',  label:'5 นาที',  sound:'urgent', toast:'danger'},
+];
+let _endwarnBeds = {};        /* shift → beds ล่าสุดจาก API */
+const _endwarnFlash = {};     /* session_id → {cls, until} */
+function _endwarnSoundOn(){ try{ return localStorage.getItem('hd_endwarn_sound') !== '0'; }catch(e){ return true; } }
+function _endwarnBtnText(){ const b = document.getElementById('endwarnBtn'); if(b) b.textContent = _endwarnSoundOn() ? '🔔 ครบเวลา' : '🔕 ครบเวลา'; }
+function _endwarnUnlockAudio(){
+  try{
+    if(!_audioCtx) _audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+    if(_audioCtx.state === 'suspended') _audioCtx.resume();
+  }catch(e){}
+}
+function toggleEndwarnSound(){
+  const on = !_endwarnSoundOn();
+  try{ localStorage.setItem('hd_endwarn_sound', on ? '1' : '0'); }catch(e){}
+  _endwarnBtnText();
+  if(on){ _endwarnUnlockAudio(); playEndwarnSound('chime'); showToast('🔔 เปิดเสียงเตือนใกล้ครบเวลาฟอก (30/15/5 นาที)','success'); }
+  else showToast('🔕 ปิดเสียงเตือนใกล้ครบเวลา — ยังมีไฟกระพริบและข้อความเหมือนเดิม','info');
+}
+/* เบราว์เซอร์ให้เล่นเสียงหลังผู้ใช้แตะหน้าจออย่างน้อย 1 ครั้ง — ปลดล็อกเงียบ ๆ ตอนแตะครั้งแรก */
+document.addEventListener('pointerdown', function _ewOnce(){ _endwarnUnlockAudio(); document.removeEventListener('pointerdown', _ewOnce); }, {passive:true});
+function _ewTone(freq, at, dur, gainV, type){
+  const o = _audioCtx.createOscillator(), g = _audioCtx.createGain();
+  o.type = type || 'sine'; o.frequency.value = freq;
+  g.gain.setValueAtTime(0.0001, at); g.gain.exponentialRampToValueAtTime(gainV, at + 0.015); g.gain.exponentialRampToValueAtTime(0.0001, at + dur);
+  o.connect(g); g.connect(_audioCtx.destination); o.start(at); o.stop(at + dur + 0.02);
+}
+function playEndwarnSound(kind){
+  try{
+    _endwarnUnlockAudio();
+    const t = _audioCtx.currentTime + 0.05;
+    if(kind === 'chime'){            /* 30 นาที: ระฆังนุ่ม 2 โน้ต ขึ้น */
+      _ewTone(523, t, 0.35, 0.30, 'sine'); _ewTone(784, t + 0.30, 0.55, 0.30, 'sine');
+    } else if(kind === 'triple'){    /* 15 นาที: บี๊บ 3 ครั้ง × 2 ชุด */
+      for(let r = 0; r < 2; r++) for(let i = 0; i < 3; i++) _ewTone(880, t + r*1.1 + i*0.25, 0.16, 0.35, 'triangle');
+    } else {                         /* 5 นาที: เสียงด่วน สลับโน้ตสูง-ต่ำ 10 จังหวะ */
+      for(let i = 0; i < 10; i++) _ewTone(i % 2 ? 784 : 1046, t + i*0.14, 0.11, 0.45, 'square');
+    }
+  }catch(e){}
+}
+function _endwarnFired(){
+  const today = new Date().toISOString().slice(0,10);
+  try{ const o = JSON.parse(localStorage.getItem('hd_endwarn_fired')||'{}'); if(o._d === today) return o; }catch(e){}
+  return {_d: today};
+}
+function _endwarnStageFor(remainMin){
+  if(!(remainMin > 0) || remainMin > 30) return null;
+  return ENDWARN_STAGES.filter(s => remainMin <= s.min).pop();   /* ช่วงที่ "ต่ำสุด" ที่เข้าเงื่อนไข */
+}
+function checkEndWarnings(){
+  const now = Date.now();
+  const fired = _endwarnFired();
+  let changed = false;
+  Object.keys(_endwarnBeds).forEach(shift => (_endwarnBeds[shift]||[]).forEach(b => {
+    if(!b.session_id || !b.start_time) return;
+    if(!(b.status==='active' || b.status==='warning' || b.status==='critical')) return;
+    let st = b.start_time; if(st && !st.endsWith('Z') && !st.includes('+')) st += 'Z';
+    const startMs = new Date(st).getTime(); if(isNaN(startMs)) return;
+    const endMs = startMs + (parseFloat(b.duration_hours)||4)*3600000 + (parseInt(b.extend_min)||0)*60000;
+    const remainMin = (endMs - now) / 60000;
+    const stage = _endwarnStageFor(remainMin);
+    if(!stage) return;
+    /* จำเป็นรายรอบ + เวลาครบที่วางแผน → ถ้ายืดเวลาบนเครื่อง เวลาครบเปลี่ยน ระบบจะเตือนรอบใหม่ให้อีกครั้ง */
+    const key = b.session_id + '@' + Math.round(endMs / 60000);
+    const done = fired[key] || [];
+    if(done.includes(stage.min)) return;
+    /* ถือว่าช่วงที่สูงกว่าผ่านไปแล้ว (เช่น เปิดหน้าตอนเหลือ 12 นาที → เตือน 15 อย่างเดียว ไม่เตือน 30 ซ้อน) */
+    fired[key] = Array.from(new Set(done.concat(ENDWARN_STAGES.filter(s => s.min >= stage.min).map(s => s.min))));
+    changed = true;
+    _endwarnFlash[b.session_id] = {cls: stage.cls, until: now + 9000};
+    const card = document.querySelector('.bed-card[data-sid="' + b.session_id + '"]');
+    if(card){ ENDWARN_STAGES.forEach(s => card.classList.remove(s.cls)); void card.offsetWidth; card.classList.add(stage.cls); }
+    const name = b.patient_name || (b.patient && b.patient.name) || '';
+    showToast(`⏰ เตียง ${b.bed_number} ${name} — เหลือ ${stage.label} ครบเวลาฟอก (${Math.round(remainMin)} นาที)`, stage.toast, 9000);
+    if(_endwarnSoundOn()) playEndwarnSound(stage.sound);
+  }));
+  if(changed){ try{ localStorage.setItem('hd_endwarn_fired', JSON.stringify(fired)); }catch(e){} }
+}
+_endwarnBtnText();
+setInterval(checkEndWarnings, 20000);
+setTimeout(checkEndWarnings, 4000);
+
 setInterval(()=>{ if(_viewMode==='all') fetchAllRounds(); else fetchBeds(); }, 15000);
 
 /* Force refresh when page restored from bfcache (back/forward navigation) */

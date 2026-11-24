@@ -6436,6 +6436,17 @@ def list_vitals(session_id):
 
 # ── UF Records ────────────────────────────────────────────
 
+def _extend_min_from_notes(notes):
+    """'target=1777;extend=75' → 75 (นาที); ไม่มี/ผิดรูป → 0 — ใช้บอกเวลาครบฟอกจริงบนแดชบอร์ด"""
+    try:
+        from .uf_watch import parse_adjust
+        _t, ext = parse_adjust(notes or "")
+        ext = int(ext or 0)
+        return ext if 0 < ext <= 240 else 0
+    except Exception:
+        return 0
+
+
 def _uf_watch_limits():
     from .uf_watch import DEFAULTS
     out = dict(DEFAULTS)
@@ -8160,13 +8171,19 @@ def bed_dashboard():
                     SELECT s.bed_number, s.id as session_id, s.status,
                            p.hn, p.patient_name, p.vascular_access,
                            p.dry_weight, p.esa_drug,
-                           s.started_at, 4 as duration_hours,
+                           s.started_at,
+                           -- 24 พ.ย. 2569: ชั่วโมงตามใบสั่งฟอกล่าสุด (เดิมคงที่ 4) — ใช้จับเวลา/เตือนใกล้ครบเวลาบนแดชบอร์ด
+                           COALESCE((SELECT r.duration_hours FROM hd_prescriptions r WHERE r.patient_id = s.patient_id
+                                     AND r.is_active = TRUE ORDER BY r.id DESC LIMIT 1), 4) as duration_hours,
                            s.esa_given, s.esa_drug_given,
                            s.shift as saved_shift,
                            s.ended_at, s.pre_weight, s.post_weight, s.actual_uf,
                            (SELECT COUNT(*) FROM hd_clinical_alerts a WHERE a.session_id = s.id) AS n_alerts,
                            p.default_shift, p.schedule_days, p.esa_dose,
-                           s.cancel_reason
+                           s.cancel_reason,
+                           -- เวลาที่ยืดบนเครื่องล่าสุด (notes 'extend=NN' จากปุ่มบันทึก UF ทุกหน้า) — คอลัมน์ท้ายสุด ไม่ขยับ index เดิม
+                           (SELECT u.notes FROM hd_uf_records u WHERE u.session_id = s.id AND u.notes LIKE '%%extend=%%'
+                            ORDER BY u.recorded_at DESC, u.id DESC LIMIT 1) AS extend_notes
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.session_date = %s
@@ -8262,6 +8279,7 @@ def bed_dashboard():
                             },
                             "start_time": (row[8].isoformat() + "Z") if row[8] else None,
                             "duration_hours": float(row[9]) if row[9] else 4,
+                            "extend_min": _extend_min_from_notes(row[22] if len(row) > 22 else None),
                             "esa_given": row[10],
                             "esa_drug_given": row[11],
                             "current_vitals": None,
