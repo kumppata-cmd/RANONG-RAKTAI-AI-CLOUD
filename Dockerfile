@@ -130,7 +130,10 @@ EXPOSE 10000
 # --threads 4: รองรับพยาบาลหลายคนพร้อมกัน — งานช้า (OCR รูป) ไม่บล็อกคำขออื่น
 # เสถียรภาพ (24 พ.ย. 2569 — 502 ตอนพยาบาลใช้พร้อมกัน):
 # --max-requests: รีไซเคิล worker เป็นระยะ ล้าง memory ที่ค่อย ๆ บวมจากงานรูป/PDF/Excel
-#   (jitter กันสอง worker รีสตาร์ทพร้อมกัน → มี worker ให้บริการเสมอ ไม่สะดุด)
+#   บทเรียน 24 พ.ย. (คืนนั้น): ค่า 300/60 ต่ำเกินไป — health check ของ Render ทุก 5 วิ (720 คำขอ/ชม.) + แดชบอร์ด
+#   รีเฟรชทุก 15 วิ นับเป็นคำขอทั้งหมด → worker รีสตาร์ททุก ~10–20 นาที และ 2 ตัวมักครบพร้อมกัน (jitter 60 ไม่พอ)
+#   worker ใหม่ใช้เวลาบูต ~20–30 วิ (import + migration) → ช่วงนั้นไม่มีใครรับคำขอ = 502 ที่พยาบาลเจอ
+#   แก้: 4000 ± 2000 → รีสตาร์ทราวทุก 3–8 ชม. ต่อ worker และแทบไม่มีทางชนกัน (memory จริงอยู่ 40–55% ไม่ต้องรีไซเคิลถี่)
 # --worker-tmp-dir /dev/shm: heartbeat บน RAM — กัน worker โดนมองว่าค้างเพราะดิสก์ช้า
 CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --threads 4 --timeout 120 \
-    --max-requests 300 --max-requests-jitter 60 --worker-tmp-dir /dev/shm --access-logfile -
+    --max-requests 4000 --max-requests-jitter 2000 --worker-tmp-dir /dev/shm --access-logfile -
