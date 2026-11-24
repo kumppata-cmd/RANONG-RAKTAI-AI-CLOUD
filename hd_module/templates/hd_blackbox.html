@@ -1,0 +1,162 @@
+{% extends "hd_base.html" %}
+{% block title %}📼 ย้อนรอบฟอก{% endblock %}
+
+{% block extra_css %}
+<style>
+.bb-wrap{max-width:1100px;margin:0 auto;padding:10px}
+.bb-head{display:flex;flex-wrap:wrap;gap:10px;align-items:baseline;justify-content:space-between;margin-bottom:8px}
+.bb-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin:10px 0}
+@media(max-width:860px){.bb-grid{grid-template-columns:1fr}}
+.bb-panel{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;font-size:.84rem;line-height:1.5}
+.bb-panel h4{margin:0 0 6px;font-size:.9rem}
+.bb-panel.fact{border-left:4px solid var(--success)} .bb-panel.miss{border-left:4px solid var(--warning)} .bb-panel.hyp{border-left:4px solid #e67e22}
+.bb-panel ul{margin:0;padding-left:18px} .bb-panel li{margin:2px 0}
+.bb-chart{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px;margin:10px 0;overflow-x:auto}
+.bb-tl{position:relative;margin:10px 0 30px;padding-left:26px;border-left:3px solid var(--border)}
+.bb-ev{position:relative;margin:0 0 8px;padding:6px 10px;border-radius:8px;background:var(--card);border:1px solid var(--border);font-size:.84rem}
+.bb-ev::before{content:"";position:absolute;left:-32px;top:12px;width:12px;height:12px;border-radius:50%;background:var(--border);border:2px solid var(--card)}
+.bb-ev.vital::before{background:#3498db} .bb-ev.uf::before{background:#1abc9c} .bb-ev.alert::before{background:var(--danger)} .bb-ev.ack::before,.bb-ev.order::before{background:#9b59b6}
+.bb-ev.med::before{background:#e67e22} .bb-ev.line::before{background:#2ecc71} .bb-ev.edit::before{background:#7f8c8d} .bb-ev.start::before,.bb-ev.end::before,.bb-ev.release::before{background:var(--fg)}
+.bb-ev.alert{border-color:var(--danger)} .bb-ev.flag{box-shadow:0 0 0 2px #e67e22 inset}
+.bb-t{font-weight:700;font-variant-numeric:tabular-nums;margin-right:6px} .bb-src{font-size:.7rem;color:var(--fg-muted)}
+.bb-gap{margin:0 0 8px;padding:4px 10px;border:1px dashed var(--warning);border-radius:8px;color:var(--warning);font-size:.78rem}
+.bb-filters{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0} .bb-filters button{font-size:.74rem;padding:3px 9px;border-radius:14px}
+.bb-filters button.on{background:var(--accent);color:#fff;border-color:var(--accent)}
+.bb-rev{background:var(--bg);border-radius:8px;padding:6px 10px;margin:4px 0;font-size:.8rem}
+.bb-note{font-size:.72rem;color:var(--fg-muted);margin-top:14px}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="bb-wrap">
+{% if disabled %}
+  <div class="bb-panel miss"><h4>📼 ย้อนรอบฟอก ยังไม่เปิดใช้งาน</h4>ฟีเจอร์นี้ปิดเป็นค่าเริ่มต้น — ผู้ดูแลระบบเปิดได้ที่ ⚙️ ตั้งค่า <code>blackbox_enabled = 1</code> (หรือ ENV <code>HD_BLACKBOX_ENABLED=true</code>) ระบบเดิมไม่ได้รับผลกระทบ</div>
+{% else %}
+  <div class="bb-head">
+    <div><h2 style="margin:0">📼 ย้อนรอบฟอก <span id="bbTitle" style="font-weight:400;font-size:.95rem"></span></h2>
+      <div id="bbSub" style="font-size:.8rem;color:var(--fg-muted)"></div></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <a id="bbSessionLink" class="btn btn-outline" style="font-size:.8rem" href="#">↩ หน้ารอบฟอก</a>
+      <a id="bbSheetLink" class="btn btn-outline" style="font-size:.8rem" href="#">📋 Sheet</a>
+      <button class="btn btn-outline" style="font-size:.8rem" onclick="bbCopy()">📋 คัดลอกสรุป</button>
+    </div>
+  </div>
+
+  <div class="bb-grid">
+    <div class="bb-panel fact"><h4>✅ ข้อเท็จจริง (จากระบบ)</h4><ul id="bbFacts"><li>กำลังโหลด…</li></ul></div>
+    <div class="bb-panel miss"><h4>❔ ข้อมูลที่ขาด / ช่องว่าง</h4><ul id="bbMissing"></ul></div>
+    <div class="bb-panel hyp"><h4>🧭 จุดที่ควรทบทวน (กฎ — ข้อสันนิษฐาน)</h4><ul id="bbHyp"></ul>
+      <div style="font-size:.7rem;color:var(--fg-muted);margin-top:6px">ไม่ใช่ข้อสรุปสาเหตุ · แพทย์ทบทวนจากข้อมูลดิบในเส้นเวลา</div></div>
+  </div>
+
+  <div class="bb-chart"><div style="font-size:.8rem;font-weight:700;margin-bottom:4px">📈 SBP / DBP (mmHg) · UF สะสม (mL) · 🔴 alert · 🟣 คำสั่งแพทย์ · ⚠️ จุดทบทวน</div><div id="bbChart"></div></div>
+
+  <div id="bbReviews"></div>
+
+  <div class="bb-filters" id="bbFilters"></div>
+  <div class="bb-tl" id="bbTl"></div>
+  <div class="bb-note">ทุกรายการมีแหล่งที่มา (ตาราง#แถว) · อ่านอย่างเดียว ไม่มีการแก้ไขข้อมูลจากหน้านี้ · การดูถูกบันทึกใน audit log</div>
+{% endif %}
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const SESSION_ID = {{ session_id }};
+const BB_DISABLED = {{ 'true' if disabled else 'false' }};
+let _bb = null;
+const KIND_TH = {start:'เริ่ม', end:'จบ', release:'ปล่อยเตียง', vital:'Vital', uf:'UF', machine:'เครื่อง', machine_obs:'เครื่อง', alert:'Alert', ack:'รับทราบ', order:'คำสั่งแพทย์', med:'ยา', line:'LINE', edit:'แก้ไขย้อนหลัง', incident:'Incident'};
+let _bbFilter = new Set();
+function bbTime(iso){ try{ const d = hdParseUtc(iso) || new Date(iso); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }catch(e){ return '-'; } }
+function esc(s){ return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
+
+function bbLoad(){
+  if(BB_DISABLED) return;
+  hdFetch('/hd/api/v1/sessions/'+SESSION_ID+'/blackbox').then(r=>r.json()).then(d=>{
+    if(d.error){ document.getElementById('bbFacts').innerHTML = '<li>'+esc(d.error)+(d.hint?' — '+esc(d.hint):'')+'</li>'; return; }
+    _bb = d; bbRender();
+  }).catch(e=>{ document.getElementById('bbFacts').innerHTML = '<li>โหลดไม่สำเร็จ: '+esc(e.message)+'</li>'; });
+}
+function bbRender(){
+  const s = _bb.session;
+  document.getElementById('bbTitle').textContent = `${s.date} เตียง ${s.bed} — ${s.patient_name||''} (HN ${s.hn||'-'})`;
+  document.getElementById('bbSub').textContent = `เริ่ม ${s.started_at?bbTime(s.started_at):'-'} · จบ ${s.ended_at?bbTime(s.ended_at):'ยังไม่ปิดรอบ'} · สถานะ ${s.status||''} · ${s.va||''}`;
+  document.getElementById('bbSessionLink').href = '/hd/session/'+s.id;
+  document.getElementById('bbSheetLink').href = '/hd/sheet/'+s.id;
+  const li = a => a.length ? a.map(x=>'<li>'+esc(x)+'</li>').join('') : '<li style="color:var(--fg-muted)">—</li>';
+  document.getElementById('bbFacts').innerHTML = li(_bb.facts);
+  document.getElementById('bbMissing').innerHTML = li(_bb.missing);
+  document.getElementById('bbHyp').innerHTML = _bb.hypotheses.length
+    ? _bb.hypotheses.map(h=>`<li><b>${esc(h.rule)}</b> ${esc(h.text)}${h.n?` <a href="#ev${h.n}" style="font-size:.7rem">#${h.n}</a>`:''}</li>`).join('')
+    : '<li style="color:var(--fg-muted)">ไม่พบจุดที่เข้าเกณฑ์</li>';
+  bbChart(); bbReviews(); bbFilters(); bbTimeline();
+}
+function bbChart(){
+  const ev = _bb.events, s = _bb.session;
+  const vit = ev.filter(e=>e.kind==='vital' && e.data.sbp!=null), uf = ev.filter(e=>e.kind==='uf' && e.data.removed!=null);
+  const box = document.getElementById('bbChart');
+  if(!vit.length && !uf.length){ box.innerHTML = '<div style="color:var(--fg-muted);font-size:.8rem">ไม่มีข้อมูลสำหรับกราฟ</div>'; return; }
+  const t0 = (hdParseUtc(s.started_at)||new Date(ev[0].ts)).getTime();
+  const tEnd = Math.max(...ev.map(e=>(hdParseUtc(e.ts)||new Date(e.ts)).getTime()), t0 + (s.duration_hours||4)*3600000);
+  const W = 900, H = 240, ml = 40, mr = 50, mt = 10, mb = 24;
+  const x = t => ml + (t - t0) / (tEnd - t0) * (W - ml - mr);
+  const yB = v => mt + (1 - (v - 40) / (200 - 40)) * (H - mt - mb);
+  const ufMax = Math.max(s.uf_goal||0, ...uf.map(u=>u.data.removed), 1000);
+  const yU = v => mt + (1 - v / ufMax) * (H - mt - mb);
+  let g = `<svg viewBox="0 0 ${W} ${H}" width="100%" style="min-width:600px;font-size:10px">`;
+  for(const v of [60,100,140,180]) g += `<line x1="${ml}" y1="${yB(v)}" x2="${W-mr}" y2="${yB(v)}" stroke="var(--border)" stroke-dasharray="3,3"/><text x="${ml-4}" y="${yB(v)+3}" text-anchor="end" fill="var(--fg-muted)">${v}</text>`;
+  g += `<line x1="${ml}" y1="${yB(_bb.limits.bb_sbp_low)}" x2="${W-mr}" y2="${yB(_bb.limits.bb_sbp_low)}" stroke="var(--danger)" stroke-dasharray="5,3" opacity=".6"/>`;
+  for(let h=0; h<=Math.ceil((tEnd-t0)/3600000); h++){ const xx = x(t0+h*3600000); if(xx<=W-mr) g += `<text x="${xx}" y="${H-6}" text-anchor="middle" fill="var(--fg-muted)">${bbTime(new Date(t0+h*3600000).toISOString())}</text>`; }
+  const pt = (arr, key, yf) => arr.map(e=>`${x((hdParseUtc(e.ts)||new Date(e.ts)).getTime()).toFixed(1)},${yf(e.data[key]).toFixed(1)}`).join(' ');
+  if(uf.length){ g += `<polyline points="${pt(uf,'removed',yU)}" fill="none" stroke="#1abc9c" stroke-width="2"/>`; uf.forEach(u=>{ const xx=x((hdParseUtc(u.ts)||new Date(u.ts)).getTime()); g += `<circle cx="${xx}" cy="${yU(u.data.removed)}" r="3" fill="#1abc9c"/>`; }); g += `<text x="${W-mr+4}" y="${yU(ufMax)+8}" fill="#1abc9c">${ufMax} mL</text>`; if(s.uf_goal) g += `<line x1="${ml}" y1="${yU(s.uf_goal)}" x2="${W-mr}" y2="${yU(s.uf_goal)}" stroke="#1abc9c" stroke-dasharray="2,4" opacity=".7"/>`; }
+  if(vit.length){ g += `<polyline points="${pt(vit,'sbp',yB)}" fill="none" stroke="#3498db" stroke-width="2.5"/>`; const dv = vit.filter(v=>v.data.dbp!=null); if(dv.length) g += `<polyline points="${pt(dv,'dbp',yB)}" fill="none" stroke="#3498db" stroke-width="1.5" opacity=".5"/>`;
+    vit.forEach(v=>{ const xx=x((hdParseUtc(v.ts)||new Date(v.ts)).getTime()); const low = v.data.sbp < _bb.limits.bb_sbp_low; g += `<circle cx="${xx}" cy="${yB(v.data.sbp)}" r="4" fill="${low?'var(--danger)':'#3498db'}"><title>#${v.n} ${bbTime(v.ts)} BP ${v.data.sbp}/${v.data.dbp??'-'}</title></circle>`; }); }
+  ev.filter(e=>e.kind==='alert').forEach(a=>{ const xx=x((hdParseUtc(a.ts)||new Date(a.ts)).getTime()); g += `<line x1="${xx}" y1="${mt}" x2="${xx}" y2="${H-mb}" stroke="var(--danger)" stroke-width="1.5" opacity=".8"/><text x="${xx+3}" y="${mt+10}" fill="var(--danger)">🔴#${a.n}</text>`; });
+  ev.filter(e=>e.kind==='order').forEach(a=>{ const xx=x((hdParseUtc(a.ts)||new Date(a.ts)).getTime()); g += `<text x="${xx+3}" y="${mt+22}" fill="#9b59b6">🟣#${a.n}</text>`; });
+  _bb.hypotheses.filter(h=>h.ts).forEach(h=>{ const xx=x((hdParseUtc(h.ts)||new Date(h.ts)).getTime()); g += `<text x="${xx-6}" y="${H-mb-2}" fill="#e67e22">⚠️</text>`; });
+  _bb.gaps.forEach(gp=>{ const a=x((hdParseUtc(gp.from)||new Date(gp.from)).getTime()), b=x((hdParseUtc(gp.to)||new Date(gp.to)).getTime()); g += `<rect x="${a}" y="${mt}" width="${Math.max(1,b-a)}" height="${H-mt-mb}" fill="var(--warning)" opacity=".08"/>`; });
+  g += '</svg>';
+  box.innerHTML = g;
+}
+function bbReviews(){
+  const box = document.getElementById('bbReviews');
+  if(!_bb.alert_reviews.length){ box.innerHTML=''; return; }
+  box.innerHTML = '<div class="bb-panel" style="margin:10px 0"><h4>🔎 ก่อน alert ' + _bb.limits.bb_prewindow_min + ' นาที — ระบบเตือนทันไหม</h4>' +
+    _bb.alert_reviews.map(r=>`<div class="bb-rev"><b>#${r.n} ${bbTime(r.ts)} ${esc(r.title)}</b> ${r.timing?'· '+esc(r.timing):''} ${r.acknowledged?'· ✅ รับทราบแล้ว':'· ⏳ ยังไม่รับทราบ'}<br>${r.signals.map(x=>'• '+esc(x)).join('<br>')}</div>`).join('') + '</div>';
+}
+function bbFilters(){
+  const kinds = [...new Set(_bb.events.map(e=>e.kind))];
+  document.getElementById('bbFilters').innerHTML = '<span style="font-size:.74rem;color:var(--fg-muted);align-self:center">กรอง:</span>' +
+    kinds.map(k=>`<button type="button" class="btn btn-outline ${_bbFilter.size===0||_bbFilter.has(k)?'on':''}" onclick="bbToggle('${k}')">${esc(KIND_TH[k]||k)} (${_bb.events.filter(e=>e.kind===k).length})</button>`).join('') +
+    `<button type="button" class="btn btn-outline" onclick="_bbFilter.clear();bbFilters();bbTimeline()">ทั้งหมด</button>`;
+}
+function bbToggle(k){ if(_bbFilter.has(k)) _bbFilter.delete(k); else _bbFilter.add(k); bbFilters(); bbTimeline(); }
+function bbTimeline(){
+  const flagged = new Set(_bb.hypotheses.map(h=>h.n).filter(Boolean));
+  const gapsAt = {}; _bb.gaps.forEach(g=>{ gapsAt[g.to] = g; });
+  let h = '';
+  _bb.events.forEach(e=>{
+    if(_bbFilter.size && !_bbFilter.has(e.kind)) return;
+    const gp = Object.values(gapsAt).find(g=>g.to===e.ts); if(gp) h += `<div class="bb-gap">⏳ ${esc(gp.text)}</div>`;
+    const extra = [];
+    if(e.kind==='vital' && e.data.symptoms) extra.push('อาการ: '+esc(e.data.symptoms));
+    if(e.kind==='uf' && e.data.notes) extra.push(esc(e.data.notes));
+    if(e.kind==='alert' && e.data.message) extra.push(esc(e.data.message));
+    if(e.kind==='edit' && e.data.resource) extra.push(esc(e.data.resource) + (e.data.old?' · เดิม: '+esc(JSON.stringify(e.data.old)).slice(0,120):''));
+    if(e.kind==='line' && e.data.symptoms) extra.push('อาการ: '+esc(e.data.symptoms));
+    if(e.kind==='end') extra.push(`น้ำหนักหลัง ${e.data.post_weight??'-'} kg · UF จริง ${e.data.actual_uf??'-'} mL${e.data.post_symptoms?' · '+esc(e.data.post_symptoms):''}`);
+    if(e.kind==='start') extra.push(`น้ำหนักก่อน ${e.data.pre_weight??'-'} kg · เป้า UF ${e.data.uf_goal??'-'} mL${e.data.pre_symptoms?' · '+esc(e.data.pre_symptoms):''}`);
+    h += `<div class="bb-ev ${e.kind} ${flagged.has(e.n)?'flag':''}" id="ev${e.n}"><span class="bb-t">${bbTime(e.ts)}</span><span style="font-size:.7rem;color:var(--fg-muted)">#${e.n} ${esc(KIND_TH[e.kind]||e.kind)}</span> ${esc(e.text)}${extra.length?'<div style="font-size:.76rem;color:var(--fg-muted)">'+extra.join(' · ')+'</div>':''}<div class="bb-src">${esc(e.source.table)}#${e.source.id}${e.actor?' · โดย '+esc(e.actor):''}</div></div>`;
+  });
+  document.getElementById('bbTl').innerHTML = h || '<div style="color:var(--fg-muted)">ไม่มีเหตุการณ์</div>';
+}
+function bbCopy(){
+  if(!_bb) return;
+  const s=_bb.session;
+  const txt = [`📼 ย้อนรอบฟอก ${s.date} เตียง ${s.bed} ${s.patient_name||''} (HN ${s.hn||''})`, ...(_bb.facts.map(f=>'• '+f)),
+    _bb.missing.length?'❔ '+_bb.missing.join('; '):'', _bb.hypotheses.length?'🧭 '+_bb.hypotheses.map(x=>x.rule+' '+x.text).join(' | '):'', '(ข้อเท็จจริงจากระบบ — ข้อสันนิษฐานให้แพทย์ทบทวน)'].filter(Boolean).join('\n');
+  try{ navigator.clipboard.writeText(txt); showToast('คัดลอกสรุปแล้ว','success'); }catch(e){ showToast('คัดลอกไม่ได้','warning'); }
+}
+bbLoad();
+</script>
+{% endblock %}

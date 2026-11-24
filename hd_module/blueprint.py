@@ -319,6 +319,50 @@ def hd_sheet_page(session_id):
     return render_template("hd_sheet.html", session_id=session_id)
 
 
+@hd_web.route("/blackbox/<int:session_id>")
+def hd_blackbox_page(session_id):
+    """📼 ย้อนรอบฟอก (Kidney Black Box) — อ่านอย่างเดียว · flag blackbox_enabled (24 พ.ย. 2569)"""
+    from .blackbox import enabled as _bb_on
+    if not _bb_on():
+        return render_template("hd_blackbox.html", session_id=session_id, disabled=True)
+    return render_template("hd_blackbox.html", session_id=session_id, disabled=False)
+
+
+@hd_bp.route("/blackbox/status", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def blackbox_status():
+    from .blackbox import enabled as _bb_on
+    return jsonify({"enabled": bool(_bb_on())})
+
+
+@hd_bp.route("/sessions/<int:session_id>/blackbox", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def session_blackbox(session_id):
+    """เส้นเวลารวมทุกตาราง + ข้อเท็จจริง/ข้อมูลที่ขาด/ข้อสันนิษฐาน(กฎ) — ไม่เขียนอะไร"""
+    import os
+    from .blackbox import enabled as _bb_on, build as _bb_build, rule_limits as _bb_limits
+    if not _bb_on():
+        return jsonify({"error": "blackbox_disabled", "hint": "ตั้งค่า blackbox_enabled=1 ใน ⚙️ settings"}), 404
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            tl = _bb_build(conn, session_id, _bb_limits(get_setting_value))
+        finally:
+            conn.close()
+        if not tl:
+            return jsonify({"error": "ไม่พบรอบฟอก"}), 404
+        log_action(user_id=g.get("hd_user_id"), action="blackbox.view", resource_type="session",
+                   resource_id=session_id, ip_address=request.remote_addr or "")
+        return jsonify(tl)
+    except Exception as e:
+        logger.error("blackbox error: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_web.route("/worksheet/<int:session_id>")
 def hd_worksheet_page(session_id):
     """HD Work Sheet Interactive — พยาบาลกรอก checklist."""

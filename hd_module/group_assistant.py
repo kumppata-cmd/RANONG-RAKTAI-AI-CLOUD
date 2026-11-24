@@ -30,7 +30,8 @@ HELP = ("🤖 รักษ์ไต ช่วยตอบได้ (พิมพ
         "• รหัสญาติ <HN> — ออกรหัสให้ญาติรับสรุปหลังฟอก · ยกเลิกญาติ <HN>\n"
         "• ลิงก์อาหาร <HN> — ออกลิงก์โค้ชอาหาร (ถ่ายรูปถาม AI) ส่งต่อผู้ป่วย\n"
         "• แล็บบ้าน <HN> — ดูตัวอย่างแล็บภาษาบ้าน · ส่งแล็บบ้าน <HN> — ส่งเข้า LINE ผู้ป่วย\n"
-        "• ยา <HN> — รายการยาปัจจุบัน + แพ้ยา\n\n"
+        "• ยา <HN> — รายการยาปัจจุบัน + แพ้ยา\n"
+        "• ย้อน เตียง 12 เมื่อวาน / ย้อน HN 1234 ล่าสุด — 📼 ย้อนรอบฟอก (ถ้าเปิดใช้)\n\n"
         "ตอบจากข้อมูลในระบบเท่านั้น ไม่สั่งการรักษา")
 
 
@@ -242,6 +243,19 @@ def answer(conn, body, base_url=""):
             return _esa(cur)
         if low in ("น้ำ", "ตรวจน้ำ", "water") or low.startswith("น้ำ"):
             return _water(cur, today)
+        # 📼 ย้อนรอบฟอก (Kidney Black Box) — 24 พ.ย. 2569 · ปิดเป็นค่าเริ่มต้น (blackbox_enabled)
+        if low.startswith("ย้อน") or low.startswith("กล่องดำ") or low.startswith("blackbox"):
+            from .blackbox import line_command as _bb_cmd
+            push_fn, ids, gsv = None, [], None
+            try:
+                from flask import current_app
+                from .blueprint import get_setting_value as gsv
+                push_fn = current_app.config.get("LINE_PUSH_FN")
+                raw_ids = gsv("alert_recipients", "") or gsv("physician_line_id", "")
+                ids = [x.strip() for x in (raw_ids or "").split(",") if x.strip()]
+            except Exception:
+                pass
+            return _bb_cmd(cur, b, today, base_url=base_url, push_fn=push_fn, physician_ids=ids, get_setting=gsv)
         r = _patient(cur, b, today)
         if r:
             return r
