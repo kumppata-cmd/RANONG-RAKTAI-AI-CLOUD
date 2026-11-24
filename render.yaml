@@ -8,7 +8,10 @@ services:
     dockerfilePath: ./Dockerfile
     region: singapore  # ใกล้ประเทศไทยที่สุด
     plan: starter      # เริ่มต้นที่ starter ($7/mo)
-    healthCheckPath: /health
+    # เสถียรภาพ (24 พ.ย. 2569): ใช้ liveness ตัวเบา — /health เดิมยิง GCS 2 ครั้งทุกการเช็ค
+    # ช่วงพยาบาลใช้พร้อมกัน thread เต็ม → /health ตอบช้า → Render คิดว่าตาย → restart = 502
+    # (ต้องตั้งค่าเดียวกันใน Render Dashboard > Settings > Health Check Path ด้วย)
+    healthCheckPath: /health/live
     envVars:
       # PORT — Render กำหนดอัตโนมัติ (ไม่ต้องตั้งเอง)
 

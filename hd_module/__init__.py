@@ -933,6 +933,24 @@ def _start_daily_reminder_scheduler(app):
         t.start()
         return t
 
+    # ── เสถียรภาพ (24 พ.ย. 2569, 502 ตอนพยาบาลใช้พร้อมกัน) ──
+    # gunicorn มี 2 worker แต่ละตัว import app → scheduler เคยรัน 2 ชุดซ้อน
+    # (งานหนัก sync ใบยา/แล็บ/สำเนา วิ่งพร้อมกัน 2 เท่า แย่ง CPU/RAM กับคำขอพยาบาล)
+    # ใช้ file lock บน RAM ให้มี worker เดียวที่รัน — worker ถูกรีไซเคิลเมื่อไหร่
+    # lock จะหลุดเอง และ worker ใหม่ที่เกิดมาจะรับช่วงต่อ
+    try:
+        import fcntl
+        import os as _os_lk
+        _lk_dir = "/dev/shm" if _os_lk.path.isdir("/dev/shm") else "/tmp"
+        _lk_fh = open(_os_lk.path.join(_lk_dir, "hd_scheduler.lock"), "w")
+        fcntl.flock(_lk_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        app.config["_HD_SCHED_LOCK_FH"] = _lk_fh  # ถือ handle ไว้ตลอดอายุ process
+    except (OSError, BlockingIOError):
+        logger.info("HD scheduler: worker อื่นถือ lock อยู่ — worker นี้ไม่รัน scheduler")
+        return
+    except Exception as _lk_e:
+        logger.warning("HD scheduler lock unavailable (%s) — run without lock", _lk_e)
+
     _spawn(True)
     ops.start_watchdog(lambda: _spawn(False))
     logger.info("HD scheduler started (5-min loop + watchdog)")
