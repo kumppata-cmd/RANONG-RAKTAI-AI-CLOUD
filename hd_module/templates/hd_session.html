@@ -707,7 +707,9 @@
     <div id="imUfInfo" style="font-size:.78rem;line-height:1.55;background:var(--bg);border-radius:8px;padding:8px 10px;margin-top:6px;border-left:4px solid var(--border)"></div>
     <div id="imUfOpts" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
     <div id="imUfAdj" style="font-size:.74rem;color:#e67e22;font-weight:700;margin-top:4px"></div>
-    <div class="vital-input" style="margin-top:6px"><label>📝 หมายเหตุ/อาการ</label><input type="text" class="form-control" id="imRemark" placeholder="เช่น หน้ามืดเล็กน้อย ลด UF แล้ว"></div>
+    <div class="vital-input" style="margin-top:6px"><label>📝 หมายเหตุ/อาการ <span style="font-weight:400;font-size:.72rem;color:var(--fg-muted)">(แตะชิปเพื่อเติม แก้ต่อได้)</span></label>
+      <div id="imRemarkChips" style="display:flex;flex-wrap:wrap;gap:5px;margin:4px 0 6px"></div>
+      <input type="text" class="form-control" id="imRemark" placeholder="เช่น หน้ามืดเล็กน้อย ลด UF แล้ว" oninput="ufRemarkChipsSync('imRemark','imRemarkChips')"></div>
     <div id="imWarn" style="font-size:.78rem;margin-top:6px;font-weight:700;color:var(--danger)"></div>
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal('intraModal')">ยกเลิก</button>
@@ -2602,6 +2604,7 @@ function openIntraModal(){
   if(!sessionData.session_id){ showToast('❌ ยังไม่มีรอบฟอก — กดเริ่มฟอกก่อน','danger'); return; }
   IM_ALL.forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   document.getElementById('imWarn').textContent=''; document.getElementById('imShotStatus').textContent='';
+  ufRemarkChipsRender('imRemark','imRemarkChips');
   /* จำค่าเครื่องครั้งก่อน (BFR/DFR/AP/VP/TMP/Cond/Dialysate T ไม่ค่อยเปลี่ยน) */
   try{
     const last = JSON.parse(localStorage.getItem('hd_intra_last_'+sessionData.session_id)||'{}');

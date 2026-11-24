@@ -132,8 +132,9 @@
     </div>
 
     <div class="param-group">
-      <div class="param-group-title">📝 Remark</div>
-      <input type="text" id="eRemark" style="width:100%;padding:10px;font-size:.9rem;border:1.5px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);" placeholder="หมายเหตุ...">
+      <div class="param-group-title">📝 Remark <span style="font-weight:400;font-size:.72rem;color:var(--fg-muted)">(แตะชิปเพื่อเติม แก้ต่อได้)</span></div>
+      <div id="eRemarkChips" style="display:flex;flex-wrap:wrap;gap:5px;margin:0 0 6px"></div>
+      <input type="text" id="eRemark" style="width:100%;padding:10px;font-size:.9rem;border:1.5px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);" placeholder="หมายเหตุ..." oninput="ufRemarkChipsSync('eRemark','eRemarkChips')">
     </div>
 
     <button class="btn btn-success" id="entrySaveBtn" onclick="saveEntry()" style="width:100%;padding:16px;font-size:1.1rem;font-weight:700;">💾 บันทึก</button>
@@ -339,6 +340,7 @@ function openEntry(slot, idx){
   document.getElementById('eUfr').value = r.ufr||'';
   document.getElementById('eTotalUf').value = r.total_uf||'';
   document.getElementById('eRemark').value = r.remark||'';
+  ufRemarkChipsRender('eRemark','eRemarkChips');
 
   /* Auto-fill machine params from previous row if this row is empty */
   const hint = document.getElementById('autofillHint');

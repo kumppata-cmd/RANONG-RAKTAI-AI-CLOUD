@@ -139,3 +139,41 @@ function _ufAdjCommit(){
   if(_ufPending.target) _ufAdj.target = _ufPending.target;
   if(_ufPending.extend) _ufAdj.extend = _ufPending.extend;
 }
+/* 📝 ชิปหมายเหตุ/คำสั่งพื้นฐานเรื่อง UF (24 พ.ย. 2569) — แตะเพื่อเติมลงช่องหมายเหตุ แก้ต่อได้ แตะซ้ำเพื่อเอาออก
+   ใช้ร่วมกัน: ฟอร์มรวม (imRemark) และ Monitoring Sheet (eRemark) · ข้อความเป็น "บันทึกสิ่งที่ทำ" ไม่ใช่ใบสั่งแพทย์ */
+const UF_REMARK_CHIPS = [
+  '✅ UF ตามแผน ไม่มีอาการ',
+  '⬇️ ลด UF rate ตามคำสั่งแพทย์',
+  '⏸ หยุด UF ชั่วคราว (UF off) ความดันตก',
+  '🎯 ตั้งเป้า UF ใหม่บนเครื่อง',
+  '⏱ ยืดเวลาฟอก +15 นาที',
+  '💧 ให้ NSS ตามคำสั่งแพทย์',
+  '😵 หน้ามืด/คลื่นไส้ → ลด UF',
+  '🦵 ตะคริว → ลด UF',
+  '🙋 ผู้ป่วยขอหยุด UF',
+  '🏁 ครบเป้า UF แล้ว',
+];
+function ufRemarkChipsRender(targetId, boxId){
+  const box = document.getElementById(boxId); if(!box) return;
+  const esc = t => t.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+  box.innerHTML = UF_REMARK_CHIPS.map(t => `<button type="button" class="btn btn-outline uf-chip" style="font-size:.74rem;padding:4px 9px;border-radius:14px" onclick="ufRemarkChipTap('${targetId}', this)">${esc(t)}</button>`).join('');
+  ufRemarkChipsSync(targetId, boxId);
+}
+function ufRemarkChipTap(targetId, btn){
+  const inp = document.getElementById(targetId); if(!inp) return;
+  const text = btn.textContent.trim();
+  const parts = (inp.value || '').split(';').map(x => x.trim()).filter(Boolean);
+  const i = parts.indexOf(text);
+  if(i >= 0) parts.splice(i, 1); else parts.push(text);
+  inp.value = parts.join('; ');
+  try{ inp.dispatchEvent(new Event('input', {bubbles:true})); }catch(e){}
+  ufRemarkChipsSync(targetId, btn.parentElement && btn.parentElement.id);
+}
+function ufRemarkChipsSync(targetId, boxId){
+  const inp = document.getElementById(targetId), box = boxId && document.getElementById(boxId); if(!inp || !box) return;
+  const cur = (inp.value || '');
+  box.querySelectorAll('.uf-chip').forEach(b => {
+    const on = cur.indexOf(b.textContent.trim()) >= 0;
+    b.style.background = on ? 'var(--accent)' : ''; b.style.color = on ? '#fff' : ''; b.style.borderColor = on ? 'var(--accent)' : '';
+  });
+}
