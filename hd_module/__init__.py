@@ -924,6 +924,20 @@ def _start_daily_reminder_scheduler(app):
                             res = ops.run_guarded("daily_export", run_daily_export, now.date(), trigger="scheduled", timeout=900) or {}
                             logger.info("Daily record export: ok=%s failed=%s folder=%s",
                                         res.get("ok"), res.get("failed"), res.get("folder"))
+                    # 📼 Black Box (25 พ.ย. 2569): hash รายวันของ audit log → hd_settings + GCS (tamper-evident) — เบา, อ่านอย่างเดียว
+                    if now.minute >= 40 and _claim_once(app, "audit_hash", now.date()):
+                        try:
+                            import psycopg2 as _pg2
+                            from .blackbox import audit_hash_run as _ahr
+                            _dbu = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+                            _c2 = _pg2.connect(_dbu, connect_timeout=5)
+                            try:
+                                _rec = _ahr(_c2, now.date(), getattr(app.config.get("STORAGE_OBJ"), "_bucket", None))
+                            finally:
+                                _c2.close()
+                            logger.info("audit hash %s: rows=%s gcs=%s", _rec["date"], _rec["rows"], _rec.get("gcs"))
+                        except Exception as _ahe:
+                            logger.warning("audit hash: %s", type(_ahe).__name__)
                     # ว้าว รอบ 2 #2: 1st of the month → quality report for the previous month
                     if now.day == 1 and _claim_once(app, "quality_report", now.date()):
                         with app.app_context():

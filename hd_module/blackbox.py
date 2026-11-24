@@ -494,3 +494,263 @@ def line_command(cur, body, today, base_url="", push_fn=None, physician_ids=None
              + (f"🔗 {base_url}/hd/blackbox/{sid} (ต้อง login)\n" if base_url else "")
              + (f"📨 ส่งสรุปเต็มถึงแพทย์ทาง LINE ส่วนตัวแล้ว ({pushed})" if pushed else "(รายละเอียดผู้ป่วยดูในหน้าเว็บ — ไม่แสดงในกลุ่ม)"))
     return brief
+
+
+# ───────────────────────── 5) ร่างรายงาน incident จากเส้นเวลา (ไม่บันทึกเอง) ─────────────────────────
+
+def incident_draft(tl, alert_id=None):
+    """คืน dict สำหรับเติมฟอร์ม incident ของ clinic-profile — พยาบาลแก้/ยืนยันก่อนบันทึก"""
+    s = tl["session"]
+    alerts = [e for e in tl["events"] if e["kind"] == "alert"]
+    focus = next((a for a in alerts if alert_id and a["source"]["id"] == alert_id), alerts[0] if alerts else None)
+    sev_map = {"critical": "major", "warning": "moderate", "info": "minor"}
+    lines = [f"[ร่างจาก 📼 ย้อนรอบฟอก รอบ #{s['id']} — {s['date']} เตียง {s['bed']}]"]
+    if focus:
+        lines.append(f"เหตุการณ์: {focus['text']} เวลา {_th(focus['ts'])}")
+        rv = next((r for r in tl.get("alert_reviews", []) if r["alert_id"] == focus["source"]["id"]), None)
+        if rv:
+            lines.append("สัญญาณก่อนหน้า: " + "; ".join(rv["signals"]) + (f" · {rv['timing']}" if rv.get("timing") else ""))
+    lines += [f"- {f}" for f in tl["facts"][:6]]
+    if tl["hypotheses"]:
+        lines.append("จุดที่ควรทบทวน: " + " | ".join(f"{h['rule']} {h['text']}" for h in tl["hypotheses"][:4]))
+    if tl["missing"]:
+        lines.append("ข้อมูลที่ขาด: " + "; ".join(tl["missing"][:4]))
+    lines.append("(ข้อเท็จจริงจากระบบ — ส่วนสาเหตุ/การแก้ไขให้ผู้รายงานเขียนเอง)")
+    itype = "idh" if (focus and ("ความดัน" in focus["text"] or "idh" in (focus["data"].get("rule_id") or "").lower())) else "other"
+    return {"type": itype, "severity": sev_map.get((focus or {}).get("data", {}).get("severity"), "minor"),
+            "date": (s.get("ended_at") or s.get("started_at") or "")[:16], "hn": s.get("hn"),
+            "description": "\n".join(lines), "session_id": s["id"], "alert_id": focus["source"]["id"] if focus else None}
+
+
+# ───────────────────────── 6) การ์ดคุณภาพรายเดือน (SQL ล้วน — เบา) ─────────────────────────
+
+def quality_metrics(conn, year, month, limits=None):
+    """ตัวชี้วัดระดับหน่วย (ไม่ระบุตัวบุคคล) สำหรับ QI — คืน dict พร้อม 'insufficient' เมื่อรอบน้อย"""
+    L = dict(RULE_DEFAULTS)
+    L.update(limits or {})
+    from datetime import date as _date
+    d0 = _date(year, month, 1)
+    d1 = _date(year + (month // 12), month % 12 + 1, 1)
+    out = {"month": f"{year}-{month:02d}", "sessions": 0}
+
+    def q(sql, params):
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+    try:
+        n = q("""SELECT COUNT(*), COUNT(*) FILTER (WHERE post_weight IS NOT NULL), COUNT(*) FILTER (WHERE bed_released_at IS NOT NULL)
+                 FROM hd_sessions WHERE session_date >= %s AND session_date < %s AND status IN ('completed','in_progress')""", (d0, d1))[0]
+        out.update({"sessions": int(n[0]), "with_post_weight": int(n[1]), "released_bed": int(n[2])})
+        if out["sessions"] == 0:
+            out["insufficient"] = True
+            return out
+        r = q("""SELECT COUNT(DISTINCT v.session_id) FROM hd_vital_signs v JOIN hd_sessions s ON s.id = v.session_id
+                 WHERE s.session_date >= %s AND s.session_date < %s AND v.sbp IS NOT NULL AND v.sbp < %s""", (d0, d1, L["bb_sbp_low"]))[0]
+        out["sessions_sbp_low"] = int(r[0])
+        r = q("""SELECT COUNT(*), COUNT(*) FILTER (WHERE a.acknowledged),
+                        percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (a.acknowledged_at - COALESCE(a.triggered_at, a.created_at)))/60)
+                 FROM hd_clinical_alerts a JOIN hd_sessions s ON s.id = a.session_id
+                 WHERE s.session_date >= %s AND s.session_date < %s""", (d0, d1))[0]
+        out.update({"alerts": int(r[0]), "alerts_acked": int(r[1]), "ack_median_min": round(float(r[2]), 1) if r[2] is not None else None})
+        r = q("""SELECT COUNT(*) FROM hd_clinical_alerts a JOIN hd_sessions s ON s.id = a.session_id
+                 WHERE s.session_date >= %s AND s.session_date < %s AND a.acknowledged
+                   AND EXTRACT(EPOCH FROM (a.acknowledged_at - COALESCE(a.triggered_at, a.created_at)))/60 > %s""", (d0, d1, L["bb_ack_min"]))[0]
+        out["alerts_ack_late"] = int(r[0])
+        # ช่องว่าง vital > N นาที ขณะฟอก (window function)
+        r = q("""WITH v AS (
+                   SELECT v.session_id, v.recorded_at,
+                          LAG(v.recorded_at) OVER (PARTITION BY v.session_id ORDER BY v.recorded_at) AS prev
+                   FROM hd_vital_signs v JOIN hd_sessions s ON s.id = v.session_id
+                   WHERE s.session_date >= %s AND s.session_date < %s AND v.recorded_at IS NOT NULL)
+                 SELECT COUNT(DISTINCT session_id) FROM v WHERE prev IS NOT NULL
+                   AND EXTRACT(EPOCH FROM (recorded_at - prev))/60 > %s""", (d0, d1, L["bb_vital_gap_min"]))[0]
+        out["sessions_with_vital_gap"] = int(r[0])
+        r = q("""SELECT COUNT(DISTINCT u.session_id) FROM hd_uf_records u JOIN hd_sessions s ON s.id = u.session_id
+                 JOIN hd_patient_mapping p ON p.id = s.patient_id
+                 WHERE s.session_date >= %s AND s.session_date < %s AND p.dry_weight > 0 AND u.uf_rate > 0
+                   AND u.uf_rate / p.dry_weight > %s""", (d0, d1, L["bb_uf_rate_high"]))[0]
+        out["sessions_uf_rate_high"] = int(r[0])
+        r = q("""SELECT COUNT(*) FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                 WHERE s.session_date >= %s AND s.session_date < %s AND s.post_weight IS NOT NULL AND p.dry_weight > 0
+                   AND s.post_weight - p.dry_weight > %s""", (d0, d1, L["bb_post_over_dw_kg"]))[0]
+        out["sessions_post_over_dw"] = int(r[0])
+        r = q("""SELECT COUNT(*) FROM hd_audit_logs WHERE created_at >= %s AND created_at < %s
+                 AND (action LIKE '%%time_edit%%' OR action LIKE '%%edit%%')""", (d0, d1))[0]
+        out["edits"] = int(r[0])
+        r = q("""SELECT COUNT(*) FROM hd_incidents WHERE incident_date >= %s AND incident_date < %s""", (d0, d1))[0]
+        out["incidents"] = int(r[0])
+    except Exception as e:  # noqa: BLE001
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        out["error"] = type(e).__name__
+    n = out["sessions"] or 1
+    out["rates"] = {k: round(out.get(k, 0) * 100.0 / n, 1) for k in
+                    ("sessions_sbp_low", "sessions_with_vital_gap", "sessions_uf_rate_high", "sessions_post_over_dw")}
+    out["insufficient"] = out["sessions"] < 20
+    return out
+
+
+# ───────────────────────── 7) hash รายวันของ audit log (tamper-evident, ต้นทุนต่ำ) ─────────────────────────
+
+def audit_day_hash(conn, day, prev_hash=""):
+    """sha256 ของทุกแถว audit ของวันนั้น (เรียงตาม id) ต่อสายกับ hash วันก่อน → {date, rows, hash, prev}"""
+    import hashlib
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id, user_id, action, resource_type, resource_id, old_values, new_values, created_at
+                       FROM hd_audit_logs WHERE created_at::date = %s ORDER BY id""", (day,))
+        rows = cur.fetchall()
+    h = hashlib.sha256()
+    h.update((prev_hash or "").encode("utf-8"))
+    for r in rows:
+        h.update("|".join("" if v is None else str(v) for v in r).encode("utf-8"))
+        h.update(b"\n")
+    return {"date": day.isoformat(), "rows": len(rows), "hash": h.hexdigest(), "prev": prev_hash or ""}
+
+
+def audit_hash_store(conn, rec, bucket=None):
+    """เก็บใน hd_settings (bb_audit_hash_<date>) + GCS _audit_hash/<date>.json (create-only) — ไม่ทับของเดิม"""
+    import json as _json
+    key = f"bb_audit_hash_{rec['date']}"
+    with conn.cursor() as cur:
+        cur.execute("""INSERT INTO hd_settings (key, value, description, updated_at)
+                       VALUES (%s, %s, %s, NOW()) ON CONFLICT (key) DO NOTHING""",
+                    (key, _json.dumps(rec), "📼 audit log daily hash (tamper-evident)"))
+    try:
+        conn.commit()
+    except Exception:
+        pass
+    gcs_ok = False
+    if bucket is not None:
+        try:
+            bucket.blob(f"_audit_hash/{rec['date']}.json").upload_from_string(
+                _json.dumps(rec), content_type="application/json", if_generation_match=0)
+            gcs_ok = True
+        except Exception as e:  # noqa: BLE001
+            gcs_ok = getattr(e, "code", None) == 412   # มีอยู่แล้ว = ถือว่าเก็บแล้ว
+    return gcs_ok
+
+
+def audit_hash_run(conn, day, bucket=None):
+    """งาน 22:40: ต่อสายจาก hash เมื่อวาน (ถ้ามี) แล้วเก็บ"""
+    import json as _json
+    prev = ""
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM hd_settings WHERE key = %s", (f"bb_audit_hash_{(day - timedelta(days=1)).isoformat()}",))
+        r = cur.fetchone()
+        if r and r[0]:
+            try:
+                prev = _json.loads(r[0]).get("hash", "")
+            except Exception:
+                prev = ""
+    rec = audit_day_hash(conn, day, prev)
+    rec["gcs"] = audit_hash_store(conn, rec, bucket)
+    return rec
+
+
+def audit_hash_verify(conn, day):
+    """คำนวณใหม่เทียบกับที่เก็บไว้ → {stored, recomputed, match}"""
+    import json as _json
+    with conn.cursor() as cur:
+        cur.execute("SELECT value FROM hd_settings WHERE key = %s", (f"bb_audit_hash_{day.isoformat()}",))
+        r = cur.fetchone()
+    if not r or not r[0]:
+        return {"date": day.isoformat(), "stored": None, "match": None, "note": "ยังไม่มี hash ของวันนี้ (รันตอน 22:40)"}
+    stored = _json.loads(r[0])
+    rec = audit_day_hash(conn, day, stored.get("prev", ""))
+    return {"date": day.isoformat(), "stored": stored, "recomputed": rec, "match": rec["hash"] == stored.get("hash"),
+            "rows_now": rec["rows"], "rows_then": stored.get("rows")}
+
+
+# ───────────────────────── 8) ชั้น AI เรียบเรียง "ข้อสันนิษฐาน" (flag แยก, ไม่ส่งชื่อ/HN) ─────────────────────────
+
+def ai_enabled():
+    if os.environ.get("HD_BLACKBOX_AI", "").strip().lower() in ("1", "true", "yes", "on"):
+        return True
+    try:
+        from .blueprint import get_setting_value
+        return str(get_setting_value("blackbox_ai_enabled", "") or "").strip().lower() in ("1", "true", "yes", "on")
+    except Exception:
+        return False
+
+
+def deidentified_payload(tl):
+    """ตัดชื่อ/HN/ผู้ทำ ออก — ส่งเฉพาะตัวเลขและข้อความเหตุการณ์"""
+    s = tl["session"]
+    return {
+        "session": {k: s.get(k) for k in ("date", "shift", "started_at", "ended_at", "pre_weight", "post_weight", "dry_weight",
+                                           "uf_goal", "actual_uf", "duration_hours")},
+        "events": [{"n": e["n"], "t": _th(e["ts"]), "kind": e["kind"], "text": e["text"],
+                    "data": {k: v for k, v in e["data"].items() if k not in ("old", "new")}} for e in tl["events"]],
+        "facts": tl["facts"], "missing": tl["missing"],
+        "hypotheses": [f"{h['rule']} {h['text']}" for h in tl["hypotheses"]],
+        "alert_reviews": [{"n": r["n"], "title": r["title"], "signals": r["signals"], "timing": r["timing"]} for r in tl["alert_reviews"]],
+    }
+
+
+AI_PROMPT = (
+    "คุณช่วยแพทย์โรคไตทบทวนรอบฟอกเลือด 1 รอบจากข้อมูลเหตุการณ์ที่ให้ (JSON) "
+    "เขียนภาษาไทย ≤ 12 บรรทัด แบ่ง 3 ส่วน: (1) ลำดับเหตุการณ์สำคัญ — อ้างหมายเลข #n ทุกข้อ "
+    "(2) สัญญาณที่เห็นก่อน alert (ถ้ามี) (3) ข้อสันนิษฐานให้แพทย์ทบทวน — ขึ้นต้นทุกข้อด้วย 'ข้อสันนิษฐาน:' "
+    "ห้ามสรุปสาเหตุเป็นข้อเท็จจริง ห้ามแนะนำการรักษา/ปรับเครื่อง/ยา ห้ามเติมข้อมูลที่ไม่มีใน JSON "
+    "ถ้าข้อมูลไม่พอให้เขียน 'ข้อมูลไม่พอ' ตรง ๆ"
+)
+
+
+def ai_narrative(tl, timeout=25):
+    """คืน {text, model} หรือ {error}; ใช้ Claude ผ่าน API key เดิม — ไม่ส่งชื่อ/HN"""
+    import json as _json
+    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not key:
+        return {"error": "ไม่มี ANTHROPIC_API_KEY"}
+    try:
+        import requests as _rq
+        from .patient_engage import ai_model
+        body = _json.dumps({
+            "model": ai_model(), "max_tokens": 900,
+            "messages": [{"role": "user", "content": AI_PROMPT + "\n\n" + _json.dumps(deidentified_payload(tl), ensure_ascii=False, default=str)}],
+        })
+        resp = _rq.post("https://api.anthropic.com/v1/messages",
+                        headers={"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"},
+                        data=body, timeout=timeout)
+        if resp.status_code != 200:
+            return {"error": f"AI HTTP {resp.status_code}"}
+        txt = "".join(x.get("text", "") for x in (resp.json().get("content") or []) if x.get("type") == "text").strip()
+        return {"text": txt or "ข้อมูลไม่พอ", "model": ai_model()}
+    except Exception as e:  # noqa: BLE001
+        return {"error": type(e).__name__}
+
+
+# ───────────────────────── 9) คิว "รอบที่ควรทบทวน" ของวัน (แดชบอร์ด/ตอนเช้า) ─────────────────────────
+
+_RQ_CACHE = {}
+
+
+def review_queue(conn, day, limits=None, ttl=600):
+    """รอบของวันนั้นที่มีจุดที่ควรทบทวน/ช่องว่างข้อมูล — cache ในหน่วยความจำ 10 นาที"""
+    import time as _t
+    ck = (day.isoformat(), tuple(sorted((limits or {}).items())))
+    hit = _RQ_CACHE.get(ck)
+    if hit and _t.time() - hit[0] < ttl:
+        return hit[1]
+    with conn.cursor() as cur:
+        cur.execute("""SELECT id FROM hd_sessions WHERE session_date = %s AND status IN ('completed','in_progress')
+                       ORDER BY bed_number, id""", (day,))
+        ids = [r[0] for r in cur.fetchall()]
+    items = []
+    for sid in ids[:60]:
+        try:
+            tl = build(conn, sid, limits)
+        except Exception:
+            tl = None
+        if not tl:
+            continue
+        if tl["hypotheses"] or tl["gaps"]:
+            s = tl["session"]
+            items.append({"session_id": sid, "bed": s["bed"], "hn": s["hn"], "patient_name": s["patient_name"],
+                          "hypotheses": len(tl["hypotheses"]), "gaps": len(tl["gaps"]), "alerts": sum(1 for e in tl["events"] if e["kind"] == "alert"),
+                          "top": (tl["hypotheses"][0]["text"] if tl["hypotheses"] else tl["gaps"][0]["text"])})
+    out = {"date": day.isoformat(), "sessions": len(ids), "to_review": items}
+    _RQ_CACHE[ck] = (_t.time(), out)
+    return out

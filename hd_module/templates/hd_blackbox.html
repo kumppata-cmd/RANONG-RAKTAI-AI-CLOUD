@@ -39,6 +39,9 @@
       <a id="bbSessionLink" class="btn btn-outline" style="font-size:.8rem" href="#">↩ หน้ารอบฟอก</a>
       <a id="bbSheetLink" class="btn btn-outline" style="font-size:.8rem" href="#">📋 Sheet</a>
       <button class="btn btn-outline" style="font-size:.8rem" onclick="bbCopy()">📋 คัดลอกสรุป</button>
+      <button class="btn btn-outline" style="font-size:.8rem" onclick="bbDraftIncident()">📝 ร่าง incident</button>
+      <button class="btn btn-outline" style="font-size:.8rem" id="bbAiBtn" onclick="bbAi()">🤖 AI เรียบเรียง</button>
+      <a class="btn btn-outline" style="font-size:.8rem" href="/hd/blackbox/quality">📊 คุณภาพรายเดือน</a>
     </div>
   </div>
 
@@ -51,6 +54,8 @@
 
   <div class="bb-chart"><div style="font-size:.8rem;font-weight:700;margin-bottom:4px">📈 SBP / DBP (mmHg) · UF สะสม (mL) · 🔴 alert · 🟣 คำสั่งแพทย์ · ⚠️ จุดทบทวน</div><div id="bbChart"></div></div>
 
+  <div id="bbAi" class="bb-panel hyp" style="display:none;margin:10px 0"><h4>🤖 AI เรียบเรียง (ข้อสันนิษฐาน — ไม่ใช่ข้อสรุป)</h4><div id="bbAiText" style="white-space:pre-wrap"></div>
+    <div style="font-size:.7rem;color:var(--fg-muted);margin-top:6px">สร้างจากข้อมูลเหตุการณ์ที่ตัดชื่อ/HN ออกแล้ว · อ้างหมายเลข #n ในเส้นเวลา · แพทย์ตัดสิน</div></div>
   <div id="bbReviews"></div>
 
   <div class="bb-filters" id="bbFilters"></div>
@@ -156,6 +161,25 @@ function bbCopy(){
   const txt = [`📼 ย้อนรอบฟอก ${s.date} เตียง ${s.bed} ${s.patient_name||''} (HN ${s.hn||''})`, ...(_bb.facts.map(f=>'• '+f)),
     _bb.missing.length?'❔ '+_bb.missing.join('; '):'', _bb.hypotheses.length?'🧭 '+_bb.hypotheses.map(x=>x.rule+' '+x.text).join(' | '):'', '(ข้อเท็จจริงจากระบบ — ข้อสันนิษฐานให้แพทย์ทบทวน)'].filter(Boolean).join('\n');
   try{ navigator.clipboard.writeText(txt); showToast('คัดลอกสรุปแล้ว','success'); }catch(e){ showToast('คัดลอกไม่ได้','warning'); }
+}
+function bbDraftIncident(){
+  if(!_bb) return;
+  const aid = _bb.alert_reviews.length ? _bb.alert_reviews[0].alert_id : '';
+  hdFetch('/hd/api/v1/sessions/'+SESSION_ID+'/blackbox/incident-draft'+(aid?'?alert_id='+aid:'')).then(r=>r.json()).then(d=>{
+    if(d.error){ showToast('❌ '+d.error,'danger'); return; }
+    try{ sessionStorage.setItem('hd_incident_draft', JSON.stringify(d)); }catch(e){}
+    window.location.href = '/hd/clinic-profile?inc_draft=1#incidents';
+  }).catch(e=>showToast('❌ '+e.message,'danger'));
+}
+function bbAi(){
+  const btn = document.getElementById('bbAiBtn'); btn.disabled = true; btn.textContent = '⏳ AI กำลังเรียบเรียง…';
+  hdFetch('/hd/api/v1/sessions/'+SESSION_ID+'/blackbox/narrative', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{}'})
+    .then(r=>r.json()).then(d=>{
+      btn.disabled = false; btn.textContent = '🤖 AI เรียบเรียง';
+      const box = document.getElementById('bbAi');
+      if(d.error){ box.style.display='block'; document.getElementById('bbAiText').textContent = (d.error==='ai_disabled' ? 'ชั้น AI ยังไม่เปิด — ' + (d.hint||'') : 'ไม่สำเร็จ: '+d.error); return; }
+      box.style.display = 'block'; document.getElementById('bbAiText').textContent = d.text || '';
+    }).catch(e=>{ btn.disabled=false; btn.textContent='🤖 AI เรียบเรียง'; showToast('❌ '+e.message,'danger'); });
 }
 bbLoad();
 </script>

@@ -420,6 +420,7 @@
       <div class="cp-field" style="grid-column:1/-1"><div class="flabel">รายละเอียด</div><textarea id="inc_desc" rows="3" placeholder="บรรยายเหตุการณ์..."></textarea></div>
       <div class="cp-field" style="grid-column:1/-1"><div class="flabel">การจัดการ/แก้ไข</div><textarea id="inc_action" rows="2" placeholder="ดำเนินการอะไรบ้าง..."></textarea></div>
       <div class="cp-field"><div class="flabel">ผู้รายงาน</div><input id="inc_by" placeholder="ชื่อผู้รายงาน"></div>
+      <div class="cp-field"><div class="flabel">HN ผู้ป่วย (ถ้าเกี่ยวข้อง)</div><input id="inc_hn" placeholder="เช่น 1234" inputmode="numeric"></div>
     </div>
     <button class="save-btn" onclick="saveIncident()">💾 บันทึกรายงาน</button>
   </div>
@@ -1121,6 +1122,7 @@ function saveIncident(){
     description: document.getElementById('inc_desc').value,
     action: document.getElementById('inc_action').value,
     reported_by: document.getElementById('inc_by').value,
+    hn: (document.getElementById('inc_hn')||{}).value || null,
   };
   if(!data.description){showToast('กรุณาระบุรายละเอียด','danger');return}
   hdFetch('/hd/api/v1/clinic-profile/incidents',{method:'POST',body:JSON.stringify(data)})
@@ -1367,5 +1369,21 @@ function downloadWqFile(wqId, filename){
 
 /* Init */
 loadProfileData();
+/* 📼 Black Box (25 พ.ย. 2569): เปิดมาจากปุ่ม "ร่าง incident" → เติมฟอร์มให้ (ไม่บันทึกเอง) */
+try{
+  const _dr = sessionStorage.getItem('hd_incident_draft');
+  if(_dr && location.search.indexOf('inc_draft=1') >= 0){
+    const d = JSON.parse(_dr); sessionStorage.removeItem('hd_incident_draft');
+    setTimeout(()=>{
+      openIncidentModal();
+      if(d.date){ const dt = new Date(d.date.endsWith('Z')?d.date:d.date+'Z'); if(!isNaN(dt)) document.getElementById('inc_date').value = new Date(dt.getTime()+7*3600000).toISOString().slice(0,16); }
+      if(d.type) document.getElementById('inc_type').value = d.type;
+      if(d.severity) document.getElementById('inc_severity').value = d.severity;
+      if(d.description) document.getElementById('inc_desc').value = d.description;
+      if(d.hn && document.getElementById('inc_hn')) document.getElementById('inc_hn').value = d.hn;
+      showToast('เติมร่างจาก 📼 ย้อนรอบฟอกแล้ว — ตรวจ/แก้ก่อนบันทึก','info');
+    }, 300);
+  }
+}catch(e){}
 </script>
 {% endblock %}

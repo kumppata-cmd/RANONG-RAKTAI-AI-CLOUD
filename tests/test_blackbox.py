@@ -139,3 +139,116 @@ def test_line_command_disabled_by_default(monkeypatch):
     from datetime import date
     out = bb.line_command(_Cur(), "ย้อน เตียง 1 วันนี้", date(2026, 11, 24), base_url="https://x")
     assert "ยังไม่เปิดใช้งาน" in out
+
+
+# ───────── phase 2: incident draft / audit hash / de-identification / quality / review queue ─────────
+
+def test_incident_draft_prefills_from_focus_alert():
+    tl = bb.analyze(bb.assemble(_raw()))
+    d = bb.incident_draft(tl)
+    assert d["type"] == "idh" and d["severity"] == "major" and d["hn"] == "1234" and d["session_id"] == 7
+    assert "ความดันตก" in d["description"] and "สัญญาณก่อนหน้า" in d["description"]
+    assert "ส่วนสาเหตุ/การแก้ไขให้ผู้รายงานเขียนเอง" in d["description"]
+    d2 = bb.incident_draft(bb.analyze(bb.assemble(_raw(alerts=[], acks=[]))))
+    assert d2["type"] == "other" and d2["severity"] == "minor" and d2["alert_id"] is None
+
+
+def test_deidentified_payload_has_no_name_hn_or_actor():
+    import json
+    tl = bb.analyze(bb.assemble(_raw()))
+    txt = json.dumps(bb.deidentified_payload(tl), ensure_ascii=False, default=str)
+    assert "ทดสอบ" not in txt and "1234" not in txt and "nurse1" not in txt and '"actor"' not in txt
+    assert '"n": 1' in txt and "hypotheses" in txt
+
+
+class _ConnStub:
+    """fake psycopg2 connection: queue of fetchall/fetchone results"""
+    def __init__(self, results):
+        self._results = list(results)
+        self.sql = []
+        self.committed = False
+    def cursor(self):
+        return _CursorStub(self)
+    def commit(self):
+        self.committed = True
+    def rollback(self):
+        pass
+
+
+class _CursorStub:
+    def __init__(self, conn):
+        self.c = conn
+        self._cur = None
+        self.description = None
+    def __enter__(self):
+        return self
+    def __exit__(self, *a):
+        return False
+    def execute(self, sql, params=None):
+        self.c.sql.append((sql, params))
+        self._cur = self.c._results.pop(0) if self.c._results else []
+    def fetchall(self):
+        return self._cur if isinstance(self._cur, list) else [self._cur]
+    def fetchone(self):
+        return self._cur[0] if isinstance(self._cur, list) and self._cur else (self._cur if not isinstance(self._cur, list) else None)
+
+
+def test_audit_day_hash_is_deterministic_and_chained():
+    from datetime import date
+    rows = [(1, 5, "vital.time_edit", "vital", 3, None, None, datetime(2026, 11, 24, 5, 0)),
+            (2, 5, "flowsheet.save", "flowsheet", 9, None, "{}", datetime(2026, 11, 24, 6, 0))]
+    a = bb.audit_day_hash(_ConnStub([rows]), date(2026, 11, 24), "")
+    b = bb.audit_day_hash(_ConnStub([rows]), date(2026, 11, 24), "")
+    c = bb.audit_day_hash(_ConnStub([rows]), date(2026, 11, 24), "prevhash")
+    d = bb.audit_day_hash(_ConnStub([rows[:1]]), date(2026, 11, 24), "")
+    assert a["hash"] == b["hash"] and a["rows"] == 2
+    assert a["hash"] != c["hash"]          # ต่อสายกับวันก่อน
+    assert a["hash"] != d["hash"]          # แถวหาย = hash เปลี่ยน
+
+
+def test_audit_hash_verify_detects_tamper():
+    from datetime import date
+    import json
+    rows = [(1, 5, "vital.time_edit", "vital", 3, None, None, datetime(2026, 11, 24, 5, 0))]
+    stored = bb.audit_day_hash(_ConnStub([rows]), date(2026, 11, 24), "")
+    ok = bb.audit_hash_verify(_ConnStub([(json.dumps(stored),), rows]), date(2026, 11, 24))
+    assert ok["match"] is True
+    tampered = [(1, 5, "vital.time_edit", "vital", 3, None, '{"sbp": 120}', datetime(2026, 11, 24, 5, 0))]
+    bad = bb.audit_hash_verify(_ConnStub([(json.dumps(stored),), tampered]), date(2026, 11, 24))
+    assert bad["match"] is False
+    none = bb.audit_hash_verify(_ConnStub([None]), date(2026, 11, 24))
+    assert none["match"] is None
+
+
+def test_quality_metrics_rates_and_insufficient_flag():
+    conn = _ConnStub([
+        [(12, 10, 2)],      # sessions, with_post_weight, released
+        [(3,)],             # sbp low
+        [(5, 4, 7.5)],      # alerts, acked, median
+        [(1,)],             # late
+        [(2,)],             # vital gap
+        [(1,)],             # uf high
+        [(2,)],             # post over dw
+        [(4,)],             # edits
+        [(0,)],             # incidents
+    ])
+    q = bb.quality_metrics(conn, 2026, 11)
+    assert q["sessions"] == 12 and q["insufficient"] is True
+    assert q["rates"]["sessions_sbp_low"] == 25.0 and q["ack_median_min"] == 7.5 and q["alerts_ack_late"] == 1
+    q0 = bb.quality_metrics(_ConnStub([[(0, 0, 0)]]), 2026, 10)
+    assert q0["insufficient"] is True and q0["sessions"] == 0
+
+
+def test_review_queue_uses_cache(monkeypatch):
+    from datetime import date
+    calls = []
+    def fake_build(conn, sid, limits=None):
+        calls.append(sid)
+        return {"session": {"bed": 1, "hn": "1", "patient_name": "x"}, "events": [], "hypotheses": [{"text": "t"}], "gaps": []}
+    monkeypatch.setattr(bb, "build", fake_build)
+    bb._RQ_CACHE.clear()
+    conn = _ConnStub([[(1,), (2,)]])
+    out = bb.review_queue(conn, date(2026, 11, 24))
+    assert out["sessions"] == 2 and len(out["to_review"]) == 2 and calls == [1, 2]
+    out2 = bb.review_queue(_ConnStub([]), date(2026, 11, 24))     # cache hit — ไม่ query ซ้ำ
+    assert out2 is out and calls == [1, 2]
