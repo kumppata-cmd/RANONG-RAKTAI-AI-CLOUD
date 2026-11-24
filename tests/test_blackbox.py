@@ -252,3 +252,9 @@ def test_review_queue_uses_cache(monkeypatch):
     assert out["sessions"] == 2 and len(out["to_review"]) == 2 and calls == [1, 2]
     out2 = bb.review_queue(_ConnStub([]), date(2026, 11, 24))     # cache hit — ไม่ query ซ้ำ
     assert out2 is out and calls == [1, 2]
+
+
+def test_line_summary_focus_alert_signals():
+    tl = bb.analyze(bb.assemble(_raw()))
+    txt = bb.line_summary(tl, focus_alerts=True)
+    assert "🔎" in txt and "SBP 135→92" in txt and "เตือนทันที" in txt

@@ -413,11 +413,16 @@ def build(conn, session_id, limits=None):
     return analyze(tl, limits)
 
 
-def line_summary(tl, base_url="", max_lines=12):
-    """สรุปสั้นสำหรับ LINE (ข้อเท็จจริงล้วน) — ส่งถึงแพทย์ 1:1 เท่านั้น"""
+def line_summary(tl, base_url="", max_lines=12, focus_alerts=False):
+    """สรุปสั้นสำหรับ LINE (ข้อเท็จจริงล้วน) — ส่งถึงแพทย์ 1:1 เท่านั้น · focus_alerts = "ก่อนความดันตก": ใส่สัญญาณก่อน alert"""
     s = tl["session"]
     L = [f"📼 ย้อนรอบฟอก {s['date']} เตียง {s['bed']} — {s.get('patient_name') or ''} (HN {s.get('hn')})"]
     L += [f"• {f}" for f in tl["facts"][:5]]
+    if focus_alerts:
+        for r in tl.get("alert_reviews", [])[:2]:
+            L.append(f"🔎 {_th(r['ts'])} {r['title']}: " + "; ".join(r["signals"]) + (f" · {r['timing']}" if r.get("timing") else ""))
+        if not tl.get("alert_reviews"):
+            L.append("🔎 รอบนี้ไม่มี alert — ดูจุดที่ควรทบทวนแทน")
     if tl["hypotheses"]:
         L.append(f"⚠️ จุดที่ควรทบทวน {len(tl['hypotheses'])}: " + " / ".join(h["text"] for h in tl["hypotheses"][:2]))
     if tl["missing"]:
@@ -481,7 +486,7 @@ def line_command(cur, body, today, base_url="", push_fn=None, physician_ids=None
     s = tl["session"]
     pushed = 0
     if push_fn and physician_ids:
-        full = line_summary(tl, base_url)
+        full = line_summary(tl, base_url, focus_alerts=("ก่อน" in body))
         for uid in physician_ids:
             try:
                 if push_fn(uid, full) is not False:
