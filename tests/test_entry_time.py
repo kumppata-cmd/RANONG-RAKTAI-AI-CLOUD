@@ -49,21 +49,34 @@ class TestParseEntryTime:
             assert (out + timedelta(hours=7)).strftime("%H:%M") == hhmm
 
 
-class TestShiftForThaiHour:
-    """เกณฑ์รอบฟอก (24 พ.ย. 2569): หน่วยเริ่มรอบแรกได้ตั้งแต่ ~05:00"""
+class TestShiftForThaiTime:
+    """เกณฑ์รอบฟอก — สเปคแพทย์ 24 พ.ย. 2569:
+    เช้า 05:00–09:29 · บ่าย 09:30–13:59 · ค่ำ 14:00 เป็นต้นไป"""
 
-    def test_early_morning_is_morning(self):
-        from hd_module.blueprint import _shift_for_thai_hour as f
-        # บั๊กจริง: 05:30 เคยถูกจัดเป็นรอบค่ำ
-        for h in (3, 4, 5, 6, 7, 10, 12):
-            assert f(h) == "morning", h
+    def test_morning_window(self):
+        from hd_module.blueprint import _shift_for_thai_time as f
+        for h, m in ((5, 0), (5, 30), (7, 0), (9, 0), (9, 29)):
+            assert f(h, m) == "morning", (h, m)
 
-    def test_afternoon(self):
-        from hd_module.blueprint import _shift_for_thai_hour as f
-        for h in (13, 14, 16):
-            assert f(h) == "afternoon", h
+    def test_afternoon_window(self):
+        from hd_module.blueprint import _shift_for_thai_time as f
+        for h, m in ((9, 30), (10, 0), (12, 0), (13, 59)):
+            assert f(h, m) == "afternoon", (h, m)
 
-    def test_evening_and_night(self):
+    def test_evening_window_incl_night(self):
+        from hd_module.blueprint import _shift_for_thai_time as f
+        for h, m in ((14, 0), (16, 30), (18, 30), (20, 0), (23, 59), (0, 0), (3, 0), (4, 59)):
+            assert f(h, m) == "evening", (h, m)
+
+    def test_exact_boundaries(self):
+        from hd_module.blueprint import _shift_for_thai_time as f
+        assert f(9, 29) == "morning"
+        assert f(9, 30) == "afternoon"
+        assert f(13, 59) == "afternoon"
+        assert f(14, 0) == "evening"
+        assert f(4, 59) == "evening"
+        assert f(5, 0) == "morning"
+
+    def test_hour_wrapper_compat(self):
         from hd_module.blueprint import _shift_for_thai_hour as f
-        for h in (17, 19, 22, 23, 0, 1, 2):
-            assert f(h) == "evening", h
+        assert f(6) == "morning" and f(10) == "afternoon" and f(15) == "evening"

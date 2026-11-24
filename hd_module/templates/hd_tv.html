@@ -75,7 +75,8 @@ const TOKEN = (new URLSearchParams(location.search).get('token')) || (function()
 if(!TOKEN) location.href = '/hd/login?next=' + encodeURIComponent(location.pathname + location.search);
 const REFRESH = 20000;
 function thaiNow(){ const n = new Date(); return new Date(n.getTime() + (n.getTimezoneOffset() + 420) * 60000); }
-function detectShift(){ const h = thaiNow().getHours(); if(h >= 7 && h < 13) return 'morning'; if(h >= 13 && h < 17) return 'afternoon'; return 'evening'; }
+/* สเปคแพทย์ 24 พ.ย. 2569: เช้า 05:00–09:29 · บ่าย 09:30–13:59 · ค่ำ 14:00 เป็นต้นไป */
+function detectShift(){ const t = thaiNow(); const mm = t.getHours()*60 + t.getMinutes(); if(mm >= 300 && mm < 570) return 'morning'; if(mm >= 570 && mm < 840) return 'afternoon'; return 'evening'; }
 const SH_TH = {morning:'🌅 รอบเช้า', afternoon:'☀️ รอบบ่าย', evening:'🌙 รอบค่ำ'};
 const SHIFTS = ['morning','afternoon','evening'];
 let shiftSel = 'all';

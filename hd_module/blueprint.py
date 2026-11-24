@@ -4667,7 +4667,8 @@ def create_session():
             #    ตอนกดเริ่ม — ไม่เชื่อ client ซึ่งอาจเปิดหน้าค้างข้ามคืน (รอบติดมาจากเมื่อวาน)
             session_id = None
             if not is_schedule:
-                shift = _shift_for_thai_hour((datetime.utcnow() + timedelta(hours=7)).hour)
+                _now_th = datetime.utcnow() + timedelta(hours=7)
+                shift = _shift_for_thai_time(_now_th.hour, _now_th.minute)
                 cur.execute("""SELECT id FROM hd_sessions
                                WHERE patient_id = %s AND session_date = %s AND status = 'scheduled'
                                ORDER BY id DESC LIMIT 1""",
@@ -5827,14 +5828,21 @@ def _process_vital_alerts(cur, session_id, sbp=None, dbp=None, hr=None, spo2=Non
             logger.warning("vital alert LINE push failed: %s", e)
     return created
 
-def _shift_for_thai_hour(h):
-    """ชั่วโมง (เวลาไทย 0-23) → รอบฟอก. หน่วยเริ่มรอบแรกได้ตั้งแต่ ~05:00
-    จึงนับ 03:00-12:59 เป็นรอบเช้า (บั๊ก 24 พ.ย. 2569: 05:30 เคยถูกจัดเป็นรอบค่ำ)."""
-    if 3 <= h < 13:
+def _shift_for_thai_time(h, m=0):
+    """เวลาไทย (ชั่วโมง, นาที) → รอบฟอก — สเปคแพทย์ 24 พ.ย. 2569:
+    เช้า 05:00–09:29 · บ่าย 09:30–13:59 · ค่ำ 14:00 เป็นต้นไป (รวมดึกถึงก่อนตี 5).
+    คนไข้ที่ฟอกเกินเวลารอบตัวเอง dashboard แสดงต่อในรอบถัดไปอยู่แล้ว (_show_ip_shifts)."""
+    t = h * 60 + m
+    if 5 * 60 <= t < 9 * 60 + 30:
         return "morning"
-    if 13 <= h < 17:
+    if 9 * 60 + 30 <= t < 14 * 60:
         return "afternoon"
     return "evening"
+
+
+def _shift_for_thai_hour(h):
+    """(คงไว้เพื่อความเข้ากันได้) ชั่วโมงเต็ม → รอบฟอก ตามเกณฑ์ _shift_for_thai_time."""
+    return _shift_for_thai_time(h, 0)
 
 
 def _parse_entry_time(hhmm, anchor_utc=None):

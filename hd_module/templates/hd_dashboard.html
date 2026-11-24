@@ -871,10 +871,10 @@ function detectShift(){
   /* Convert to Thai time regardless of browser timezone */
   const utc = now.getTime() + now.getTimezoneOffset() * 60000;
   const thaiTime = new Date(utc + 7 * 3600000);
-  const h = thaiTime.getHours();
-  /* Morning 07:00-12:59, Afternoon 13:00-16:59, Evening 17:00+ and before 07:00 */
-  if(h >= 7 && h < 13) return 'morning';
-  if(h >= 13 && h < 17) return 'afternoon';
+  /* สเปคแพทย์ 24 พ.ย. 2569: เช้า 05:00–09:29 · บ่าย 09:30–13:59 · ค่ำ 14:00 เป็นต้นไป */
+  const mm = thaiTime.getHours() * 60 + thaiTime.getMinutes();
+  if(mm >= 300 && mm < 570) return 'morning';
+  if(mm >= 570 && mm < 840) return 'afternoon';
   return 'evening';
 }
 

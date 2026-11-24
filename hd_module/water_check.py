@@ -220,7 +220,10 @@ def save_record(conn, vals, ev, *, tester_name, tester_hash, raw_text, source="l
     """Insert the row and claim the sender's recent inbox photos. Returns record dict."""
     now = _thai_now()
     day = check_date or vals.get("date") or now.date()
-    sh = shift or vals.get("shift") or ("morning" if now.hour < 13 else ("afternoon" if now.hour < 17 else "evening"))
+    # สเปคแพทย์ 24 พ.ย. 2569: เช้า 05:00–09:29 · บ่าย 09:30–13:59 · ค่ำ 14:00 เป็นต้นไป
+    _mm = now.hour * 60 + now.minute
+    sh = shift or vals.get("shift") or (
+        "morning" if 300 <= _mm < 570 else ("afternoon" if 570 <= _mm < 840 else "evening"))
     with conn.cursor() as cur:
         cur.execute(CREATE_SQL)
         cur.execute("""INSERT INTO hd_water_daily (check_date, shift, sample_point, hardness_ppm, hardness_text, free_cl,
