@@ -610,13 +610,17 @@ def _auto_complete_stale_sessions():
         import psycopg2
         conn = psycopg2.connect(db_url, connect_timeout=10)
         with conn.cursor() as cur:
+            # 24 พ.ย. 2569 (แพทย์อนุมัติ แบบ ก): รอบที่ "ปล่อยเตียงรอสรุป Post-HD" (bed_released_at
+            # ไม่ว่าง) ไม่ถูกปิดอัตโนมัติ — เตียงว่างอยู่แล้ว และบันทึกทางการแพทย์ต้องปิดโดยคน
+            # (LINE 21:00 เตือนจนกว่าจะสรุป) รอบที่ค้างโดยไม่ได้กดอะไรเลยยังถูกปิดตามเดิม
             cur.execute("""
                 UPDATE hd_sessions
                 SET status = 'completed',
                     ended_at = NOW(),
-                    notes = COALESCE(notes, '') || ' [auto-completed: stale session >8hr]'
+                    notes = COALESCE(notes, '') || ' [ปิดอัตโนมัติ: รอบค้างเกิน 8 ชม. — ไม่มีข้อมูล Post-HD]'
                 WHERE status = 'in_progress'
                   AND started_at < NOW() - INTERVAL '8 hours'
+                  AND bed_released_at IS NULL
                 RETURNING id, bed_number
             """)
             rows = cur.fetchall()
