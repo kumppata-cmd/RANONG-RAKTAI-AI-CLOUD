@@ -360,14 +360,15 @@
     </div>
   </div>
 
-  <!-- Action Buttons -->
-  <div class="grid-2" style="margin-bottom:8px;">
-    <button class="btn btn-primary btn-lg" onclick="openModal('vitalModal')">
-      ❤️ บันทึก Vital Signs
+  <!-- Action Buttons — 24 พ.ย. 2569: รวมเป็นปุ่มเดียว บันทึกครบทุกค่า (แพทย์สั่งจากปัญหาพยาบาลกดหลายปุ่ม) -->
+  <div style="margin-bottom:6px;">
+    <button class="btn btn-primary btn-lg" id="intraOpenBtn" onclick="openIntraModal()" style="width:100%;font-size:1.15rem;padding:16px">
+      📝 บันทึกค่ารอบนี้ (Vital + เครื่อง + UF)
     </button>
-    <button class="btn btn-warning btn-lg" onclick="openUfModal()">
-      💧 บันทึก UF
-    </button>
+  </div>
+  <div style="display:flex;gap:10px;justify-content:center;margin-bottom:8px;font-size:.74rem">
+    <a href="#" onclick="openModal('vitalModal');return false;" style="color:var(--fg-muted)">❤️ Vital อย่างเดียว</a>
+    <a href="#" onclick="openUfModal();return false;" style="color:var(--fg-muted)">💧 UF ละเอียด (วางแผน/ถ่ายรูปเครื่อง)</a>
   </div>
   <div style="text-align:center;margin-bottom:16px">
     <button id="voiceBtn" onclick="toggleVoice()" class="btn" style="padding:6px 14px;border-radius:20px;background:linear-gradient(135deg,#7c3aed,#1e40af);color:#fff;font-size:.72rem">
@@ -657,6 +658,56 @@
     <div class="modal-actions">
       <button class="btn btn-outline" onclick="closeModal('vitalModal')">ยกเลิก</button>
       <button class="btn btn-primary" onclick="saveIntraVital()">💾 บันทึก</button>
+    </div>
+  </div>
+</div>
+
+<!-- 📝 Unified Intra-HD Modal (24 พ.ย. 2569) — บันทึกครบทุกค่าในครั้งเดียว -->
+<div class="modal-overlay" id="intraModal">
+  <div class="modal" style="max-height:92vh;overflow-y:auto">
+    <div class="modal-title">📝 บันทึกค่ารอบนี้ <span id="intraSlotHint" style="font-size:.72rem;font-weight:600;color:var(--fg-muted);margin-left:6px"></span></div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+      <div class="vital-input" style="flex:1;min-width:140px">
+        <label>🕐 เวลาวัดจริง <small style="color:var(--fg-muted)">(ว่าง = ตอนนี้)</small></label>
+        <input type="time" class="form-control" id="imTime">
+      </div>
+      <label class="btn btn-outline" style="font-size:.8rem;padding:8px 10px;cursor:pointer;margin:0">📷 อ่านจากหน้าจอเครื่อง
+        <input type="file" id="imShot" accept="image/*" style="display:none" onchange="intraPhotoRead(this)"></label>
+    </div>
+    <div id="imShotStatus" style="font-size:.74rem;margin-bottom:6px"></div>
+
+    <div style="font-size:.78rem;font-weight:800;color:var(--fg-muted);margin:8px 0 4px;letter-spacing:.3px">❤️ VITAL SIGNS</div>
+    <div class="vital-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="vital-input"><label>SBP <small>mmHg</small></label><input type="number" class="form-control" id="imSbp" inputmode="numeric"></div>
+      <div class="vital-input"><label>DBP <small>mmHg</small></label><input type="number" class="form-control" id="imDbp" inputmode="numeric"></div>
+      <div class="vital-input"><label>PR <small>/min</small></label><input type="number" class="form-control" id="imHr" inputmode="numeric"></div>
+      <div class="vital-input"><label>RR <small>/min</small></label><input type="number" class="form-control" id="imRr" inputmode="numeric"></div>
+      <div class="vital-input"><label>SpO₂ <small>%</small></label><input type="number" class="form-control" id="imSpo2" inputmode="numeric"></div>
+      <div class="vital-input"><label>Temp <small>°C</small></label><input type="number" step="0.1" class="form-control" id="imTemp" inputmode="decimal"></div>
+    </div>
+
+    <div style="font-size:.78rem;font-weight:800;color:var(--fg-muted);margin:10px 0 4px;letter-spacing:.3px">⚙️ DIALYSIS PARAMETERS <small style="font-weight:500">(จำค่าครั้งก่อนให้ แก้เฉพาะที่เปลี่ยน)</small></div>
+    <div class="vital-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="vital-input"><label>BFR <small>mL/min</small></label><input type="number" class="form-control" id="imBfr" inputmode="numeric"></div>
+      <div class="vital-input"><label>DFR <small>mL/min</small></label><input type="number" class="form-control" id="imDfr" inputmode="numeric"></div>
+      <div class="vital-input"><label>AP <small>mmHg</small></label><input type="number" class="form-control" id="imAp" inputmode="numeric"></div>
+      <div class="vital-input"><label>VP <small>mmHg</small></label><input type="number" class="form-control" id="imVp" inputmode="numeric"></div>
+      <div class="vital-input"><label>TMP <small>mmHg</small></label><input type="number" class="form-control" id="imTmp" inputmode="numeric"></div>
+      <div class="vital-input"><label>Cond. <small>mS/cm</small></label><input type="number" step="0.1" class="form-control" id="imCond" inputmode="decimal"></div>
+      <div class="vital-input"><label>Dialysate T <small>°C</small></label><input type="number" step="0.1" class="form-control" id="imDtemp" inputmode="decimal"></div>
+    </div>
+
+    <div style="font-size:.78rem;font-weight:800;color:var(--fg-muted);margin:10px 0 4px;letter-spacing:.3px">💧 UF <span id="imUfPlan" style="font-weight:500"></span></div>
+    <div class="vital-grid" style="grid-template-columns:repeat(3,1fr)">
+      <div class="vital-input"><label>UF Rate <small>mL/h</small></label><input type="number" class="form-control" id="imUfRate" inputmode="numeric"></div>
+      <div class="vital-input"><label>UF Volume <small>mL สะสม</small></label><input type="number" class="form-control" id="imUfRemoved" inputmode="numeric" oninput="intraUfCalc()"></div>
+      <div class="vital-input"><label>เหลือ <small>mL</small></label><input type="number" class="form-control" id="imUfRemaining" inputmode="numeric"></div>
+    </div>
+    <div class="vital-input" style="margin-top:6px"><label>📝 หมายเหตุ/อาการ</label><input type="text" class="form-control" id="imRemark" placeholder="เช่น หน้ามืดเล็กน้อย ลด UF แล้ว"></div>
+    <div id="imWarn" style="font-size:.78rem;margin-top:6px;font-weight:700;color:var(--danger)"></div>
+    <div class="modal-actions">
+      <button class="btn btn-outline" onclick="closeModal('intraModal')">ยกเลิก</button>
+      <button class="btn btn-primary" id="imSaveBtn" onclick="saveIntraRecord()">💾 บันทึกทั้งหมด</button>
     </div>
   </div>
 </div>
@@ -1688,9 +1739,10 @@ function saveIntraVital(){
 
   /* POST to API — ใช้ hdFetch เพื่อจัดการ token + 401 */
   if(sessionData.session_id){
+    const _vkey = _imKey(); /* 24 พ.ย.: กุญแจกันซ้ำ (retry/offline ใช้ key เดิม) */
     hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',{
       method:'POST',
-      body:JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null, temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null, time: vTime || undefined})
+      body:JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null, temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null, time: vTime || undefined, idempotency_key:_vkey})
     }).then(r=>r.ok?r.json():r.json().then(e=>Promise.reject(e)))
     .then(d=>{
       if(d.vital_id){ entry.vid = d.vital_id; showToast('Vital #'+d.vital_id+' บันทึกลง DB สำเร็จ','info'); renderTimeline(); }
@@ -1714,7 +1766,7 @@ function saveIntraVital(){
       _pushOffline(
         '/hd/api/v1/sessions/'+sessionData.session_id+'/vitals',
         'POST',
-        JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null, temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null})
+        JSON.stringify({phase:'intra', sbp:parseInt(sbp), dbp:parseInt(dbp)||null, hr:parseInt(hr)||null, temp:parseFloat(temp)||null, spo2:parseInt(spo2)||null, time: vTime || undefined, idempotency_key:_vkey})
       );
       showToast('บันทึก offline — จะ sync เมื่อ online','warning');
     });
@@ -2563,7 +2615,7 @@ function saveUfRecord(){
     const now = new Date();
     const ufTimeChosen = (document.getElementById('modalUfTime')||{}).value || '';
     const slotTime = ufTimeChosen || (String(now.getHours()).padStart(2,'0')+':'+String(now.getMinutes()).padStart(2,'0'));
-    const ufPayload = {uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0, slot_time:slotTime};
+    const ufPayload = {uf_removed:parseInt(removed)||0, uf_remaining:parseInt(remaining)||0, uf_rate:parseInt(rate)||0, slot_time:slotTime, idempotency_key:_imKey()};
     if(ufTimeChosen) ufPayload.time = ufTimeChosen;
     if(_ufPending.target) ufPayload.machine_target = _ufPending.target;
     else if(_ufAdj.target) ufPayload.machine_target = _ufAdj.target;
@@ -2622,6 +2674,149 @@ function releaseBed(fromConflictSessionId){
     }).catch(e=>{ showToast('ผิดพลาด: '+e,'danger'); return false; });
 }
 
+/* ═══════ 📝 บันทึกรอบเดียวครบทุกค่า (24 พ.ย. 2569) ═══════
+   - ปุ่มเดียว: Vital + ค่าเครื่อง + UF → POST /intra-record (ลงตารางเดิม 3 ตารางใน transaction เดียว)
+   - idempotency_key ต่อการกด 1 ครั้ง: retry/กดซ้ำ/ส่งซ้ำหลัง 502 ไม่สร้างแถวซ้ำ
+   - แถวในรายการแสดงสถานะจริง: ⏳ รอ server ยืนยัน → ✅ / ❌ ส่งซ้ำ (ไม่โชว์ว่าสำเร็จก่อนบันทึกจริง) */
+const IM_MACHINE = ['imBfr','imDfr','imAp','imVp','imTmp','imCond','imDtemp'];
+const IM_ALL = ['imTime','imSbp','imDbp','imHr','imRr','imSpo2','imTemp'].concat(IM_MACHINE, ['imUfRate','imUfRemoved','imUfRemaining','imRemark']);
+let _imInFlight = false;
+const _imPayloads = {}; /* key → payload (สำหรับส่งซ้ำด้วย key เดิม) */
+
+function _imVal(id){ const el = document.getElementById(id); const v = el ? el.value : ''; return v === '' ? null : v; }
+function _imGoal(){ return parseInt((document.getElementById('ufGoal')||{}).textContent) || sessionData.uf_goal || 0; }
+function _imKey(){ try{ return crypto.randomUUID(); }catch(e){ return Date.now()+'-'+Math.random().toString(16).slice(2); } }
+
+function openIntraModal(){
+  if(!sessionData.session_id){ showToast('❌ ยังไม่มีรอบฟอก — กดเริ่มฟอกก่อน','danger'); return; }
+  IM_ALL.forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
+  document.getElementById('imWarn').textContent=''; document.getElementById('imShotStatus').textContent='';
+  /* จำค่าเครื่องครั้งก่อน (BFR/DFR/AP/VP/TMP/Cond/Dialysate T ไม่ค่อยเปลี่ยน) */
+  try{
+    const last = JSON.parse(localStorage.getItem('hd_intra_last_'+sessionData.session_id)||'{}');
+    IM_MACHINE.forEach(id=>{ if(last[id]!=null) document.getElementById(id).value = last[id]; });
+  }catch(e){}
+  const g = _imGoal();
+  document.getElementById('imUfPlan').textContent = g ? ('· เป้า '+g+' mL' + (_lastUfRemoved ? ' · ครั้งก่อนสะสม '+_lastUfRemoved : '')) : '· ยังไม่มีเป้า UF';
+  document.getElementById('imSlotHint').textContent = '';
+  openModal('intraModal');
+  setTimeout(()=>{ try{ document.getElementById('imSbp').focus(); }catch(e){} }, 150);
+}
+function intraUfCalc(){
+  const g = _imGoal(), r = parseInt(_imVal('imUfRemoved'));
+  const remEl = document.getElementById('imUfRemaining');
+  if(g && !isNaN(r) && remEl) remEl.value = Math.max(0, g - r);
+}
+function intraPhotoRead(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  const st = document.getElementById('imShotStatus');
+  st.textContent = '⏳ กำลังอ่านตัวเลขจากรูป...'; st.style.color = 'var(--fg-muted)';
+  const fd = new FormData(); fd.append('image', f); fd.append('session_id', sessionData.session_id);
+  hdFetch('/hd/api/v1/machine-screen/read', {method:'POST', body: fd}).then(r=>r.json()).then(d=>{
+    inp.value=''; const v=(d&&d.values)||{}; const got=[];
+    const put=(id,val,label)=>{ if(val!=null){ document.getElementById(id).value=val; got.push(label+' '+val); } };
+    put('imUfRemoved', v.uf_removed, 'UF'); put('imUfRate', v.uf_rate, 'อัตรา');
+    put('imSbp', v.sbp, 'SBP'); put('imDbp', v.dbp, 'DBP');
+    put('imBfr', v.bfr, 'BFR'); put('imAp', v.ap, 'AP'); put('imVp', v.vp, 'VP'); put('imTmp', v.tmp, 'TMP');
+    intraUfCalc();
+    if(!got.length){ st.textContent='⚠️ อ่านตัวเลขไม่ได้ — ถ่ายใหม่ให้ชัด หรือกรอกเอง'; st.style.color='var(--danger)'; return; }
+    st.innerHTML = '✅ อ่านได้: <b>'+got.join(' · ')+'</b> — <u>ตรวจกับหน้าจอก่อนกดบันทึก</u>'; st.style.color='var(--success)';
+  }).catch(()=>{ inp.value=''; st.textContent='❌ อ่านรูปไม่สำเร็จ — กรอกเอง'; st.style.color='var(--danger)'; });
+}
+
+function saveIntraRecord(){
+  if(_imInFlight) return;
+  const warn = document.getElementById('imWarn'); warn.textContent='';
+  const p = {
+    idempotency_key: _imKey(),
+    time: _imVal('imTime') || undefined,
+    sbp:_imVal('imSbp'), dbp:_imVal('imDbp'), hr:_imVal('imHr'), rr:_imVal('imRr'), spo2:_imVal('imSpo2'), temp:_imVal('imTemp'),
+    bfr:_imVal('imBfr'), dfr:_imVal('imDfr'), ap:_imVal('imAp'), vp:_imVal('imVp'), tmp:_imVal('imTmp'),
+    conductivity:_imVal('imCond'), dialysate_temp:_imVal('imDtemp'),
+    uf_rate:_imVal('imUfRate'), uf_removed:_imVal('imUfRemoved'), uf_remaining:_imVal('imUfRemaining'),
+    remark:_imVal('imRemark')
+  };
+  const hasAny = Object.keys(p).some(k => !['idempotency_key','time'].includes(k) && p[k] != null);
+  if(!hasAny){ warn.textContent='ยังไม่ได้กรอกค่าใด ๆ'; return; }
+  if(p.sbp && (p.sbp<30||p.sbp>300)){ warn.textContent='SBP ต้องอยู่ระหว่าง 30–300'; return; }
+  if(p.dbp && (p.dbp<20||p.dbp>200)){ warn.textContent='DBP ต้องอยู่ระหว่าง 20–200'; return; }
+  if(p.sbp && p.dbp && parseInt(p.dbp) >= parseInt(p.sbp)){ warn.textContent='DBP ต้องน้อยกว่า SBP'; return; }
+  if(p.uf_removed && _lastUfRemoved && parseInt(p.uf_removed) < _lastUfRemoved){
+    if(!confirm('UF สะสม '+p.uf_removed+' น้อยกว่าครั้งก่อน ('+_lastUfRemoved+') — UF บนเครื่องเป็นค่าสะสม ตรวจว่าอ่านถูก?\n\nกดตกลงเพื่อบันทึกต่อ')) return;
+  }
+  /* จำค่าเครื่องไว้ให้ครั้งถัดไป */
+  try{ const m={}; IM_MACHINE.forEach(id=>{ const v=_imVal(id); if(v!=null) m[id]=v; }); localStorage.setItem('hd_intra_last_'+sessionData.session_id, JSON.stringify(m)); }catch(e){}
+
+  const tDisp = p.time || new Date().toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
+  const hasVital = [p.sbp,p.dbp,p.hr,p.rr,p.spo2,p.temp].some(v=>v!=null);
+  const hasUf = p.uf_removed!=null || p.uf_rate!=null;
+  const machine = {bfr:p.bfr,dfr:p.dfr,ap:p.ap,vp:p.vp,tmp:p.tmp,cond:p.conductivity,dtemp:p.dialysate_temp};
+  if(hasVital || !hasUf) timeline.push({ time:tDisp, ts:Date.now(), type:'vital', phase:'intra', key:p.idempotency_key, status:'pending',
+      sbp:p.sbp?parseInt(p.sbp):null, dbp:p.dbp?parseInt(p.dbp):null, hr:p.hr?parseInt(p.hr):null, spo2:p.spo2?parseInt(p.spo2):null, temp:p.temp?parseFloat(p.temp):null, machine:machine, remark:p.remark });
+  if(hasUf) timeline.push({ time:tDisp, ts:Date.now(), type:'uf', key:p.idempotency_key, status:'pending',
+      removed:p.uf_removed?parseInt(p.uf_removed):null, rate:p.uf_rate?parseInt(p.uf_rate):null, remaining:p.uf_remaining?parseInt(p.uf_remaining):null });
+  renderTimeline();
+  closeModal('intraModal');
+  _imPayloads[p.idempotency_key] = p;
+  _sendIntra(p.idempotency_key);
+}
+
+function _imMark(key, status, extra){
+  timeline.filter(e=>e.key===key).forEach(e=>{
+    e.status = status;
+    if(extra){
+      if(e.type==='vital' && extra.vital_id) e.vid = extra.vital_id;
+      if(e.type==='uf' && extra.uf_id) e.rid = extra.uf_id;
+      if(extra.slot_time) e.slot = extra.slot_time;
+      if(extra.recorded_at){ e.time = hdTime(extra.recorded_at); e.ts = _tsOf(extra.recorded_at); }
+      if(extra.err) e.err = extra.err;
+    }
+  });
+  renderTimeline();
+}
+function _sendIntra(key){
+  const p = _imPayloads[key]; if(!p) return;
+  _imInFlight = true;
+  const btn = document.getElementById('intraOpenBtn'); if(btn){ btn.disabled = true; btn.style.opacity='.7'; }
+  const done = ()=>{ _imInFlight=false; if(btn){ btn.disabled=false; btn.style.opacity=''; } };
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/intra-record', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(p)
+  }).then(r=>r.json().then(d=>({ok:r.ok, status:r.status, d})))
+  .then(x=>{
+    done();
+    if(!x.ok){ _imMark(key,'failed',{err:x.d.error||('HTTP '+x.status)}); showToast('❌ บันทึกไม่สำเร็จ: '+(x.d.error||x.status)+' — กด "ส่งซ้ำ" ที่แถวนั้น','danger'); return; }
+    const d = x.d;
+    _imMark(key,'ok',d);
+    delete _imPayloads[key];
+    showToast(d.duplicate ? '✅ รายการนี้บันทึกไว้แล้ว (ไม่สร้างซ้ำ)' : '✅ บันทึกครบแล้ว'+(d.slot_time?' → ช่อง '+d.slot_time+' ใน Monitoring Sheet':''),'success');
+    /* อัปเดต UF progress + กราฟ เหมือนปุ่ม UF เดิม */
+    if(p.uf_removed!=null){
+      const rv = parseInt(p.uf_removed); if(rv > (_lastUfRemoved||0)) _lastUfRemoved = rv;
+      try{
+        const g=_imGoal(); const shown=Math.max(rv,_lastUfRemoved||0);
+        document.getElementById('ufRemoved').textContent = shown;
+        document.getElementById('ufRemaining').textContent = p.uf_remaining!=null ? p.uf_remaining : (g?Math.max(0,g-shown):'-');
+        if(p.uf_rate!=null) document.getElementById('ufRate').textContent = p.uf_rate;
+        if(g){ const pct=Math.min(100,Math.round(shown/g*100)); const bar=document.getElementById('ufProgressBar'); bar.style.width=pct+'%'; bar.textContent=pct+'%'; }
+        _ufRecords.push({t:new Date().toISOString(), removed:rv}); drawUfChart();
+      }catch(e){}
+      if(d.idh_alert_sent) showToast('🚨 แจ้งหัวหน้าเวรแล้ว: อัตรา UF เกินเพดาน + เสี่ยง IDH สูง','danger');
+    }
+    if((d.alerts||[]).length){
+      showToast('⚠️ มีการแจ้งเตือน '+d.alerts.length+' รายการ — ดูในการ์ดแจ้งเตือน','warning');
+      try{ playAlertSound('warning'); vibrateAlert('warning'); }catch(e){}
+      try{ loadSessionAlerts(); }catch(e){}
+    }
+  }).catch(e=>{
+    done();
+    /* เครือข่ายล่ม: เข้าคิว offline (ส่งซ้ำอัตโนมัติด้วย key เดิม → ไม่ซ้ำ) */
+    _imMark(key,'queued');
+    _pushOffline('/hd/api/v1/sessions/'+sessionData.session_id+'/intra-record','POST',JSON.stringify(p));
+    showToast('⚠️ เน็ตหลุด — เก็บไว้ส่งอัตโนมัติเมื่อกลับมาออนไลน์','warning');
+  });
+}
+function retryIntra(key){ if(!_imPayloads[key]){ showToast('ไม่พบข้อมูลสำหรับส่งซ้ำ — กรอกใหม่','warning'); return; } _imMark(key,'pending'); _sendIntra(key); }
+
 /* 🕐 แก้เวลาวัดย้อนหลัง — ช่องในแผ่น HD Monitoring Sheet ขยับตามอัตโนมัติ */
 function editRecTime(kind, id, cur){
   const t = prompt('เวลาวัดจริง (HH:MM เช่น 17:30):', cur || '');
@@ -2655,10 +2850,17 @@ function renderTimeline(){
   /* 🕐 แก้เวลาวัดย้อนหลังได้ (23 พ.ย. 2569) — เฉพาะแถวที่บันทึกลง DB แล้ว (มี id) */
   const tbtn = (kind, id, t) => id ? ` <button onclick="event.stopPropagation();editRecTime('${kind}',${id},'${t}')" title="แก้เวลาวัด"
       style="border:1px solid var(--border);background:var(--bg);border-radius:6px;padding:0 5px;font-size:.7rem;cursor:pointer">🕐</button>` : '';
-  const vRows = vit.map(e=>`<tr><td ${td}>${e.time}${PH[e.phase]?' <span style="font-size:.68rem;padding:1px 6px;border-radius:8px;background:rgba(52,152,219,.12)">'+PH[e.phase]+'</span>':''}${e.phase==='intra'||!e.phase?tbtn('vitals',e.vid,e.time):''}</td>
+  /* สถานะบันทึกจริง (24 พ.ย. 2569): ⏳ รอ server · 📶 รอ sync · ❌ ส่งซ้ำ — ไม่มีสถานะ = ยืนยันแล้ว */
+  const stg = e => e.status==='pending' ? ' <span title="รอ server ยืนยัน" style="font-size:.72rem">⏳</span>'
+    : e.status==='queued' ? ' <span title="เน็ตหลุด รอส่งอัตโนมัติ" style="font-size:.72rem">📶⏳</span>'
+    : e.status==='failed' ? ` <button onclick="event.stopPropagation();retryIntra('${e.key}')" title="${(e.err||'').replace(/"/g,'')}"
+        style="border:1px solid var(--danger);color:var(--danger);background:#fff;border-radius:6px;padding:0 6px;font-size:.68rem;cursor:pointer;font-weight:700">❌ ส่งซ้ำ</button>` : '';
+  const mline = e => { const m=e.machine||{}; const parts=[['BFR',m.bfr],['DFR',m.dfr],['AP',m.ap],['VP',m.vp],['TMP',m.tmp],['Cond',m.cond],['DT',m.dtemp]].filter(x=>x[1]!=null&&x[1]!=='').map(x=>x[0]+' '+x[1]);
+    return parts.length ? `<div style="font-size:.62rem;color:var(--fg-muted);white-space:nowrap">⚙ ${parts.join(' · ')}</div>` : ''; };
+  const vRows = vit.map(e=>`<tr><td ${td}>${e.time}${PH[e.phase]?' <span style="font-size:.68rem;padding:1px 6px;border-radius:8px;background:rgba(52,152,219,.12)">'+PH[e.phase]+'</span>':''}${e.phase==='intra'||!e.phase?tbtn('vitals',e.vid,e.time):''}${stg(e)}${mline(e)}</td>
       <td ${td}>${c(e.sbp, e.sbp!=null&&e.sbp<90, e.sbp!=null&&e.sbp<100)}/${e.dbp??'-'}</td><td ${td}>${c(e.hr, e.hr!=null&&(e.hr>120||e.hr<50))}</td>
       <td ${td}>${c(e.spo2, e.spo2!=null&&e.spo2<92)}</td><td ${td}>${c(e.temp, e.temp!=null&&e.temp>=37.8)}</td></tr>`).join('');
-  const uRows = uf.map(e=>`<tr><td ${td}>${e.time}${e.slot&&e.slot!==e.time?' <span style="font-size:.66rem;color:var(--fg-muted)">(ช่อง '+e.slot+')</span>':''}${tbtn('uf',e.rid,e.time)}</td>
+  const uRows = uf.map(e=>`<tr><td ${td}>${e.time}${e.slot&&e.slot!==e.time?' <span style="font-size:.66rem;color:var(--fg-muted)">(ช่อง '+e.slot+')</span>':''}${tbtn('uf',e.rid,e.time)}${stg(e)}</td>
       <td ${td}><b>${e.removed!=null?Math.round(e.removed):'-'}</b></td><td ${td}>${e.remaining!=null?Math.round(e.remaining):'-'}</td><td ${td}>${e.rate!=null?Math.round(e.rate):'-'}</td></tr>`).join('');
   const box = (title, n, head, rows, empty) => `<div style="margin-bottom:14px">
       <div style="font-weight:800;font-size:.9rem;margin:2px 0 6px">${title} <span style="font-weight:500;font-size:.75rem;color:var(--fg-muted)">${n} ครั้ง</span></div>

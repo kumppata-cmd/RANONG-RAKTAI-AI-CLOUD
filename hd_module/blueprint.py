@@ -5838,6 +5838,110 @@ def _process_vital_alerts(cur, session_id, sbp=None, dbp=None, hr=None, spo2=Non
             logger.warning("vital alert LINE push failed: %s", e)
     return created
 
+# ═══════════ Idempotency (24 พ.ย. 2569) — กันแถวซ้ำจาก retry/กดซ้ำ ═══════════
+# หน้าเว็บสร้างรหัสสุ่มต่อ "การกดบันทึก 1 ครั้ง" ส่งมากับคำขอ; ถ้าเคยรับรหัสนี้แล้ว
+# (เช่น 502 กลางทางแล้ว offline queue ส่งซ้ำ, แตะปุ่มรัว) คืนผลเดิม ไม่สร้างแถวใหม่
+# คำขอที่ไม่มีรหัส = พฤติกรรมเดิมทุกประการ
+
+def _idem_key(data):
+    k = (data.get("idempotency_key") or "").strip()
+    return k[:64] if k else None
+
+
+def _idem_lookup(cur, session_id, key):
+    """คืน dict ผลเดิมถ้าเคยรับ key นี้แล้ว, None ถ้าใหม่ (ทนตารางยังไม่มี)."""
+    if not key:
+        return None
+    try:
+        cur.execute("SAVEPOINT idem_q")
+    except Exception:
+        pass
+    try:
+        cur.execute("SELECT result_json FROM hd_intra_submissions WHERE session_id = %s AND idem_key = %s",
+                    (session_id, key))
+        r = cur.fetchone()
+        try:
+            cur.execute("RELEASE SAVEPOINT idem_q")
+        except Exception:
+            pass
+        if r and r[0]:
+            import json as _json
+            d = _json.loads(r[0])
+            d["duplicate"] = True
+            return d
+        return None
+    except Exception:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT idem_q")
+        except Exception:
+            pass
+        return None
+
+
+def _idem_store(cur, session_id, key, kind, result):
+    """บันทึกผลของ key (best-effort, ไม่ทำให้ธุรกรรมหลักล้ม)."""
+    if not key:
+        return
+    try:
+        import json as _json
+        cur.execute("SAVEPOINT idem_s")
+        cur.execute("""INSERT INTO hd_intra_submissions (session_id, idem_key, kind, result_json)
+                       VALUES (%s, %s, %s, %s) ON CONFLICT (session_id, idem_key) DO NOTHING""",
+                    (session_id, key, kind, _json.dumps(result, default=str)))
+        cur.execute("RELEASE SAVEPOINT idem_s")
+    except Exception:
+        try:
+            cur.execute("ROLLBACK TO SAVEPOINT idem_s")
+        except Exception:
+            pass
+
+
+def _idem_check_conn(session_id, key):
+    """เวอร์ชันเปิด connection เอง (สำหรับ endpoint เดิมที่จัดการ connection หลายแบบ)."""
+    if not key:
+        return None
+    try:
+        import os, psycopg2
+        c = psycopg2.connect(os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", ""),
+                             connect_timeout=5)
+        c.autocommit = True
+        with c.cursor() as cur:
+            r = _idem_lookup(cur, session_id, key)
+        c.close()
+        return r
+    except Exception:
+        return None
+
+
+def _idem_store_conn(session_id, key, kind, result):
+    if not key:
+        return
+    try:
+        import os, psycopg2
+        c = psycopg2.connect(os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", ""),
+                             connect_timeout=5)
+        c.autocommit = True
+        with c.cursor() as cur:
+            import json as _json
+            cur.execute("""INSERT INTO hd_intra_submissions (session_id, idem_key, kind, result_json)
+                           VALUES (%s, %s, %s, %s) ON CONFLICT (session_id, idem_key) DO NOTHING""",
+                        (session_id, key, kind, _json.dumps(result, default=str)))
+        c.close()
+    except Exception as e:
+        logger.warning("idem store: %s", e)
+
+
+def _slot_for_started(started_utc, ts_utc):
+    """ช่อง 30 นาทีของแผ่น sheet (เริ่มปัดเป็น :00/:30 เหมือนหน้า sheet), คืน 'HH:MM'."""
+    from datetime import timedelta
+    thai_start = started_utc + timedelta(hours=7)
+    base = thai_start.replace(second=0, microsecond=0, minute=0 if thai_start.minute < 15 else 30)
+    delta = (ts_utc + timedelta(hours=7)) - base
+    idx = int(round(delta.total_seconds() / 1800.0))
+    idx = max(0, min(idx, 11))
+    return (base + timedelta(minutes=30 * idx)).strftime("%H:%M")
+
+
 def _shift_for_thai_time(h, m=0):
     """เวลาไทย (ชั่วโมง, นาที) → รอบฟอก — สเปคแพทย์ 24 พ.ย. 2569:
     เช้า 05:00–09:29 · บ่าย 09:30–13:59 · ค่ำ 14:00 เป็นต้นไป (รวมดึกถึงก่อนตี 5).
@@ -5999,6 +6103,156 @@ def uf_time_edit(session_id, rec_id):
         return jsonify({"error": str(e)}), 500
 
 
+@hd_bp.route("/sessions/<int:session_id>/intra-record", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def intra_record(session_id):
+    """📝 บันทึกรอบเดียวครบทุกค่า (24 พ.ย. 2569, แพทย์สั่งจากปัญหาพยาบาลกดหลายปุ่ม/ข้อมูลไม่ครบ)
+
+    body: {idempotency_key, time?: 'HH:MM',
+           sbp, dbp, hr, rr, spo2, temp,
+           bfr, dfr, ap, vp, tmp, conductivity, dialysate_temp,
+           uf_rate, uf_removed, uf_remaining?, remark?}
+
+    เขียนลง "ตารางเดิม" ทั้ง 3 ใน transaction เดียว — ไม่มีชุดข้อมูลแยก:
+      hd_vital_signs  → alert/dashboard/PDF เดิมทำงานตามปกติ
+      hd_uf_records   → UF brain/กราฟเดิม
+      hd_flowsheet    → HD Monitoring Sheet (ค่าเครื่องครบ)
+    idempotency_key ซ้ำ → คืนผลเดิม ไม่สร้างแถวใหม่
+    """
+    import os, psycopg2
+    data = request.get_json(silent=True) or {}
+    key = _idem_key(data)
+
+    def _num(k, cast):
+        v = data.get(k)
+        if v in (None, ""):
+            return None
+        try:
+            return cast(v)
+        except (TypeError, ValueError):
+            return None
+
+    sbp, dbp, hr, rr = _num("sbp", int), _num("dbp", int), _num("hr", int), _num("rr", int)
+    spo2, temp = _num("spo2", int), _num("temp", float)
+    bfr, dfr, ap, vp, tmp = (_num("bfr", int), _num("dfr", int), _num("ap", int),
+                             _num("vp", int), _num("tmp", int))
+    cond, dtemp = _num("conductivity", float), _num("dialysate_temp", float)
+    uf_rate, uf_removed, uf_remaining = (_num("uf_rate", float), _num("uf_removed", float),
+                                         _num("uf_remaining", float))
+    remark = (data.get("remark") or "").strip()[:500] or None
+    has_vital = any(v is not None for v in (sbp, dbp, hr, rr, spo2, temp))
+    has_machine = any(v is not None for v in (bfr, dfr, ap, vp, tmp, cond, dtemp))
+    has_uf = uf_removed is not None or uf_rate is not None
+    if not (has_vital or has_machine or has_uf or remark):
+        return jsonify({"error": "ไม่มีค่าให้บันทึก"}), 400
+    # ช่วงที่ฐานข้อมูลยอมรับ (CHECK constraints) — ตอบเป็นภาษาคนก่อนถึง DB
+    if sbp is not None and not 30 <= sbp <= 300:
+        return jsonify({"error": "SBP ต้องอยู่ระหว่าง 30–300"}), 400
+    if dbp is not None and not 20 <= dbp <= 200:
+        return jsonify({"error": "DBP ต้องอยู่ระหว่าง 20–200"}), 400
+    if hr is not None and not 20 <= hr <= 250:
+        return jsonify({"error": "PR ต้องอยู่ระหว่าง 20–250"}), 400
+
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    uid = g.get("hd_user_id")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            dup = _idem_lookup(cur, session_id, key)
+            if dup:
+                conn.close()
+                return jsonify(dup), 200
+            cur.execute("SELECT status, started_at, uf_goal FROM hd_sessions WHERE id = %s", (session_id,))
+            srow = cur.fetchone()
+            if not srow:
+                conn.close()
+                return jsonify({"error": "ไม่พบรอบฟอกนี้"}), 404
+            status, started, uf_goal = srow
+            if status != "in_progress":
+                conn.close()
+                return jsonify({"error": "รอบนี้ไม่ได้อยู่ระหว่างฟอก (บันทึกได้เฉพาะรอบที่กำลังฟอก)"}), 400
+            rec_ts = _parse_entry_time(data.get("time")) or datetime.utcnow()
+            result = {"session_id": session_id, "recorded_at": rec_ts.isoformat() + "Z",
+                      "vital_id": None, "uf_id": None, "flowsheet_id": None,
+                      "slot_time": None, "alerts": []}
+            if has_vital:
+                cur.execute("""INSERT INTO hd_vital_signs
+                                   (session_id, phase, recorded_at, sbp, dbp, heart_rate,
+                                    temperature, spo2, respiratory_rate, nurse_id)
+                               VALUES (%s, 'intra'::hd_vital_phase, %s, %s, %s, %s, %s, %s, %s, %s)
+                               RETURNING id""",
+                            (session_id, rec_ts, sbp, dbp, hr, temp, spo2, rr, uid))
+                result["vital_id"] = cur.fetchone()[0]
+                try:
+                    result["alerts"] = _process_vital_alerts(cur, session_id, sbp=sbp, dbp=dbp,
+                                                             hr=hr, spo2=spo2, temp=temp) or []
+                except Exception as ae:
+                    logger.warning("intra_record alerts: %s", ae)
+            if has_uf:
+                if uf_remaining is None and uf_removed is not None and uf_goal is not None:
+                    uf_remaining = max(0.0, float(uf_goal) - uf_removed)
+                from datetime import timedelta as _td
+                cur.execute("""INSERT INTO hd_uf_records
+                                   (session_id, slot_time, uf_removed, uf_rate, uf_remaining,
+                                    recorded_at, nurse_id)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                            (session_id, (rec_ts + _td(hours=7)).strftime("%H:%M"),
+                             uf_removed, uf_rate, uf_remaining, rec_ts, uid))
+                result["uf_id"] = cur.fetchone()[0]
+                if uf_removed is not None:
+                    cur.execute("UPDATE hd_sessions SET actual_uf = %s WHERE id = %s",
+                                (uf_removed, session_id))
+                try:  # UF Watch + IDH predictor เหมือนปุ่ม UF เดิม
+                    from .uf_watch import for_session as _ufw
+                    result["watch"] = _ufw(cur, session_id, _uf_watch_limits())
+                    result["idh_alert_sent"] = _uf_idh_alert(cur, session_id, result["watch"])
+                except Exception as we:
+                    logger.warning("intra_record uf watch: %s", we)
+            if started:
+                slot = _slot_for_started(started, rec_ts)
+                params = {"sbp": sbp, "dbp": dbp, "pr": hr, "rr": rr, "temp": temp, "spo2": spo2,
+                          "bfr": bfr, "dfr": dfr, "vp": vp, "tmp": tmp, "ap": ap,
+                          "conductivity": cond, "dialysate_temp": dtemp,
+                          "ufr": int(uf_rate) if uf_rate is not None else None,
+                          "total_uf": int(uf_removed) if uf_removed is not None else None,
+                          "remark": remark}
+                cur.execute("SELECT id FROM hd_flowsheet WHERE session_id = %s AND slot_time = %s",
+                            (session_id, slot))
+                ex = cur.fetchone()
+                if ex:
+                    sets, vals = [], []
+                    for k, v in params.items():
+                        if v is not None:
+                            sets.append(f"{k} = %s")
+                            vals.append(v)
+                    if sets:
+                        sets.append("recorded_at = %s")
+                        vals.extend([rec_ts, ex[0]])
+                        cur.execute(f"UPDATE hd_flowsheet SET {', '.join(sets)} WHERE id = %s", vals)
+                    result["flowsheet_id"] = ex[0]
+                else:
+                    cols = ["session_id", "slot_time", "recorded_at", "nurse_id"] + list(params.keys())
+                    vals = [session_id, slot, rec_ts, uid] + list(params.values())
+                    cur.execute(f"""INSERT INTO hd_flowsheet ({', '.join(cols)})
+                                    VALUES ({', '.join(['%s'] * len(cols))}) RETURNING id""", vals)
+                    result["flowsheet_id"] = cur.fetchone()[0]
+                result["slot_time"] = slot
+            _idem_store(cur, session_id, key, "intra", result)
+            conn.commit()
+        conn.close()
+        try:
+            log_action(user_id=uid, action="session.intra_record",
+                       resource_type="hd_session", resource_id=str(session_id),
+                       old_values={}, new_values={k: v for k, v in result.items() if k != "alerts"},
+                       ip_address=request.remote_addr or "")
+        except Exception:
+            pass
+        return jsonify(result), 201
+    except Exception as e:
+        logger.error("intra_record: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/sessions/<int:session_id>/vitals", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def record_vital(session_id):
@@ -6013,6 +6267,12 @@ def record_vital(session_id):
     phase = data.get("phase")
     if phase not in ("pre", "intra", "post"):
         return jsonify({"error": "phase must be pre, intra, or post"}), 400
+
+    # 24 พ.ย. 2569: idempotency — คำขอซ้ำ (retry หลัง 502 / กดรัว) คืนผลเดิม ไม่สร้างแถวใหม่
+    _ikey = _idem_key(data)
+    _dup = _idem_check_conn(session_id, _ikey)
+    if _dup:
+        return jsonify(_dup), 201
 
     log_action(
         user_id=g.get("hd_user_id"),
@@ -6079,14 +6339,16 @@ def record_vital(session_id):
             recorded_by=str(g.get("hd_user_id", "")),
         )
         _apply_entry_ts(result.get("vital_id"))
-        return jsonify({
+        _resp = {
             "session_id": session_id,
             "phase": phase,
             "recorded": True,
             "vital_id": result.get("vital_id"),
             "alerts": result.get("alerts", []),
             "alert_count": result.get("alert_count", 0),
-        }), 201
+        }
+        _idem_store_conn(session_id, _ikey, "vital", _resp)
+        return jsonify(_resp), 201
 
     # Fallback: direct INSERT if no VitalRecorder
     import os
@@ -6124,9 +6386,11 @@ def record_vital(session_id):
                     hr=data.get("hr"), spo2=data.get("spo2"), temp=data.get("temp"))
                 conn_fb.commit()
             conn_fb.close()
-            return jsonify({"session_id": session_id, "phase": phase, "recorded": True,
+            _resp = {"session_id": session_id, "phase": phase, "recorded": True,
                             "vital_id": vid, "alerts": new_alerts,
-                            "alert_count": len(new_alerts)}), 201
+                            "alert_count": len(new_alerts)}
+            _idem_store_conn(session_id, _ikey, "vital", _resp)
+            return jsonify(_resp), 201
         except Exception as ve:
             logger.error("vital fallback error: %s", ve)
     return jsonify({"session_id": session_id, "phase": phase, "recorded": True}), 201
@@ -6271,6 +6535,11 @@ def record_uf(session_id):
 
     # POST: Save new UF record
     data = request.get_json(silent=True) or {}
+    # 24 พ.ย. 2569: idempotency — คำขอซ้ำคืนผลเดิม ไม่สร้างแถวใหม่
+    _ikey = _idem_key(data)
+    _dup = _idem_check_conn(session_id, _ikey)
+    if _dup:
+        return jsonify(_dup), 201
     uf_removed = data.get("uf_removed", 0)
     uf_rate = data.get("uf_rate", 0)
     uf_remaining = data.get("uf_remaining", 0)
@@ -6328,7 +6597,7 @@ def record_uf(session_id):
             new_values=data,
             ip_address=request.remote_addr or "",
         )
-        return jsonify({
+        _resp = {
             "id": rec_id,
             "session_id": session_id,
             "uf_removed": uf_removed,
@@ -6336,7 +6605,9 @@ def record_uf(session_id):
             "uf_recorded": True,
             "watch": watch,
             "idh_alert_sent": alerted,
-        }), 201
+        }
+        _idem_store_conn(session_id, _ikey, "uf", _resp)
+        return jsonify(_resp), 201
     except Exception as e:
         logger.error("record_uf error: %s", e)
         return jsonify({"error": str(e)}), 500
@@ -10951,7 +11222,7 @@ def flowsheet_entries(conn, session_id):
                 SELECT id, slot_time, recorded_at,
                        sbp, dbp, pr, rr, temp, spo2,
                        bfr, vp, tmp, ap, conductivity, dialysate_temp,
-                       ufr, total_uf, remark
+                       ufr, total_uf, remark, dfr
                 FROM hd_flowsheet
                 WHERE session_id = %s
                 ORDER BY slot_time, recorded_at
@@ -11012,6 +11283,7 @@ def flowsheet_entries(conn, session_id):
                 "dialysate_temp": float(r[14]) if r[14] else None,
                 "ufr": r[15], "total_uf": r[16],
                 "remark": r[17],
+                "dfr": r[18] if len(r) > 18 else None,
             })
 
         # ── Merge: vitals / UF recorded on the session page land in the sheet ──
@@ -11038,7 +11310,7 @@ def flowsheet_entries(conn, session_id):
                     e = {"id": None, "slot_time": st, "recorded_at": rec.isoformat() + "Z",
                          "sbp": None, "dbp": None, "pr": None, "rr": None, "temp": None, "spo2": None,
                          "bfr": None, "vp": None, "tmp": None, "ap": None, "conductivity": None,
-                         "dialysate_temp": None, "ufr": None, "total_uf": None, "remark": None}
+                         "dialysate_temp": None, "ufr": None, "total_uf": None, "remark": None, "dfr": None}
                     by_slot[st] = e
                     entries.append(e)
                 # latest reading in the slot wins for fields the sheet row doesn't have
@@ -11058,7 +11330,7 @@ def flowsheet_entries(conn, session_id):
                     e = {"id": None, "slot_time": st, "recorded_at": rec.isoformat() + "Z",
                          "sbp": None, "dbp": None, "pr": None, "rr": None, "temp": None, "spo2": None,
                          "bfr": None, "vp": None, "tmp": None, "ap": None, "conductivity": None,
-                         "dialysate_temp": None, "ufr": None, "total_uf": None, "remark": None}
+                         "dialysate_temp": None, "ufr": None, "total_uf": None, "remark": None, "dfr": None}
                     by_slot[st] = e
                     entries.append(e)
                 if uf_removed is not None and (e.get("total_uf") is None or uf_removed > (e.get("total_uf") or 0)):
@@ -11138,6 +11410,7 @@ def save_flowsheet_row(session_id):
                 "dialysate_temp": data.get("dialysate_temp"),
                 "ufr": data.get("ufr"), "total_uf": data.get("total_uf"),
                 "remark": data.get("remark"),
+                "dfr": data.get("dfr"),
             }
 
             if existing:
@@ -11162,8 +11435,8 @@ def save_flowsheet_row(session_id):
                     INSERT INTO hd_flowsheet
                         (session_id, slot_time, sbp, dbp, pr, rr, temp, spo2,
                          bfr, vp, tmp, ap, conductivity, dialysate_temp,
-                         ufr, total_uf, remark, nurse_id)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                         ufr, total_uf, remark, nurse_id, dfr)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                     RETURNING id
                 """, (
                     session_id, slot_time,
@@ -11172,7 +11445,7 @@ def save_flowsheet_row(session_id):
                     params["bfr"], params["vp"], params["tmp"], params["ap"],
                     params["conductivity"], params["dialysate_temp"],
                     params["ufr"], params["total_uf"],
-                    params["remark"], g.get("hd_user_id"),
+                    params["remark"], g.get("hd_user_id"), params["dfr"],
                 ))
                 row_id = cur.fetchone()[0]
 

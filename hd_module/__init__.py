@@ -309,6 +309,19 @@ def _run_hd_migrations():
             # ── Unified Lab VIEW: hd_labs ──────────────────────────
             # Merge hd_lab_results (manual) + hd_lab_docs (OCR) into one VIEW
             # with standardised column names so every query uses one source.
+            # Unified intra-HD record + idempotency (24 พ.ย. 2569, แพทย์สั่ง — บั๊กแถวซ้ำจาก retry/กดซ้ำ)
+            fixes.append("ALTER TABLE hd_flowsheet ADD COLUMN IF NOT EXISTS dfr INTEGER")
+            fixes.append("""
+                CREATE TABLE IF NOT EXISTS hd_intra_submissions (
+                    id SERIAL PRIMARY KEY,
+                    session_id INTEGER NOT NULL,
+                    idem_key VARCHAR(64) NOT NULL,
+                    kind VARCHAR(20) NOT NULL,
+                    result_json TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE (session_id, idem_key)
+                )
+            """)
             # Lab verify gate (2026-11-22): verified_status/by/at + delta_flags
             fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS verified_status VARCHAR(20) DEFAULT 'pending'")
             fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS verified_by VARCHAR(80)")

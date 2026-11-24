@@ -80,3 +80,38 @@ class TestShiftForThaiTime:
     def test_hour_wrapper_compat(self):
         from hd_module.blueprint import _shift_for_thai_hour as f
         assert f(6) == "morning" and f(10) == "afternoon" and f(15) == "evening"
+
+
+class TestUnifiedIntraHelpers:
+    """ปุ่มเดียวครบทุกค่า (24 พ.ย. 2569): ช่อง sheet + กุญแจกันซ้ำ"""
+
+    def test_slot_for_started_matches_sheet_grid(self):
+        from hd_module.blueprint import _slot_for_started
+        started = _u("2026-11-24T10:35:00")  # 17:35 ไทย → base 17:30
+        assert _slot_for_started(started, _u("2026-11-24T10:49:00")) == "18:00"  # 17:49 → ใกล้ 18:00
+        assert _slot_for_started(started, _u("2026-11-24T10:40:00")) == "17:30"  # 17:40 → 17:30
+        assert _slot_for_started(started, _u("2026-11-24T14:36:00")) == "21:30"
+        # ไม่เกิน 12 ช่อง (base + 5.5 ชม.)
+        assert _slot_for_started(started, _u("2026-11-24T23:00:00")) == "23:00"
+
+    def test_slot_for_started_rounds_start_down_before_15(self):
+        from hd_module.blueprint import _slot_for_started
+        started = _u("2026-11-24T22:10:00")  # 05:10 ไทย → base 05:00
+        assert _slot_for_started(started, started) == "05:00"
+
+    def test_idem_key_normalisation(self):
+        from hd_module.blueprint import _idem_key
+        assert _idem_key({}) is None
+        assert _idem_key({"idempotency_key": "  "}) is None
+        assert _idem_key({"idempotency_key": " abc "}) == "abc"
+        assert len(_idem_key({"idempotency_key": "x" * 100})) == 64
+
+    def test_idem_lookup_tolerates_missing_table(self):
+        from hd_module.blueprint import _idem_lookup
+        class Cur:
+            def execute(self, sql, params=None):
+                if "hd_intra_submissions" in sql:
+                    raise RuntimeError("relation does not exist")
+            def fetchone(self):
+                return None
+        assert _idem_lookup(Cur(), 1, "k") is None
