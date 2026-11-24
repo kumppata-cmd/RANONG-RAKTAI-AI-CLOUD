@@ -6192,12 +6192,20 @@ def intra_record(session_id):
                 if uf_remaining is None and uf_removed is not None and uf_goal is not None:
                     uf_remaining = max(0.0, float(uf_goal) - uf_removed)
                 from datetime import timedelta as _td
+                # เป้า/เวลาที่ตั้งบนเครื่องหลังปรึกษาแพทย์ — เข้ารหัสใน notes แบบเดียวกับปุ่ม UF เดิม
+                try:
+                    _mt = int(float(data.get("machine_target") or 0))
+                    _ex = int(float(data.get("extend_min") or 0))
+                except (TypeError, ValueError):
+                    _mt, _ex = 0, 0
+                _uf_notes = ";".join(x for x in (f"target={_mt}" if 0 < _mt <= 10000 else "",
+                                                 f"extend={_ex}" if 0 < _ex <= 240 else "") if x) or None
                 cur.execute("""INSERT INTO hd_uf_records
                                    (session_id, slot_time, uf_removed, uf_rate, uf_remaining,
-                                    recorded_at, nurse_id)
-                               VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+                                    recorded_at, nurse_id, notes)
+                               VALUES (%s, %s, %s, %s, %s, %s, %s, %s) RETURNING id""",
                             (session_id, (rec_ts + _td(hours=7)).strftime("%H:%M"),
-                             uf_removed, uf_rate, uf_remaining, rec_ts, uid))
+                             uf_removed, uf_rate, uf_remaining, rec_ts, uid, _uf_notes))
                 result["uf_id"] = cur.fetchone()[0]
                 if uf_removed is not None:
                     cur.execute("UPDATE hd_sessions SET actual_uf = %s WHERE id = %s",

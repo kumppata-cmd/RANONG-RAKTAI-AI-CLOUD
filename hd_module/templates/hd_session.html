@@ -697,12 +697,16 @@
       <div class="vital-input"><label>Dialysate T <small>°C</small></label><input type="number" step="0.1" class="form-control" id="imDtemp" inputmode="decimal"></div>
     </div>
 
-    <div style="font-size:.78rem;font-weight:800;color:var(--fg-muted);margin:10px 0 4px;letter-spacing:.3px">💧 UF <span id="imUfPlan" style="font-weight:500"></span></div>
+    <div style="font-size:.78rem;font-weight:800;color:var(--fg-muted);margin:10px 0 4px;letter-spacing:.3px">💧 UF <span style="font-weight:500;font-size:.7rem">🧮 คำนวณอัตโนมัติ (ระบบเดียวกับ UF ละเอียด)</span></div>
+    <div id="imUfPlan" style="font-size:.76rem;color:var(--fg-muted);margin-bottom:6px"></div>
     <div class="vital-grid" style="grid-template-columns:repeat(3,1fr)">
-      <div class="vital-input"><label>UF Rate <small>mL/h</small></label><input type="number" class="form-control" id="imUfRate" inputmode="numeric"></div>
-      <div class="vital-input"><label>UF Volume <small>mL สะสม</small></label><input type="number" class="form-control" id="imUfRemoved" inputmode="numeric" oninput="intraUfCalc()"></div>
-      <div class="vital-input"><label>เหลือ <small>mL</small></label><input type="number" class="form-control" id="imUfRemaining" inputmode="numeric"></div>
+      <div class="vital-input"><label>UF Removed <small>mL อ่านจากเครื่อง</small></label><input type="number" class="form-control" id="imUfRemoved" inputmode="numeric" oninput="ufAutoCalc('removed')"></div>
+      <div class="vital-input"><label>เหลือ <small style="color:var(--accent)">อัตโนมัติ</small></label><input type="number" class="form-control" id="imUfRemaining" inputmode="numeric" oninput="ufAutoCalc('remaining')"></div>
+      <div class="vital-input"><label>UF Rate <small style="color:var(--accent)">ที่ต้องใช้ต่อจากนี้</small></label><input type="number" class="form-control" id="imUfRate" inputmode="numeric" oninput="ufAutoCalc('rate')"></div>
     </div>
+    <div id="imUfInfo" style="font-size:.78rem;line-height:1.55;background:var(--bg);border-radius:8px;padding:8px 10px;margin-top:6px;border-left:4px solid var(--border)"></div>
+    <div id="imUfOpts" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px"></div>
+    <div id="imUfAdj" style="font-size:.74rem;color:#e67e22;font-weight:700;margin-top:4px"></div>
     <div class="vital-input" style="margin-top:6px"><label>📝 หมายเหตุ/อาการ</label><input type="text" class="form-control" id="imRemark" placeholder="เช่น หน้ามืดเล็กน้อย ลด UF แล้ว"></div>
     <div id="imWarn" style="font-size:.78rem;margin-top:6px;font-weight:700;color:var(--danger)"></div>
     <div class="modal-actions">
@@ -2485,6 +2489,25 @@ function readMachineScreen(inp){
 let _ufManual = {remaining:false, rate:false};
 let _ufAdj = {target:null, extend:0};      /* เป้า/เวลาที่ตั้งบนเครื่องแล้ว (บันทึกไว้ใน UF record) */
 let _ufPending = {target:null, extend:0};  /* ที่เลือกในหน้าต่างนี้ ยังไม่บันทึก */
+/* 24 พ.ย. 2569: สมอง UF ตัวเดียวใช้ได้ทั้ง "UF ละเอียด" (modalUf*) และ "ฟอร์มรวม" (imUf*) ผ่านแผนที่ id */
+const _UF_IDS_LEGACY  = {removed:'modalUfRemoved', remaining:'modalUfRemaining', rate:'modalUfRate', info:'ufAutoInfo', opts:'ufAutoOpts', warn:'ufSaveWarn', btn:'ufSaveBtn', plan:'ufPlanLine', adj:'ufAdjLine', btnLabel:'💾 บันทึก'};
+const _UF_IDS_UNIFIED = {removed:'imUfRemoved', remaining:'imUfRemaining', rate:'imUfRate', info:'imUfInfo', opts:'imUfOpts', warn:'imWarn', btn:'imSaveBtn', plan:'imUfPlan', adj:'imUfAdj', btnLabel:'💾 บันทึกทั้งหมด'};
+let _ufIds = _UF_IDS_LEGACY;
+function _ufEl(k){ return document.getElementById(_ufIds[k]); }
+function _ufRenderPlan(){
+  const c = _ufCtx();
+  const expected = c.dur ? Math.round(c.goal * c.elapsed / c.dur) : 0;
+  const rem = _ufEl('removed');
+  if(rem){ rem.placeholder = c.goal ? `ตามแผนควร ≈ ${expected}` : ''; }
+  const hhmm = h => { const m = Math.round(h*60); return `${Math.floor(m/60)} ชม. ${m%60} นาที`; };
+  const plan = _ufEl('plan'); if(!plan) return c;
+  plan.innerHTML = c.goal
+    ? `เป้า <b>${c.goal}</b> mL ใน ${c.dur} ชม. · ผ่านไป ${hhmm(c.elapsed)} (${Math.round(c.elapsed/c.dur*100)}%) · ตามแผนควรดึงได้แล้ว <b>${expected}</b> mL · อัตราตามแผน ${Math.round(c.goal/c.dur)} mL/ชม.${c.dw?` (${(c.goal/c.dur/c.dw).toFixed(1)} mL/kg/ชม.)`:''}`
+    : 'ยังไม่มีเป้า UF — กำหนดใน UF Planner ด้านบนก่อน ระบบจะคำนวณให้อัตโนมัติ';
+  if(c.goal && c.goal < c.rx) plan.innerHTML += `<br><b style="color:#e67e22">🎯 ตั้งเป้าบนเครื่องไว้ ${c.goal} mL (แพทย์สั่ง ${c.rx} mL)</b>`;
+  if(_ufAdj.extend) plan.innerHTML += `<br><b style="color:#e67e22">⏱ ยืดเวลาแล้ว +${_ufAdj.extend} นาที</b>`;
+  return c;
+}
 function _ufCtx(){
   const rx = parseInt(document.getElementById('ufGoal').textContent) || sessionData.uf_goal || 0;
   const tgt = _ufAdj.target && _ufAdj.target < rx ? _ufAdj.target : 0;
@@ -2496,33 +2519,27 @@ function _ufCtx(){
   return {goal, rx, dur, dw, elapsed: Math.min(elapsed, dur), left: Math.max(0, dur - Math.min(elapsed, dur))};
 }
 function openUfModal(){
+  _ufIds = _UF_IDS_LEGACY;
   _ufManual = {remaining:false, rate:false};
   _ufPending = {target:null, extend:0};
   _ufSaveConfirm = false;
-  document.getElementById('ufSaveWarn').textContent = '';
-  document.getElementById('ufSaveBtn').textContent = '💾 บันทึก';
-  const c = _ufCtx();
-  const expected = c.dur ? Math.round(c.goal * c.elapsed / c.dur) : 0;
-  const rem = document.getElementById('modalUfRemoved');
-  rem.value = _lastUfRemoved || '';
-  rem.placeholder = c.goal ? `ตามแผนควร ≈ ${expected}` : '';
-  const hhmm = h => { const m = Math.round(h*60); return `${Math.floor(m/60)} ชม. ${m%60} นาที`; };
-  document.getElementById('ufPlanLine').innerHTML = c.goal
-    ? `เป้า <b>${c.goal}</b> mL ใน ${c.dur} ชม. · ผ่านไป ${hhmm(c.elapsed)} (${Math.round(c.elapsed/c.dur*100)}%) · ตามแผนควรดึงได้แล้ว <b>${expected}</b> mL · อัตราตามแผน ${Math.round(c.goal/c.dur)} mL/ชม.${c.dw?` (${(c.goal/c.dur/c.dw).toFixed(1)} mL/kg/ชม.)`:''}`
-    : 'ยังไม่มีเป้า UF — กำหนดใน UF Planner ด้านบนก่อน ระบบจะคำนวณให้อัตโนมัติ';
-  if(c.goal && c.goal < c.rx) document.getElementById('ufPlanLine').innerHTML += `<br><b style="color:#e67e22">🎯 ตั้งเป้าบนเครื่องไว้ ${c.goal} mL (แพทย์สั่ง ${c.rx} mL)</b>`;
-  if(_ufAdj.extend) document.getElementById('ufPlanLine').innerHTML += `<br><b style="color:#e67e22">⏱ ยืดเวลาแล้ว +${_ufAdj.extend} นาที</b>`;
+  _ufEl('warn').textContent = '';
+  _ufEl('btn').textContent = _ufIds.btnLabel;
+  _ufEl('removed').value = _lastUfRemoved || '';
+  _ufRenderPlan();
   ufAutoCalc('removed');
   openModal('ufModal');
 }
 function ufAutoCalc(src){
   const c = _ufCtx();
-  const removedEl = document.getElementById('modalUfRemoved'), remEl = document.getElementById('modalUfRemaining'), rateEl = document.getElementById('modalUfRate');
+  const removedEl = _ufEl('removed'), remEl = _ufEl('remaining'), rateEl = _ufEl('rate');
+  if(!removedEl || !remEl || !rateEl) return;
   if(src==='remaining') _ufManual.remaining = true;
-  _ufSaveConfirm = false; document.getElementById('ufSaveWarn').textContent = ''; document.getElementById('ufSaveBtn').textContent = '💾 บันทึก';
+  _ufSaveConfirm = false; if(_ufEl('warn')) _ufEl('warn').textContent = ''; if(_ufEl('btn')) _ufEl('btn').textContent = _ufIds.btnLabel;
   if(src==='rate') _ufManual.rate = true;
   const removed = parseInt(removedEl.value);
-  const info = document.getElementById('ufAutoInfo'), opts = document.getElementById('ufAutoOpts');
+  const info = _ufEl('info'), opts = _ufEl('opts');
+  if(!info || !opts) return;
   if(!c.goal || isNaN(removed)){ info.innerHTML = c.goal ? 'กรอก UF Removed จากหน้าจอเครื่อง → ระบบจะคำนวณที่เหลือและอัตราให้' : ''; opts.innerHTML=''; if(!isNaN(removed)&&!_ufManual.remaining) remEl.value = c.goal? Math.max(0,c.goal-removed):''; return; }
   const remaining = Math.max(0, c.goal - removed);
   if(!_ufManual.remaining) remEl.value = remaining;
@@ -2563,7 +2580,7 @@ function ufAutoCalc(src){
   opts.innerHTML = o;
 }
 function _ufAdjText(){
-  const el = document.getElementById('ufAdjLine'); if(!el) return;
+  const el = _ufEl('adj'); if(!el) return;
   const t = [];
   if(_ufPending.target) t.push(`🎯 จะบันทึกเป้าใหม่บนเครื่อง ${_ufPending.target} mL`);
   if(_ufPending.extend) t.push(`⏱ จะบันทึกการยืดเวลา +${_ufPending.extend} นาที`);
@@ -2571,16 +2588,17 @@ function _ufAdjText(){
 }
 function ufApplyOpt(type, v){
   const c = _ufCtx();
-  const removed = parseInt(document.getElementById('modalUfRemoved').value) || 0;
+  const removed = parseInt(_ufEl('removed').value) || 0;
   const remaining = Math.max(0, c.goal - removed);
   if(type==='time'){ _ufPending = {target:null, extend:(_ufAdj.extend||0) + v}; } else { _ufPending = {target: removed + Math.max(0, remaining - v), extend:0}; }
   _ufAdjText();
-  if(type==='time'){ const left = c.left + v/60; document.getElementById('modalUfRate').value = Math.round(remaining/left); _ufManual.rate = true; showToast(`คำนวณอัตราใหม่เมื่อยืดเวลา +${v} นาที — บันทึกเวลาที่ยืดใน Sheet ด้วย`,'info'); }
-  else { document.getElementById('modalUfRemaining').value = Math.max(0, remaining - v); document.getElementById('modalUfRate').value = c.left>0.05? Math.round(Math.max(0, remaining - v)/c.left):0; _ufManual.remaining = _ufManual.rate = true; showToast(`ตั้งเป้าใหม่: เหลือดึงอีก ${Math.max(0, remaining - v)} mL`,'info'); }
+  if(type==='time'){ const left = c.left + v/60; _ufEl('rate').value = Math.round(remaining/left); _ufManual.rate = true; showToast(`คำนวณอัตราใหม่เมื่อยืดเวลา +${v} นาที — บันทึกเวลาที่ยืดใน Sheet ด้วย`,'info'); }
+  else { _ufEl('remaining').value = Math.max(0, remaining - v); _ufEl('rate').value = c.left>0.05? Math.round(Math.max(0, remaining - v)/c.left):0; _ufManual.remaining = _ufManual.rate = true; showToast(`ตั้งเป้าใหม่: เหลือดึงอีก ${Math.max(0, remaining - v)} mL`,'info'); }
   ufAutoCalc('opt');
 }
 let _ufSaveConfirm = false;
 function saveUfRecord(){
+  _ufIds = _UF_IDS_LEGACY;
   const removed = document.getElementById('modalUfRemoved').value;
   const remaining = document.getElementById('modalUfRemaining').value;
   const rate = document.getElementById('modalUfRate').value;
@@ -2696,16 +2714,19 @@ function openIntraModal(){
     const last = JSON.parse(localStorage.getItem('hd_intra_last_'+sessionData.session_id)||'{}');
     IM_MACHINE.forEach(id=>{ if(last[id]!=null) document.getElementById(id).value = last[id]; });
   }catch(e){}
-  const g = _imGoal();
-  document.getElementById('imUfPlan').textContent = g ? ('· เป้า '+g+' mL' + (_lastUfRemoved ? ' · ครั้งก่อนสะสม '+_lastUfRemoved : '')) : '· ยังไม่มีเป้า UF';
+  /* สมอง UF เดิมทำงานในฟอร์มรวม */
+  _ufIds = _UF_IDS_UNIFIED;
+  _ufManual = {remaining:false, rate:false};
+  _ufPending = {target:null, extend:0};
+  _ufSaveConfirm = false;
+  document.getElementById('imUfRemoved').value = _lastUfRemoved || '';
+  document.getElementById('imUfAdj').textContent = '';
+  _ufRenderPlan();
+  ufAutoCalc('removed');
+  document.getElementById('imSaveBtn').textContent = _UF_IDS_UNIFIED.btnLabel;
   document.getElementById('intraSlotHint').textContent = '';
   openModal('intraModal');
   setTimeout(()=>{ try{ document.getElementById('imSbp').focus(); }catch(e){} }, 150);
-}
-function intraUfCalc(){
-  const g = _imGoal(), r = parseInt(_imVal('imUfRemoved'));
-  const remEl = document.getElementById('imUfRemaining');
-  if(g && !isNaN(r) && remEl) remEl.value = Math.max(0, g - r);
 }
 function intraPhotoRead(inp){
   const f = inp.files && inp.files[0]; if(!f) return;
@@ -2718,7 +2739,8 @@ function intraPhotoRead(inp){
     put('imUfRemoved', v.uf_removed, 'UF'); put('imUfRate', v.uf_rate, 'อัตรา');
     put('imSbp', v.sbp, 'SBP'); put('imDbp', v.dbp, 'DBP');
     put('imBfr', v.bfr, 'BFR'); put('imAp', v.ap, 'AP'); put('imVp', v.vp, 'VP'); put('imTmp', v.tmp, 'TMP');
-    intraUfCalc();
+    if(v.uf_rate!=null) _ufManual.rate = true;
+    ufAutoCalc('removed');
     if(!got.length){ st.textContent='⚠️ อ่านตัวเลขไม่ได้ — ถ่ายใหม่ให้ชัด หรือกรอกเอง'; st.style.color='var(--danger)'; return; }
     st.innerHTML = '✅ อ่านได้: <b>'+got.join(' · ')+'</b> — <u>ตรวจกับหน้าจอก่อนกดบันทึก</u>'; st.style.color='var(--success)';
   }).catch(()=>{ inp.value=''; st.textContent='❌ อ่านรูปไม่สำเร็จ — กรอกเอง'; st.style.color='var(--danger)'; });
@@ -2741,8 +2763,26 @@ function saveIntraRecord(){
   if(p.sbp && (p.sbp<30||p.sbp>300)){ warn.textContent='SBP ต้องอยู่ระหว่าง 30–300'; return; }
   if(p.dbp && (p.dbp<20||p.dbp>200)){ warn.textContent='DBP ต้องอยู่ระหว่าง 20–200'; return; }
   if(p.sbp && p.dbp && parseInt(p.dbp) >= parseInt(p.sbp)){ warn.textContent='DBP ต้องน้อยกว่า SBP'; return; }
-  if(p.uf_removed && _lastUfRemoved && parseInt(p.uf_removed) < _lastUfRemoved){
-    if(!confirm('UF สะสม '+p.uf_removed+' น้อยกว่าครั้งก่อน ('+_lastUfRemoved+') — UF บนเครื่องเป็นค่าสะสม ตรวจว่าอ่านถูก?\n\nกดตกลงเพื่อบันทึกต่อ')) return;
+  /* ด่านกันค่า UF ผิด — กฎเดียวกับปุ่ม UF เดิม (16 พ.ย.): กดครั้งแรกเตือน กดอีกครั้ง = ยืนยัน */
+  if(p.uf_removed != null){
+    const rv = parseInt(p.uf_removed), c0 = _ufCtx();
+    let w = '';
+    if(_lastUfRemoved && rv < _lastUfRemoved) w = `UF Removed ${rv} น้อยกว่าที่บันทึกครั้งก่อน (${_lastUfRemoved}) — UF บนเครื่องเป็นค่าสะสม ไม่ลดลง ตรวจว่าอ่านถูกหรือเครื่องถูกรีเซ็ต`;
+    else if(c0.rx && rv > c0.rx * 1.5) w = `UF Removed ${rv} สูงกว่าเป้า ${c0.rx} มาก — ตรวจตัวเลขอีกครั้ง`;
+    const sbtn = document.getElementById('imSaveBtn');
+    if(w && !_ufSaveConfirm){ warn.textContent = '⚠️ ' + w; sbtn.textContent = '✔ ยืนยันบันทึกค่านี้'; _ufSaveConfirm = true; return; }
+    _ufSaveConfirm = false; sbtn.textContent = _UF_IDS_UNIFIED.btnLabel;
+    /* แก้ช่อง "เหลือ" เอง → ถือเป็นเป้าบนเครื่องใหม่ (ถ้าต่ำกว่าเป้าเดิม) */
+    if(_ufManual.remaining && !_ufPending.target && p.uf_remaining != null){
+      const t = rv + (parseInt(p.uf_remaining)||0);
+      if(c0.goal && t < c0.goal - 50) _ufPending.target = t;
+    }
+    if(_ufPending.target) p.machine_target = _ufPending.target; else if(_ufAdj.target) p.machine_target = _ufAdj.target;
+    if(_ufPending.extend) p.extend_min = _ufPending.extend; else if(_ufAdj.extend) p.extend_min = _ufAdj.extend;
+    if(_ufPending.target) _ufAdj.target = _ufPending.target;
+    if(_ufPending.extend) _ufAdj.extend = _ufPending.extend;
+  } else if(p.uf_rate != null || p.uf_remaining != null){
+    warn.textContent = 'กรอก UF Removed ที่อ่านจากหน้าจอเครื่องก่อนบันทึก (หรือเว้นว่างทั้งส่วน UF)'; return;
   }
   /* จำค่าเครื่องไว้ให้ครั้งถัดไป */
   try{ const m={}; IM_MACHINE.forEach(id=>{ const v=_imVal(id); if(v!=null) m[id]=v; }); localStorage.setItem('hd_intra_last_'+sessionData.session_id, JSON.stringify(m)); }catch(e){}
