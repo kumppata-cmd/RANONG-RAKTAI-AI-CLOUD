@@ -1546,6 +1546,9 @@ class DocumentIndex:
         # threading.Lock สำหรับ intra-worker thread safety เท่านั้น
         # cross-worker consistency ป้องกันด้วย GCS (see docstring above)
         self._lock = threading.Lock()
+        # 24 พ.ย. 2569: กัน reload ซ้อนกันภายใน worker — thread ที่มาทีหลังรอผลของ thread แรก
+        # (ใช้ตอน warm-up เบื้องหลังหลังบูต: คำขอที่มาระหว่างโหลดจะรอ ไม่ดาวน์โหลดซ้ำทั้งชุด)
+        self._reload_lock = threading.Lock()
         self._cache_ts: float = 0  # timestamp ที่ load cache ล่าสุด
         self._cache_ttl: float = INDEX_CACHE_TTL
         # cache เนื้อหา per-doc file ตามชื่อ blob — ไฟล์ใน _index/docs/
@@ -1751,7 +1754,10 @@ class DocumentIndex:
         """ตรวจสอบว่า cache ยังใหม่อยู่ ถ้าหมดอายุให้โหลดใหม่จาก GCS."""
         now = time.time()
         if now - self._cache_ts > self._cache_ttl:
-            self._reload_from_gcs()
+            with self._reload_lock:
+                # thread อื่นอาจเพิ่งโหลดเสร็จระหว่างที่รอ lock → ไม่ต้องโหลดซ้ำ
+                if time.time() - self._cache_ts > self._cache_ttl:
+                    self._reload_from_gcs()
 
     def add(self, doc_meta: dict) -> bool:
         """เพิ่มเอกสารใหม่ลง index — เขียน per-doc JSON file ใน GCS.
@@ -22542,8 +22548,20 @@ logger.info(f"OCR (Tesseract): {'พร้อม' if HAS_TESSERACT and HAS_PIL e
 logger.info(f"PyMuPDF: {'พร้อม' if HAS_PYMUPDF else 'ไม่พร้อม'}")
 
 # ── Document Search V1: โหลด index ตอน startup ──
-doc_index._reload_from_gcs()
-logger.info(f"Document Index: {doc_index.count()} เอกสาร")
+# 24 พ.ย. 2569 (แพทย์อนุมัติ): ย้ายไปเบื้องหลัง — การดาวน์โหลด per-doc files ครั้งแรกใช้ ~16 วิ
+# และเคยทำให้ worker ใหม่รับคำขอไม่ได้ตลอดช่วงนั้น (ส่วนหนึ่งของเหตุ 502) ตอนนี้ worker
+# พร้อมรับคำขอทันที ส่วน index โหลดคู่ขนาน; คำขอที่ต้องใช้ index ก่อนโหลดเสร็จจะรอผ่าน
+# _ensure_fresh() (reload lock) — ได้ข้อมูลชุดเดียวกับเดิม ไม่มีคำขอไหนเห็น index ว่างเปล่า
+def _warm_doc_index():
+    try:
+        _t = _boot_time.time()
+        doc_index._ensure_fresh()
+        logger.info("Document Index: %d เอกสาร (warm-up เบื้องหลัง %.1fs)", doc_index.count(), _boot_time.time() - _t)
+    except Exception as _we:  # noqa: BLE001
+        logger.error("Document Index warm-up ล้มเหลว: %s — จะโหลดเมื่อมีการใช้งานครั้งแรก", type(_we).__name__)
+
+
+threading.Thread(target=_warm_doc_index, name="doc-index-warmup", daemon=True).start()
 logger.info(f"Authorized Users: {len(AUTHORIZED_USERS)} users")
 logger.info(f"Admin Secret: {'ตั้งค่าแล้ว' if ADMIN_SECRET else 'ไม่ได้ตั้งค่า'}")
 
