@@ -365,6 +365,12 @@ def session_blackbox(session_id):
         return jsonify({"error": str(e)}), 500
 
 
+@hd_web.route("/ocr-accuracy")
+def hd_ocr_accuracy_page():
+    """📷📊 ความแม่นการอ่านจอเครื่องรายรุ่น (Magic Camera 2.0)"""
+    return render_template("hd_ocr_accuracy.html")
+
+
 @hd_web.route("/blackbox/quality")
 def hd_blackbox_quality_page():
     from .blackbox import enabled as _bb_on
@@ -8465,8 +8471,11 @@ def _machine_ai_read(img_bytes):
 @hd_bp.route("/machine-screen/read", methods=["POST"])
 @require_role("physician", "nurse", "admin")
 def read_machine_screen():
-    """ข้อ 8: รูปหน้าจอเครื่องฟอก → UF removed / UF rate / UF goal / เวลาที่เหลือ / BP
-    ผลเป็นค่าแนะนำให้พยาบาลตรวจก่อนกดบันทึกเสมอ — ไม่บันทึกอะไรเอง"""
+    """📷 รูปหน้าจอเครื่องฟอก → ค่าของ Sheet ทั้งชุด (Magic Camera 2.0 — รู้รุ่นเครื่อง, confidence รายค่า)
+    form: image, session_id?, model? (รหัสรุ่น เช่น nikkiso_dbb27) · ผลเป็นค่าแนะนำ พยาบาลตรวจก่อนบันทึกเสมอ — ไม่บันทึกอะไรเอง
+    ตอบ: values (ใส่ช่องได้), confidence, uncertain (AI ไม่มั่นใจ — แสดงให้ดูแต่ไม่ใส่ช่อง), dropped, model_seen, model_mismatch, read_id"""
+    import os
+    from . import machine_ocr as mo
     from .uf_coach import parse_machine_text, parse_machine_words
     f = request.files.get("image")
     if not f:
@@ -8474,31 +8483,125 @@ def read_machine_screen():
     data = f.read()
     if not data or len(data) > 12 * 1024 * 1024:
         return jsonify({"error": "รูปว่างหรือใหญ่เกิน 12 MB"}), 400
+    model = (request.form.get("model") or "").strip().lower() or None
+    sid = _safe_int(request.form.get("session_id"))
+    read_id = mo.new_read_id()
 
-    # 1) Claude Vision ก่อน — อ่านจอ 7-segment ได้จริง (OCR เดิมเป็น fallback)
+    # 1) Claude Vision (รู้รุ่น) — จำกัดพร้อมกัน 2 คำขอ, timeout 25 วิ — กัน thread ค้างจนเป็น 502
+    res = None
     try:
-        ai = _machine_ai_read(data)
+        from .patient_engage import ai_model as _ai_model
+        res = mo.read_with_claude(data, model, os.environ.get("ANTHROPIC_API_KEY", "").strip(), _ai_model())
+    except RuntimeError as e:
+        if str(e) == "busy":
+            return jsonify({"error": "มีคนกำลังอ่านรูปพร้อมกันอยู่ 2 คน — รอ 10 วินาทีแล้วลองใหม่ หรือกรอกเอง", "busy": True}), 429
+        logger.info("machine-screen claude: %s", e)
     except Exception as e:
         logger.info("machine-screen claude: %s", type(e).__name__)
-        ai = None
-    if ai:
-        found = [k for k in ("uf_removed", "uf_rate", "uf_goal", "time_left_min", "sbp") if k in ai]
-        if found:
-            log_action(user_id=g.get("hd_user_id"), action="machine_screen.read", resource_type="session",
-                       resource_id=_safe_int(request.form.get("session_id")),
-                       new_values={"engine": "claude-vision", "found": found}, ip_address=request.remote_addr or "")
-            return jsonify({"values": ai, "engine": "claude-vision", "found": found, "words": 0})
+    if res and (res["values"] or res["uncertain"]):
+        found = list(res["values"].keys())
+        log_action(user_id=g.get("hd_user_id"), action="machine_screen.read", resource_type="session",
+                   resource_id=sid, new_values={"engine": "claude-vision", "model": model, "found": found,
+                                                "uncertain": [u["field"] for u in res["uncertain"]],
+                                                "model_seen": res.get("model_seen"), "read_id": read_id},
+                   ip_address=request.remote_addr or "")
+        prof = mo.profile_for(model)
+        return jsonify({**res, "engine": "claude-vision", "found": found, "model": model, "read_id": read_id,
+                        "profile_label": prof["label"] if prof else None,
+                        "bargraph": prof["bargraph"] if prof else [], "words": 0})
 
+    # 2) fallback: OCR คำ (ของเดิม) — ได้แค่ UF/BP
     words, engine = _ocr_words(data)
     vals = parse_machine_words(words)
     if not any(k in vals for k in ("uf_removed", "uf_rate", "uf_goal")):
         alt = parse_machine_text(" ".join(w["t"] for w in words))
         vals = {**alt, **{k: v for k, v in vals.items() if k != "raw"}}
+    vals = {k: v for k, v in vals.items() if k != "raw"}
     found = [k for k in ("uf_removed", "uf_rate", "uf_goal", "time_left_min", "sbp") if k in vals]
     log_action(user_id=g.get("hd_user_id"), action="machine_screen.read", resource_type="session",
-               resource_id=_safe_int(request.form.get("session_id")),
-               new_values={"engine": engine, "found": found}, ip_address=request.remote_addr or "")
-    return jsonify({"values": vals, "engine": engine, "found": found, "words": len(words)})
+               resource_id=sid, new_values={"engine": engine, "model": model, "found": found, "read_id": read_id},
+               ip_address=request.remote_addr or "")
+    return jsonify({"values": vals, "confidence": {}, "uncertain": [], "dropped": [], "engine": engine, "found": found,
+                    "model": model, "read_id": read_id, "words": len(words),
+                    "reason": None if found else (res or {}).get("reason") or "อ่านตัวเลขไม่ได้ — ถ่ายให้ตรงจอ ไม่มีแสงสะท้อน"})
+
+
+@hd_bp.route("/machine-screen/models", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def machine_screen_models():
+    """รายการรุ่นเครื่องที่มี profile + รุ่นที่เดาได้จากทะเบียนเครื่องของเตียง (?session_id=)"""
+    import os
+    from . import machine_ocr as mo
+    guess, eq_label = None, None
+    sid = _safe_int(request.args.get("session_id"))
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if sid and db_url:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("""SELECT e.brand, e.model FROM hd_sessions s
+                               LEFT JOIN hd_equipment e ON e.id = s.equipment_id
+                                    OR (s.equipment_id IS NULL AND e.bed_number = s.bed_number
+                                        AND e.equipment_type = 'dialysis_machine' AND e.status = 'active')
+                               WHERE s.id = %s LIMIT 1""", (sid,))
+                r = cur.fetchone()
+                if r and (r[0] or r[1]):
+                    eq_label = f"{r[0] or ''} {r[1] or ''}".strip()
+                    guess = mo.guess_model(r[0], r[1])
+            conn.close()
+        except Exception as e:
+            logger.info("machine models guess: %s", e)
+    return jsonify({"models": mo.model_choices(), "guess": guess, "equipment": eq_label, "conf_min": mo.CONF_MIN})
+
+
+@hd_bp.route("/machine-screen/confirm", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def machine_screen_confirm():
+    """พยาบาลกดบันทึกค่าหลังอ่านรูป → เก็บ AI อ่าน vs ค่าที่บันทึกจริง (ตัวเลขอย่างเดียว) เป็นตัวอย่างวัดความแม่นรายรุ่น
+    body: {session_id, model, read_id, ai: {field: value}, confidence: {field: c}, final: {field: value}}"""
+    import os
+    from . import machine_ocr as mo
+    data = request.get_json(silent=True) or {}
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"ok": False, "saved": 0})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            n = mo.record_samples(cur, _safe_int(data.get("session_id")), data.get("model"), data.get("ai") or {},
+                                  data.get("confidence") or {}, data.get("final") or {}, data.get("read_id"),
+                                  _safe_int(g.get("hd_user_id")))
+        conn.commit()
+        conn.close()
+        return jsonify({"ok": True, "saved": n})
+    except Exception as e:
+        logger.warning("machine confirm: %s", e)
+        return jsonify({"ok": False, "saved": 0, "error": str(e)[:120]})
+
+
+@hd_bp.route("/machine-screen/accuracy", methods=["GET"])
+@require_role("physician", "admin", "auditor")
+def machine_screen_accuracy():
+    """📊 ความแม่นการอ่านจอรายรุ่นรายฟิลด์ จากที่พยาบาลยืนยันจริง ?days=30"""
+    import os
+    from . import machine_ocr as mo
+    days = _safe_int(request.args.get("days")) or 30
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"days": days, "models": {}})
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            rep = mo.accuracy_report(cur, days=min(max(days, 1), 365))
+        conn.close()
+        rep["fields"] = {k: v["label"] for k, v in mo.FIELDS.items()}
+        return jsonify(rep)
+    except Exception as e:
+        logger.warning("machine accuracy: %s", e)
+        return jsonify({"days": days, "models": {}, "error": str(e)[:120]})
 
 
 @hd_bp.route("/patients/<hn>", methods=["GET"])

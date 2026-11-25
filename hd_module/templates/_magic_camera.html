@@ -1,0 +1,69 @@
+/* ═══ 📷 Magic Camera 2.0 — shared (25 พ.ย. 2569) — include ภายใน script ของหน้า (ไม่มีแท็ก script ในไฟล์นี้)
+   ใช้: mcInit(sessionId, selectId) · mcRead(fileInput, map, statusId, reviewId, after) · mcConfirm(sessionId, map)
+   map = {field: elementId} เฉพาะช่องที่หน้านั้นมี · ค่า confidence ต่ำ/ไม่แน่ใจไม่ใส่ช่องเอง (พยาบาลแตะเลือก)
+   ต้องมี hdFetch, showToast ในหน้า */
+var _mc = {models: [], guess: null, equipment: null, model: null, last: null, confMin: 0.7, selectId: null};
+var MC_LABEL = {uf_removed:'UF Removed', uf_rate:'UF Rate', uf_goal:'UF Goal', time_left_min:'เหลือ (นาที)', bfr:'BFR', dfr:'DFR',
+  ap:'AP', vp:'VP', tmp:'TMP', conductivity:'Cond.', dialysate_temp:'Dialysate T', sbp:'SBP', dbp:'DBP', hr:'PR', heparin_rate:'Heparin'};
+function mcModelKey(sid){ return 'mc_model_' + (sid || 'x'); }
+function mcInit(sid, selectId){
+  _mc.selectId = selectId;
+  const sel = document.getElementById(selectId); if(!sel) return;
+  const saved = (function(){ try{ return localStorage.getItem(mcModelKey(sid)); }catch(e){ return null; } })();
+  hdFetch('/hd/api/v1/machine-screen/models' + (sid ? '?session_id=' + sid : '')).then(r => r.ok ? r.json() : null).then(d => {
+    if(!d) return;
+    _mc.models = d.models || []; _mc.guess = d.guess || null; _mc.equipment = d.equipment || null; _mc.confMin = d.conf_min || 0.7;
+    sel.innerHTML = '<option value="">รุ่นเครื่อง: ไม่ระบุ</option>' + _mc.models.map(m => '<option value="' + m.id + '">' + m.label + '</option>').join('');
+    const pick = saved || _mc.guess || '';
+    sel.value = pick; _mc.model = pick || null;
+    if(_mc.guess && !saved){ sel.title = 'จากทะเบียนเครื่องของเตียง: ' + (_mc.equipment || ''); }
+  }).catch(() => {});
+  sel.onchange = function(){ _mc.model = sel.value || null; try{ localStorage.setItem(mcModelKey(sid), sel.value || ''); }catch(e){} };
+}
+function mcConfBadge(c){
+  if(c == null) return '';
+  const col = c >= 0.9 ? 'var(--success)' : (c >= _mc.confMin ? '#e67e22' : 'var(--danger)');
+  return '<span style="font-size:.68rem;font-weight:800;color:' + col + '">' + Math.round(c * 100) + '%</span>';
+}
+function mcRead(inp, map, statusId, reviewId, after){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  const st = document.getElementById(statusId), rv = document.getElementById(reviewId);
+  if(st){ st.textContent = '⏳ กำลังอ่านตัวเลขจากรูป' + (_mc.model ? ' (' + ((_mc.models.find(m => m.id === _mc.model) || {}).label || _mc.model) + ')' : '') + '...'; st.style.color = 'var(--fg-muted)'; }
+  if(rv) rv.innerHTML = '';
+  const fd = new FormData(); fd.append('image', f);
+  const sid = (typeof sessionData !== 'undefined' && sessionData.session_id) ? sessionData.session_id : (typeof SESSION_ID !== 'undefined' ? SESSION_ID : null);
+  if(sid) fd.append('session_id', sid);
+  if(_mc.model) fd.append('model', _mc.model);
+  hdFetch('/hd/api/v1/machine-screen/read', {method: 'POST', body: fd}).then(r => r.json().then(d => ({ok: r.ok, status: r.status, d: d}))).then(x => {
+    inp.value = '';
+    const d = x.d || {};
+    if(x.status === 429){ if(st){ st.textContent = '⏳ ' + (d.error || 'คิวเต็ม ลองใหม่ใน 10 วิ'); st.style.color = '#e67e22'; } return; }
+    const v = d.values || {}, conf = d.confidence || {}, unc = d.uncertain || [];
+    _mc.last = {read_id: d.read_id, model: d.model || _mc.model, ai: Object.assign({}, v), confidence: conf,
+                uncertain_vals: unc.reduce((a, u) => { a[u.field] = u.value; return a; }, {})};
+    const filled = [];
+    Object.keys(map).forEach(k => { const el = document.getElementById(map[k]); if(el && v[k] != null){ el.value = v[k]; filled.push(k); try{ el.dispatchEvent(new Event('input', {bubbles: true})); }catch(e){} } });
+    const rows = [];
+    Object.keys(v).forEach(k => { if(!(k in map)) return; rows.push('<tr><td>' + (MC_LABEL[k] || k) + '</td><td style="text-align:right;font-weight:700">' + v[k] + '</td><td>' + mcConfBadge(conf[k]) + '</td><td style="color:var(--success);font-size:.7rem">ใส่แล้ว</td></tr>'); });
+    unc.forEach(u => { if(!(u.field in map)) return; rows.push('<tr><td>' + (MC_LABEL[u.field] || u.field) + '</td><td style="text-align:right;color:var(--danger)">' + u.value + '?</td><td>' + mcConfBadge(u.confidence) + '</td><td><button type="button" class="btn btn-outline" style="font-size:.68rem;padding:1px 6px" onclick="mcUse(\'' + map[u.field] + '\',' + JSON.stringify(u.value) + ')">ใช้ค่านี้</button></td></tr>'); });
+    if(rv){
+      let head = '';
+      if(d.model_mismatch && d.model_seen) head += '<div style="color:#e67e22;font-size:.72rem;font-weight:700">⚠️ รูปดูเหมือนเครื่อง "' + d.model_seen + '" ไม่ตรงรุ่นที่เลือก — ตรวจรุ่นใน dropdown</div>';
+      if((d.bargraph || []).length) head += '<div style="font-size:.68rem;color:var(--fg-muted)">รุ่นนี้ ' + d.bargraph.map(k => MC_LABEL[k] || k).join('/') + ' เป็นแท่งไฟ ไม่อ่านเป็นตัวเลข — อ่านจากเครื่องแล้วพิมพ์เอง</div>';
+      rv.innerHTML = head + (rows.length ? '<table style="width:100%;font-size:.74rem;border-collapse:collapse;margin-top:4px"><tr style="color:var(--fg-muted)"><th style="text-align:left">ค่า</th><th style="text-align:right">AI อ่าน</th><th>มั่นใจ</th><th></th></tr>' + rows.join('') + '</table>' : '');
+    }
+    if(!filled.length && !unc.length){ if(st){ st.textContent = '⚠️ ' + (d.reason || 'อ่านตัวเลขไม่ได้ — ถ่ายใหม่ให้ตรงจอ ไม่มีแสงสะท้อน หรือกรอกเอง'); st.style.color = 'var(--danger)'; } return; }
+    if(st){ st.innerHTML = '✅ ใส่ให้แล้ว ' + filled.length + ' ค่า' + (unc.length ? ' · ⚠️ ไม่แน่ใจ ' + unc.length + ' ค่า (แตะ "ใช้ค่านี้" ถ้าตรงกับจอ)' : '') + ' — <u>ตรวจกับหน้าจอก่อนกดบันทึก</u>'; st.style.color = 'var(--success)'; }
+    if(typeof after === 'function') after(v, filled);
+  }).catch(() => { inp.value = ''; if(st){ st.textContent = '❌ อ่านรูปไม่สำเร็จ — กรอกเอง'; st.style.color = 'var(--danger)'; } });
+}
+function mcUse(elId, val){ const el = document.getElementById(elId); if(!el) return; el.value = val; try{ el.dispatchEvent(new Event('input', {bubbles: true})); }catch(e){} }
+/* หลังบันทึกสำเร็จ: ส่ง AI อ่าน vs ค่าที่บันทึกจริง (ตัวเลขอย่างเดียว) ไปเป็นตัวอย่างวัดความแม่นรายรุ่น */
+function mcConfirm(sid, map){
+  const L = _mc.last; if(!L) return; _mc.last = null;
+  const fin = {};
+  Object.keys(map).forEach(k => { const el = document.getElementById(map[k]); const n = el && el.value !== '' ? parseFloat(el.value) : null; if(n != null && !isNaN(n)) fin[k] = n; });
+  const ai = Object.assign({}, L.ai, L.uncertain_vals);
+  hdFetch('/hd/api/v1/machine-screen/confirm', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: sid, model: L.model, read_id: L.read_id, ai: ai, confidence: L.confidence, final: fin})}).catch(() => {});
+}

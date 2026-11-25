@@ -661,6 +661,27 @@ INSERT INTO hd_schema_version (version, description)
 VALUES ('2.1.0', 'HD Work Sheet Interactive — checklist, complications, nursing notes per session')
 ON CONFLICT (version) DO NOTHING;
 
+-- v2.2.0 (25 พ.ย. 2569): 📷 Magic Camera 2.0 — ตัวอย่างการอ่านจอเครื่อง (AI อ่าน vs พยาบาลยืนยัน)
+-- ใช้วัดความแม่นรายรุ่นรายฟิลด์จากการใช้งานจริง · เก็บเฉพาะตัวเลข ไม่เก็บรูป ไม่มีชื่อผู้ป่วย
+CREATE TABLE IF NOT EXISTS hd_ocr_samples (
+    id SERIAL PRIMARY KEY,
+    session_id INTEGER,
+    machine_model VARCHAR(40),
+    field VARCHAR(30) NOT NULL,
+    ai_value NUMERIC(10,2),
+    confidence NUMERIC(4,3),
+    nurse_value NUMERIC(10,2),
+    outcome VARCHAR(10),
+    read_id VARCHAR(40),
+    nurse_id INTEGER,
+    created_at TIMESTAMP DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_hd_ocr_samples_model ON hd_ocr_samples(machine_model, field, created_at DESC);
+
+INSERT INTO hd_schema_version (version, description)
+VALUES ('2.2.0', 'Magic Camera 2.0 — hd_ocr_samples (per-model OCR accuracy from nurse confirmations)')
+ON CONFLICT (version) DO NOTHING;
+
 -- v2.0.1: Schema fixes (DROP FK / ALTER type / ADD COLUMN) are applied by the
 -- post-migration script in __init__.py, which runs every boot statement-by-statement.
 """

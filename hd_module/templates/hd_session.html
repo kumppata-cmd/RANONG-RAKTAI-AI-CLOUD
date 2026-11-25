@@ -705,8 +705,10 @@
       </div>
       <label class="btn btn-outline" style="font-size:.8rem;padding:8px 10px;cursor:pointer;margin:0">📷 อ่านจากหน้าจอเครื่อง
         <input type="file" id="imShot" accept="image/*" style="display:none" onchange="intraPhotoRead(this)"></label>
+      <select id="imMcModel" class="form-control" style="width:auto;max-width:190px;font-size:.76rem;padding:6px 8px" title="รุ่นเครื่องของเตียงนี้ — ช่วยให้อ่านจอแม่นขึ้น"><option value="">รุ่นเครื่อง: ไม่ระบุ</option></select>
     </div>
     <div id="imShotStatus" style="font-size:.74rem;margin-bottom:6px"></div>
+    <div id="imShotReview" style="margin-bottom:6px"></div>
 
     <div style="font-size:.78rem;font-weight:800;color:var(--fg-muted);margin:8px 0 4px;letter-spacing:.3px">❤️ VITAL SIGNS</div>
     <div class="vital-grid" style="grid-template-columns:repeat(3,1fr)">
@@ -761,6 +763,7 @@
         <input type="file" id="machineShot" accept="image/*" style="display:none" onchange="readMachineScreen(this)"></label>
       <span id="machineReadStatus" style="font-size:.78rem;color:var(--fg-muted)">Nikkiso · Fresenius — ถ่ายให้เห็นตัวเลข UF ชัด ๆ</span>
     </div>
+    <div id="machineReadReview" style="margin-bottom:6px"></div>
     <div class="vital-grid">
       <div class="vital-input">
         <label>UF Removed (mL) <small style="color:var(--fg-muted)">อ่านจากเครื่อง</small></label>
@@ -2703,23 +2706,16 @@ function _bbLinkMaybe(sid){
 }
 {# 24 พ.ย. 2569: สมอง UF ตัวเดียวสำหรับ 3 หน้าจอ — ดู _uf_brain.html #}
 {% include "_uf_brain.html" %}
+{% include "_magic_camera.html" %}
+/* 📷 Magic Camera 2.0: ช่องของแต่ละฟอร์มที่รับค่าจากรูป */
+const MC_MAP_IM = {uf_removed:'imUfRemoved', uf_rate:'imUfRate', sbp:'imSbp', dbp:'imDbp', hr:'imHr', bfr:'imBfr', dfr:'imDfr', ap:'imAp', vp:'imVp', tmp:'imTmp', conductivity:'imCond', dialysate_temp:'imDtemp'};
+const MC_MAP_UF = {uf_removed:'modalUfRemoved', uf_rate:'modalUfRate'};
+
 /* ข้อ 8: รูปหน้าจอเครื่องฟอก → เติมค่า (ไม่บันทึกเอง) */
 function readMachineScreen(inp){
-  const f = inp.files && inp.files[0]; if(!f) return;
-  const st = document.getElementById('machineReadStatus');
-  st.textContent = '⏳ กำลังอ่านตัวเลขจากรูป...'; st.style.color = 'var(--fg-muted)';
-  const fd = new FormData(); fd.append('image', f); if(sessionData.session_id) fd.append('session_id', sessionData.session_id);
-  hdFetch('/hd/api/v1/machine-screen/read', {method:'POST', body: fd}).then(r=>r.json()).then(d=>{
-    inp.value = '';
-    const v = (d && d.values) || {}; const got = [];
-    if(v.uf_removed != null){ document.getElementById('modalUfRemoved').value = v.uf_removed; got.push('UF '+v.uf_removed+' mL'); ufAutoCalc('removed'); }
-    if(v.uf_rate != null){ document.getElementById('modalUfRate').value = v.uf_rate; _ufManual.rate = true; got.push('อัตรา '+v.uf_rate+' mL/ชม.'); ufAutoCalc('rate'); }
-    if(v.uf_goal != null) got.push('เป้าบนเครื่อง '+v.uf_goal);
-    if(v.time_left_min != null) got.push('เหลือ '+v.time_left_min+' นาที');
-    if(v.sbp != null) got.push('BP '+v.sbp+'/'+(v.dbp??'-'));
-    if(!got.length){ st.textContent = '⚠️ อ่านตัวเลขไม่ได้ — ถ่ายใหม่ให้ตรงและชัด หรือกรอกเอง'; st.style.color = 'var(--danger)'; return; }
-    st.innerHTML = '✅ อ่านได้: <b>' + got.join(' · ') + '</b> — <u>ตรวจกับหน้าจอก่อนกดบันทึก</u>'; st.style.color = 'var(--success)';
-  }).catch(()=>{ inp.value=''; st.textContent = '❌ อ่านรูปไม่สำเร็จ — กรอกเอง'; st.style.color = 'var(--danger)'; });
+  /* 25 พ.ย. 2569: ใช้ Magic Camera 2.0 ร่วมกับฟอร์มรวม (รุ่นเครื่องจาก dropdown ของฟอร์มรวม/ทะเบียนเครื่อง) */
+  if(!_mc._inited){ _mc._inited = true; try{ mcInit(sessionData.session_id, 'imMcModel'); }catch(e){} }
+  mcRead(inp, MC_MAP_UF, 'machineReadStatus', 'machineReadReview', function(v){ if(v.uf_rate != null) _ufManual.rate = true; try{ ufAutoCalc('removed'); }catch(e){} });
 }
 function openUfModal(){
   _ufIds = _UF_IDS_LEGACY;
@@ -2792,7 +2788,7 @@ function saveUfRecord(){
       if(!r.ok) throw new Error('API '+r.status);
       return r.json();
     }).then(d=>{
-      if(d.uf_recorded) showToast('✅ UF บันทึกลง DB สำเร็จ','success');
+      if(d.uf_recorded){ showToast('✅ UF บันทึกลง DB สำเร็จ','success'); try{ mcConfirm(sessionData.session_id, MC_MAP_UF); }catch(e){} }
       else showToast('⚠️ UF API ตอบกลับไม่สมบูรณ์','warning');
       if(d.watch) showUfWatch(d.watch);
       if(d.idh_alert_sent) showToast('🚨 แจ้งหัวหน้าเวรแล้ว: อัตรา UF เกินเพดาน + เสี่ยง IDH สูง','danger');
@@ -2847,6 +2843,8 @@ function openIntraModal(){
   if(!sessionData.session_id){ showToast('❌ ยังไม่มีรอบฟอก — กดเริ่มฟอกก่อน','danger'); return; }
   IM_ALL.forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   document.getElementById('imWarn').textContent=''; document.getElementById('imShotStatus').textContent='';
+  const _rv = document.getElementById('imShotReview'); if(_rv) _rv.innerHTML = '';
+  if(!_mc._inited){ _mc._inited = true; try{ mcInit(sessionData.session_id, 'imMcModel'); }catch(e){} }
   ufRemarkChipsRender('imRemark','imRemarkChips');
   /* จำค่าเครื่องครั้งก่อน (BFR/DFR/AP/VP/TMP/Cond/Dialysate T ไม่ค่อยเปลี่ยน) */
   try{
@@ -2868,21 +2866,8 @@ function openIntraModal(){
   setTimeout(()=>{ try{ document.getElementById('imSbp').focus(); }catch(e){} }, 150);
 }
 function intraPhotoRead(inp){
-  const f = inp.files && inp.files[0]; if(!f) return;
-  const st = document.getElementById('imShotStatus');
-  st.textContent = '⏳ กำลังอ่านตัวเลขจากรูป...'; st.style.color = 'var(--fg-muted)';
-  const fd = new FormData(); fd.append('image', f); fd.append('session_id', sessionData.session_id);
-  hdFetch('/hd/api/v1/machine-screen/read', {method:'POST', body: fd}).then(r=>r.json()).then(d=>{
-    inp.value=''; const v=(d&&d.values)||{}; const got=[];
-    const put=(id,val,label)=>{ if(val!=null){ document.getElementById(id).value=val; got.push(label+' '+val); } };
-    put('imUfRemoved', v.uf_removed, 'UF'); put('imUfRate', v.uf_rate, 'อัตรา');
-    put('imSbp', v.sbp, 'SBP'); put('imDbp', v.dbp, 'DBP');
-    put('imBfr', v.bfr, 'BFR'); put('imAp', v.ap, 'AP'); put('imVp', v.vp, 'VP'); put('imTmp', v.tmp, 'TMP');
-    if(v.uf_rate!=null) _ufManual.rate = true;
-    ufAutoCalc('removed');
-    if(!got.length){ st.textContent='⚠️ อ่านตัวเลขไม่ได้ — ถ่ายใหม่ให้ชัด หรือกรอกเอง'; st.style.color='var(--danger)'; return; }
-    st.innerHTML = '✅ อ่านได้: <b>'+got.join(' · ')+'</b> — <u>ตรวจกับหน้าจอก่อนกดบันทึก</u>'; st.style.color='var(--success)';
-  }).catch(()=>{ inp.value=''; st.textContent='❌ อ่านรูปไม่สำเร็จ — กรอกเอง'; st.style.color='var(--danger)'; });
+  /* 25 พ.ย. 2569: Magic Camera 2.0 — รู้รุ่น, confidence รายค่า, ค่าไม่แน่ใจไม่ใส่ช่องเอง */
+  mcRead(inp, MC_MAP_IM, 'imShotStatus', 'imShotReview', function(v){ if(v.uf_rate != null) _ufManual.rate = true; try{ ufAutoCalc('removed'); }catch(e){} });
 }
 
 function saveIntraRecord(){
@@ -2968,6 +2953,7 @@ function _sendIntra(key){
     _imMark(key,'ok',x.d);
     delete _imPayloads[key];
     showToast(x.d.duplicate ? '✅ รายการนี้บันทึกไว้แล้ว (ไม่สร้างซ้ำ)' : '✅ บันทึกครบแล้ว'+(x.d.slot_time?' → ช่อง '+x.d.slot_time+' ใน Monitoring Sheet':''),'success');
+    try{ mcConfirm(sessionData.session_id, MC_MAP_IM); }catch(e){}
     try{ _imAfterSave(p, x.d); }catch(err){ console.warn('post-save UI:', err); }
   }).catch(e => {
     done();

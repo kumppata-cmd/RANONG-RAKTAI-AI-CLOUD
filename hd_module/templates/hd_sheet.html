@@ -82,8 +82,15 @@
   <div class="entry-sheet">
     <h3 style="display:flex;align-items:center;gap:10px;">⏰ <span id="entryTime">-</span>
       <span style="flex:1"></span>
+      <label class="btn btn-secondary" style="padding:6px 12px;font-size:.85rem;cursor:pointer;margin:0">📷 อ่านจอ
+        <input type="file" id="eShot" accept="image/*" style="display:none" onchange="sheetPhotoRead(this)"></label>
       <button type="button" class="btn btn-secondary" id="voiceBtn" onclick="voiceToggle()" style="padding:6px 12px;font-size:.85rem;" title="พูดค่า เช่น 'ความดัน 130 ทับ 80 ชีพจร 72 BFR 300 VP 120'">🎤 พูดค่า</button>
     </h3>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+      <select id="eMcModel" class="form-control" style="width:auto;max-width:200px;font-size:.78rem;padding:5px 8px" title="รุ่นเครื่องของเตียงนี้"><option value="">รุ่นเครื่อง: ไม่ระบุ</option></select>
+      <span id="eShotStatus" style="font-size:.74rem;color:var(--fg-muted)"></span>
+    </div>
+    <div id="eShotReview" style="margin-bottom:6px"></div>
     <div id="voiceBox" style="display:none;font-size:.8rem;padding:8px 10px;border:1px dashed var(--border);border-radius:6px;margin-bottom:10px;background:var(--bg);">
       <div id="voiceText" style="min-height:1.2em;color:var(--fg)"></div>
       <div id="voiceFilled" style="color:var(--fg-muted);margin-top:4px;"></div>
@@ -188,6 +195,11 @@ let _ufSheetManual = false;  /* ช่องนี้มี UFR ที่พย�
 /* 24 พ.ย. 2569: สมอง UF ตัวเดียวกับหน้ารอบฟอก (บันทึก UF / ฟอร์มรวม) — ดู _uf_brain.html */
 let sessionData = {session_id: SESSION_ID, uf_goal: 0, duration_hours: 4, dry_weight: 0, start_time: null};
 {% include "_uf_brain.html" %}
+{% include "_magic_camera.html" %}
+const MC_MAP_E = {uf_removed:'eTotalUf', uf_rate:'eUfr', sbp:'eSbp', dbp:'eDbp', hr:'ePr', bfr:'eBfr', ap:'eAp', vp:'eVp', tmp:'eTmp', conductivity:'eConduct', dialysate_temp:'eDTemp'};
+function sheetPhotoRead(inp){ if(!_mc._inited){ _mc._inited = true; try{ mcInit(SESSION_ID, 'eMcModel'); }catch(e){} }
+  mcRead(inp, MC_MAP_E, 'eShotStatus', 'eShotReview', function(v){ try{ if(v.uf_removed != null) ufSheetCalc('total'); }catch(e){} }); }
+
 
 /* ── UF link: ช่องเวลาก่อนหน้า + เวลาของช่องที่กำลังกรอก (ใช้ป้อนสมอง UF) ── */
 function _slotH(t){ const p = String(t||'').split(':'); return (parseInt(p[0])||0) + (parseInt(p[1])||0)/60; }
@@ -458,6 +470,7 @@ function saveEntry(){
     if(d.alert) showToast('⚠️ '+d.alert.title,'danger');
     if(d.watch && d.watch.flag && d.watch.flag !== 'ok' && d.watch.flag !== 'no_goal' && d.watch.text) showToast('💧 UF Watch: '+d.watch.text, d.watch.flag==='high_rate' ? 'danger' : 'warning', 8000);
     showToast('✅ บันทึก '+_currentSlot+' สำเร็จ','success');
+    try{ mcConfirm(SESSION_ID, MC_MAP_E); }catch(e){}
     closeEntry();
   })
   .catch(e=>{

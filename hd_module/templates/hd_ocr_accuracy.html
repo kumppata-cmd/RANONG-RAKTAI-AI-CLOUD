@@ -1,0 +1,50 @@
+{% extends "hd_base.html" %}
+{% block title %}📷📊 ความแม่นการอ่านจอเครื่อง{% endblock %}
+{% block extra_css %}
+<style>
+.oa-wrap{max-width:1000px;margin:0 auto;padding:10px}
+.oa-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:10px}
+.oa-table{width:100%;border-collapse:collapse;font-size:.8rem} .oa-table th,.oa-table td{padding:5px 6px;border-bottom:1px solid var(--border);text-align:right}
+.oa-table th:first-child,.oa-table td:first-child{text-align:left}
+.oa-pill{display:inline-block;padding:1px 7px;border-radius:999px;font-weight:800;font-size:.72rem}
+.oa-note{font-size:.74rem;color:var(--fg-muted);line-height:1.5;margin-top:6px}
+</style>
+{% endblock %}
+{% block content %}
+<div class="oa-wrap">
+  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between">
+    <h2 style="margin:0">📷📊 ความแม่นการอ่านจอเครื่อง <span style="font-weight:400;font-size:.85rem;color:var(--fg-muted)">รายรุ่น · รายค่า · จากที่พยาบาลยืนยันจริง</span></h2>
+    <div><select id="oaDays" class="form-control" style="width:auto;display:inline-block" onchange="oaLoad()"><option value="7">7 วัน</option><option value="30" selected>30 วัน</option><option value="90">90 วัน</option></select></div>
+  </div>
+  <div id="oaBody" class="oa-card">กำลังโหลด…</div>
+  <div class="oa-note">
+    <b>ตรง</b> = AI อ่านได้ค่าเดียวกับที่พยาบาลบันทึก (ภายในค่าคลาดเคลื่อนที่ยอมรับ เช่น UF ±10 mL, ความดัน ±5) ·
+    <b>ผิด</b> = AI ให้ค่าแต่พยาบาลแก้ · <b>เว้นว่าง</b> = AI ไม่ให้ค่า พยาบาลกรอกเอง (ยอมรับได้) · <b>ไม่ใช้</b> = AI ให้ค่าแต่พยาบาลไม่บันทึกช่องนั้น<br>
+    <b>แม่นเมื่ออ่านได้</b> = ตรง ÷ (ตรง+ผิด+ไม่ใช้) · <b>อ่านได้</b> = ครั้งที่ AI ให้ค่า ÷ ครั้งที่พยาบาลบันทึกช่องนั้น ·
+    เป้าหมาย: "ผิด" ต้องใกล้ 0 — ยอมให้ "เว้นว่าง" ได้ · เก็บเฉพาะตัวเลข ไม่เก็บรูป ไม่มีข้อมูลผู้ป่วย
+  </div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+function oaLoad(){
+  const days = document.getElementById('oaDays').value;
+  const body = document.getElementById('oaBody'); body.textContent = 'กำลังโหลด…';
+  hdFetch('/hd/api/v1/machine-screen/accuracy?days=' + days).then(r => r.json()).then(d => {
+    const models = d.models || {}, F = d.fields || {};
+    const keys = Object.keys(models);
+    if(!keys.length){ body.innerHTML = 'ยังไม่มีตัวอย่าง — ทุกครั้งที่พยาบาล 📷 อ่านจอแล้วกดบันทึก ระบบจะเก็บ "AI อ่าน vs ค่าที่บันทึก" ไว้ที่นี่อัตโนมัติ'; return; }
+    const pct = x => x == null ? '-' : Math.round(x * 100) + '%';
+    const col = x => x == null ? 'var(--fg-muted)' : (x >= 0.95 ? 'var(--success)' : (x >= 0.85 ? '#e67e22' : 'var(--danger)'));
+    body.innerHTML = keys.map(m => {
+      const M = models[m]; const fk = Object.keys(M.fields);
+      return '<div style="font-weight:800;margin:8px 0 4px">' + M.label + ' <span style="font-weight:400;font-size:.76rem;color:var(--fg-muted)">อ่านรูป ' + M.reads + ' ครั้ง</span></div>' +
+        '<table class="oa-table"><tr><th>ค่า</th><th>n</th><th>ตรง</th><th>ผิด</th><th>เว้นว่าง</th><th>ไม่ใช้</th><th>แม่นเมื่ออ่านได้</th><th>อ่านได้</th></tr>' +
+        fk.map(k => { const f = M.fields[k]; return '<tr><td>' + (F[k] || k) + '</td><td>' + f.n + '</td><td>' + f.ok + '</td><td style="color:' + (f.wrong ? 'var(--danger)' : 'inherit') + ';font-weight:' + (f.wrong ? '800' : '400') + '">' + f.wrong + '</td><td>' + f.blank + '</td><td>' + f.unused + '</td>' +
+          '<td><span class="oa-pill" style="color:' + col(f.precision) + ';border:1px solid ' + col(f.precision) + '">' + pct(f.precision) + '</span></td><td>' + pct(f.coverage) + '</td></tr>'; }).join('') + '</table>';
+    }).join('');
+  }).catch(() => { body.textContent = 'โหลดไม่สำเร็จ'; });
+}
+oaLoad();
+</script>
+{% endblock %}
