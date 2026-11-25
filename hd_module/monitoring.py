@@ -100,7 +100,8 @@ def start_self_ping(app_url: str, interval: int = 300):
 
     def _ping_loop():
         import urllib.request
-        health_url = f"{app_url.rstrip('/')}/health"
+        # 25 พ.ย. 2569: ใช้ /health/live (ไม่แตะ GCS) — /health เดิมยิง GCS 2 ครั้งทุก 5 นาที × ทุก worker
+        health_url = f"{app_url.rstrip('/')}/health/live"
         logger.info("Self-ping started: %s every %ds", health_url, interval)
         while True:
             try:

@@ -1754,10 +1754,17 @@ class DocumentIndex:
         """ตรวจสอบว่า cache ยังใหม่อยู่ ถ้าหมดอายุให้โหลดใหม่จาก GCS."""
         now = time.time()
         if now - self._cache_ts > self._cache_ttl:
-            with self._reload_lock:
+            # 25 พ.ย. 2569: รอได้ไม่เกิน 20 วิ — ถ้า GCS ช้าผิดปกติ ให้ใช้ข้อมูลชุดเดิมไปก่อน
+            # (ห้ามให้ request ค้างไม่มีกำหนดเพราะรอ lock → thread หมด → health check ล้ม)
+            if not self._reload_lock.acquire(timeout=20):
+                logger.warning("Document index: reload lock busy >20s — serving cached index")
+                return
+            try:
                 # thread อื่นอาจเพิ่งโหลดเสร็จระหว่างที่รอ lock → ไม่ต้องโหลดซ้ำ
                 if time.time() - self._cache_ts > self._cache_ttl:
                     self._reload_from_gcs()
+            finally:
+                self._reload_lock.release()
 
     def add(self, doc_meta: dict) -> bool:
         """เพิ่มเอกสารใหม่ลง index — เขียน per-doc JSON file ใน GCS.

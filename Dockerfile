@@ -135,5 +135,9 @@ EXPOSE 10000
 #   worker ใหม่ใช้เวลาบูต ~20–30 วิ (import + migration) → ช่วงนั้นไม่มีใครรับคำขอ = 502 ที่พยาบาลเจอ
 #   แก้: 4000 ± 2000 → รีสตาร์ทราวทุก 3–8 ชม. ต่อ worker และแทบไม่มีทางชนกัน (memory จริงอยู่ 40–55% ไม่ต้องรีไซเคิลถี่)
 # --worker-tmp-dir /dev/shm: heartbeat บน RAM — กัน worker โดนมองว่าค้างเพราะดิสก์ช้า
-CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --threads 4 --timeout 120 \
+# 25 พ.ย. 2569 (502 ตอน 06:12/07:12 — health check ตอบไม่ทัน 5 วิ ขณะ thread ทั้ง 8 ถูกใช้หมด):
+# --threads 8 → รับพร้อมกัน 16 คำขอ: แดชบอร์ด 4-5 เครื่อง + หน้ารอบฟอก + webhook รูป ไม่ทำให้ /health/live รอคิว
+# PGOPTIONS statement_timeout 30 วิ → คำสั่ง DB ที่ค้าง (lock/ช้า) ถูกตัดและคืน thread แทนที่จะค้างไม่มีกำหนด
+ENV PGOPTIONS="-c statement_timeout=30000"
+CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --threads 8 --timeout 120 \
     --max-requests 4000 --max-requests-jitter 2000 --worker-tmp-dir /dev/shm --access-logfile -

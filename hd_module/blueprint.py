@@ -2846,7 +2846,9 @@ def announce_deploy_once():
         return False
     from . import _claim_once
     from datetime import date as _d
-    if not _claim_once(current_app, f"deploy_{sha[:7]}", _d.today()):
+    # 25 พ.ย. 2569: ครั้งเดียวต่อ commit (เดิมผูกกับวันที่ UTC → รีสตาร์ทข้ามเที่ยงคืน UTC = 07:00 ไทย ส่งซ้ำ
+    # ทำให้เข้าใจผิดว่ามี deploy ใหม่) · marker: _markers/hd_deploy_<sha>_2000-01-01.json
+    if not _claim_once(current_app, f"deploy_{sha[:7]}", _d(2000, 1, 1)):
         return False
     push_fn = current_app.config.get("LINE_PUSH_FN")
     ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
