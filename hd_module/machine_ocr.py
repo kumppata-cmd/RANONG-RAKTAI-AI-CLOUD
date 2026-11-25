@@ -225,7 +225,7 @@ def read_with_claude(img_bytes, model, api_key, ai_model_id, post_fn=None):
     except Exception:
         pass
     body = json.dumps({
-        "model": ai_model_id, "max_tokens": 1200,
+        "model": ai_model_id, "max_tokens": 4000,   # 26 พ.ย.: 1200 ถูกใช้หมดไปกับการ "คิด" ของรุ่นใหม่ → JSON ขาด → อ่านไม่ได้ ~40%
         "messages": [{"role": "user", "content": [
             {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
                                          "data": base64.b64encode(img_bytes).decode()}},
@@ -247,16 +247,47 @@ def read_with_claude(img_bytes, model, api_key, ai_model_id, post_fn=None):
     if getattr(resp, "status_code", 0) != 200:
         logger.info("machine-screen claude HTTP %s", getattr(resp, "status_code", "?"))
         return None
-    txt = "".join(x.get("text", "") for x in (resp.json().get("content") or []) if x.get("type") == "text").strip()
-    if txt.startswith("```"):
-        txt = txt.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-    try:
-        raw = json.loads(txt)
-    except Exception:
+    rj = resp.json()
+    txt = "".join(x.get("text", "") for x in (rj.get("content") or []) if x.get("type") == "text").strip()
+    raw = extract_json(txt)
+    if raw is None:
+        logger.warning("machine-screen claude: no JSON (stop=%s, len=%s): %s",
+                       rj.get("stop_reason"), len(txt), txt[:160].replace("\n", " "))
         return None
     if isinstance(raw, dict) and "values" not in raw:        # รูปแบบเก่า (flat) → ห่อ
         raw = {"values": raw, "confidence": {}}
-    return sanitize(raw, model)
+    out = sanitize(raw, model)
+    out["raw_text_len"] = len(txt)
+    return out
+
+
+def extract_json(txt):
+    """ดึง JSON object ตัวแรกออกจากข้อความ (รองรับ ```json … ```, ข้อความนำหน้า, และ JSON ที่ถูกตัดท้าย → None)"""
+    if not txt:
+        return None
+    t = txt.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    try:
+        return json.loads(t)
+    except Exception:
+        pass
+    i = t.find("{")
+    if i < 0:
+        return None
+    # หาวงเล็บปิดที่สมดุล
+    depth = 0
+    for j in range(i, len(t)):
+        if t[j] == "{":
+            depth += 1
+        elif t[j] == "}":
+            depth -= 1
+            if depth == 0:
+                try:
+                    return json.loads(t[i:j + 1])
+                except Exception:
+                    return None
+    return None
 
 
 # ── ตัวอย่างเฉลย: AI อ่าน vs พยาบาลยืนยัน ───────────────────────────────────────────────

@@ -8516,20 +8516,31 @@ def read_machine_screen():
                         "profile_label": prof["label"] if prof else None,
                         "bargraph": prof["bargraph"] if prof else [], "words": 0})
 
-    # 2) fallback: OCR คำ (ของเดิม) — ได้แค่ UF/BP
+    # 2) fallback: OCR คำ (ของเดิม) — ได้แค่ UF/BP และเชื่อถือน้อยกว่า → ส่งเป็น "ไม่แน่ใจ" ทั้งหมด ไม่ใส่ช่องเอง
+    #    (26 พ.ย. 2569: เคยส่งเป็น values ตรง ๆ → เลขมั่ว เช่น uf_goal 500 / blood_flow โผล่ในตาราง)
     words, engine = _ocr_words(data)
     vals = parse_machine_words(words)
     if not any(k in vals for k in ("uf_removed", "uf_rate", "uf_goal")):
         alt = parse_machine_text(" ".join(w["t"] for w in words))
         vals = {**alt, **{k: v for k, v in vals.items() if k != "raw"}}
-    vals = {k: v for k, v in vals.items() if k != "raw"}
-    found = [k for k in ("uf_removed", "uf_rate", "uf_goal", "time_left_min", "sbp") if k in vals]
+    unc = []
+    for k in ("uf_removed", "uf_rate", "uf_goal", "time_left_min", "sbp", "dbp", "bfr"):
+        v = vals.get(k)
+        if v is None:
+            continue
+        try:
+            unc.append({"field": k, "value": float(v), "confidence": 0.4})
+        except (TypeError, ValueError):
+            pass
+    found = []
     log_action(user_id=g.get("hd_user_id"), action="machine_screen.read", resource_type="session",
-               resource_id=sid, new_values={"engine": engine, "model": model, "found": found, "read_id": read_id},
+               resource_id=sid, new_values={"engine": engine, "model": model, "found": found,
+                                            "uncertain": [u["field"] for u in unc], "read_id": read_id,
+                                            "claude_failed": True},
                ip_address=request.remote_addr or "")
-    return jsonify({"values": vals, "confidence": {}, "uncertain": [], "dropped": [], "engine": engine, "found": found,
-                    "model": model, "read_id": read_id, "words": len(words),
-                    "reason": None if found else (res or {}).get("reason") or "อ่านตัวเลขไม่ได้ — ถ่ายให้ตรงจอ ไม่มีแสงสะท้อน"})
+    return jsonify({"values": {}, "confidence": {}, "uncertain": unc, "dropped": [], "engine": engine + "-fallback",
+                    "found": found, "model": model, "read_id": read_id, "words": len(words), "claude_failed": True,
+                    "reason": (res or {}).get("reason") or "AI อ่านรูปไม่สำเร็จ — ลองถ่ายใหม่ให้ตรงจอ/ชัด หรือกรอกเอง"})
 
 
 @hd_bp.route("/machine-screen/models", methods=["GET"])

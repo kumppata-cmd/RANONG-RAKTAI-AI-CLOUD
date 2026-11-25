@@ -177,3 +177,25 @@ class TestWiring:
         for n in ('"/machine-screen/models"', '"/machine-screen/confirm"', '"/machine-screen/accuracy"', '"/ocr-accuracy"',
                   "mo.read_with_claude(", "429"):
             assert n in src, n
+
+
+class TestExtractJson:
+    def test_variants(self):
+        assert mo.extract_json('{"values": {"bfr": 300}}') == {"values": {"bfr": 300}}
+        assert mo.extract_json('```json\n{"values": {"bfr": 300}}\n```') == {"values": {"bfr": 300}}
+        assert mo.extract_json('อ่านได้ดังนี้: {"values": {"bfr": 300}, "confidence": {"bfr": 0.9}} ครับ')["confidence"] == {"bfr": 0.9}
+        assert mo.extract_json('{"values": {"bfr": 300, "vp": 1') is None      # ถูกตัดท้าย → None ไม่ใช่ค่ามั่ว
+        assert mo.extract_json("") is None and mo.extract_json("ไม่มีตัวเลข") is None
+
+    def test_prefixed_text_still_read(self):
+        import types
+        payload = 'ผลการอ่าน:\n```json\n{"model_seen":"4008 B","values":{"uf_removed":2334,"bfr":300},"confidence":{"uf_removed":0.95,"bfr":0.9}}\n```'
+        resp = types.SimpleNamespace(status_code=200, json=lambda: {"content": [{"type": "text", "text": payload}], "stop_reason": "end_turn"})
+        r = mo.read_with_claude(b"x", "fresenius_4008b", "key", "m", post_fn=lambda b: resp)
+        assert r["values"] == {"uf_removed": 2334, "bfr": 300}
+
+    def test_fallback_never_fills_fields(self):
+        import inspect
+        from hd_module import blueprint as bp
+        src = inspect.getsource(bp.read_machine_screen)
+        assert '"values": {}' in src and '"claude_failed": True' in src and '"confidence": 0.4' in src

@@ -63,10 +63,11 @@ async function otRun(inp){
     if(status !== 200){ stats.fail++; tr.innerHTML = '<td>'+(i+1)+'</td><td>'+f.name.slice(0,28)+'</td><td colspan="15" class="ot-u">❌ HTTP '+status+' '+(d.error||'')+'</td>'; continue; }
     stats.ok++;
     OT_F.forEach(k=>{ const s = stats.fields[k] = stats.fields[k]||{read:0, unc:0}; if((d.values||{})[k]!=null) s.read++; else if((d.uncertain||[]).some(x=>x.field===k)) s.unc++; });
-    tr.innerHTML = '<td>'+(i+1)+'</td><td title="'+f.name+'">'+f.name.slice(0,28)+'</td><td'+(d.model_mismatch?' class="ot-u" title="ไม่ตรงรุ่นที่เลือก"':'')+'>'+(d.model_seen||'—')+'</td>' + OT_F.map(k=>otCell(k,d)).join('') + '<td>'+ms+'</td>';
+    if(d.claude_failed) stats.failedAi = (stats.failedAi||0)+1;
+    tr.innerHTML = '<td>'+(i+1)+'</td><td title="'+f.name+'">'+f.name.slice(0,28)+'</td><td'+(d.model_mismatch?' class="ot-u" title="ไม่ตรงรุ่นที่เลือก"':'')+'>'+(d.claude_failed?'<span class="ot-u" title="'+(d.reason||'')+'">⚠️ AI ล้ม</span> ':'')+(d.model_seen||'—')+'</td>' + OT_F.map(k=>otCell(k,d)).join('') + '<td>'+ms+'</td>';
     tr.dataset.json = JSON.stringify({file:f.name, model:d.model||model, read_id:d.read_id, values:d.values, confidence:d.confidence, uncertain:d.uncertain, dropped:d.dropped, model_seen:d.model_seen});
   }
-  st.textContent = '✅ เสร็จ '+stats.ok+'/'+stats.n+' ใบ'+(stats.fail?' · ล้มเหลว '+stats.fail:'')+(stats.busy?' · รอคิว '+stats.busy+' ครั้ง':'');
+  st.textContent = '✅ เสร็จ '+stats.ok+'/'+stats.n+' ใบ'+(stats.failedAi?' · ⚠️ AI อ่านไม่สำเร็จ '+stats.failedAi+' ใบ':'')+(stats.fail?' · ล้มเหลว '+stats.fail:'')+(stats.busy?' · รอคิว '+stats.busy+' ครั้ง':'');
   const sm = document.getElementById('otSummary'); sm.style.display = 'block';
   sm.innerHTML = '<div style="font-weight:800;margin-bottom:4px">สรุป: AI ให้ค่าได้กี่ใบ (จาก '+stats.ok+' ใบ)</div><table class="ot-table"><tr><th>ค่า</th>'+OT_F.map(k=>'<th>'+k+'</th>').join('')+'</tr><tr><td>อ่านได้</td>'+OT_F.map(k=>'<td>'+(stats.fields[k]||{}).read+'</td>').join('')+'</tr><tr><td>ไม่มั่นใจ</td>'+OT_F.map(k=>'<td class="ot-u">'+(stats.fields[k]||{}).unc+'</td>').join('')+'</tr></table>'+
     '<div class="ot-note">ถูกหรือผิด ต้องเทียบกับรูปด้วยตา — รูปที่หมอดูแล้วว่า AI อ่านผิด ให้บอกเลขไฟล์ + ค่าที่ถูก ผมจะปรับ profile ของรุ่นนั้น · <button class="btn btn-outline" style="font-size:.72rem;padding:2px 8px" onclick="otCopy()">คัดลอกผลเป็น JSON</button></div>';
