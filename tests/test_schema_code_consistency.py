@@ -31,14 +31,21 @@ def _schema():
                 continue
             cols.add(line.split()[0].strip(",").lower())
         tables.setdefault(m.group(1), set()).update(cols)
-    # one-line CREATE TABLE strings inside python code
-    code = "".join(open(f, encoding="utf-8").read() for f in glob.glob(os.path.join(MOD, "*.py")))
-    for m in re.finditer(r"CREATE TABLE IF NOT EXISTS (hd_\w+)\s*\((.*?)\)\s*\"\"\"", code, re.S):
-        body = re.sub(r"\s+", " ", m.group(2))
-        for part in body.split(","):
-            part = part.strip()
-            if part and not _CONSTRAINT.match(part):
-                tables.setdefault(m.group(1), set()).add(part.split()[0].strip(")").lower())
+    # one-line CREATE TABLE strings inside python code.
+    # 25 Nov 2026: scan PER FILE (sorted) — concatenating the folder in filesystem order let an
+    # unterminated CREATE in one file (lab_sync.py) swallow the next file's CREATE whenever the OS
+    # returned the files in a different order, so CI failed at random ("hd_fluid_assessments:
+    # table not defined") while the same code passed locally.
+    files = sorted(glob.glob(os.path.join(MOD, "*.py")))
+    sources = [open(f, encoding="utf-8").read() for f in files]
+    code = "".join(sources)
+    for one in sources:
+        for m in re.finditer(r"CREATE TABLE IF NOT EXISTS (hd_\w+)\s*\((.*?)\)\s*\"\"\"", one, re.S):
+            body = re.sub(r"\s+", " ", m.group(2))
+            for part in body.split(","):
+                part = part.strip()
+                if part and not _CONSTRAINT.match(part):
+                    tables.setdefault(m.group(1), set()).add(part.split()[0].strip(")").lower())
     for m in re.finditer(r"ALTER TABLE (hd_\w+) ADD COLUMN IF NOT EXISTS (\w+)", src + code):
         tables.setdefault(m.group(1), set()).add(m.group(2).lower())
     return tables, code
