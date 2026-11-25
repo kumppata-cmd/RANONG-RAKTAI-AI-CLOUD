@@ -258,3 +258,11 @@ def test_line_summary_focus_alert_signals():
     tl = bb.analyze(bb.assemble(_raw()))
     txt = bb.line_summary(tl, focus_alerts=True)
     assert "🔎" in txt and "SBP 135→92" in txt and "เตือนทันที" in txt
+
+
+def test_beds_cache_helpers_exist_and_bust():
+    from hd_module import blueprint as bp
+    bp._BEDS_CACHE[("morning", "")] = (0, {"beds": []})
+    bp._beds_cache_bust()
+    assert bp._BEDS_CACHE == {}
+    assert bp._beds_cache_ttl() > 0

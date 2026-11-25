@@ -5,6 +5,8 @@ All routes under /hd/api/v1/.  Completely isolated from server.py.
 
 import json
 import logging
+import os
+import threading
 from datetime import date, datetime, timedelta, timezone  # noqa: F401
 from flask import (  # noqa: F401
     Blueprint, request, jsonify, g, render_template, redirect, url_for,
@@ -5007,6 +5009,7 @@ def create_session():
         conn.commit()
         conn.close()
 
+        _beds_cache_bust()
         log_action(
             user_id=g.get("hd_user_id"),
             action="session.create",
@@ -5298,6 +5301,7 @@ def update_session(session_id):
         except Exception as e:
             logger.error("update_session error: %s", e)
 
+    _beds_cache_bust()
     log_action(
         user_id=g.get("hd_user_id"),
         action="session.update",
@@ -6242,6 +6246,7 @@ def release_bed(session_id):
                            WHERE id = %s""", (f"hd_user:{g.get('hd_user_id')}", session_id))
             conn.commit()
         conn.close()
+        _beds_cache_bust()
         log_action(user_id=g.get("hd_user_id"), action="session.release_bed",
                    resource_type="hd_session", resource_id=str(session_id),
                    old_values={}, new_values={"bed_number": bed},
@@ -8306,9 +8311,51 @@ def get_patient_history(hn):
 
 # ── Dashboard ─────────────────────────────────────────────
 
+# ── 25 พ.ย. 2569: cache ผลแดชบอร์ดสั้น ๆ ต่อ (วัน, รอบ) — DB อยู่บน 0.1 CPU; แดชบอร์ด 4–6 เครื่องโพลทุก 15 วิ
+#    ทำให้ CPU ของ DB ชน 100% → ทุก query ต่อคิว → health check ล้ม → 502 · cache 8 วิ ลด query ลง ~5 เท่า
+#    การเปลี่ยนสถานะรอบ (เริ่ม/ปล่อยเตียง/อัปเดต/intra) ล้าง cache ของ worker นั้นทันที · ?fresh=1 ข้าม cache
+_BEDS_CACHE = {}
+_BEDS_CACHE_LOCK = threading.Lock()
+
+
+def _beds_cache_ttl():
+    try:
+        return float(os.environ.get("HD_BEDS_CACHE_TTL", "8") or 8)
+    except ValueError:
+        return 8.0
+
+
+def _beds_cache_bust():
+    try:
+        with _BEDS_CACHE_LOCK:
+            _BEDS_CACHE.clear()
+    except Exception:
+        pass
+
+
 @hd_bp.route("/dashboard/beds", methods=["GET"])
 @require_role("physician", "nurse", "admin", "display")
 def bed_dashboard():
+    """25-bed real-time dashboard with active sessions, filtered by shift (cached a few seconds)."""
+    import time as _t
+    key = (request.args.get("shift", "morning"), request.args.get("date", ""))
+    ttl = _beds_cache_ttl()
+    if ttl > 0 and request.args.get("fresh") != "1":
+        hit = _BEDS_CACHE.get(key)
+        if hit and _t.time() - hit[0] < ttl:
+            resp = jsonify(hit[1])
+            resp.headers["X-HD-Cache"] = "hit"
+            return resp
+    payload = _bed_dashboard_impl()
+    if ttl > 0 and isinstance(payload, dict) and not payload.get("_debug_error"):
+        with _BEDS_CACHE_LOCK:
+            _BEDS_CACHE[key] = (_t.time(), payload)
+    resp = jsonify(payload)
+    resp.headers["X-HD-Cache"] = "miss"
+    return resp
+
+
+def _bed_dashboard_impl():
     """25-bed real-time dashboard with active sessions, filtered by shift."""
     import os
     from .config import HdConfig
@@ -8797,7 +8844,7 @@ def bed_dashboard():
         except Exception as de:
             debug_detail = 'db_error: ' + str(de)
 
-    return jsonify({
+    return {
         "beds": beds,
         "pending_summary": pending_summary,
         "total": HdConfig.TOTAL_BEDS,
@@ -8813,7 +8860,7 @@ def bed_dashboard():
         "_debug_sessions_today": debug_total,
         "_debug_detail": debug_detail,
         "_debug_error": _dash_error,
-    })
+    }
 
 
 
@@ -11174,6 +11221,7 @@ def restore_cancelled_session(session_id):
                 return jsonify({"error": "ไม่พบรายการที่ยกเลิก หรือถูกเอากลับไปแล้ว"}), 404
             conn.commit()
         conn.close()
+        _beds_cache_bust()
         log_action(user_id=g.get("hd_user_id"), action="session.restore", resource_type="session",
                    resource_id=session_id, new_values={"bed": row[0]}, ip_address=request.remote_addr or "")
         return jsonify({"ok": True, "bed_number": row[0], "message": f"คืนสถานะสำเร็จ — เตียง {row[0]} พร้อมฟอก"})

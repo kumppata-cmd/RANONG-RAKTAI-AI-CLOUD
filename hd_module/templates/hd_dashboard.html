@@ -1629,7 +1629,9 @@ _endwarnBtnText();
 setInterval(checkEndWarnings, 20000);
 setTimeout(checkEndWarnings, 4000);
 
-setInterval(()=>{ if(_viewMode==='all') fetchAllRounds(); else fetchBeds(); }, 15000);
+/* 25 พ.ย. 2569: ลดภาระ DB (0.1 CPU) — โพลทุก 25 วิ เมื่อแท็บอยู่หน้าจอ, 60 วิ เมื่อซ่อน (ค่าเดิม 15 วิ) */
+setInterval(()=>{ if(document.hidden){ if(Date.now() % 60000 >= 25000) return; } if(_viewMode==='all') fetchAllRounds(); else fetchBeds(); }, 25000);
+document.addEventListener('visibilitychange', ()=>{ if(!document.hidden){ if(_viewMode==='all') fetchAllRounds(); else fetchBeds(); } });
 
 /* Force refresh when page restored from bfcache (back/forward navigation) */
 window.addEventListener('pageshow', function(e) {

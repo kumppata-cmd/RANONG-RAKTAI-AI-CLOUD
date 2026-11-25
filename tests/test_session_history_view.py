@@ -111,7 +111,7 @@ class BedDashboardGuardTests(unittest.TestCase):
     def test_no_savepoint_in_autocommit_dashboard(self):
         """bed_dashboard ใช้ autocommit — SAVEPOINT จะ error และทำให้ Heparin ไม่ขึ้นทุกเตียง (16 พ.ย. 2569)"""
         import inspect
-        src = inspect.getsource(bp.bed_dashboard)
+        src = inspect.getsource(bp._bed_dashboard_impl)   # 25 พ.ย. 2569: route = cache wrapper, ตัวจริงคือ _bed_dashboard_impl
         self.assertIn("autocommit = True", src)
         self.assertNotIn('execute("SAVEPOINT', src)
         self.assertIn("anticoag_maintenance", src)
