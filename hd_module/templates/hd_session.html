@@ -159,6 +159,7 @@
           <input type="number" id="ufSim" step="0.1" min="0" class="form-control" style="display:inline-block;width:80px;padding:3px 6px;font-size:.8rem;" oninput="ufPlanRefresh(true)"></label>
       </div>
       <div id="ufPlanBody" style="font-size:.84rem;margin-top:6px;"></div>
+      <div id="ufPlanManual" style="display:none;font-size:.8rem;margin-top:6px;padding:6px 8px;border-radius:8px;background:rgba(39,174,96,.1);border-left:3px solid var(--success)"></div>
       <div id="ufPlanOpts" style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px;"></div>
       <div id="idhSim" style="font-size:.8rem;margin-top:8px;color:var(--fg-muted);"></div>
     </div>
@@ -368,7 +369,7 @@
     <div class="uf-progress-container">
       <div class="uf-progress-label">
         <span>UF Removed: <strong id="ufRemoved">0</strong> mL</span>
-        <span>UF Goal: <strong id="ufGoal">-</strong> mL <button type="button" onclick="editUfGoal()" style="border:1px solid var(--border);background:var(--bg);border-radius:6px;padding:1px 7px;font-size:.72rem;cursor:pointer">✏️ แก้เป้า</button></span>
+        <span>UF Goal: <strong id="ufGoal">-</strong> mL <button type="button" onclick="editUfGoal()" style="border:1px solid var(--info);color:var(--info);background:var(--bg);border-radius:6px;padding:2px 9px;font-size:.76rem;font-weight:700;cursor:pointer">✏️ ตั้งเป้า UF เอง</button></span>
       </div>
       <div class="progress">
         <div class="progress-bar" id="ufProgressBar" style="width:0%;background:var(--success);">0%</div>
@@ -1152,7 +1153,9 @@ function calcIDWG(){
     el.style.display = 'block';
     /* Auto-calculate UF Goal = (pre_weight - dry_weight) × 1000 mL */
     const ufGoal = Math.round(idwg * 1000);
-    if(ufGoal > 0){
+    /* 25 พ.ย. 2569: รอบที่เริ่มแล้ว เป้าในระบบอาจเป็นค่าที่ตั้งเอง — ไม่ทับด้วยสูตร นอกจากกำลังแก้ Pre-HD และยังไม่ตั้งเอง */
+    const _simTouched = !!((document.getElementById('ufSim')||{}).dataset||{}).touched;
+    if(ufGoal > 0 && !_simTouched && (!sessionData.session_id || _preEditOn)){
       document.getElementById('ufGoal').textContent = ufGoal;
       sessionData.uf_goal = ufGoal;
     }
@@ -1178,6 +1181,8 @@ function ufPlanRefresh(fromSim){
       const r = await hdFetch(`/hd/api/v1/uf-plan?pre_weight=${w}&dry_weight=${dw}&hours=${hours}`);
       const p = await r.json(); if(!r.ok) throw new Error(p.error||r.status);
       const ufMl = isFinite(ufL) ? Math.round(ufL*1000) : p.uf_ml;
+      if(simEl.dataset.touched && isFinite(ufL)){ document.getElementById('ufGoal').textContent = ufMl; sessionData.uf_goal = ufMl; }
+      try{ ufPlannerBadge(ufMl, w, dw); }catch(e){}
       const rate = ufMl / dw / hours;
       const lim = p.level; const col = rate > 13 ? 'var(--danger)' : (rate > 10 ? '#e67e22' : 'var(--success)');
       document.getElementById('ufPlanBody').innerHTML =
@@ -1207,6 +1212,37 @@ function ufPlanRefresh(fromSim){
     }catch(e){ document.getElementById('ufPlanBody').textContent = 'คำนวณไม่ได้: ' + (e.message||e); }
   }, 350);
 }
+/* 25 พ.ย. 2569: เป้า UF ที่พยาบาล "ตั้งเอง" ใน UF Planner (พิมพ์ในช่อง UF (L) หรือแตะตัวเลือก) — ชนะสูตร pre − DW
+   เคสจริง: DW 60 มา 65 แต่คนไข้มีธุระ ฟอกได้ 4 ชม. → ตั้ง 4.0 L เอง แล้วหน้า Intra/Sheet ต้องเห็น 4000 ไม่ใช่ 5000 */
+function ufPlannerManualMl(){
+  const el = document.getElementById('ufSim'); if(!el || !el.dataset.touched) return null;
+  const v = parseFloat(el.value); if(!isFinite(v) || v < 0 || v > 8) return null;
+  return Math.round(v*1000);
+}
+function ufPlannerHours(){ const h = parseFloat((document.getElementById('ufHours')||{}).value); return (isFinite(h) && h >= 2 && h <= 8) ? h : null; }
+function ufPlannerBadge(ufMl, w, dw){
+  const el = document.getElementById('ufPlanManual'); if(!el) return;
+  const manual = ufPlannerManualMl();
+  if(manual == null){ el.style.display = 'none'; return; }
+  const excess = (w && dw) ? Math.max(0, Math.round((w - dw)*1000)) : null;
+  el.style.display = 'block';
+  el.innerHTML = '🎯 <b>เป้า UF รอบนี้ = ' + (manual/1000).toFixed(1) + ' L (ตั้งเอง)</b>' +
+    (excess != null && excess !== manual ? ' · ส่วนเกินจริง ' + (excess/1000).toFixed(1) + ' L → เหลือค้าง ' + ((excess-manual)/1000).toFixed(1) + ' kg เก็บรอบหน้า' : '') +
+    ' <button type="button" class="btn btn-outline" style="font-size:.7rem;padding:2px 8px;margin-left:6px" onclick="ufPlannerReset()">↺ ใช้สูตร pre − DW</button>';
+}
+function ufPlannerSyncFromSession(d){
+  try{
+    const el = document.getElementById('ufSim'); if(!el || d.uf_goal == null) return;
+    const w = parseFloat(d.pre_weight), dw = parseFloat(d.dry_weight);
+    const formula = (w && dw) ? Math.max(0, Math.round((w - dw)*1000)) : null;
+    const g = Math.round(parseFloat(d.uf_goal));
+    if(formula != null && g !== formula){ el.value = (g/1000).toFixed(1); el.dataset.touched = '1'; }
+    document.getElementById('ufGoal').textContent = g; sessionData.uf_goal = g;
+    if(d.duration_hours){ const hs = document.getElementById('ufHours'); if(hs){ const v = String(parseFloat(d.duration_hours)); if([...hs.options].some(o=>o.value===v)) hs.value = v; } }
+    ufPlanRefresh(!!el.dataset.touched);
+  }catch(e){}
+}
+function ufPlannerReset(){ const el = document.getElementById('ufSim'); if(el){ delete el.dataset.touched; } ufPlanRefresh(false); const b = document.getElementById('ufPlanManual'); if(b) b.style.display='none'; try{ const w=parseFloat(document.getElementById('preWeight').value), dw=parseFloat(document.getElementById('dryWeight').value); if(w&&dw){ const g=Math.max(0,Math.round((w-dw)*1000)); document.getElementById('ufGoal').textContent=g; sessionData.uf_goal=g; } }catch(e){} }
 function ufApply(hours, ufMl){
   if(hours){ document.getElementById('ufHours').value = String(hours); sessionData.duration_hours = hours; }
   if(ufMl){ document.getElementById('ufSim').value = (ufMl/1000).toFixed(1); document.getElementById('ufSim').dataset.touched = '1';
@@ -1238,9 +1274,12 @@ function startSession(){
   sessionData.dry_weight = parseFloat(document.getElementById('dryWeight').value) || 0;
 
   /* UF Goal จากน้ำหนัก: pre = DW → เป้า 0 (ไม่ดึงน้ำ) — ห้ามเด้งเป็น 2000 (บั๊ก 22 พ.ย. 2569) */
-  const calcUfGoal = (sessionData.pre_weight > 0 && sessionData.dry_weight > 0)
+  const _manualUf = ufPlannerManualMl();   /* 25 พ.ย. 2569: ค่าที่พยาบาลตั้งเองใน UF Planner ชนะสูตร */
+  const calcUfGoal = (_manualUf != null) ? _manualUf
+    : (sessionData.pre_weight > 0 && sessionData.dry_weight > 0)
     ? Math.max(0, Math.round((sessionData.pre_weight - sessionData.dry_weight) * 1000))
     : (sessionData.uf_goal != null ? sessionData.uf_goal : 2000);
+  const _planHours = ufPlannerHours();
 
   const data = {
     patient_hn: hn, bed_number: parseInt(bed),
@@ -1254,6 +1293,7 @@ function startSession(){
     pre_weight: sessionData.pre_weight,
     dry_weight: sessionData.dry_weight,
     uf_goal: calcUfGoal,
+    plan_hours: _planHours,           /* ชั่วโมงที่เลือกใน UF Planner (เก็บเป็น [แผนฟอก X ชม.]) */
     /* Dialyzer + Heparin + VA */
     dialyzer_type: document.getElementById('dialyzerType').value || null,
     dialyzer_reuse: parseInt(document.getElementById('dialyzerReuse').value) || 0,
@@ -1273,6 +1313,8 @@ function startSession(){
     .then(d=>{
       if(!d.session_id){ showToast('❌ ไม่ได้ session_id — ลองใหม่','danger'); return; }
       sessionData.session_id = d.session_id;
+      sessionData.uf_goal = calcUfGoal; document.getElementById('ufGoal').textContent = calcUfGoal;
+      if(_planHours) sessionData.duration_hours = _planHours;
       if(d.esa_drug) sessionData.esa_drug = d.esa_drug;
       document.getElementById('bedDisplay').textContent = bed;
       document.getElementById('sessionStatus').textContent = 'กำลังฟอก';
@@ -1550,7 +1592,7 @@ function loadExistingSession(sid){
         loadSessionRecords(sid, {}, true);
         fillPreHd(d);
         lockPreHd('✅ ข้อมูลก่อนฟอกบันทึกแล้วตอนเริ่มฟอก (ดูอย่างเดียว)');
-        try{ preEditShowBar(true); preMissingRender(d.pre_hd_missing || []); postEndTimeSuggest(); }catch(e){}
+        try{ ufPlannerSyncFromSession(d); preEditShowBar(true); preMissingRender(d.pre_hd_missing || []); postEndTimeSuggest(); }catch(e){}
       } else if(d.status==='scheduled'){
         document.getElementById('sessionStatus').textContent = 'จองไว้ — รอเริ่ม';
         document.getElementById('sessionStatus').className = 'badge badge-info';
@@ -1696,7 +1738,7 @@ function lockPreHd(note){
 
 /* ══ 25 พ.ย. 2569: แก้ไข Pre-HD หลังเริ่มฟอก · เวลา OFF จริง · ป้าย Pre-HD ไม่ครบ · แก้เวลาย้อนหลัง ══ */
 const PRE_EDIT_LOCKED = ['patientSelect','bedSelect','preEditStartTime'];   /* ผู้ป่วย/เตียงยังล็อกเสมอ */
-let _preEditOn = false, _endTimeTouched = false, _timerFrozenAt = null;
+var _preEditOn = false, _endTimeTouched = false, _timerFrozenAt = null;   /* var: เรียกได้ก่อนบรรทัดนี้รัน (calcIDWG ตอนโหลด) */
 function _hhmm(d){ if(!d) return ''; d = (d instanceof Date) ? d : (hdParseUtc(d) || new Date(d)); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
 function preEditShowBar(show){ const b = document.getElementById('preEditBar'); if(b) b.style.display = show ? 'block' : 'none'; }
 function preEditStart(){
@@ -1728,8 +1770,10 @@ function _preEditPayload(){
     vascular_access: v('vaSelect') || null, va_location: v('vaLocation') || null,
     hep_drug: v('hepProtocol') || null, hep_bolus: parseInt(v('hepBolus')) || null, hep_maintenance: parseInt(v('hepMaintenance')) || null,
   };
-  /* UF goal ใหม่จากน้ำหนักใหม่ (สูตรเดียวกับตอนเริ่มฟอก: pre − DW, ไม่ติดลบ) */
-  if(preW && dw) p.uf_goal = Math.max(0, Math.round((preW - dw)*1000));
+  /* UF goal: ค่าที่ตั้งเองใน UF Planner ชนะ · ไม่งั้นสูตร pre − DW (ไม่ติดลบ) */
+  const _m = ufPlannerManualMl();
+  if(_m != null) p.uf_goal = _m; else if(preW && dw) p.uf_goal = Math.max(0, Math.round((preW - dw)*1000));
+  const _ph = ufPlannerHours(); if(_ph) p.plan_hours = _ph;
   const st = v('preEditStartTime'); if(st && st !== _hhmm(sessionData.start_time)) p.started_time = st;
   return p;
 }
@@ -1742,7 +1786,8 @@ function preEditSave(){
       if(!ok){ showToast('❌ '+(d.error||'บันทึกไม่สำเร็จ'),'danger'); return; }
       showToast('✅ บันทึกการแก้ไข Pre-HD แล้ว','success');
       if(p.pre_weight) sessionData.pre_weight = p.pre_weight; if(p.dry_weight) sessionData.dry_weight = p.dry_weight;
-      if(p.uf_goal != null) sessionData.uf_goal = p.uf_goal;
+      if(p.uf_goal != null){ sessionData.uf_goal = p.uf_goal; const _g = document.getElementById('ufGoal'); if(_g) _g.textContent = p.uf_goal; }
+      if(p.plan_hours) sessionData.duration_hours = p.plan_hours;
       _preEditOn = false;
       document.getElementById('preEditIdle').style.display = 'block'; document.getElementById('preEditActive').style.display = 'none';
       lockPreHd(''); const note = document.getElementById('preLockNote'); if(note) note.textContent = '✅ แก้ไขล่าสุด '+_hhmm(new Date())+' น. — บันทึกแล้ว (ดูอย่างเดียว)';

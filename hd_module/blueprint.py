@@ -5002,6 +5002,16 @@ def create_session():
                         return jsonify({"error": f"เตียง {bed} ถูกจองพร้อมกันโดยผู้ใช้อีกคน — รีเฟรช dashboard แล้วเลือกเตียงใหม่"}), 409
                     raise
                 session_id = cur.fetchone()[0]
+                # 25 พ.ย. 2569: ชั่วโมงที่พยาบาลเลือกใน UF Planner (ต่างจากใบสั่งฟอกได้ เช่น คนไข้มีธุระ) → เก็บเป็น tag ใน notes
+                _pht = _plan_hours_tag(data.get("plan_hours"))
+                if _pht:
+                    cur.execute("SAVEPOINT sp_plan_hours")
+                    try:
+                        cur.execute("UPDATE hd_sessions SET notes = %s WHERE id = %s", (_pht, session_id))
+                        cur.execute("RELEASE SAVEPOINT sp_plan_hours")
+                    except Exception as _phe:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_plan_hours")
+                        logger.warning("plan hours tag: %s", _phe)
 
             # Save Dialyzer tracking (upsert active dialyzer).
             # Each optional save runs inside a SAVEPOINT: in PostgreSQL a failed
@@ -6403,6 +6413,9 @@ def _session_plan(cur, session_id):
         dur = float(r[6] or 4)
     except (TypeError, ValueError):
         dur = 4.0
+    _ph = _plan_hours_from_notes(r[8])      # ชั่วโมงที่พยาบาลตั้งเองใน UF Planner ชนะใบสั่งฟอก
+    if _ph:
+        dur = _ph
     ext = _extend_min_from_notes(r[7])
     planned = (r[0] + timedelta(hours=dur, minutes=ext)) if r[0] else None
     return {"started_at": r[0], "ended_at": r[1], "bed_released_at": r[2], "status": r[3],
@@ -6493,6 +6506,10 @@ def update_pre_hd(session_id):
                 ug = _safe_int(data.get("uf_goal"))
                 if ug is not None and 0 <= ug <= 8000:
                     updates.append("uf_goal = %s"); params.append(ug)
+            if data.get("plan_hours") is not None:
+                _nn = _notes_with_plan_hours(plan.get("notes"), data.get("plan_hours"))
+                if _nn is not None:
+                    updates.append("notes = %s"); params.append(_nn)
             new_start = None
             if data.get("started_time"):
                 new_start = _parse_entry_time(data["started_time"], anchor_utc=plan["started_at"] or datetime.utcnow())
@@ -7048,6 +7065,43 @@ def _extend_min_from_notes(notes):
         return ext if 0 < ext <= 240 else 0
     except Exception:
         return 0
+
+
+PLAN_HOURS_RE = __import__("re").compile(r"\[แผนฟอก ([\d.]+) ชม\.\]")
+
+
+def _plan_hours_from_notes(notes):
+    """'[แผนฟอก 4.5 ชม.]' ใน notes ของรอบ → 4.5 (ชั่วโมงที่พยาบาลตั้งเองใน UF Planner ตอนเริ่ม/แก้ Pre-HD)
+    ไม่มี/ผิดรูป/นอกช่วง 2–8 → None (ใช้ใบสั่งฟอกตามเดิม) — 25 พ.ย. 2569"""
+    try:
+        m = PLAN_HOURS_RE.search(notes or "")
+        if not m:
+            return None
+        h = float(m.group(1))
+        return h if 2 <= h <= 8 else None
+    except Exception:
+        return None
+
+
+def _plan_hours_tag(hours):
+    try:
+        h = float(hours)
+    except (TypeError, ValueError):
+        return None
+    if not 2 <= h <= 8:
+        return None
+    return f"[แผนฟอก {h:g} ชม.]"
+
+
+def _notes_with_plan_hours(notes, hours):
+    """แทนที่ tag เดิม (ถ้ามี) หรือเติมท้าย — คืน None ถ้าไม่ต้องแก้"""
+    tag = _plan_hours_tag(hours)
+    if not tag:
+        return None
+    cur = notes or ""
+    if PLAN_HOURS_RE.search(cur):
+        return PLAN_HOURS_RE.sub(tag, cur, count=1)
+    return (cur + "\n" + tag).strip() if cur else tag
 
 
 def _uf_watch_limits():
@@ -8828,7 +8882,8 @@ def _bed_dashboard_impl():
                            s.cancel_reason,
                            -- เวลาที่ยืดบนเครื่องล่าสุด (notes 'extend=NN' จากปุ่มบันทึก UF ทุกหน้า) — คอลัมน์ท้ายสุด ไม่ขยับ index เดิม
                            (SELECT u.notes FROM hd_uf_records u WHERE u.session_id = s.id AND u.notes LIKE '%%extend=%%'
-                            ORDER BY u.recorded_at DESC, u.id DESC LIMIT 1) AS extend_notes
+                            ORDER BY u.recorded_at DESC, u.id DESC LIMIT 1) AS extend_notes,
+                           s.notes AS session_notes   -- 25 พ.ย. 2569: '[แผนฟอก X ชม.]' จาก UF Planner (ท้ายสุด ไม่ขยับ index)
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.session_date = %s
@@ -8926,7 +8981,7 @@ def _bed_dashboard_impl():
                                 "esa_dose": row[20] if len(row) > 20 else None,
                             },
                             "start_time": (row[8].isoformat() + "Z") if row[8] else None,
-                            "duration_hours": float(row[9]) if row[9] else 4,
+                            "duration_hours": (_plan_hours_from_notes(row[23]) if len(row) > 23 else None) or (float(row[9]) if row[9] else 4),
                             "extend_min": _extend_min_from_notes(row[22] if len(row) > 22 else None),
                             "esa_given": row[10],
                             "esa_drug_given": row[11],
@@ -11929,6 +11984,18 @@ def flowsheet_entries(conn, session_id):
                     except Exception:
                         pass
                     logger.warning("flowsheet duration lookup failed: %s", de)
+                # 25 พ.ย. 2569: ชั่วโมงที่พยาบาลตั้งเองใน UF Planner ('[แผนฟอก X ชม.]' ใน notes) ชนะใบสั่งฟอก
+                try:
+                    cur.execute("SELECT notes FROM hd_sessions WHERE id = %s", (session_id,))
+                    _nr = cur.fetchone()
+                    _ph = _plan_hours_from_notes(_nr[0] if _nr else None)
+                    if _ph:
+                        dur_h = _ph
+                except Exception:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                 srow = tuple(srow) + (dur_h,)
                 # 24 พ.ย. 2569: น้ำหนักแห้ง + สถานะรอบ ให้ Sheet ใช้สมอง UF ตัวเดียวกับหน้ารอบฟอก (index 7, 8)
                 dw_v, st_v = None, None
