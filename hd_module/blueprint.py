@@ -365,6 +365,12 @@ def session_blackbox(session_id):
         return jsonify({"error": str(e)}), 500
 
 
+@hd_web.route("/ocr-test")
+def hd_ocr_test_page():
+    """🧪 ทดสอบอ่านจอเครื่องหลายรูป (calibration) — ไม่ผูกผู้ป่วย ไม่บันทึกค่า"""
+    return render_template("hd_ocr_test.html")
+
+
 @hd_web.route("/ocr-accuracy")
 def hd_ocr_accuracy_page():
     """📷📊 ความแม่นการอ่านจอเครื่องรายรุ่น (Magic Camera 2.0)"""
