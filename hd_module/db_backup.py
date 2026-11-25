@@ -22,6 +22,7 @@ import io
 import json
 import logging
 import tarfile
+import tempfile
 from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
@@ -76,9 +77,52 @@ def table_ddl(cur, table):
     return f'CREATE TABLE IF NOT EXISTS "{table}" (\n' + ",\n".join(cols) + "\n);", names
 
 
-def dump(conn, app_version=""):
-    """→ (archive_bytes, manifest)"""
-    buf = io.BytesIO()
+class _CsvSpool:
+    """One table's COPY output spooled to a binary temp file instead of RAM.
+
+    25 Nov 2026: the 23:00 backup pushed the 512 MB web instance into OOM — every
+    table was held as a Python str (2–4 bytes/char for Thai), then encoded to bytes,
+    then copied again into the tar: ~3× the table size at peak, on top of a worker
+    that had been running all day. psycopg2 writes bytes to anything that is not a
+    text file, so this sink receives bytes straight from COPY; the fake cursor in the
+    tests writes str, which is encoded on the way through.
+    """
+
+    def __init__(self):
+        self.f = tempfile.TemporaryFile()
+        self.size = 0
+
+    def write(self, data):
+        if isinstance(data, str):
+            data = data.encode("utf-8")
+        self.f.write(data)
+        self.size += len(data)
+        return len(data)
+
+    def close(self):
+        try:
+            self.f.close()
+        except Exception:
+            pass
+
+
+def _add_file(tar, name, fileobj, size):
+    info = tarfile.TarInfo(name)
+    info.size = size
+    info.mtime = int(datetime.now(timezone.utc).timestamp())
+    fileobj.seek(0)
+    tar.addfile(info, fileobj)
+
+
+def dump(conn, app_version="", out=None):
+    """→ (archive_bytes, manifest).
+
+    out: optional seekable binary file (e.g. tempfile.TemporaryFile()) — the archive is
+    streamed there and archive_bytes is b"" (the caller reads `out`). Without it the
+    archive is built in a BytesIO as before (tests, small DBs). Either way each table's
+    CSV goes through a disk spool, never a whole-table str.
+    """
+    buf = out if out is not None else io.BytesIO()
     manifest = {"created_at": _now().isoformat(timespec="seconds"), "app_version": app_version, "tables": {}}
     ddl = []
     with conn.cursor() as cur:
@@ -87,33 +131,39 @@ def dump(conn, app_version=""):
         tables = list_tables(cur)
         with tarfile.open(fileobj=buf, mode="w:gz") as tar:
             for t in tables:
+                spool = _CsvSpool()
                 try:
                     stmt, cols = table_ddl(cur, t)
                     ddl.append(stmt)
-                    out = io.StringIO()
-                    cur.copy_expert(f'COPY "{t}" TO STDOUT WITH (FORMAT csv, HEADER true)', out)
-                    data = out.getvalue().encode("utf-8")
+                    cur.copy_expert(f'COPY "{t}" TO STDOUT WITH (FORMAT csv, HEADER true)', spool)
                     cur.execute(f'SELECT COUNT(*) FROM "{t}"')
                     n = cur.fetchone()[0]
-                    info = tarfile.TarInfo(f"data/{t}.csv")
-                    info.size = len(data)
-                    info.mtime = int(datetime.now(timezone.utc).timestamp())
-                    tar.addfile(info, io.BytesIO(data))
-                    manifest["tables"][t] = {"rows": n, "bytes": len(data), "columns": cols}
+                    _add_file(tar, f"data/{t}.csv", spool.f, spool.size)
+                    manifest["tables"][t] = {"rows": n, "bytes": spool.size, "columns": cols}
                 except Exception as e:
                     logger.warning("backup table %s skipped: %s", t, str(e)[:100])
                     conn.rollback()
                     manifest["tables"][t] = {"error": str(e)[:100]}
+                finally:
+                    spool.close()
             sch = "\n\n".join(ddl).encode("utf-8")
             for name, blob in (("schema.sql", sch), ("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=1, default=str).encode("utf-8"))):
-                info = tarfile.TarInfo(name)
-                info.size = len(blob)
-                info.mtime = int(datetime.now(timezone.utc).timestamp())
-                tar.addfile(info, io.BytesIO(blob))
+                _add_file(tar, name, io.BytesIO(blob), len(blob))
     manifest["archive_bytes"] = buf.tell()
     manifest["table_count"] = sum(1 for v in manifest["tables"].values() if "rows" in v)
     manifest["row_total"] = sum(v.get("rows", 0) for v in manifest["tables"].values())
+    if out is not None:
+        out.flush()
+        return b"", manifest
     return buf.getvalue(), manifest
+
+
+def _as_fileobj(archive):
+    """bytes → BytesIO; file-like → rewound as is."""
+    if isinstance(archive, (bytes, bytearray)):
+        return io.BytesIO(archive)
+    archive.seek(0)
+    return archive
 
 
 def verify(archive_bytes):
@@ -130,7 +180,7 @@ def verify(archive_bytes):
         except OverflowError:
             _lim //= 2
     try:
-        with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+        with tarfile.open(fileobj=_as_fileobj(archive_bytes), mode="r:gz") as tar:
             names = tar.getnames()
             if "manifest.json" not in names or "schema.sql" not in names:
                 return False, ["manifest/schema missing"]
@@ -142,7 +192,8 @@ def verify(archive_bytes):
                 if m is None:
                     problems.append(f"{t}: csv missing")
                     continue
-                txt = io.StringIO(m.read().decode("utf-8"))
+                # Stream the CSV through the reader — never the whole table as one str (OOM 25 Nov 2026)
+                txt = io.TextIOWrapper(m, encoding="utf-8", newline="")
                 n = sum(1 for _ in csv.reader(txt)) - 1
                 if n != info["rows"]:
                     problems.append(f"{t}: csv {n} rows ≠ manifest {info['rows']}")
@@ -158,7 +209,7 @@ def restore_to_schema(conn, archive_bytes, schema=None, tables=None):
     if not schema.startswith("restore_"):
         raise ValueError("restore schema must start with restore_")
     out = {"schema": schema, "restored": {}, "errors": {}}
-    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
+    with tarfile.open(fileobj=_as_fileobj(archive_bytes), mode="r:gz") as tar:
         man = json.loads(tar.extractfile("manifest.json").read().decode("utf-8"))
         ddl = tar.extractfile("schema.sql").read().decode("utf-8")
         with conn.cursor() as cur:
@@ -181,7 +232,8 @@ def restore_to_schema(conn, archive_bytes, schema=None, tables=None):
                 try:
                     m = tar.extractfile(f"data/{t}.csv")
                     cur.execute(f'TRUNCATE "{schema}"."{t}"')
-                    cur.copy_expert(f'COPY "{schema}"."{t}" FROM STDIN WITH (FORMAT csv, HEADER true)', io.StringIO(m.read().decode("utf-8")))
+                    cur.copy_expert(f'COPY "{schema}"."{t}" FROM STDIN WITH (FORMAT csv, HEADER true)',
+                                    io.TextIOWrapper(m, encoding="utf-8", newline=""))  # streamed, not one big str
                     cur.execute(f'SELECT COUNT(*) FROM "{schema}"."{t}"')
                     out["restored"][t] = cur.fetchone()[0]
                 except Exception as e:

@@ -138,6 +138,14 @@ EXPOSE 10000
 # 25 พ.ย. 2569 (502 ตอน 06:12/07:12 — health check ตอบไม่ทัน 5 วิ ขณะ thread ทั้ง 8 ถูกใช้หมด):
 # --threads 8 → รับพร้อมกัน 16 คำขอ: แดชบอร์ด 4-5 เครื่อง + หน้ารอบฟอก + webhook รูป ไม่ทำให้ /health/live รอคิว
 # PGOPTIONS statement_timeout 30 วิ → คำสั่ง DB ที่ค้าง (lock/ช้า) ถูกตัดและคืน thread แทนที่จะค้างไม่มีกำหนด
+# 25 พ.ย. 2569 กลางวัน (OOM >512 MB 9 ครั้ง 08:39–17:50 หลัง DB อัปเกรดแล้ว — คอขวดย้ายจาก DB มาที่ RAM):
+#   สาเหตุร่วม: (1) max-requests 4000 ทำให้ worker อยู่นานหลายชั่วโมง memory ที่บวมจากงานรูป/PDF/ดัชนีเอกสาร
+#   ไม่ถูกล้างเหมือนตอน 300 (2) glibc malloc สร้าง arena ต่อ thread → RSS ขึ้นเป็นขั้นบันไดและไม่คืน
+#   แก้: MALLOC_ARENA_MAX=2 (วิธีมาตรฐานของ gunicorn หลาย thread ใน container; RSS ลด 30–50%)
+#        max-requests 1200 ± 400 → รีไซเคิลราวทุก 1–2 ชม. แบบเหลื่อมกัน (บูต ~9 วิ อีก worker ยังรับคำขออยู่ → ไม่ 502)
+#        threads 8 → 6 ต่อ worker (12 พร้อมกัน พอสำหรับ 4–6 เครื่อง เพราะ DB 0.5 CPU ไม่ต่อคิวแล้ว)
+#   web service อัปเกรดเป็น 1c-2g (19:41) — ค่านี้คือกันไม่ให้บวมตั้งแต่ต้น ไม่ใช่พึ่ง RAM อย่างเดียว
 ENV PGOPTIONS="-c statement_timeout=30000"
-CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --threads 8 --timeout 120 \
-    --max-requests 4000 --max-requests-jitter 2000 --worker-tmp-dir /dev/shm --access-logfile -
+ENV MALLOC_ARENA_MAX=2
+CMD gunicorn server:app --bind "0.0.0.0:${PORT:-10000}" --workers 2 --threads 6 --timeout 120 \
+    --max-requests 1200 --max-requests-jitter 400 --worker-tmp-dir /dev/shm --access-logfile -

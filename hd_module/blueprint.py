@@ -2625,20 +2625,27 @@ def run_db_backup(trigger="scheduled", restore_test=False, send_line=True):
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not db_url:
         return {"error": "no database"}
+    # 25 Nov 2026: the whole archive used to live in RAM (dump → bytes → verify → upload), and the
+    # 23:00 run tipped a long-running 512 MB worker into OOM (Instance failed 23:02). The archive now
+    # streams to a temp file on disk; GCS uploads from the file; only Drive / restore-test (which
+    # need bytes) read the compressed archive back, and the spool is dropped right after.
+    import gc
+    import tempfile
+    spool = tempfile.TemporaryFile()
     conn = psycopg2.connect(db_url, connect_timeout=10)
     try:
-        blob, man = dbb.dump(conn, app_version=(os.environ.get("RENDER_GIT_COMMIT") or "")[:7])
+        _, man = dbb.dump(conn, app_version=(os.environ.get("RENDER_GIT_COMMIT") or "")[:7], out=spool)
         restore = None
         if restore_test:
             try:
-                restore = dbb.restore_to_schema(conn, blob)
+                restore = dbb.restore_to_schema(conn, spool)
                 dbb.drop_restore_schema(conn, restore["schema"])
             except Exception as e:
                 conn.rollback()
                 restore = {"ok": False, "error": str(e)[:120], "restored": {}}
     finally:
         conn.close()
-    verify_ok, problems = dbb.verify(blob)
+    verify_ok, problems = dbb.verify(spool)
     name = dbb.archive_name()
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     gcs_path = ""
@@ -2646,7 +2653,8 @@ def run_db_backup(trigger="scheduled", restore_test=False, send_line=True):
         bucket = getattr(current_app.config.get("STORAGE_OBJ"), "_bucket", None)
         if bucket is not None:
             gcs_path = f"{dbb.GCS_PREFIX}/{now.year}/{now.month:02d}/{name}"
-            bucket.blob(gcs_path).upload_from_string(blob, content_type="application/gzip")
+            spool.seek(0)
+            bucket.blob(gcs_path).upload_from_file(spool, content_type="application/gzip", rewind=True)
     except Exception as e:
         logger.error("db backup gcs: %s", e)
         gcs_path = ""
@@ -2656,13 +2664,21 @@ def run_db_backup(trigger="scheduled", restore_test=False, send_line=True):
         from .daily_records import drive_upload_fn
         up = drive_upload_fn()
         if up:
+            spool.seek(0)
+            blob = spool.read()          # compressed archive only, and only when Drive is on
             up(f"{dbb.DRIVE_DIR}/{now.year}/{now.month:02d}/{name}", blob, "application/gzip")
+            del blob
             drive_ok = True
         else:
             drive_err = "ไม่ได้เปิดใช้ Google Drive"
     except Exception as e:
         drive_err = str(e)[:120]
         logger.warning("db backup drive: %s", drive_err)
+    try:
+        spool.close()
+    except Exception:
+        pass
+    gc.collect()
     status = {"name": name, "gcs": gcs_path, "drive": drive_ok, "drive_error": drive_err, "verify": verify_ok, "problems": problems,
               "tables": man.get("table_count"), "rows": man.get("row_total"), "bytes": man.get("archive_bytes"),
               "restore": {k: v for k, v in (restore or {}).items() if k != "restored"} if restore else None,
