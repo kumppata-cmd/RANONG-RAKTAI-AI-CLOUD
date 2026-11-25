@@ -266,10 +266,32 @@
     <button class="btn btn-success btn-lg" onclick="startSession()">▶️ เริ่มฟอกเลือด</button>
     <button class="btn btn-outline btn-lg" onclick="openBooking()" style="color:var(--info);border-color:var(--info);">📅 จองรอบฟอก (เลือกวัน/รอบ)</button>
   </div>
+  <!-- ✏️ 25 พ.ย. 2569: แก้ไข Pre-HD หลังเริ่มฟอกแล้ว (รอบ in_progress) — ปุ่มเดียว เปิด/บันทึก/ยกเลิก -->
+  <div id="preEditBar" style="display:none;margin-top:10px;padding:10px 12px;border-radius:10px;border:1px solid var(--border);background:var(--bg-card)">
+    <div id="preEditIdle">
+      <button class="btn btn-outline" style="width:100%" onclick="preEditStart()">✏️ แก้ไขข้อมูลก่อนฟอก / เวลาเริ่ม</button>
+      <div style="font-size:.7rem;color:var(--fg-muted);margin-top:4px;text-align:center">กรอกผิดหรือไม่ครบ แก้ได้ที่นี่ ไม่ต้องยกเลิกรอบ — ทุกการแก้ถูกบันทึกไว้ (audit)</div>
+    </div>
+    <div id="preEditActive" style="display:none">
+      <div class="form-group" style="margin-bottom:8px">
+        <label class="form-label">🕐 เวลาเริ่มฟอกจริง</label>
+        <input type="time" class="form-control" id="preEditStartTime" style="max-width:160px">
+        <div style="font-size:.7rem;color:var(--fg-muted)">ถ้ากด "เริ่มฟอก" ช้ากว่าเวลา ON จริง ใส่เวลาจริงที่นี่ — นาฬิกา/Sheet/Dashboard จะขยับตาม</div>
+      </div>
+      <div class="grid-2">
+        <button class="btn btn-success" onclick="preEditSave()">💾 บันทึกการแก้ไข</button>
+        <button class="btn btn-outline" onclick="preEditCancel()">ยกเลิก</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ═══ INTRA-HD TAB ═══ -->
 <div class="tab-content" data-tab-content-group="session" data-tab-content="intra">
+  <!-- ⚠️ 25 พ.ย. 2569: Pre-HD ไม่ครบ → บอกตั้งแต่เริ่ม ไม่ใช่ตอนปิดรอบ (กดแล้วไปโหมดแก้ไข Pre-HD) -->
+  <div id="preMissingBanner" style="display:none;margin-bottom:10px;padding:8px 12px;border-radius:8px;background:rgba(243,156,18,.12);border-left:4px solid var(--warning);font-size:.8rem;cursor:pointer" onclick="preEditFromBanner()">
+    ⚠️ <span id="preMissingText">ข้อมูลก่อนฟอกยังไม่ครบ</span> — <b>แตะเพื่อแก้ไข</b>
+  </div>
   <!-- Timer Countdown -->
   <div class="session-timer" id="sessionTimer" style="display:none;">
     <div class="timer-label">⏱ เวลาฟอกเลือด</div>
@@ -541,6 +563,14 @@
     <div class="form-group" style="margin-top:12px;">
       <label class="form-label">หมายเหตุ</label>
       <textarea class="form-control" id="postNotes" rows="3" placeholder="บันทึกเพิ่มเติม (ถ้ามี)"></textarea>
+    </div>
+    <!-- 🕐 25 พ.ย. 2569: เวลาเลิกฟอกจริง — เติมให้เอง (ปล่อยเตียง → ครบตามแผน → ตอนนี้) แก้ได้ก่อนกดเสร็จสิ้น -->
+    <div class="form-group" style="margin-top:12px;">
+      <label class="form-label">🕐 เวลาเลิกฟอก (OFF HD)</label>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <input type="time" class="form-control" id="postEndTime" style="max-width:150px" onchange="_endTimeTouched=true">
+        <span id="postEndHint" style="font-size:.72rem;color:var(--fg-muted)"></span>
+      </div>
     </div>
   </div>
 
@@ -880,6 +910,16 @@ let _timerAlertedDone = false;
 
 function updateTimer(){
   if(!sessionData.start_time) return;
+  /* 25 พ.ย. 2569: ครบตามแผน/ลงเตียงแล้ว → หยุดนับที่เวลานั้น (ไม่บวมเป็น 5–6 ชม. ระหว่างรอสรุป) */
+  if(typeof timerFreezeIfDone === 'function' && timerFreezeIfDone()){
+    const timerEl = document.getElementById('sessionTimer'); timerEl.classList.add('urgent');
+    document.getElementById('completeBtn').style.display = 'block';
+    const rb = document.getElementById('bedReleaseBox'); if(rb && !sessionData.bed_released) rb.style.display = 'block';
+    if(!_timerAlertedDone){ playAlertSound('critical'); vibrateAlert('critical'); _timerAlertedDone=true; }
+    try{ postEndTimeSuggest(); }catch(e){}
+    clearInterval(timerInterval);
+    return;
+  }
   const now = new Date();
   const totalMs = sessionData.duration_hours * 3600000;
   const elapsedMs = now - sessionData.start_time;
@@ -1242,6 +1282,8 @@ function startSession(){
       switchTab('session','intra');
       /* 24 พ.ย. 2569: ล็อก Pre-HD ทันที — กันกดเริ่มซ้ำ/แก้ข้อมูลก่อนฟอกหลังเริ่มแล้ว */
       lockPreHd('✅ เริ่มฟอกแล้ว — ข้อมูลก่อนฟอกถูกล็อก (ดูอย่างเดียว)');
+      try{ sessionData.planned_end = new Date(sessionData.start_time.getTime() + sessionData.duration_hours*3600000).toISOString(); preEditShowBar(true);
+           setTimeout(()=>hdFetch('/hd/api/v1/sessions/'+d.session_id+'/detail').then(r=>r.ok?r.json():null).then(x=>{ if(x) preMissingRender(x.pre_hd_missing||[]); }).catch(()=>{}), 1200); }catch(e){}
       document.getElementById('cancelBtn').style.display = 'inline-flex';
       loadEsaHistory();
       /* Show HD Sheet link */
@@ -1482,6 +1524,8 @@ function loadExistingSession(sid){
           if(!st.endsWith('Z')&&!st.includes('+')) st+='Z';
           sessionData.start_time = hdParseUtc(st) || new Date(st);
           sessionData.duration_hours = d.duration_hours || 4;
+          sessionData.planned_end = d.planned_end || null; sessionData.bed_released_at = d.bed_released_at || null;
+          sessionData.end_grace_min = d.end_grace_min; sessionData.extend_min = d.extend_min || 0;
           document.getElementById('sessionTimer').style.display = 'block';
           document.getElementById('timerStartTime').textContent = sessionData.start_time.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});
           const endTime = new Date(sessionData.start_time.getTime()+sessionData.duration_hours*3600000);
@@ -1506,6 +1550,7 @@ function loadExistingSession(sid){
         loadSessionRecords(sid, {}, true);
         fillPreHd(d);
         lockPreHd('✅ ข้อมูลก่อนฟอกบันทึกแล้วตอนเริ่มฟอก (ดูอย่างเดียว)');
+        try{ preEditShowBar(true); preMissingRender(d.pre_hd_missing || []); postEndTimeSuggest(); }catch(e){}
       } else if(d.status==='scheduled'){
         document.getElementById('sessionStatus').textContent = 'จองไว้ — รอเริ่ม';
         document.getElementById('sessionStatus').className = 'badge badge-info';
@@ -1648,6 +1693,145 @@ function lockPreHd(note){
     n.textContent = note; pre.prepend(n);
   }
 }
+
+/* ══ 25 พ.ย. 2569: แก้ไข Pre-HD หลังเริ่มฟอก · เวลา OFF จริง · ป้าย Pre-HD ไม่ครบ · แก้เวลาย้อนหลัง ══ */
+const PRE_EDIT_LOCKED = ['patientSelect','bedSelect','preEditStartTime'];   /* ผู้ป่วย/เตียงยังล็อกเสมอ */
+let _preEditOn = false, _endTimeTouched = false, _timerFrozenAt = null;
+function _hhmm(d){ if(!d) return ''; d = (d instanceof Date) ? d : (hdParseUtc(d) || new Date(d)); return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0'); }
+function preEditShowBar(show){ const b = document.getElementById('preEditBar'); if(b) b.style.display = show ? 'block' : 'none'; }
+function preEditStart(){
+  const pre = document.querySelector('[data-tab-content="pre"]'); if(!pre) return;
+  _preEditOn = true;
+  pre.querySelectorAll('input, select, textarea').forEach(el=>{ if(!PRE_EDIT_LOCKED.includes(el.id)) el.disabled = false; });
+  document.getElementById('preEditIdle').style.display = 'none';
+  document.getElementById('preEditActive').style.display = 'block';
+  const t = document.getElementById('preEditStartTime'); t.disabled = false; t.value = _hhmm(sessionData.start_time);
+  const note = document.getElementById('preLockNote'); if(note) note.textContent = '✏️ กำลังแก้ไขข้อมูลก่อนฟอก — กด "บันทึกการแก้ไข" เมื่อเสร็จ';
+  try{ switchTab('session','pre'); }catch(e){}
+}
+function preEditCancel(){
+  _preEditOn = false;
+  lockPreHd(''); document.getElementById('preEditIdle').style.display = 'block'; document.getElementById('preEditActive').style.display = 'none';
+  const note = document.getElementById('preLockNote'); if(note) note.textContent = '✅ ข้อมูลก่อนฟอกบันทึกแล้วตอนเริ่มฟอก (ดูอย่างเดียว)';
+  if(sessionData.session_id) loadExistingSession(sessionData.session_id);
+}
+function preEditFromBanner(){ preEditStart(); }
+function _preEditPayload(){
+  const v = id => document.getElementById(id) ? document.getElementById(id).value : '';
+  const preW = parseFloat(v('preWeight')) || null, dw = parseFloat(v('dryWeight')) || null;
+  const p = {
+    pre_weight: preW, dry_weight: dw,
+    pre_sbp: parseInt(v('preSbp')) || null, pre_dbp: parseInt(v('preDbp')) || null, pre_hr: parseInt(v('preHr')) || null,
+    pre_temp: parseFloat(v('preTemp')) || null, pre_spo2: parseInt(v('preSpo2')) || null,
+    pre_symptoms: Array.from(document.querySelectorAll('input[name="pre_symptom"]:checked')).map(el=>el.value),
+    dialyzer_type: v('dialyzerType') || null, dialyzer_reuse: parseInt(v('dialyzerReuse')) || null,
+    vascular_access: v('vaSelect') || null, va_location: v('vaLocation') || null,
+    hep_drug: v('hepProtocol') || null, hep_bolus: parseInt(v('hepBolus')) || null, hep_maintenance: parseInt(v('hepMaintenance')) || null,
+  };
+  /* UF goal ใหม่จากน้ำหนักใหม่ (สูตรเดียวกับตอนเริ่มฟอก: pre − DW, ไม่ติดลบ) */
+  if(preW && dw) p.uf_goal = Math.max(0, Math.round((preW - dw)*1000));
+  const st = v('preEditStartTime'); if(st && st !== _hhmm(sessionData.start_time)) p.started_time = st;
+  return p;
+}
+function preEditSave(){
+  if(!sessionData.session_id){ showToast('ยังไม่มีรอบฟอก','warning'); return; }
+  const p = _preEditPayload();
+  hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/pre-hd',{method:'PUT', body:JSON.stringify(p)})
+    .then(r=>r.json().then(d=>({ok:r.ok, d})))
+    .then(({ok,d})=>{
+      if(!ok){ showToast('❌ '+(d.error||'บันทึกไม่สำเร็จ'),'danger'); return; }
+      showToast('✅ บันทึกการแก้ไข Pre-HD แล้ว','success');
+      if(p.pre_weight) sessionData.pre_weight = p.pre_weight; if(p.dry_weight) sessionData.dry_weight = p.dry_weight;
+      if(p.uf_goal != null) sessionData.uf_goal = p.uf_goal;
+      _preEditOn = false;
+      document.getElementById('preEditIdle').style.display = 'block'; document.getElementById('preEditActive').style.display = 'none';
+      lockPreHd(''); const note = document.getElementById('preLockNote'); if(note) note.textContent = '✅ แก้ไขล่าสุด '+_hhmm(new Date())+' น. — บันทึกแล้ว (ดูอย่างเดียว)';
+      /* เวลาเริ่มใหม่ → นาฬิกาเดินจากเวลาใหม่ */
+      if(d.started_at){ sessionData.start_time = hdParseUtc(d.started_at) || new Date(d.started_at); _timerFrozenAt = null;
+        document.getElementById('timerStartTime').textContent = _hhmm(sessionData.start_time);
+        const endTime = new Date(sessionData.start_time.getTime()+sessionData.duration_hours*3600000);
+        document.getElementById('timerEndTime').textContent = _hhmm(endTime);
+        if(timerInterval) clearInterval(timerInterval); _timerAlertedDone = false; document.getElementById('sessionTimer').classList.remove('urgent');
+        updateTimer(); timerInterval = setInterval(updateTimer, 1000); }
+      try{ loadIdhRisk(); loadUfCoach(); }catch(e){}
+      preMissingRender([]);  /* เคลียร์ป้ายก่อน แล้วให้ reload ตัดสินใหม่ */
+      setTimeout(()=>{ if(sessionData.session_id) hdFetch('/hd/api/v1/sessions/'+sessionData.session_id+'/detail').then(r=>r.ok?r.json():null).then(x=>{ if(x) preMissingRender(x.pre_hd_missing||[]); }).catch(()=>{}); }, 800);
+      try{ switchTab('session','intra'); }catch(e){}
+    }).catch(()=>showToast('เชื่อมต่อไม่ได้ — ลองใหม่','danger'));
+}
+function preMissingRender(list){
+  const b = document.getElementById('preMissingBanner'); if(!b) return;
+  if(!list || !list.length){ b.style.display = 'none'; return; }
+  document.getElementById('preMissingText').textContent = 'ก่อนฟอกยังไม่มี: ' + list.join(', ');
+  b.style.display = 'block';
+}
+/* เวลาเลิกฟอกที่ระบบเสนอ: ปล่อยเตียง → ครบตามแผน (ถ้าเกิน grace) → ตอนนี้ */
+function postEndTimeSuggest(){
+  const inp = document.getElementById('postEndTime'), hint = document.getElementById('postEndHint'); if(!inp || _endTimeTouched) return;
+  const now = new Date(); let t = now, why = 'เวลาตอนนี้';
+  const rel = sessionData.bed_released_at ? (hdParseUtc(sessionData.bed_released_at) || new Date(sessionData.bed_released_at)) : null;
+  const pe = sessionData.planned_end ? (hdParseUtc(sessionData.planned_end) || new Date(sessionData.planned_end)) : null;
+  const grace = (sessionData.end_grace_min != null ? sessionData.end_grace_min : 15) * 60000;
+  if(rel && rel <= now){ t = rel; why = 'ตามเวลาปล่อยเตียง'; }
+  else if(pe && now - pe > grace){ t = pe; why = 'ครบตามแผน (สรุปช้ากว่า '+Math.round((now-pe)/60000)+' นาที)'; }
+  inp.value = _hhmm(t); if(hint) hint.textContent = '← ' + why + ' · แก้ได้ถ้า OFF จริงต่างจากนี้';
+}
+/* นาฬิกา Intra-HD: ครบตามแผน/ปล่อยเตียงแล้ว → หยุดนับ ไม่บวมเป็น 5–6 ชม. */
+function timerFreezeIfDone(){
+  const now = new Date();
+  const rel = sessionData.bed_released_at ? (hdParseUtc(sessionData.bed_released_at) || new Date(sessionData.bed_released_at)) : null;
+  const pe = sessionData.planned_end ? (hdParseUtc(sessionData.planned_end) || new Date(sessionData.planned_end)) : null;
+  let at = null, label = '';
+  if(rel && rel <= now){ at = rel; label = 'ลงเตียง '+_hhmm(rel)+' น.'; }
+  else if(pe && now >= pe){ at = pe; label = 'ครบตามแผน '+_hhmm(pe)+' น.'; }
+  if(!at || !sessionData.start_time) return false;
+  const mins = Math.max(0, Math.round((at - sessionData.start_time)/60000));
+  document.getElementById('timerDisplay').textContent = Math.floor(mins/60)+':'+String(mins%60).padStart(2,'0')+' ชม. ✅';
+  document.getElementById('timerBarFill').style.width = '100%';
+  document.getElementById('timerEndTime').textContent = label + ' — รอสรุป Post-HD';
+  _timerFrozenAt = at;
+  return true;
+}
+/* 🕐 แก้เวลาเริ่ม/สิ้นสุดย้อนหลัง (รอบที่ปิดแล้ว) — พร้อมเหตุผล 1 แตะ */
+function timeEditOpen(){
+  const b = document.getElementById('timeEditBox'); if(!b) return;
+  b.style.display = b.style.display === 'none' ? 'block' : 'none';
+}
+function timeEditSave(){
+  const sid = sessionData.session_id; if(!sid) return;
+  const st = document.getElementById('teStart').value, en = document.getElementById('teEnd').value;
+  const reason = (document.querySelector('input[name="teReason"]:checked')||{}).value;
+  if(!reason){ showToast('เลือกเหตุผลการแก้เวลาก่อน','warning'); return; }
+  const body = {reason, reason_text: document.getElementById('teText').value || ''};
+  if(st && st !== sessionData._te_start0) body.started_time = st;
+  if(en && en !== sessionData._te_end0) body.ended_time = en;
+  if(!body.started_time && !body.ended_time){ showToast('ยังไม่ได้เปลี่ยนเวลา','warning'); return; }
+  hdFetch('/hd/api/v1/sessions/'+sid+'/times',{method:'PUT', body:JSON.stringify(body)})
+    .then(r=>r.json().then(d=>({ok:r.ok,d}))).then(({ok,d})=>{
+      if(!ok){ showToast('❌ '+(d.error||'แก้เวลาไม่สำเร็จ'),'danger'); return; }
+      showToast('✅ แก้เวลาแล้ว — '+d.note,'success');
+      loadExistingSession(sid);
+    }).catch(()=>showToast('เชื่อมต่อไม่ได้ — ลองใหม่','danger'));
+}
+function timeEditRender(d){
+  const b = document.getElementById('historyBanner'); if(!b || d.status !== 'completed') return;
+  const reasons = d.time_edit_reasons || {late_start:'กดเริ่มช้า', late_summary:'กดสรุปช้า', early_off:'OFF ก่อนเวลา (อาการ)', other:'อื่น ๆ'};
+  sessionData._te_start0 = _hhmm(d.started_at); sessionData._te_end0 = _hhmm(d.ended_at);
+  const box = document.createElement('div'); box.style.marginTop = '8px';
+  box.innerHTML = `<button class="btn btn-outline" style="font-size:.8rem;padding:6px 10px" onclick="timeEditOpen()">🕐 แก้เวลาเริ่ม/สิ้นสุด</button>
+    <div id="timeEditBox" style="display:none;margin-top:8px;padding:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg-card)">
+      <div class="grid-2">
+        <div class="form-group"><label class="form-label">เริ่มฟอกจริง</label><input type="time" class="form-control" id="teStart" value="${sessionData._te_start0}"></div>
+        <div class="form-group"><label class="form-label">เลิกฟอกจริง (OFF)</label><input type="time" class="form-control" id="teEnd" value="${sessionData._te_end0}"></div>
+      </div>
+      <div style="font-size:.78rem;font-weight:700;margin:4px 0">เหตุผล (เลือก 1)</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px">${Object.entries(reasons).map(([k,v])=>`<label class="symptom-check" style="font-size:.78rem"><input type="radio" name="teReason" value="${k}"> ${v}</label>`).join('')}</div>
+      <input class="form-control" id="teText" placeholder="รายละเอียดเพิ่มเติม (ถ้ามี)" style="margin-bottom:8px">
+      <div class="grid-2"><button class="btn btn-success" onclick="timeEditSave()">💾 บันทึกเวลาใหม่</button><button class="btn btn-outline" onclick="timeEditOpen()">ยกเลิก</button></div>
+      <div style="font-size:.7rem;color:var(--fg-muted);margin-top:6px">บันทึกลง audit (เวลาเก่า → ใหม่ + เหตุผล) · พยาบาลแก้ได้ภายใน 7 วัน</div>
+    </div>`;
+  b.appendChild(box);
+}
 function showSessionHistory(d, sid, headers){
   const done = d.status === 'completed';
   const st = document.getElementById('sessionStatus');
@@ -1696,6 +1880,8 @@ function showSessionHistory(d, sid, headers){
   const sl = document.getElementById('hdSheetLink'); sl.href = '/hd/sheet/'+sid; sl.style.display = 'block'; _bbLinkMaybe(sid);
   sl.textContent = '📋 เปิด HD Monitoring Sheet ของรอบนี้';
   sessionData.actual_uf = d.actual_uf;
+  sessionData.session_id = sid;
+  try{ timeEditRender(d); }catch(e){}
   loadSessionRecords(sid, headers, false);
 
   /* อ่านอย่างเดียว: ปิดช่องกรอก + ซ่อนปุ่มที่บันทึกข้อมูล */
@@ -2590,8 +2776,10 @@ function releaseBed(fromConflictSessionId){
       showToast('🛏 '+(x.d.message||'ปล่อยเตียงแล้ว'),'success');
       if(!fromConflictSessionId){
         sessionData.bed_released = true;
+        sessionData.bed_released_at = new Date().toISOString();   /* ลงเตียง = OFF → เวลาสิ้นสุดใช้ค่านี้ */
         const rb = document.getElementById('bedReleaseBox');
         if(rb) rb.innerHTML = '<div style="font-size:.8rem;font-weight:700;color:var(--warning)">🕓 ปล่อยเตียงแล้ว — รอบนี้ยังเปิดอยู่ อย่าลืมสรุป Post-HD เพื่อปิดรอบ</div>';
+        try{ timerFreezeIfDone(); postEndTimeSuggest(); }catch(e){}
       }
       return true;
     }).catch(e=>{ showToast('ผิดพลาด: '+e,'danger'); return false; });
@@ -3091,6 +3279,8 @@ function gateChecks(){
   else if(ufGoal) items.push({k:'uf', ok:true, t:`UF จริง ${uf}/${ufGoal} mL`});
   if(_openAlertCount > 0) items.push({k:'alerts', ok:false, t:`มี alert ยังไม่รับทราบ ${_openAlertCount} รายการ`, sub:'กด ✔ รับทราบ ในแผงการแจ้งเตือนก่อนปิดรอบ'});
   else items.push({k:'alerts', ok:true, t:'ไม่มี alert ค้างรับทราบ'});
+  try{ postEndTimeSuggest(); const _et = document.getElementById('postEndTime'), _eh = document.getElementById('postEndHint');
+    if(_et && _et.value) items.push({k:'end', ok:true, t:`เวลาเลิกฟอก ${_et.value} น.`, sub:(_eh && _eh.textContent) ? _eh.textContent.replace('← ','') : 'แก้ได้ในช่อง "เวลาเลิกฟอก" ก่อนกดบันทึก'}); }catch(e){}
   return items;
 }
 function endSessionGate(){
@@ -3122,8 +3312,10 @@ function endSession(fromGate){
   /* Merge ESA + lab data */
   const esaData = getEsaData();
 
+  const _endInp = document.getElementById('postEndTime');
   const completionData = {
     status:'completed',
+    ended_time: (_endInp && _endInp.value) ? _endInp.value : undefined,   /* 25 พ.ย. 2569: เวลา OFF จริง */
     post_weight: postWeight,
     post_sbp: postSbp, post_dbp: postDbp, post_hr: postHr,
     actual_uf: actualUf,

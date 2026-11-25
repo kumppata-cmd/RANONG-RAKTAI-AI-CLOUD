@@ -793,6 +793,18 @@ def _start_daily_reminder_scheduler(app):
             try:
                 ops.tick()
                 now = datetime.now(_thai_tz)
+                # 🕓 25 พ.ย. 2569: ทุก 5 นาที (05:00–23:00) — รอบที่ปล่อยเตียงแล้ว ≥30/60 นาทียังไม่สรุป → เตือนกลุ่มพยาบาล
+                # (marker GCS ต่อรอบ/stage กันส่งซ้ำข้าม restart; ล้มได้ไม่กระทบงานอื่น)
+                if 5 <= now.hour <= 23:
+                    with app.app_context():
+                        try:
+                            from .blueprint import run_pending_summary_reminders
+                            _sr = ops.run_guarded("summary_reminders", run_pending_summary_reminders,
+                                                  claim_fn=lambda job, day: _claim_once(app, job, day), timeout=60) or {}
+                            if _sr.get("sent"):
+                                logger.info("Pending-summary reminders: %s", _sr)
+                        except Exception as _sre:
+                            logger.warning("summary reminders: %s", _sre)
                 # Every 30 min (first pass right away): lab documents → hd_lab_docs
                 if lab_tick % 6 == 0:
                     with app.app_context():

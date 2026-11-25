@@ -531,10 +531,15 @@ function renderPendingSummary(items){
   tray.style.display = 'block';
   document.getElementById('psCount').textContent = '(' + items.length + ' ราย)';
   const t = s => { try{ let x=s; if(x && !x.endsWith('Z') && !x.includes('+')) x+='Z'; const d=new Date(x); return d.toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'});}catch(e){ return '-'; } };
-  document.getElementById('psList').innerHTML = items.map(p =>
+  /* 25 พ.ย. 2569: นาทีที่รอ + สี (เขียว <30 · เหลือง 30–60 · แดง >60) ให้หัวหน้าเวรเห็นว่าใครค้างนาน */
+  const waitOf = p => { if(typeof p.waited_min === 'number') return p.waited_min; try{ let x=p.released_at; if(x && !x.endsWith('Z') && !x.includes('+')) x+='Z'; return Math.max(0, Math.round((Date.now()-new Date(x).getTime())/60000)); }catch(e){ return 0; } };
+  const waitStyle = m => m > 60 ? 'background:rgba(231,76,60,.15);color:var(--danger);border-color:var(--danger)' : (m >= 30 ? 'background:rgba(243,156,18,.18);color:var(--warning);border-color:var(--warning)' : 'background:rgba(39,174,96,.12);color:var(--success);border-color:var(--success)');
+  const waitTxt = m => m >= 60 ? Math.floor(m/60)+' ชม. '+(m%60)+' น.' : m+' นาที';
+  document.getElementById('psList').innerHTML = items.slice().sort((a,b)=>waitOf(b)-waitOf(a)).map(p => { const w = waitOf(p); return (
     '<a href="/hd/session/' + p.session_id + '" style="text-decoration:none;color:var(--fg);border:1px solid var(--border);border-radius:10px;padding:6px 10px;font-size:.76rem;background:var(--bg-card)">' +
     '🕓 <b>' + (p.name || p.hn) + '</b> · HN ' + p.hn + ' · เตียงเดิม ' + p.bed_number +
-    ' · ปล่อย ' + t(p.released_at) + ' น. <span style="color:var(--info);font-weight:700">→ สรุปเลย</span></a>').join('');
+    ' · ปล่อย ' + t(p.released_at) + ' น. <span style="display:inline-block;margin-left:4px;padding:1px 7px;border-radius:999px;border:1px solid;font-weight:800;' + waitStyle(w) + '">รอ ' + waitTxt(w) + '</span>' +
+    ' <span style="color:var(--info);font-weight:700">→ สรุปเลย</span></a>'); }).join('');
 }
 
 function renderBeds(beds){

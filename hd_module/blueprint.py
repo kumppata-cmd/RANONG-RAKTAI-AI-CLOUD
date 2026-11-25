@@ -1271,6 +1271,73 @@ def run_daily_export(day, trigger="manual", user=None):
     return res
 
 
+# ── 25 พ.ย. 2569: เตือน "รอสรุป Post-HD ค้าง" (แบบ C ปล่อยเตียงแล้วลืมสรุป → ปิดอัตโนมัติ 8 ชม. ข้อมูลหาย) ──
+SUMMARY_REMIND_STAGES = (30, 60)          # นาทีหลังปล่อยเตียง — เตือนแค่ 2 ครั้ง ไม่รบกวน
+_SUMMARY_REMIND_SENT = {}                 # (session_id, stage) → utc (กันซ้ำใน process; ข้าม restart ใช้ claim_fn)
+
+
+def run_pending_summary_reminders(claim_fn=None, now_utc=None, push_fn=None, base_url=""):
+    """รอบ in_progress ที่ bed_released_at ไว้แล้ว ≥30/≥60 นาทีและยังไม่ปิด → push กลุ่มพยาบาล 1 ข้อความต่อ stage.
+    claim_fn(job, day) → True ถ้ายังไม่เคยส่ง (เช่น _claim_once ของ __init__) · ไม่มี → กันซ้ำในหน่วยความจำอย่างเดียว"""
+    import os
+    now = now_utc or datetime.utcnow()
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"checked": 0, "sent": 0}
+    import psycopg2
+    base_url = (base_url or os.environ.get("RENDER_EXTERNAL_URL", "https://ranong-raktai-ai-cloud.onrender.com")).rstrip("/")
+    out = {"checked": 0, "sent": 0, "items": []}
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT s.id, s.bed_number, p.patient_name, s.bed_released_at, s.session_date
+                           FROM hd_sessions s JOIN hd_patient_mapping p ON p.id = s.patient_id
+                           WHERE s.status = 'in_progress' AND s.bed_released_at IS NOT NULL
+                             AND s.bed_released_at <= %s
+                           ORDER BY s.bed_released_at""", (now - timedelta(minutes=SUMMARY_REMIND_STAGES[0]),))
+            rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        logger.warning("pending summary reminders query: %s", e)
+        return {"checked": 0, "sent": 0, "error": str(e)[:120]}
+    for sid, bed, name, rel, sday in rows:
+        out["checked"] += 1
+        waited = int((now - rel).total_seconds() // 60)
+        stage = max([s for s in SUMMARY_REMIND_STAGES if waited >= s] or [0])
+        if not stage:
+            continue
+        # เตือนเฉพาะ stage ปัจจุบัน (ข้าม stage ที่เลยมาแล้วตอน restart) และไม่เกิน 6 ชม. (หลังนั้นระบบปิดเองที่ 8 ชม.)
+        if waited > 6 * 60:
+            continue
+        key = (sid, stage)
+        if key in _SUMMARY_REMIND_SENT:
+            continue
+        if claim_fn is not None:
+            try:
+                if not claim_fn(f"sumrem_{sid}_{stage}", sday or _thai_today()):
+                    _SUMMARY_REMIND_SENT[key] = now
+                    continue
+            except Exception as e:
+                logger.warning("summary reminder claim: %s", e)
+        first = (name or "").strip().split(" ")[0] if name else ""
+        msg = (f"🕓 เตียง {bed}{(' (' + first + ')') if first else ''} ปล่อยเตียงแล้ว {waited} นาที ยังไม่สรุป Post-HD\n"
+               + ("⚠️ ถ้าไม่สรุป ระบบจะปิดรอบอัตโนมัติเมื่อครบ 8 ชม. โดยไม่มีข้อมูลหลังฟอก\n" if stage >= 60 else "")
+               + f"👉 {base_url}/hd/session/{sid} → แท็บ Post-HD → เสร็จสิ้น")
+        try:
+            res = push_nurse_group(msg) if push_fn is None else {"sent": push_fn(msg) is not False}
+            if res.get("sent"):
+                out["sent"] += 1
+            _SUMMARY_REMIND_SENT[key] = now
+            out["items"].append({"session_id": sid, "stage": stage, "waited": waited, "sent": bool(res.get("sent"))})
+        except Exception as e:
+            logger.warning("summary reminder push: %s", e)
+    # ล้าง key เก่า (รอบที่ปิดแล้ว) กันโต
+    if len(_SUMMARY_REMIND_SENT) > 500:
+        for k in list(_SUMMARY_REMIND_SENT)[:250]:
+            _SUMMARY_REMIND_SENT.pop(k, None)
+    return out
+
+
 def run_morning_brief(trigger="manual", user=None):
     """Build the physician Morning Brief and push it to alert_recipients."""
     import os
@@ -5178,11 +5245,28 @@ def get_session(session_id):
             """, (session_id,))
             row = cur.fetchone()
             extra = _session_record_extras(cur, session_id, row[17]) if row else {}
+            # 25 พ.ย. 2569: แผนเวลาจริง (ชั่วโมงตามใบสั่ง + ที่ขยาย) + รายการ Pre-HD ที่ยังไม่ครบ — เสริม ล้มได้ไม่กระทบ
+            _plan_extra = {}
+            if row:
+                try:
+                    _pl = _session_plan(cur, session_id) or {}
+                    _plan_extra = {
+                        "duration_hours": _pl.get("duration_hours", 4),
+                        "extend_min": _pl.get("extend_min", 0),
+                        "planned_end": (_pl["planned_end"].isoformat() + "Z") if _pl.get("planned_end") else None,
+                        "end_grace_min": _end_grace_min(),
+                        "time_edit_reasons": TIME_EDIT_REASONS,
+                    }
+                except Exception as _pe:
+                    logger.warning("session plan extra: %s", _pe)
         conn.close()
         if not row:
             return jsonify({"session_id": session_id, "status": "not_found"}), 404
+        _pre_miss = _pre_hd_missing({**extra, "pre_weight": row[4]})
         return jsonify({
             **extra,
+            **_plan_extra,
+            "pre_hd_missing": _pre_miss,
             "session_id": row[0], "bed_number": row[1],
             "session_date": row[2].isoformat() if row[2] else None,
             "status": row[3], "pre_weight": float(row[4]) if row[4] else None,
@@ -5195,7 +5279,7 @@ def get_session(session_id):
             "patient_hn": row[11], "patient_name": row[12],
             "vascular_access": row[13], "schedule_days": row[14],
             "dry_weight": float(row[15]) if row[15] else None,
-            "esa_drug": row[16], "duration_hours": 4, "patient_id": row[17],
+            "esa_drug": row[16], "duration_hours": _plan_extra.get("duration_hours", 4), "patient_id": row[17],
             "bed_released_at": (row[18].isoformat() + "Z") if row[18] else None,
         })
     except Exception as e:
@@ -5226,7 +5310,23 @@ def update_session(session_id):
                 params = []
                 if data.get("status") == "completed":
                     updates.append("status = 'completed'")
-                    updates.append("ended_at = NOW()")
+                    # 25 พ.ย. 2569: เวลาสิ้นสุด = เวลา OFF จริง ไม่ใช่เวลาที่กดสรุป
+                    # (ช่อง 'เวลาเลิกฟอก' → เวลาปล่อยเตียง → ครบตามแผนถ้าสรุปช้าเกิน grace → ตอนนี้)
+                    _end_src, _end_note = "now", None
+                    try:
+                        _plan = _session_plan(cur, session_id)
+                        if _plan and _plan.get("status") == "in_progress":
+                            _end_ts, _end_src, _end_note = _resolve_end_time(_plan, data.get("ended_time"))
+                            updates.append("ended_at = %s")
+                            params.append(_end_ts)
+                        else:
+                            updates.append("ended_at = NOW()")
+                    except Exception as _ee:
+                        logger.warning("resolve end time: %s", _ee)
+                        updates.append("ended_at = NOW()")
+                    if _end_note:
+                        data["notes"] = ((data.get("notes") or "") + "\n" + _end_note).strip()
+                    data["_end_source"] = _end_src
                 elif data.get("status") == "cancelled":
                     # (3) กันยกเลิกพลาด: มีบันทึก vital/UF แล้ว → ต้องจบรอบก่อนกำหนดแทน ไม่ให้ข้อมูลการฟอกหาย
                     cur.execute("""
@@ -5327,6 +5427,8 @@ def update_session(session_id):
         ip_address=request.remote_addr or "",
     )
     result = {"session_id": session_id, "updated": True}
+    if data.get("_end_source"):
+        result["end_source"] = data.pop("_end_source")
 
     # Generate summary if requested
     if data.get("generate_summary") and data.get("status") == "completed":
@@ -6271,6 +6373,291 @@ def release_bed(session_id):
                         "message": f"ปล่อยเตียง {bed} แล้ว — อย่าลืมกลับมาสรุป Post-HD เพื่อปิดรอบ"})
     except Exception as e:
         logger.error("release_bed: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+# ── 25 พ.ย. 2569: เวลาเริ่ม/สิ้นสุดที่ถูกต้อง + แก้ Pre-HD หลังเริ่มฟอก ───────────────────
+# เหตุ: รอบที่ปล่อยเตียงแล้วมาสรุป Post-HD ทีหลัง ได้ ended_at = เวลาที่กดสรุป (5:18 ชม. ทั้งที่ฟอก 4 ชม.)
+# และ Pre-HD ถูกล็อกทันทีที่เริ่มฟอก แก้ค่าที่กรอกผิดไม่ได้ ต้องยกเลิกรอบ
+END_GRACE_MIN_DEFAULT = 15   # สรุปช้ากว่า "ครบตามแผน + grace" → เวลาสิ้นสุด = ครบตามแผน (hd_settings: end_grace_min)
+TIME_EDIT_REASONS = {"late_start": "กดเริ่มช้า", "late_summary": "กดสรุปช้า",
+                     "early_off": "OFF ก่อนเวลา (อาการ)", "other": "อื่น ๆ"}
+
+
+def _session_plan(cur, session_id):
+    """แผนเวลาของรอบ: started/ended/bed_released, ชั่วโมงตามใบสั่ง, นาทีที่ขยาย, planned_end (UTC).
+    ใช้ SQL ชุดเดียวกับแดชบอร์ด (duration จาก hd_prescriptions, extend จาก notes 'extend=NN' ของ UF)."""
+    cur.execute("""
+        SELECT s.started_at, s.ended_at, s.bed_released_at, s.status, s.session_date, s.patient_id,
+               COALESCE((SELECT r.duration_hours FROM hd_prescriptions r WHERE r.patient_id = s.patient_id
+                         AND r.is_active = TRUE ORDER BY r.id DESC LIMIT 1), 4),
+               (SELECT u.notes FROM hd_uf_records u WHERE u.session_id = s.id AND u.notes LIKE '%%extend=%%'
+                ORDER BY u.recorded_at DESC, u.id DESC LIMIT 1),
+               s.notes, s.bed_number
+        FROM hd_sessions s WHERE s.id = %s
+    """, (session_id,))
+    r = cur.fetchone()
+    if not r:
+        return None
+    try:
+        dur = float(r[6] or 4)
+    except (TypeError, ValueError):
+        dur = 4.0
+    ext = _extend_min_from_notes(r[7])
+    planned = (r[0] + timedelta(hours=dur, minutes=ext)) if r[0] else None
+    return {"started_at": r[0], "ended_at": r[1], "bed_released_at": r[2], "status": r[3],
+            "session_date": r[4], "patient_id": r[5], "duration_hours": dur, "extend_min": ext,
+            "planned_end": planned, "notes": r[8] or "", "bed_number": r[9]}
+
+
+def _end_grace_min():
+    try:
+        v = int(get_setting_value("end_grace_min", END_GRACE_MIN_DEFAULT))
+        return v if 0 <= v <= 120 else END_GRACE_MIN_DEFAULT
+    except Exception:
+        return END_GRACE_MIN_DEFAULT
+
+
+def _resolve_end_time(plan, requested_hhmm=None, now=None):
+    """เวลาสิ้นสุดที่ควรบันทึกตอนปิดรอบ → (datetime_utc, source, note_or_None)
+
+    ลำดับ: เวลาที่พยาบาลระบุ (HH:MM) → เวลาปล่อยเตียง (ลงจากเตียง = OFF) →
+           ครบตามแผน ถ้าสรุปช้ากว่า แผน + grace → ตอนนี้
+    """
+    now = now or datetime.utcnow()
+    st = plan.get("started_at")
+    if requested_hhmm:
+        t = _parse_entry_time(requested_hhmm, anchor_utc=st or now)
+        if t and (not st or t >= st) and t <= now + timedelta(minutes=2):
+            return t, "nurse", None
+    rel = plan.get("bed_released_at")
+    if rel and (not st or rel >= st) and rel <= now:
+        return rel, "bed_release", None
+    pe = plan.get("planned_end")
+    if pe and st and now > pe + timedelta(minutes=_end_grace_min()):
+        thai = (pe + timedelta(hours=7)).strftime("%H:%M")
+        return pe, "planned_end", f"[เวลาสิ้นสุดตั้งอัตโนมัติ = ครบตามแผน {thai} น. (สรุปล่าช้า {int((now - pe).total_seconds() // 60)} นาที)]"
+    return now, "now", None
+
+
+def _pre_hd_missing(d):
+    """รายการ Pre-HD ที่ยังไม่ครบ สำหรับป้ายเตือนบนแท็บ Intra-HD (เฉพาะที่สำคัญต่อการฟอก)."""
+    miss = []
+    pv = d.get("pre_vitals") or {}
+    if not pv.get("sbp"):
+        miss.append("BP ก่อนฟอก")
+    if not d.get("pre_weight"):
+        miss.append("น้ำหนักก่อนฟอก")
+    if not d.get("dialyzer_type"):
+        miss.append("ตัวกรอง")
+    if not (d.get("access_type") or d.get("vascular_access")):
+        miss.append("Vascular access")
+    return miss
+
+
+@hd_bp.route("/sessions/<int:session_id>/pre-hd", methods=["PUT"])
+@require_role("physician", "nurse", "admin")
+def update_pre_hd(session_id):
+    """✏️ แก้ไขข้อมูลก่อนฟอกหลังเริ่มฟอกแล้ว (รอบ in_progress เท่านั้น) + เวลาเริ่มฟอก {started_time:'HH:MM'}.
+
+    ค่าเดิมถูกเก็บใน audit (old → new) · vital 'pre' แถวแรกถูกแก้ในที่ (ไม่สร้างแถวใหม่) ·
+    น้ำหนัก/DW เปลี่ยน → uf_goal คำนวณใหม่เฉพาะเมื่อส่ง uf_goal มา (UF brain ฝั่งหน้าเว็บเป็นคนคิด)."""
+    data = request.get_json(silent=True) or {}
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            plan = _session_plan(cur, session_id)
+            if not plan:
+                conn.close()
+                return jsonify({"error": "ไม่พบรอบฟอกนี้"}), 404
+            if plan["status"] != "in_progress":
+                conn.close()
+                return jsonify({"error": "แก้ไข Pre-HD ได้เฉพาะรอบที่กำลังฟอก — รอบที่ปิดแล้วใช้ 'แก้ไขเวลา' ได้อย่างเดียว"}), 400
+            cur.execute("""SELECT pre_weight, uf_goal, started_at, dialyzer_type, access_type, heparin_dose, pre_symptoms
+                           FROM hd_sessions WHERE id = %s""", (session_id,))
+            old = cur.fetchone()
+            old_vals = {"pre_weight": float(old[0]) if old[0] is not None else None,
+                        "uf_goal": float(old[1]) if old[1] is not None else None,
+                        "started_at": old[2].isoformat() if old[2] else None,
+                        "dialyzer_type": old[3], "access_type": old[4], "heparin_dose": old[5], "pre_symptoms": old[6]}
+            updates, params = [], []
+            if data.get("pre_weight") is not None:
+                pw = _vital_float(data.get("pre_weight"), 20, 250)
+                if pw is None:
+                    conn.close()
+                    return jsonify({"error": "น้ำหนักก่อนฟอกต้องอยู่ระหว่าง 20–250 kg"}), 400
+                updates.append("pre_weight = %s"); params.append(pw)
+            if data.get("uf_goal") is not None:
+                ug = _safe_int(data.get("uf_goal"))
+                if ug is not None and 0 <= ug <= 8000:
+                    updates.append("uf_goal = %s"); params.append(ug)
+            new_start = None
+            if data.get("started_time"):
+                new_start = _parse_entry_time(data["started_time"], anchor_utc=plan["started_at"] or datetime.utcnow())
+                if not new_start:
+                    conn.close()
+                    return jsonify({"error": "รูปแบบเวลาเริ่มไม่ถูกต้อง (HH:MM)"}), 400
+                if new_start > datetime.utcnow() + timedelta(minutes=2):
+                    conn.close()
+                    return jsonify({"error": "เวลาเริ่มฟอกต้องไม่อยู่ในอนาคต"}), 400
+                # ต้องไม่หลังบันทึกแรกระหว่างฟอก (vital/UF ที่ไม่ใช่ pre)
+                cur.execute("""SELECT MIN(t) FROM (
+                                 SELECT MIN(recorded_at) t FROM hd_vital_signs WHERE session_id = %s AND phase <> 'pre'
+                                 UNION ALL SELECT MIN(recorded_at) FROM hd_uf_records WHERE session_id = %s) x""",
+                            (session_id, session_id))
+                first_rec = (cur.fetchone() or [None])[0]
+                if first_rec and new_start > first_rec:
+                    conn.close()
+                    return jsonify({"error": f"เวลาเริ่มต้องไม่หลังบันทึกแรกระหว่างฟอก ({(first_rec + timedelta(hours=7)).strftime('%H:%M')} น.)"}), 400
+                updates.append("started_at = %s"); params.append(new_start)
+            if updates:
+                params.append(session_id)
+                cur.execute(f"UPDATE hd_sessions SET {', '.join(updates)} WHERE id = %s", params)
+            # Dry weight อยู่ที่ทะเบียนผู้ป่วย (เหมือนตอนเริ่มฟอก)
+            if data.get("dry_weight") is not None:
+                dw = _vital_float(data.get("dry_weight"), 20, 250)
+                if dw is not None:
+                    cur.execute("SAVEPOINT sp_dw")
+                    try:
+                        cur.execute("UPDATE hd_patient_mapping SET dry_weight = %s WHERE id = %s", (dw, plan["patient_id"]))
+                        cur.execute("RELEASE SAVEPOINT sp_dw")
+                    except Exception as e:
+                        cur.execute("ROLLBACK TO SAVEPOINT sp_dw")
+                        logger.warning("pre-hd dw update: %s", e)
+            # Vital 'pre' แถวแรก: แก้ในที่ ถ้าไม่มีให้สร้าง (ผ่าน _save_pre_hd)
+            sbp, dbp = _vital_int(data.get("pre_sbp"), 30, 300), _vital_int(data.get("pre_dbp"), 20, 200)
+            hr = _vital_int(data.get("pre_hr"), 20, 250)
+            temp, spo2 = _vital_float(data.get("pre_temp"), 30, 45), _vital_int(data.get("pre_spo2"), 50, 100)
+            sym = data.get("pre_symptoms")
+            sym_txt = ", ".join(str(x)[:40] for x in sym)[:500] if isinstance(sym, list) else None
+            if any(v is not None for v in (sbp, dbp, hr, temp, spo2)):
+                cur.execute("""SELECT id FROM hd_vital_signs WHERE session_id = %s AND phase = 'pre'
+                               ORDER BY recorded_at ASC LIMIT 1""", (session_id,))
+                vrow = cur.fetchone()
+                if vrow:
+                    cur.execute("""UPDATE hd_vital_signs SET sbp = COALESCE(%s, sbp), dbp = COALESCE(%s, dbp),
+                                   heart_rate = COALESCE(%s, heart_rate), temperature = COALESCE(%s, temperature),
+                                   spo2 = COALESCE(%s, spo2), symptoms = COALESCE(%s, symptoms)
+                                   WHERE id = %s""", (sbp, dbp, hr, temp, spo2, sym_txt, vrow[0]))
+                    data = {k: v for k, v in data.items() if not k.startswith("pre_") or k == "pre_symptoms"}
+            _save_pre_hd(cur, session_id, data)   # symptoms/dialyzer/access/heparin (+vital ถ้ายังไม่มีแถว pre)
+            # VA ที่ทะเบียนผู้ป่วย (เหมือนตอนเริ่มฟอก)
+            if data.get("vascular_access") or data.get("va_location"):
+                cur.execute("SAVEPOINT sp_va2")
+                try:
+                    if data.get("vascular_access"):
+                        cur.execute("UPDATE hd_patient_mapping SET vascular_access = %s WHERE id = %s",
+                                    (str(data["vascular_access"])[:30], plan["patient_id"]))
+                    if data.get("va_location"):
+                        cur.execute("UPDATE hd_patient_mapping SET va_location = %s WHERE id = %s",
+                                    (str(data["va_location"])[:60], plan["patient_id"]))
+                    cur.execute("RELEASE SAVEPOINT sp_va2")
+                except Exception as e:
+                    cur.execute("ROLLBACK TO SAVEPOINT sp_va2")
+                    logger.warning("pre-hd va update: %s", e)
+            conn.commit()
+        conn.close()
+        _beds_cache_bust()
+        new_vals = {k: v for k, v in data.items() if k in ("pre_weight", "dry_weight", "uf_goal", "started_time", "pre_sbp", "pre_dbp",
+                                                           "pre_hr", "pre_temp", "pre_spo2", "pre_symptoms", "dialyzer_type",
+                                                           "dialyzer_reuse", "vascular_access", "va_location", "hep_drug",
+                                                           "hep_bolus", "hep_maintenance", "reason")}
+        log_action(user_id=g.get("hd_user_id"), action="session.pre_hd_edit",
+                   resource_type="hd_session", resource_id=str(session_id),
+                   old_values=old_vals, new_values=new_vals, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "session_id": session_id,
+                        "started_at": (new_start.isoformat() + "Z") if new_start else old_vals["started_at"],
+                        "message": "บันทึกการแก้ไข Pre-HD แล้ว"})
+    except Exception as e:
+        logger.error("update_pre_hd: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/sessions/<int:session_id>/times", methods=["PUT"])
+@require_role("physician", "nurse", "admin")
+def session_times_edit(session_id):
+    """🕐 แก้เวลาเริ่ม/สิ้นสุดย้อนหลัง {started_time?:'HH:MM', ended_time?:'HH:MM', reason:'late_start|late_summary|early_off|other', reason_text?}
+    ใช้ได้ทั้งรอบที่กำลังฟอกและปิดแล้ว · พยาบาลแก้ได้ภายใน 7 วัน เก่ากว่านั้นแพทย์/admin · ลง audit พร้อมเหตุผล"""
+    data = request.get_json(silent=True) or {}
+    reason = str(data.get("reason") or "").strip()
+    if reason not in TIME_EDIT_REASONS:
+        return jsonify({"error": "กรุณาเลือกเหตุผลการแก้เวลา", "reasons": TIME_EDIT_REASONS}), 400
+    import os, psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    try:
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            plan = _session_plan(cur, session_id)
+            if not plan:
+                conn.close()
+                return jsonify({"error": "ไม่พบรอบฟอกนี้"}), 404
+            if plan["status"] not in ("in_progress", "completed"):
+                conn.close()
+                return jsonify({"error": "แก้เวลาได้เฉพาะรอบที่กำลังฟอกหรือปิดแล้ว"}), 400
+            sd = plan["session_date"]
+            if sd and (_thai_today() - sd).days > 7 and g.get("hd_role") == "nurse":
+                conn.close()
+                return jsonify({"error": "รอบเก่ากว่า 7 วัน — ให้แพทย์หรือ admin เป็นผู้แก้เวลา"}), 403
+            st, en = plan["started_at"], plan["ended_at"]
+            anchor = st or datetime.utcnow()
+            new_st = _parse_entry_time(data.get("started_time"), anchor_utc=anchor) if data.get("started_time") else None
+            new_en = _parse_entry_time(data.get("ended_time"), anchor_utc=(en or st or anchor)) if data.get("ended_time") else None
+            if data.get("started_time") and not new_st:
+                conn.close()
+                return jsonify({"error": "รูปแบบเวลาเริ่มไม่ถูกต้อง (HH:MM)"}), 400
+            if data.get("ended_time") and not new_en:
+                conn.close()
+                return jsonify({"error": "รูปแบบเวลาสิ้นสุดไม่ถูกต้อง (HH:MM)"}), 400
+            if not new_st and not new_en:
+                conn.close()
+                return jsonify({"error": "ไม่มีเวลาที่จะแก้"}), 400
+            if new_en and plan["status"] != "completed":
+                conn.close()
+                return jsonify({"error": "เวลาสิ้นสุดแก้ได้เมื่อปิดรอบแล้ว (ตอนปิดรอบระบุช่อง 'เวลาเลิกฟอก' ได้)"}), 400
+            f_st, f_en = new_st or st, new_en or en
+            now = datetime.utcnow()
+            if f_st and f_st > now + timedelta(minutes=2):
+                conn.close()
+                return jsonify({"error": "เวลาเริ่มต้องไม่อยู่ในอนาคต"}), 400
+            if f_en and f_en > now + timedelta(minutes=2):
+                conn.close()
+                return jsonify({"error": "เวลาสิ้นสุดต้องไม่อยู่ในอนาคต"}), 400
+            if f_st and f_en:
+                dur_min = (f_en - f_st).total_seconds() / 60
+                if dur_min < 30 or dur_min > 10 * 60:
+                    conn.close()
+                    return jsonify({"error": f"ระยะเวลาฟอกต้องอยู่ระหว่าง 30 นาที – 10 ชม. (ที่ระบุ = {int(dur_min)} นาที)"}), 400
+            updates, params = [], []
+            if new_st:
+                updates.append("started_at = %s"); params.append(new_st)
+            if new_en:
+                updates.append("ended_at = %s"); params.append(new_en)
+            # จดเหตุผลไว้ใน notes ของรอบ (ไม่แทนที่ของเดิม)
+            tag = TIME_EDIT_REASONS[reason] + (f": {str(data.get('reason_text'))[:80]}" if data.get("reason_text") else "")
+            thai = lambda t: (t + timedelta(hours=7)).strftime("%H:%M") if t else "-"
+            line = f"[แก้เวลา {('เริ่ม '+thai(st)+'→'+thai(new_st)) if new_st else ''}{' ' if new_st and new_en else ''}{('สิ้นสุด '+thai(en)+'→'+thai(new_en)) if new_en else ''} — {tag}]"
+            updates.append("notes = CASE WHEN COALESCE(notes,'') = '' THEN %s ELSE notes || E'\\n' || %s END")
+            params.extend([line, line])
+            params.append(session_id)
+            cur.execute(f"UPDATE hd_sessions SET {', '.join(updates)} WHERE id = %s", params)
+            conn.commit()
+        conn.close()
+        _beds_cache_bust()
+        log_action(user_id=g.get("hd_user_id"), action="session.time_edit",
+                   resource_type="hd_session", resource_id=str(session_id),
+                   old_values={"started_at": st.isoformat() if st else None, "ended_at": en.isoformat() if en else None},
+                   new_values={"started_at": (new_st or st).isoformat() if (new_st or st) else None,
+                               "ended_at": (new_en or en).isoformat() if (new_en or en) else None,
+                               "reason": reason, "reason_text": str(data.get("reason_text") or "")[:80]},
+                   ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "session_id": session_id,
+                        "started_at": ((new_st or st).isoformat() + "Z") if (new_st or st) else None,
+                        "ended_at": ((new_en or en).isoformat() + "Z") if (new_en or en) else None,
+                        "note": line})
+    except Exception as e:
+        logger.error("session_times_edit: %s", e)
         return jsonify({"error": str(e)}), 500
 
 
@@ -8473,10 +8860,13 @@ def _bed_dashboard_impl():
                                    WHERE s.session_date = %s AND s.status = 'in_progress'
                                      AND s.bed_released_at IS NOT NULL
                                    ORDER BY s.bed_released_at""", (target_date.isoformat(),))
+                    _now_utc = datetime.utcnow()
                     pending_summary = [{"session_id": r[0], "bed_number": r[1], "hn": r[2],
                                         "name": r[3] or "",
                                         "started_at": (r[4].isoformat() + "Z") if r[4] else None,
-                                        "released_at": (r[5].isoformat() + "Z") if r[5] else None}
+                                        "released_at": (r[5].isoformat() + "Z") if r[5] else None,
+                                        # 25 พ.ย. 2569: นาทีที่รอสรุป (ถาดแสดงสีเขียว/เหลือง/แดง)
+                                        "waited_min": int(max(0, (_now_utc - r[5]).total_seconds()) // 60) if r[5] else 0}
                                        for r in cur.fetchall()]
                 except Exception as _pse:
                     logger.warning("pending_summary list: %s", _pse)
