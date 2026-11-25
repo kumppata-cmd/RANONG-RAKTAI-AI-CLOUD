@@ -173,6 +173,11 @@ def sanitize(raw, model):
         if p and k in p["bargraph"]:
             dropped.append(k)
             continue
+        # 26 พ.ย.: ค่าที่รุ่นนั้น "ไม่มีบนจอ" (เช่น AP บน DBB-07 ที่ AI ส่ง -1/0 มา) → ตัดทิ้ง
+        # (sbp/dbp/hr มาจากเครื่องวัดความดันข้างเครื่องได้ จึงไม่ตัด)
+        if p and k not in p["numeric"] and k not in ("sbp", "dbp", "hr"):
+            dropped.append(k)
+            continue
         # ลิตร → mL (NIKKISO / EXA): UF ที่น้อยกว่า 20 ไม่มีทางเป็น mL จริง
         if k in LITER_FIELDS and 0 < abs(v) < 20:
             v = v * 1000

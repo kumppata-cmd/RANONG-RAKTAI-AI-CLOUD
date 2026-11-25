@@ -199,3 +199,10 @@ class TestExtractJson:
         from hd_module import blueprint as bp
         src = inspect.getsource(bp.read_machine_screen)
         assert '"values": {}' in src and '"claude_failed": True' in src and '"confidence": 0.4' in src
+
+
+class TestNotOnScreen:
+    def test_field_absent_on_model_is_dropped(self):
+        raw = {"values": {"ap": -1, "vp": 102, "uf_goal": 3.2, "sbp": 130}, "confidence": {"ap": .9, "vp": .9, "uf_goal": .9, "sbp": .9}}
+        r = mo.sanitize(raw, "nikkiso_dbb07")     # DBB-07 ไม่มี AP และ UF goal บนจอ
+        assert r["values"] == {"vp": 102, "sbp": 130} and set(r["dropped"]) == {"ap", "uf_goal"}
