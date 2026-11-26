@@ -183,6 +183,23 @@
   </div>
 </div>
 
+<!-- 🧭 Doc Classifier AI (26 พ.ย. 2569): ใบที่ระบบ "ไม่แน่ใจ ใบยา/ใบฟอก" → ถาม Claude Vision 1 ครั้ง -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🧭 AI ตัดสินใบที่ระบบไม่แน่ใจ (ใบยา / ใบฟอกเลือด / ใบแล็บ)</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('doc_classify_ai')">💾 บันทึก</button>
+  </div>
+  <div class="form-group">
+    <select class="form-control" id="setting_doc_classify_ai">
+      <option value="off">ปิด — ใบที่ไม่แน่ใจขึ้นธง ⚠️ ให้คนยืนยันเหมือนเดิม</option>
+      <option value="on">เปิด — เฉพาะใบที่ขึ้นธง ⚠️ ส่งรูปถาม AI 1 ครั้ง ใช้คำตอบเมื่อมั่นใจ ≥ 80% (ต่ำกว่านั้นคงธงไว้)</option>
+    </select>
+    <div class="setting-desc">ใบที่ระบบจัดได้ชัดอยู่แล้วไม่ถูกแตะ · AI ล้ม/ช้า → ใช้ผลเดิมพร้อมธง · ปุ่ม 🔁 เปลี่ยนประเภท ยังใช้ได้ ·
+      ทดสอบก่อนเปิดที่ <a href="/hd/doc-classify-test">🧭 ทดสอบ AI ตัดสินประเภท</a> · ปิดเมื่อไหร่กลับทางเดิมทันที</div>
+    <div class="setting-status" id="status_doc_classify_ai"></div>
+  </div>
+</div>
+
 <!-- Physician LINE ID -->
 <div class="card setting-card">
   <div class="card-header">

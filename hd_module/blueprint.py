@@ -426,6 +426,12 @@ def hd_lab_sheet_test_page():
     return render_template("hd_lab_sheet_test.html")
 
 
+@hd_web.route("/doc-classify-test")
+def hd_doc_classify_test_page():
+    """🧭 ทดสอบ AI ตัดสินประเภทเอกสาร (ใบยา/ใบฟอก/ใบแล็บ) — ไม่บันทึก ไม่แตะทางเดิน LINE เดิม"""
+    return render_template("hd_doc_classify_test.html")
+
+
 @hd_web.route("/ocr-accuracy")
 def hd_ocr_accuracy_page():
     """📷📊 ความแม่นการอ่านจอเครื่องรายรุ่น (Magic Camera 2.0)"""
@@ -8838,6 +8844,72 @@ def lab_sheet_file():
                     "existing": bool(out.get("existing")), "folder": out.get("folder", ""), "linked": linked})
 
 
+@hd_bp.route("/doc-classify/read", methods=["POST"])
+@require_role("physician", "admin")
+def doc_classify_read():
+    """🧭 ทดสอบ AI ตัดสินประเภทเอกสาร 1 หน้า (jpg/png/pdf ≤12 MB) — ไม่บันทึก ไม่เก็บรูป
+    คืน {"ai": {...}, "keyword": {...}|null, "decision": {...}} · keyword มาจาก server.py ถ้าลงทะเบียน DOC_KEYWORD_CLASSIFY_FN"""
+    import os
+    import tempfile
+    from . import doc_classifier_ai as dca
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "no file"}), 400
+    ext = os.path.splitext(f.filename or "")[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".pdf"):
+        return jsonify({"error": "รองรับ jpg/png/pdf"}), 400
+    data = f.read()
+    if len(data) > 12 * 1024 * 1024:
+        return jsonify({"error": "ไฟล์ใหญ่เกิน 12 MB"}), 400
+    api_key, model_id = dca._api()
+    if not api_key or not model_id:
+        return jsonify({"error": "ไม่มี ANTHROPIC_API_KEY / รุ่น AI"}), 503
+    tmp = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as fh:
+            fh.write(data)
+            tmp = fh.name
+        img = dca.image_for(tmp)
+        if not img:
+            return jsonify({"error": "แปลงรูปไม่ได้"}), 400
+        keyword = None
+        kw_fn = current_app.config.get("DOC_KEYWORD_CLASSIFY_FN")
+        if kw_fn:
+            try:
+                kw = kw_fn(tmp) or {}
+                keyword = {"category": kw.get("category"), "confidence": kw.get("confidence"),
+                           "reason": kw.get("reason"), "ambiguous_with": kw.get("ambiguous_with")}
+            except Exception as e:  # noqa: BLE001
+                keyword = {"error": str(e)[:120]}
+        try:
+            ai = dca.classify_image(img, api_key, model_id,
+                                    hint_from=(keyword or {}).get("category"), hint_with=(keyword or {}).get("ambiguous_with"))
+        except RuntimeError:
+            return jsonify({"error": "AI กำลังอ่านรูปอื่นอยู่ — รอ 10 วิ"}), 429
+        decision = None
+        if keyword and "category" in keyword:
+            res, changed, note = dca.decide({k: v for k, v in keyword.items() if v is not None}, ai)
+            decision = {"category": res.get("category"), "changed": changed, "note": note,
+                        "would_apply": bool(keyword.get("ambiguous_with"))}
+        log_action(user_id=g.get("hd_user_id"), action="doc_classify.test", resource_type="document",
+                   new_values={"keyword": (keyword or {}).get("category"), "ai": (ai or {}).get("category")})
+        return jsonify({"ai": ai, "keyword": keyword, "decision": decision, "enabled": dca.is_enabled(),
+                        "accept_conf": dca.ACCEPT_CONF, "stats": dca.stats()})
+    finally:
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+
+
+@hd_bp.route("/doc-classify/stats", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def doc_classify_stats():
+    from . import doc_classifier_ai as dca
+    return jsonify({"enabled": dca.is_enabled(), "stats": dca.stats()})
+
+
 @hd_bp.route("/lab-sheet/accuracy", methods=["GET"])
 @require_role("physician", "nurse", "admin", "auditor")
 def lab_sheet_accuracy():
@@ -11425,6 +11497,7 @@ def update_settings():
         "idwg_limit_pct",            # 17 พ.ย. 2569: เกณฑ์น้ำหนักขึ้นระหว่างรอบ (% DW) ค่าเริ่มต้น 4
         "patient_weight_coach",      # ตอบผู้ป่วยที่ส่ง "น้ำหนัก xx" ทาง LINE (on/off)
         "lab_sheet_ai",              # 26 พ.ย. 2569: LINE OA ใช้ตัวอ่านใบแล็บ AI (ขั้นที่ 3) on/off — default off
+        "doc_classify_ai",           # 26 พ.ย. 2569: ใบที่ตัวจัดประเภทไม่แน่ใจ (ใบยา/ใบฟอก) → ถาม Claude Vision on/off — default off
         "tpl_weight_reply",          # ข้อความตอบน้ำหนัก (แก้ได้ มีตัวแปร {weight} {gain} ...)
         "patient_card_note",         # ข้อความจากแพทย์ต่อท้ายการ์ดสรุปหลังฟอกทุกใบ
         "family_liff_id",            # 21 พ.ย. 2569: LIFF ID ของหน้า Family Link (ญาติรับสรุปหลังฟอก)

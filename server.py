@@ -14740,6 +14740,15 @@ def process_file_async(
             else:
                 result = classify_with_keywords(filepath)
 
+            # 26 พ.ย. 2569 (แพทย์อนุมัติ): ใบที่ตัวจัดประเภทขึ้นธง "ไม่แน่ใจ ใบยา/ใบฟอก" → ถาม Claude Vision 1 ครั้ง
+            # สวิตช์ ⚙️ doc_classify_ai (default off) · ใบที่ชัดไม่ถูกแตะ · ล้ม/ช้า → ผลเดิมพร้อมธง · ไม่ raise
+            if result.get("ambiguous_with"):
+                try:
+                    from hd_module import doc_classifier_ai as _dca
+                    result = _dca.resolve(filepath, result)
+                except Exception as _dca_err:  # noqa: BLE001
+                    logger.warning(f"doc_classify_ai skipped: {_dca_err}")
+
             category = result.get("category", "review")
 
             # ── Confidence scoring + review_status ──
@@ -17837,6 +17846,7 @@ def _hd_file_lab_sheet(data: bytes, ext: str, hd_user: str, clinic_hn: str, res:
 
 
 app.config["HD_FILE_LAB_SHEET_FN"] = _hd_file_lab_sheet   # เรียกจาก hd_module POST /lab-sheet/file
+app.config["DOC_KEYWORD_CLASSIFY_FN"] = classify_with_keywords   # 26 พ.ย. 2569: หน้าทดสอบ /hd/doc-classify-test เทียบตัวเดิมกับ AI (อ่านอย่างเดียว)
 
 
 def _multipage_flush(user_hash: str):

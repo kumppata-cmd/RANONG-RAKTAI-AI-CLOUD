@@ -1,0 +1,96 @@
+{% extends "hd_base.html" %}
+{% block title %}🧭 ทดสอบ AI ตัดสินประเภทเอกสาร{% endblock %}
+{% block extra_css %}
+<style>
+.dc-wrap{max-width:1000px;margin:0 auto;padding:10px}
+.dc-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:10px}
+.dc-note{font-size:.74rem;color:var(--fg-muted);line-height:1.5;margin-top:6px}
+.dc-row{display:grid;grid-template-columns:minmax(140px,1.2fr) 1fr 1fr 1.2fr;gap:8px;align-items:center;border:1px solid var(--border);border-radius:10px;padding:8px 10px;margin-top:8px;font-size:.8rem;background:var(--card)}
+.dc-pill{padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:600;display:inline-block}
+.ok{background:rgba(39,174,96,.15);color:#1e8449} .warn{background:rgba(230,126,34,.15);color:#a04000} .bad{background:rgba(231,76,60,.15);color:#b71c1c} .mut{background:rgba(127,140,141,.15);color:var(--fg-muted)}
+.dc-sm{font-size:.7rem;color:var(--fg-muted);display:block;margin-top:2px}
+.dc-sum{font-family:ui-monospace,monospace;font-size:.72rem;white-space:pre-wrap;background:rgba(127,140,141,.08);border-radius:6px;padding:6px;margin-top:6px}
+@media(max-width:720px){.dc-row{grid-template-columns:1fr 1fr}}
+</style>
+{% endblock %}
+{% block content %}
+<div class="dc-wrap">
+  <h2 style="margin:0">🧭 ทดสอบ AI ตัดสินประเภทเอกสาร <span style="font-weight:400;font-size:.85rem;color:var(--fg-muted)">ใบยา / ใบฟอกเลือด / ใบแล็บ · ไม่บันทึก · ไม่แตะ LINE OA · รูปไม่ถูกเก็บ</span></h2>
+  <div class="dc-card">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <label class="btn btn-success" style="cursor:pointer;margin:0">📄 เลือกรูป/PDF (หลายไฟล์ได้)
+        <input type="file" id="dcFiles" accept="image/*,.pdf,application/pdf" multiple style="display:none" onchange="dcRun(this)"></label>
+      <span id="dcStatus" style="font-size:.78rem;color:var(--fg-muted)"></span>
+      <span id="dcSwitch" class="dc-pill mut" style="margin-left:auto">สวิตช์: …</span>
+      <button class="btn btn-secondary" onclick="dcCopyAll()">📋 คัดลอกผลทั้งหมด (ส่งให้ Claude)</button>
+    </div>
+    <div class="dc-note">แต่ละใบแสดง 3 คอลัมน์: <b>ตัวจัดประเภทเดิม</b> (คำสำคัญจาก OCR — แบบที่ LINE OA ใช้ทุกวันนี้) · <b>AI จากรูป</b> · <b>ผลลัพธ์ถ้าเปิดสวิตช์</b>
+      (AI ถูกใช้เฉพาะใบที่ตัวเดิมขึ้นธง ⚠️ ไม่แน่ใจ และมั่นใจ ≥ 80%) · ส่งใบที่เคยขึ้นธง ⚠️ มาลองเป็นหลัก · เกณฑ์เปิดใช้จริง: ≥ 20 ใบ ผิด 0</div>
+  </div>
+  <div id="dcOut"></div>
+  <div class="dc-card" id="dcSummary" style="display:none"></div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+const DC_TH = {rx:'ใบยา', dialysis:'ใบฟอกเลือด', lab:'ใบแล็บ', other:'อื่น ๆ', bills:'ใบเสร็จ', review:'รอตรวจ', id:'เอกสารประจำตัว'};
+const _dcResults = [];
+function dcEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function dcTh(c){ return DC_TH[c] || c || '-'; }
+function dcPct(v){ return v==null ? '-' : Math.round(Number(v)*100)+'%'; }
+function dcRender(fname, d, secs){
+  const el = document.createElement('div'); el.className = 'dc-row';
+  if(d.error){ el.innerHTML = '<div><b>'+dcEsc(fname)+'</b></div><div class="bad dc-pill">⚠️ '+dcEsc(d.error)+'</div><div></div><div></div>'; return el; }
+  const kw = d.keyword, ai = d.ai, dec = d.decision;
+  let kwHtml = '<span class="dc-pill mut">ไม่มีตัวเดิมให้เทียบ</span>';
+  if(kw && kw.category){
+    kwHtml = '<span class="dc-pill '+(kw.ambiguous_with?'warn':'ok')+'">'+dcTh(kw.category)+(kw.ambiguous_with?' ⚠️ ไม่แน่ใจ ('+dcTh(kw.ambiguous_with)+')':'')+'</span><span class="dc-sm">'+dcEsc(kw.reason||'')+'</span>';
+  } else if(kw && kw.error){ kwHtml = '<span class="dc-pill bad">ตัวเดิมล้ม: '+dcEsc(kw.error)+'</span>'; }
+  let aiHtml = '<span class="dc-pill bad">⚠️ AI ล้ม</span>';
+  if(ai){
+    const conf = Number(ai.confidence||0);
+    aiHtml = '<span class="dc-pill '+(conf>=d.accept_conf?'ok':'warn')+'">'+dcTh(ai.category)+' · มั่นใจ '+dcPct(conf)+'</span><span class="dc-sm">'+dcEsc(ai.reason||'')+'</span>';
+  }
+  let decHtml = '<span class="dc-pill mut">—</span>';
+  if(dec){
+    if(!dec.would_apply) decHtml = '<span class="dc-pill mut">ตัวเดิมชัดอยู่แล้ว → AI ไม่ถูกเรียก (ได้ '+dcTh(kw.category)+')</span>';
+    else if(dec.note==='changed') decHtml = '<span class="dc-pill ok">AI แก้เป็น '+dcTh(dec.category)+'</span>';
+    else if(dec.note==='confirmed') decHtml = '<span class="dc-pill ok">AI ยืนยัน '+dcTh(dec.category)+' (ธงหาย)</span>';
+    else decHtml = '<span class="dc-pill warn">คงธง ⚠️ ให้คนยืนยัน ('+dcEsc(dec.note)+')</span>';
+  } else if(ai){ decHtml = '<span class="dc-pill mut">AI ว่า '+dcTh(ai.category)+' (ไม่มีผลตัวเดิมให้รวม)</span>'; }
+  el.innerHTML = '<div><b>'+dcEsc(fname)+'</b><span class="dc-sm">'+secs+' วิ</span></div><div>'+kwHtml+'</div><div>'+aiHtml+'</div><div>'+decHtml+'</div>';
+  return el;
+}
+async function dcRun(inp){
+  const files = Array.from(inp.files||[]); if(!files.length) return;
+  const out = document.getElementById('dcOut'), st = document.getElementById('dcStatus');
+  for(let i=0;i<files.length;i++){
+    const f = files[i]; st.textContent = 'กำลังตรวจ '+(i+1)+'/'+files.length+' — '+f.name;
+    const t0 = Date.now(); let d = {}, status = 0;
+    const fd = new FormData(); fd.append('file', f);
+    try{ const r = await hdFetch('/hd/api/v1/doc-classify/read', {method:'POST', body: fd}); status = r.status; d = await r.json().catch(()=>({})); }catch(e){ status = 0; }
+    if(status===429){ st.textContent = 'AI คิวเต็ม รอ 10 วิ…'; await new Promise(r=>setTimeout(r,10000)); i--; continue; }
+    if(status!==200 && !d.error) d.error = 'HTTP '+status;
+    const secs = ((Date.now()-t0)/1000).toFixed(1);
+    _dcResults.push({file:f.name, keyword:d.keyword||null, ai:d.ai||null, decision:d.decision||null, error:d.error||null, secs:Number(secs)});
+    out.appendChild(dcRender(f.name, d, secs));
+    if(d.enabled!=null) dcShowSwitch(d.enabled);
+  }
+  st.textContent = 'เสร็จ '+files.length+' ไฟล์'; inp.value = ''; dcSummary();
+}
+function dcShowSwitch(on){ const s = document.getElementById('dcSwitch'); s.textContent = 'สวิตช์ LINE OA: '+(on?'เปิด':'ปิด'); s.className = 'dc-pill '+(on?'ok':'mut'); }
+function dcSummary(){
+  const box = document.getElementById('dcSummary'); const n = _dcResults.length; if(!n){ box.style.display='none'; return; }
+  const amb = _dcResults.filter(r=>r.keyword&&r.keyword.ambiguous_with).length;
+  const fixed = _dcResults.filter(r=>r.decision&&(r.decision.note==='changed'||r.decision.note==='confirmed')).length;
+  const kept = _dcResults.filter(r=>r.decision&&r.decision.would_apply&&!(r.decision.note==='changed'||r.decision.note==='confirmed')).length;
+  const fail = _dcResults.filter(r=>r.error||!r.ai).length;
+  box.style.display=''; box.innerHTML = '<b>สรุป</b> '+n+' ใบ · ตัวเดิมขึ้นธง ⚠️ '+amb+' ใบ · AI ตัดสินให้ได้ '+fixed+' ใบ · คงธงให้คน '+kept+' ใบ · AI ล้ม '+fail+' ใบ<div class="dc-note">ตรวจทีละใบว่าคอลัมน์ "AI จากรูป" ตรงกับใบจริงไหม — ถ้าผิดแม้ใบเดียว ส่งผลทั้งหมด (ปุ่ม 📋) ให้ Claude ปรับ prompt ก่อนเปิดสวิตช์</div>';
+}
+function dcCopyAll(){
+  const txt = JSON.stringify(_dcResults, null, 0);
+  navigator.clipboard.writeText(txt).then(()=>alert('คัดลอกแล้ว '+_dcResults.length+' ใบ')).catch(()=>prompt('คัดลอกข้อความนี้:', txt));
+}
+hdFetch('/hd/api/v1/doc-classify/stats').then(r=>r.ok?r.json():null).then(d=>{ if(d) dcShowSwitch(!!d.enabled); }).catch(()=>{});
+</script>
+{% endblock %}
