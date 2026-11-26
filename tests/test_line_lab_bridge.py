@@ -137,7 +137,7 @@ class TestLabSyncExtraCols(unittest.TestCase):
         for have_extra in (True, False):
             cur = mock.MagicMock()
             cols = [("hb",), ("iron",), ("tibc",), ("vitd",), ("antihbc",)] if have_extra else [("hb",)]
-            cur.fetchall.side_effect = [[], [(7, "67379")], cols, []]   # have docs, patients, columns, prev row
+            cur.fetchall.side_effect = [[], [(7, "67379")], cols, [], []]   # have docs, patients, columns, linked docs, prev row
             cur.fetchone.return_value = None
             conn = mock.MagicMock(); conn.cursor.return_value.__enter__.return_value = cur
             st = lab_sync.sync_labs(conn, storage, doc_index)
@@ -265,3 +265,62 @@ class TestConfirmCommand(unittest.TestCase):
             self.assertIn("ไม่ใช่ผลแล็บ", s._lab_confirm_command("DOCCONF", "phys"))
             fake_index._docs[0]["category"] = "lab"; fake_storage.get.return_value = None
             self.assertIn("ยังไม่มีค่า", s._lab_confirm_command("DOCCONF", "phys"))
+
+
+class TestStage4FileFromHd(unittest.TestCase):
+    def test_lab_report_approved_when_nurse_confirmed(self):
+        rep = llb.lab_report(dict(_res(), approved_by="nurse1"), "D", "regex_ocr")
+        self.assertEqual(rep.status, "approved"); self.assertEqual(rep.reviewed_by, "hd:nurse1"); self.assertTrue(rep.reviewed_at)
+        self.assertEqual(llb.lab_report(_res(), "D", "regex_ocr").status, "pending_review")
+
+    def test_sync_skips_docs_linked_to_nurse_rows(self):
+        rep = llb.lab_report(_res(), "DOCL", "regex_ocr")
+        storage = mock.Mock(); storage.get.return_value = rep.to_json()
+        doc_index = mock.Mock(); doc_index._docs = [{"document_id": "DOCL", "category": "lab", "submitted_at": "2026-11-26", "patient_hn_folder": "67379_x"}]
+        cur = mock.MagicMock()
+        cur.fetchall.side_effect = [[], [(7, "67379")], [("hb",)], [("DOCL",)], []]
+        conn = mock.MagicMock(); conn.cursor.return_value.__enter__.return_value = cur
+        st = lab_sync.sync_labs(conn, storage, doc_index)
+        self.assertEqual(st["inserted"], 0); self.assertEqual(st["skipped"], 1)
+
+    def test_server_ingest_new_and_existing(self):
+        import server as s
+        res = _res()
+        idx = mock.Mock(); idx._doc_map = {}
+        with mock.patch.object(s, "doc_index", idx), mock.patch.object(s, "master_registry") as reg, \
+             mock.patch.object(s, "save_to_inbox", side_effect=lambda d, f: "/tmp/" + f), \
+             mock.patch.object(s, "process_file_async") as pfa, mock.patch.object(s, "audit_logger"):
+            reg.match_hn.return_value = mock.Mock(folder_name="67379_x")
+            out = s._hd_file_lab_sheet(b"\xff\xd8img", ".jpeg", "9", "67379", res, approved_by="nurse1")
+        self.assertFalse(out["existing"]); self.assertEqual(out["folder"], "67379_x"); self.assertTrue(out["doc_id"])
+        kw = pfa.call_args.kwargs
+        self.assertEqual(kw["batch_patient_folder"], "67379_x"); self.assertIn("HN 00012345", kw["merged_ocr_text"])
+        self.assertTrue(pfa.call_args.args[0].endswith(".jpg"))
+        cached = llb.recall(out["doc_id"]); self.assertEqual(cached["approved_by"], "nurse1")
+        # ไฟล์เดิม (sha ตรง) → ชี้เอกสารเดิม ไม่เก็บซ้ำ
+        import hashlib
+        sha = hashlib.sha256(b"\xff\xd8img").hexdigest()
+        idx._doc_map = {"old": {"document_id": "OLDDOC", "content_sha256": sha, "category": "lab", "patient_hn_folder": "67379_x"}}
+        with mock.patch.object(s, "doc_index", idx), mock.patch.object(s, "process_file_async") as pfa2:
+            out2 = s._hd_file_lab_sheet(b"\xff\xd8img", ".jpg", "9", "67379", res)
+        self.assertTrue(out2["existing"]); self.assertEqual(out2["doc_id"], "OLDDOC"); pfa2.assert_not_called()
+
+    def test_file_endpoint_links_row(self):
+        import io, sys
+        from flask import Flask
+        from hd_module import blueprint as bp
+        llb.remember("LSF-1", _res())
+        app = Flask(__name__)
+        app.config["HD_FILE_LAB_SHEET_FN"] = lambda data, ext, u, hn, res, approved_by="": {"doc_id": "NEWDOC123", "existing": False, "folder": "67379_x"}
+        fake_pg = mock.MagicMock(); cur = fake_pg.connect.return_value.cursor.return_value.__enter__.return_value; cur.rowcount = 1
+        with app.test_request_context(method="POST", data={"file": (io.BytesIO(b"x"), "a.jpg"), "hn": "67379", "read_id": "LSF-1", "lab_result_id": "321"},
+                                      content_type="multipart/form-data"), \
+             mock.patch.dict(sys.modules, {"psycopg2": fake_pg}), mock.patch.dict("os.environ", {"HD_DATABASE_URL": "postgresql://x"}), \
+             mock.patch.object(bp, "log_action"):
+            j = bp.lab_sheet_file.__wrapped__().get_json()
+        self.assertTrue(j["ok"]); self.assertEqual(j["doc8"], "NEWDOC12"); self.assertTrue(j["linked"])
+        self.assertIn("sheet_doc_id", cur.execute.call_args.args[0])
+        app2 = Flask(__name__)
+        with app2.test_request_context(method="POST", data={"file": (io.BytesIO(b"x"), "a.jpg")}, content_type="multipart/form-data"):
+            out = bp.lab_sheet_file.__wrapped__()
+        self.assertEqual(out[1], 503)

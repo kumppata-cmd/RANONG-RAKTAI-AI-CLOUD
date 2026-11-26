@@ -8771,6 +8771,12 @@ def lab_sheet_read():
     read_id = lsr.new_read_id()
     for p in pages:
         p["read_id"] = f"{read_id}-{p.get('page', 1)}"
+        if not p.get("failed"):
+            try:   # เก็บผลไว้ 30 นาที — ถ้าพยาบาลบันทึก จะส่งรูปมาเก็บเป็นเอกสาร (ขั้นที่ 4) โดยใช้ค่าชุดเดียวกัน
+                from . import line_lab_bridge as _llb
+                _llb.remember(p["read_id"], p)
+            except Exception:
+                pass
     log_action(user_id=g.get("hd_user_id"), action="lab_sheet.read", resource_type="lab_sheet", resource_id=None,
                new_values={"pages": len(pages), "double": double, "pdf": is_pdf, "read_id": read_id,
                            "found": [len((p.get("values") or {})) for p in pages],
@@ -8778,6 +8784,58 @@ def lab_sheet_read():
                            "matched": [((p.get("patient") or {}).get("status")) for p in pages]},
                ip_address=request.remote_addr or "")
     return jsonify({"pages": pages, "profile": lsr.PROFILE_ID, "double": double, "read_id": read_id})
+
+
+@hd_bp.route("/lab-sheet/file", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def lab_sheet_file():
+    """📄 ขั้นที่ 4 (26 พ.ย. 2569): หลังพยาบาลบันทึกค่าจากปุ่ม 📄 → ส่งรูป/PDF ใบนั้นมาเก็บเป็นเอกสาร
+    ในระบบเดียวกับ LINE OA (แฟ้มผู้ป่วย, LIFF, ค้นหา) — form: file, hn, read_id, lab_result_id?
+    ค่าใน _lab_results JSON = ค่าจากตัวอ่าน (สถานะ approved เพราะพยาบาลตรวจแล้ว) · ไฟล์ซ้ำ → ชี้เอกสารเดิม"""
+    import os
+    from flask import current_app
+    from . import line_lab_bridge as llb
+    fn = current_app.config.get("HD_FILE_LAB_SHEET_FN")
+    if not fn:
+        return jsonify({"error": "ระบบเอกสารไม่พร้อม (ไม่มี HD_FILE_LAB_SHEET_FN)"}), 503
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "ไม่พบไฟล์"}), 400
+    data = f.read()
+    if not data or len(data) > 12 * 1024 * 1024:
+        return jsonify({"error": "ไฟล์ว่างหรือใหญ่เกิน 12 MB"}), 400
+    hn = (request.form.get("hn") or "").strip()
+    read_id = (request.form.get("read_id") or "").strip()
+    lab_result_id = _safe_int(request.form.get("lab_result_id"))
+    ext = os.path.splitext(f.filename or "")[1].lower() or (".pdf" if data[:5] == b"%PDF-" else ".jpg")
+    res = llb.recall(read_id) if read_id else None
+    try:
+        out = fn(data, ext, str(g.get("hd_user_id") or ""), hn, res, approved_by=str(g.get("hd_username") or g.get("hd_user_id") or ""))
+    except Exception as e:
+        logger.warning("lab-sheet file: %s", type(e).__name__)
+        return jsonify({"error": "เก็บเอกสารไม่สำเร็จ"}), 500
+    if out.get("error"):
+        return jsonify(out), 500
+    # ผูก doc_id กับแถวที่พยาบาลบันทึก → lab_sync ไม่สร้างแถวซ้ำจากเอกสารนี้
+    linked = False
+    if lab_result_id and out.get("doc_id"):
+        db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url, connect_timeout=5)
+            with conn.cursor() as cur:
+                cur.execute("UPDATE hd_lab_results SET sheet_doc_id = %s WHERE id = %s", (out["doc_id"][:80], lab_result_id))
+                linked = cur.rowcount == 1
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.info("lab-sheet link: %s", type(e).__name__)
+    log_action(user_id=g.get("hd_user_id"), action="lab_sheet.file", resource_type="document",
+               resource_id=None, new_values={"doc8": (out.get("doc_id") or "")[:8], "existing": out.get("existing"),
+                                             "linked": linked, "has_values": bool(res)},
+               ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "doc_id": out.get("doc_id"), "doc8": (out.get("doc_id") or "")[:8],
+                    "existing": bool(out.get("existing")), "folder": out.get("folder", ""), "linked": linked})
 
 
 @hd_bp.route("/lab-sheet/accuracy", methods=["GET"])

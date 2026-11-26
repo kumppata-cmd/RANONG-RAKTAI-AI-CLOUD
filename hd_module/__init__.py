@@ -349,6 +349,7 @@ def _run_hd_migrations():
             fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS hco3 NUMERIC(4,1)")
             fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS glucose NUMERIC(6,1)")
             fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS sheet_read_id VARCHAR(40)")
+            fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS sheet_doc_id VARCHAR(80)")   # ขั้นที่ 4: เอกสารของใบที่อ่านใน HD
             # ตัวอย่างเฉลย "AI อ่านใบแล็บ vs พยาบาลยืนยัน" — ไม่มี HN/ชื่อ
             fixes.append("""
                 CREATE TABLE IF NOT EXISTS hd_lab_sheet_samples (

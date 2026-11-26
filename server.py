@@ -17788,6 +17788,57 @@ def _lab_confirm_command(doc8: str, user_hash: str) -> str:
     return f"✅ ยืนยันผลแล็บ {doc8} แล้ว" + (f" (แฟ้ม {folder})" if folder else "") + hd_note
 
 
+def _hd_file_lab_sheet(data: bytes, ext: str, hd_user: str, clinic_hn: str, res: dict | None,
+                       approved_by: str = "") -> dict:
+    """📄 ขั้นที่ 4 (26 พ.ย. 2569, แพทย์อนุมัติ): ใบแล็บที่อ่านจากปุ่ม 📄 ใน HD → เก็บเป็นเอกสาร
+    เข้าท่อเดียวกับ LINE OA (แฟ้มผู้ป่วย / LIFF / ค้นหา / _lab_results JSON) — "เอกสาร + ค่า + สถานะ" ชุดเดียว
+    คืน {"doc_id", "existing"} · ถ้าไฟล์เดียวกัน (sha256) มีอยู่แล้วจากทางใดก็ตาม → ชี้ไปเอกสารเดิม ไม่เก็บซ้ำ"""
+    ext = (ext or "").lower()
+    if ext == ".jpeg":
+        ext = ".jpg"
+    if ext not in (".jpg", ".png", ".pdf"):
+        ext = ".jpg"
+    sha256_hex = content_sha256(data)
+    try:
+        doc_index._ensure_fresh()
+        for d in reversed(list(doc_index._doc_map.values())):
+            if d.get("content_sha256") == sha256_hex or sha256_hex in (d.get("page_sha256s") or ()):
+                return {"doc_id": d.get("document_id", ""), "existing": True,
+                        "category": d.get("category", ""), "folder": d.get("patient_hn_folder", "")}
+    except Exception as _e:
+        logger.info("hd file sheet dedup: %s", type(_e).__name__)
+    owner_hash = hash_user_id(f"hd_user:{hd_user}")
+    doc_id, filename = build_storage_filename(ext)
+    folder = ""
+    try:
+        if clinic_hn and master_registry:
+            _p = master_registry.match_hn(str(clinic_hn))
+            folder = _p.folder_name if _p else ""
+    except Exception:
+        folder = ""
+    text = None
+    if res:
+        from hd_module import line_lab_bridge as _llb
+        if approved_by:
+            res = dict(res, approved_by=approved_by)
+        _llb.remember(doc_id, res)
+        text = _llb.page_text(res)
+    filepath = save_to_inbox(data, filename)
+    process_file_async(
+        filepath, None, doc_id=doc_id, sha256_hex=sha256_hex, owner_hash=owner_hash, line_user_id="",
+        merged_ocr_text=text, merged_page_count=0, submitted_at_ms=int(time.time() * 1000),
+        batch_patient_folder=folder,
+    )
+    try:
+        audit_logger.log("lab_sheet_filed_from_hd", owner_hash, {"doc_id": doc_id[:8], "has_values": bool(res)})
+    except Exception:
+        pass
+    return {"doc_id": doc_id, "existing": False, "folder": folder}
+
+
+app.config["HD_FILE_LAB_SHEET_FN"] = _hd_file_lab_sheet   # เรียกจาก hd_module POST /lab-sheet/file
+
+
 def _multipage_flush(user_hash: str):
     """ประมวลผลรูปภาพทั้งหมดในบัฟเฟอร์ของผู้ใช้เมื่อหมดเวลารอ.
 

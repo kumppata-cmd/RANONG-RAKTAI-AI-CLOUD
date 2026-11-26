@@ -253,9 +253,23 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
         except Exception:
             extra_num, extra_txt = [], []
         all_cols = NUMERIC_COLS + TEXT_COLS + extra_num + extra_txt
+        # ขั้นที่ 4 (26 พ.ย. 2569): ใบที่พยาบาลบันทึกค่าในหน้า Lab แล้วส่งรูปมาเก็บเป็นเอกสาร
+        # → ค่าอยู่ใน hd_lab_results แล้ว ไม่สร้างแถว hd_lab_docs ซ้ำ
+        linked_docs = set()
+        try:
+            cur.execute("SAVEPOINT lab_linked")
+            cur.execute("SELECT sheet_doc_id FROM hd_lab_results WHERE sheet_doc_id IS NOT NULL AND sheet_doc_id <> ''")
+            linked_docs = {r[0] for r in cur.fetchall()}
+            cur.execute("RELEASE SAVEPOINT lab_linked")
+        except Exception:
+            try:
+                cur.execute("ROLLBACK TO SAVEPOINT lab_linked")
+            except Exception:
+                pass
+            linked_docs = set()
         for d in docs[:max_docs]:
             doc_id = d.get("document_id") or d.get("doc_id") or ""
-            if not doc_id or doc_id in have:
+            if not doc_id or doc_id in have or doc_id in linked_docs:
                 stats["skipped"] += 1
                 continue
             ddate = (d.get("submitted_at") or d.get("received_at") or d.get("upload_date") or "")[:10]

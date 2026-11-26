@@ -198,6 +198,7 @@ function saveLab(){
     .then(r=>r.json()).then(d=>{
       if(d.error){showToast(d.error,'danger');return}
       showToast('บันทึกผล Lab สำเร็จ','success');
+      if(typeof _afterLabSaved==='function'){ try{ _afterLabSaved(d); }catch(e){} }   /* 📄 ขั้นที่ 4: เก็บรูปใบเป็นเอกสาร */
       closeAddLab();loadLabs();
     }).catch(()=>showToast('บันทึกไม่สำเร็จ','danger'));
 }
@@ -313,8 +314,8 @@ const _SHEET_LABELS = {bun:'BUN', creatinine:'Cr', potassium:'K', sodium:'Na', c
   hemoglobin:'Hb', hematocrit:'Hct', ferritin:'Ferritin', tsat:'TSAT', iron:'Iron', tibc:'TIBC', vitamin_d:'Vit D', hepatitis_b:'HBsAg',
   hepatitis_c:'Anti-HCV', hiv:'Anti HIV', anti_hbs:'HBs Ab', anti_hbc:'HBc Ab', wbc:'WBC', platelet:'PLT', hco3:'HCO3', glucose:'Glucose',
   uric_acid:'Uric', ast:'AST', alt:'ALT'};
-let _sheet = {readId:null, ai:{}, uncertain:[], confirmHospitalHn:null, needConfirm:false};
-function _sheetReset(){ _sheet = {readId:null, ai:{}, uncertain:[], confirmHospitalHn:null, needConfirm:false};
+let _sheet = {readId:null, ai:{}, uncertain:[], confirmHospitalHn:null, needConfirm:false, file:null};
+function _sheetReset(){ _sheet = {readId:null, ai:{}, uncertain:[], confirmHospitalHn:null, needConfirm:false, file:null};
   const st=document.getElementById('sheetStatus'); if(st) st.innerHTML='';
   Object.values(_SHEET_FIELD_IDS).forEach(id=>{ const el=document.getElementById(id); if(el) el.style.background=''; }); }
 function _sheetEsc(x){ return String(x==null?'':x).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
@@ -328,6 +329,7 @@ function readLabSheet(input){
   const f = input.files && input.files[0]; if(!f) return;
   const st = document.getElementById('sheetStatus');
   _sheetReset();
+  _sheet.file = f;   /* เก็บไว้ส่งเป็นเอกสารหลังบันทึก (ขั้นที่ 4) */
   st.innerHTML = '<span style="color:var(--accent)">⏳ AI กำลังอ่านใบ 2 รอบ (~10–25 วิ)…</span>';
   const fd = new FormData(); fd.append('file', f); fd.append('double', '1');
   hdFetch('/hd/api/v1/lab-sheet/read', {method:'POST', body:fd}).then(async r=>{ const d = await r.json().catch(()=>({})); d._status=r.status; return d; }).then(d=>{
@@ -374,6 +376,17 @@ function readLabSheet(input){
       + (probs ? '<div style="color:#b71c1c;margin-top:4px">'+probs+'</div>' : '')
       + (pages.length>1 ? '<div style="color:var(--fg-muted)">ไฟล์นี้มี '+pages.length+' หน้า — เติมจากหน้าแรกเท่านั้น</div>' : '');
   }).catch(e=>{ input.value=''; st.innerHTML='<span style="color:var(--danger)">❌ อ่านใบไม่สำเร็จ: '+_sheetEsc(e.message||e)+'</span>'; });
+}
+/* 📄 ขั้นที่ 4 (26 พ.ย. 2569): บันทึกค่าสำเร็จ → ส่งรูป/PDF ใบนั้นเก็บเป็นเอกสารในระบบเดียวกับ LINE OA (แฟ้มผู้ป่วย/LIFF/ค้นหา)
+   ไม่เก็บ = ไม่ทำให้การบันทึกล้ม — แค่แจ้ง */
+function _afterLabSaved(saved){
+  const f = _sheet.file, rid = _sheet.readId; if(!f || !rid) return;
+  const fd = new FormData(); fd.append('file', f); fd.append('hn', HN); fd.append('read_id', rid); if(saved && saved.id) fd.append('lab_result_id', saved.id);
+  _sheet.file = null;
+  hdFetch('/hd/api/v1/lab-sheet/file', {method:'POST', body:fd}).then(r=>r.json()).then(d=>{
+    if(d.error){ showToast('บันทึกค่าแล้ว แต่เก็บรูปใบเป็นเอกสารไม่สำเร็จ: '+d.error,'warning'); return; }
+    showToast(d.existing ? '📎 ใบนี้มีในระบบเอกสารแล้ว ('+d.doc8+') — เชื่อมให้แล้ว' : '📁 เก็บใบเป็นเอกสารแล้ว ('+d.doc8+(d.folder?' · แฟ้ม '+d.folder:'')+')','success');
+  }).catch(()=>showToast('บันทึกค่าแล้ว แต่เก็บรูปใบเป็นเอกสารไม่สำเร็จ','warning'));
 }
 /* ครอบ saveLab: ถ้าใบไม่ตรงทะเบียน ต้องติ๊กยืนยันก่อน · บันทึกแล้วล้างสถานะใบ */
 const _saveLabBeforeSheet = saveLab;

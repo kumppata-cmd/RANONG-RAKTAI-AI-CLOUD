@@ -209,10 +209,13 @@ def lab_report(res, doc_id, extraction_method="regex_ocr"):
     if not results:
         return None
     h = res.get("header") or {}
+    approved_by = res.get("approved_by") or ""
     rep = LabReport(source_document_id=doc_id, specimen_date=h.get("lab_date") or "unknown",
                     extraction_method=extraction_method, results=results,
-                    status=ReviewStatus.PENDING_REVIEW.value,
-                    extracted_at=datetime.now(timezone.utc).isoformat())
+                    status=(ReviewStatus.APPROVED.value if approved_by else ReviewStatus.PENDING_REVIEW.value),
+                    extracted_at=datetime.now(timezone.utc).isoformat(),
+                    reviewed_by=(f"hd:{approved_by}"[:80] if approved_by else ""),
+                    reviewed_at=(datetime.now(timezone.utc).isoformat() if approved_by else ""))
     warn = [f"ไม่แน่ใจ: {u.get('label')} ({u.get('raw') or u.get('value')})" for u in (res.get("uncertain") or [])]
     warn += [f"ตรวจสอบ: {p}" for p in (res.get("problems") or [])]
     try:
