@@ -414,6 +414,12 @@ def hd_ocr_test_page():
     return render_template("hd_ocr_test.html")
 
 
+@hd_web.route("/lab-sheet-test")
+def hd_lab_sheet_test_page():
+    """🧪 ทดสอบอ่านใบแล็บ รพ.ระนอง (Lab Sheet Reader ขั้นที่ 1) — ไม่บันทึกค่า ไม่แตะทางเดิน LINE เดิม"""
+    return render_template("hd_lab_sheet_test.html")
+
+
 @hd_web.route("/ocr-accuracy")
 def hd_ocr_accuracy_page():
     """📷📊 ความแม่นการอ่านจอเครื่องรายรุ่น (Magic Camera 2.0)"""
@@ -8603,6 +8609,68 @@ def read_machine_screen():
     return jsonify({"values": {}, "confidence": {}, "uncertain": unc, "dropped": [], "engine": engine + "-fallback",
                     "found": found, "model": model, "read_id": read_id, "words": len(words), "claude_failed": True,
                     "reason": (res or {}).get("reason") or "AI อ่านรูปไม่สำเร็จ — ลองถ่ายใหม่ให้ตรงจอ/ชัด หรือกรอกเอง"})
+
+
+@hd_bp.route("/lab-sheet/read", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def lab_sheet_read():
+    """📄 Lab Sheet Reader (26 พ.ย. 2569, ขั้นที่ 1): รูป/PDF ใบแล็บ รพ.ระนอง → ค่ารายแถว + หัวใบ + ธงตรวจสอบ
+    form: file (jpg/png/pdf ≤ 12 MB), double=1 (อ่าน 2 รอบ, ค่าเริ่มต้น) · ไม่บันทึกอะไรเอง · ไม่เก็บรูป
+    ตอบ: pages[{values, uncertain, problems, header, patient, computed, summary}] · 429 เมื่อคิวอ่านเต็ม"""
+    import os
+    from . import lab_sheet_reader as lsr
+    f = request.files.get("file") or request.files.get("image")
+    if not f:
+        return jsonify({"error": "ไม่พบไฟล์"}), 400
+    data = f.read()
+    if not data or len(data) > 12 * 1024 * 1024:
+        return jsonify({"error": "ไฟล์ว่างหรือใหญ่เกิน 12 MB"}), 400
+    double = (request.form.get("double") or "1") not in ("0", "false", "no")
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return jsonify({"error": "ANTHROPIC_API_KEY ไม่ได้ตั้งบน Render"}), 503
+    from .patient_engage import ai_model as _ai_model
+    is_pdf = data[:5] == b"%PDF-" or (f.filename or "").lower().endswith(".pdf")
+    try:
+        images = lsr.pdf_pages_to_jpeg(data) if is_pdf else [data]
+    except Exception as e:
+        return jsonify({"error": f"เปิด PDF ไม่ได้: {type(e).__name__}"}), 400
+    pages = []
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    for idx, img in enumerate(images):
+        try:
+            res = lsr.read_sheet(img, api_key, _ai_model(), double=double)
+        except RuntimeError as e:
+            if str(e) == "busy":
+                return jsonify({"error": "มีคนกำลังอ่านรูปพร้อมกันอยู่ 2 คน — รอ 10 วินาทีแล้วลองใหม่", "busy": True}), 429
+            res = None
+        except Exception as e:
+            logger.info("lab-sheet read: %s", type(e).__name__)
+            res = None
+        if res is None:
+            pages.append({"page": idx + 1, "failed": True, "reason": "AI อ่านใบไม่สำเร็จ — ลองถ่ายใหม่ให้ตรง/ชัด"})
+            continue
+        patient = None
+        if db_url and res.get("header"):
+            try:
+                import psycopg2
+                conn = psycopg2.connect(db_url, connect_timeout=5)
+                with conn.cursor() as cur:
+                    patient = lsr.match_patient(cur, res["header"])
+                conn.close()
+            except Exception as e:
+                logger.info("lab-sheet match: %s", type(e).__name__)
+        res["patient"] = patient
+        res["summary"] = lsr.summary_lines(res, patient)
+        res["page"] = idx + 1
+        pages.append(res)
+    log_action(user_id=g.get("hd_user_id"), action="lab_sheet.read", resource_type="lab_sheet", resource_id=None,
+               new_values={"pages": len(pages), "double": double, "pdf": is_pdf,
+                           "found": [len((p.get("values") or {})) for p in pages],
+                           "uncertain": [len((p.get("uncertain") or [])) for p in pages],
+                           "matched": [((p.get("patient") or {}).get("status")) for p in pages]},
+               ip_address=request.remote_addr or "")
+    return jsonify({"pages": pages, "profile": lsr.PROFILE_ID, "double": double})
 
 
 @hd_bp.route("/machine-screen/models", methods=["GET"])

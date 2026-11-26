@@ -1,0 +1,108 @@
+{% extends "hd_base.html" %}
+{% block title %}🧪 ทดสอบอ่านใบแล็บ{% endblock %}
+{% block extra_css %}
+<style>
+.ls-wrap{max-width:1150px;margin:0 auto;padding:10px}
+.ls-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:10px}
+.ls-note{font-size:.74rem;color:var(--fg-muted);line-height:1.5;margin-top:6px}
+.ls-sheet{border:1px solid var(--border);border-radius:10px;padding:10px;margin-top:10px;background:var(--card)}
+.ls-head{display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:.82rem}
+.ls-pill{padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:600}
+.ok{background:rgba(39,174,96,.15);color:#1e8449} .warn{background:rgba(230,126,34,.15);color:#a04000} .bad{background:rgba(231,76,60,.15);color:#b71c1c} .mut{background:rgba(127,140,141,.15);color:var(--fg-muted)}
+.ls-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:6px;margin-top:8px}
+.ls-v{border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:.78rem}
+.ls-v b{display:block;font-size:.7rem;color:var(--fg-muted);font-weight:600}
+.ls-v.u{border-color:#e74c3c;background:rgba(231,76,60,.06)} .ls-v.pri{border-color:#2980b9}
+.ls-prob{font-size:.76rem;color:#b71c1c;margin-top:6px;line-height:1.5}
+.ls-unk{font-size:.72rem;color:var(--fg-muted);margin-top:4px}
+.ls-sum{font-family:ui-monospace,monospace;font-size:.72rem;white-space:pre-wrap;background:rgba(127,140,141,.08);border-radius:6px;padding:6px;margin-top:6px}
+</style>
+{% endblock %}
+{% block content %}
+<div class="ls-wrap">
+  <h2 style="margin:0">🧪 ทดสอบอ่านใบแล็บ รพ.ระนอง <span style="font-weight:400;font-size:.85rem;color:var(--fg-muted)">ขั้นที่ 1 · ไม่บันทึกค่า · ไม่แตะ LINE OA · รูปไม่ถูกเก็บ</span></h2>
+  <div class="ls-card">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <label class="btn btn-success" style="cursor:pointer;margin:0">📄 เลือกรูป/PDF (หลายไฟล์ได้)
+        <input type="file" id="lsFiles" accept="image/*,.pdf,application/pdf" multiple style="display:none" onchange="lsRun(this)"></label>
+      <label style="font-size:.78rem"><input type="checkbox" id="lsDouble" checked> อ่าน 2 รอบแล้วเทียบ (ช้าขึ้น ~2 เท่า แต่จับผิดได้)</label>
+      <span id="lsStatus" style="font-size:.78rem;color:var(--fg-muted)"></span>
+      <button class="btn btn-secondary" onclick="lsCopyAll()" style="margin-left:auto">📋 คัดลอกผลทั้งหมด (ส่งให้ Claude)</button>
+    </div>
+    <div class="ls-note">อ่านทีละใบ ~10–25 วิ/ใบ (2 รอบ) · ค่าที่ผ่านการตรวจทุกชั้นขึ้นปกติ · <span style="color:#b71c1c">กรอบแดง</span> = ไม่แน่ใจ (2 รอบไม่ตรง / นอกช่วง / AI ไม่มั่นใจ) · TSAT คำนวณจาก Iron÷TIBC แล้วเทียบกับที่เขียนมือ · HN ตรวจกับทะเบียนคลินิก + เทียบชื่อ · Anti HIV แสดงเฉพาะหน้านี้ ไม่ออก LINE</div>
+  </div>
+  <div id="lsOut"></div>
+  <div class="ls-card" id="lsSummary" style="display:none"></div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+const LS_PRI = ['ferritin','pth','iron','tibc','vitd','hbsag','antihbs','antihbc','antihcv','antihiv'];
+const _lsResults = [];
+function lsEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function lsPatientPill(p){
+  if(!p) return '<span class="ls-pill mut">ไม่ได้ตรวจทะเบียน</span>';
+  return {matched:'<span class="ls-pill ok">✅ ตรงทะเบียน: '+lsEsc(p.patient_name)+'</span>',
+          name_mismatch:'<span class="ls-pill warn">⚠️ HN พบ แต่ชื่อไม่ตรง: '+lsEsc(p.patient_name)+'</span>',
+          not_found:'<span class="ls-pill bad">❌ HN '+lsEsc(p.hn)+' ไม่อยู่ในทะเบียน</span>',
+          no_hn:'<span class="ls-pill bad">❌ อ่าน HN ไม่ได้</span>'}[p.status] || '<span class="ls-pill mut">'+lsEsc(p.status)+'</span>';
+}
+function lsRender(fname, pg, secs){
+  const el = document.createElement('div'); el.className='ls-sheet';
+  if(pg.failed){ el.innerHTML = '<div class="ls-head"><b>'+lsEsc(fname)+'</b> หน้า '+pg.page+' <span class="ls-pill bad">⚠️ AI ล้ม</span> <span class="ls-note">'+lsEsc(pg.reason)+'</span></div>'; return el; }
+  const h = pg.header || {};
+  const vals = pg.values || {}, unc = pg.uncertain || [];
+  const keys = LS_PRI.filter(k=>k in vals).concat(Object.keys(vals).filter(k=>!LS_PRI.includes(k)));
+  let cells = keys.map(k=>'<div class="ls-v'+(LS_PRI.includes(k)?' pri':'')+'"><b>'+lsEsc(vals[k].param||k)+' <span style="font-weight:400">#'+(vals[k].no??'-')+'</span></b>'+lsEsc(vals[k].value)+' <span style="color:var(--fg-muted)">'+lsEsc(vals[k].unit)+'</span></div>').join('');
+  if(pg.computed && pg.computed.tsat != null) cells += '<div class="ls-v pri"><b>TSAT (คำนวณ Iron÷TIBC)</b>'+pg.computed.tsat+' % <span style="color:var(--fg-muted);font-size:.68rem">'+lsEsc(pg.computed.tsat_check||'')+'</span></div>';
+  cells += unc.map(u=>'<div class="ls-v u"><b>'+lsEsc(u.label)+' #'+(u.no??'-')+' ❓</b>'+lsEsc(u.raw||u.value)+(u.alt!=null?' / '+lsEsc(u.alt):'')+'<div style="font-size:.66rem;color:#b71c1c">'+lsEsc(u.why)+'</div></div>').join('');
+  const nOk = keys.length, nU = unc.length, nP = (pg.problems||[]).length;
+  const pill = nP===0 && nU===0 ? '<span class="ls-pill ok">✅ ผ่านทุกชั้น</span>' : (nP? '<span class="ls-pill bad">⚠️ มีข้อสงสัย '+nP+'</span>' : '<span class="ls-pill warn">❓ ไม่แน่ใจ '+nU+' ค่า</span>');
+  el.innerHTML = '<div class="ls-head"><b>'+lsEsc(fname)+'</b> หน้า '+pg.page+' '+pill+' '+lsPatientPill(pg.patient)
+    + '<span class="ls-pill mut">'+(pg.double_checked?'อ่าน 2 รอบ':'อ่าน 1 รอบ')+' · '+secs+' วิ · แถว '+(pg.rows_seen||[]).length+'</span></div>'
+    + '<div class="ls-note">HN <b>'+lsEsc(h.hn)+'</b> → '+lsEsc(h.hn_norm)+' · AN '+lsEsc(h.an)+' · '+lsEsc(h.name)+' · '+lsEsc(h.request_form)+' · ขอ '+lsEsc(h.request_date)+' '+lsEsc(h.request_time)+' · รับ '+lsEsc(h.receive_date)+'</div>'
+    + '<div class="ls-grid">'+cells+'</div>'
+    + ((pg.problems||[]).length ? '<div class="ls-prob">'+pg.problems.map(p=>'⚠️ '+lsEsc(p)).join('<br>')+'</div>' : '')
+    + ((pg.unknown_rows||[]).length ? '<div class="ls-unk">แถวที่ระบบยังไม่รู้จัก (ไม่ใช้): '+pg.unknown_rows.map(r=>'#'+(r.no??'-')+' '+lsEsc(r.parameter)+' = '+lsEsc(r.result)).join(' · ')+'</div>' : '')
+    + '<details style="margin-top:6px"><summary style="font-size:.74rem;cursor:pointer">สรุปข้อความ (เหมือนที่จะส่งเป็นการ์ด — ไม่มี Anti HIV)</summary><div class="ls-sum">'+lsEsc((pg.summary||[]).join('\n'))+'</div></details>';
+  return el;
+}
+async function lsRun(inp){
+  const files = Array.from(inp.files||[]); if(!files.length) return;
+  const out = document.getElementById('lsOut'), st = document.getElementById('lsStatus');
+  const dbl = document.getElementById('lsDouble').checked ? '1' : '0';
+  const stats = {n:0, pass:0, unc:0, prob:0, fail:0, matched:0};
+  for(let i=0;i<files.length;i++){
+    const f = files[i]; st.textContent = '⏳ '+(i+1)+'/'+files.length+' — '+f.name;
+    let d = {}, status = 0, tries = 0; const t0 = performance.now();
+    while(tries < 4){
+      tries++;
+      const fd = new FormData(); fd.append('file', f); fd.append('double', dbl);
+      try{ const r = await hdFetch('/hd/api/v1/lab-sheet/read', {method:'POST', body: fd}); status = r.status; d = await r.json().catch(()=>({})); }catch(e){ status = 0; }
+      if(status === 429){ await new Promise(r=>setTimeout(r, 8000)); continue; }
+      break;
+    }
+    const secs = Math.round((performance.now()-t0)/100)/10;
+    if(status !== 200){ const el=document.createElement('div'); el.className='ls-sheet'; el.innerHTML='<b>'+lsEsc(f.name)+'</b> <span class="ls-pill bad">HTTP '+status+'</span> '+lsEsc(d.error||''); out.appendChild(el); stats.n++; stats.fail++; continue; }
+    (d.pages||[]).forEach(pg=>{
+      stats.n++;
+      if(pg.failed){ stats.fail++; } else {
+        if((pg.problems||[]).length) stats.prob++; else if((pg.uncertain||[]).length) stats.unc++; else stats.pass++;
+        if(pg.patient && pg.patient.status==='matched') stats.matched++;
+      }
+      _lsResults.push({file:f.name, secs, page:pg});
+      out.appendChild(lsRender(f.name, pg, secs));
+    });
+  }
+  st.textContent = '✅ เสร็จ '+files.length+' ไฟล์';
+  const s = document.getElementById('lsSummary'); s.style.display='';
+  s.innerHTML = '<b>สรุป</b> หน้า '+stats.n+' · ✅ ผ่านทุกชั้น '+stats.pass+' · ❓ มีค่าไม่แน่ใจ '+stats.unc+' · ⚠️ มีข้อสงสัย '+stats.prob+' · AI ล้ม '+stats.fail+' · ตรงทะเบียน '+stats.matched
+    + '<div class="ls-note">เกณฑ์ไปขั้น 2: ค่าที่ "ผ่าน" ต้องถูกทุกค่าเมื่อเทียบกับใบจริง (ยอมให้ "ไม่แน่ใจ" ได้) — ถ้าพบค่าที่ผ่านแต่ผิด ให้คัดลอกผลส่งให้ Claude พร้อมบอกค่าที่ถูก</div>';
+  inp.value = '';
+}
+function lsCopyAll(){
+  const txt = _lsResults.map(r=>'== '+r.file+' หน้า '+r.page.page+' ('+r.secs+' วิ)\n'+(r.page.failed ? 'AI ล้ม: '+r.page.reason : (r.page.summary||[]).join('\n'))).join('\n\n');
+  (navigator.clipboard ? navigator.clipboard.writeText(txt) : Promise.reject()).then(()=>showToast('คัดลอกแล้ว','success')).catch(()=>{ const ta=document.createElement('textarea'); ta.value=txt; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); showToast('คัดลอกแล้ว','success'); });
+}
+</script>
+{% endblock %}
