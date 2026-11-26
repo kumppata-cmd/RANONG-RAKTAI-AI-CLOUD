@@ -2525,6 +2525,8 @@ function toggleLabHistory(){
 
 /* คำสั่งแพทย์: เก็บข้อความที่กำลังพิมพ์ไว้ ไม่ให้หายตอนรายการแจ้งเตือนรีเฟรช (ทุก 60 วิ / หลังบันทึก BP) */
 const _orderDrafts = {};
+/* 🛡 26 พ.ย. 2569: คำสั่งที่บันทึกแล้วแต่ "ยังไม่ถึง LINE กลุ่มพยาบาล" → แถบแดงค้างใต้คำสั่งจนกว่าจะรีเฟรช (ไม่ใช่ toast ที่หายไป) */
+const _orderRelayWarn = {};
 let _alertsPending = false;
 const ORDER_QUICK = {
   idh: ['Stop UF 15 นาที แล้ววัด BP ซ้ำ', 'Load NSS 100 mL แล้ววัด BP ซ้ำ', 'Load NSS 200 mL', 'จัดท่า Trendelenburg', 'ลด UF rate 50%', 'ลด BFR เหลือ 200', 'Cool dialysate 35.5°C', 'วัด BP ทุก 15 นาที'],
@@ -2578,7 +2580,7 @@ function loadSessionAlerts(){
       const when = a.created_at ? hdTime(a.created_at) : '-';
       const orderBlock = a.physician_order
         ? `<div style="margin-top:6px;padding:8px;background:rgba(39,174,96,.08);border-left:3px solid var(--success);border-radius:6px;font-size:.8rem">
-             <b>✍️ คำสั่งแพทย์</b> <span style="color:var(--fg-muted);font-size:.7rem">(${a.order_by||'-'} · ${a.order_at?hdTime(a.order_at):''})</span><br>${a.physician_order}</div>`
+             <b>✍️ คำสั่งแพทย์</b> <span style="color:var(--fg-muted);font-size:.7rem">(${a.order_by||'-'} · ${a.order_at?hdTime(a.order_at):''})</span><br>${a.physician_order}</div>${_orderRelayWarn[a.id] ? `<div style="margin-top:4px;padding:8px;background:#fdecea;border:2px solid #e74c3c;border-radius:6px;font-size:.8rem;color:#b71c1c"><b>⚠️ ยังไม่ถึง LINE กลุ่มพยาบาล</b> — แจ้งพยาบาลทางอื่นด้วย<br><span style="font-size:.72rem">${_orderRelayWarn[a.id]}</span></div>` : ''}`
         : (isDoc ? `<div style="margin-top:6px;display:flex;gap:6px">
              <textarea id="order_${a.id}" class="form-control" rows="2" autocomplete="off" spellcheck="false"
                placeholder="เลือกคำสั่งด้านล่าง หรือพิมพ์เอง เช่น ลด UF, ให้ NSS 200 mL, Trendelenburg..."
@@ -2606,7 +2608,15 @@ function sendOrder(alertId){
   hdFetch('/hd/api/v1/alerts/'+alertId+'/order',{method:'POST',body:JSON.stringify({order:txt})})
     .then(r=>r.json()).then(d=>{
       if(d.error){ showToast(d.error,'danger'); return; }
-      showToast(d.relayed_to_nurses ? '✅ บันทึกคำสั่ง + ส่ง LINE พยาบาลแล้ว' : '✅ บันทึกคำสั่งแพทย์แล้ว','success');
+      if(d.relayed_to_nurses){
+        showToast('✅ บันทึกคำสั่ง + ส่ง LINE กลุ่มพยาบาลแล้ว','success');
+        delete _orderRelayWarn[alertId];
+      } else {
+        /* 🛡 26 พ.ย. 2569: บันทึกได้แต่ส่งกลุ่มไม่ได้ → ต้องไม่เงียบ (เหตุการณ์ 25–26 พ.ย. เงียบ 16 ชม.) */
+        const why = (d.relay_error || 'ไม่ทราบสาเหตุ');
+        _orderRelayWarn[alertId] = why;
+        showToast('⚠️ บันทึกคำสั่งแล้ว แต่ยังไม่ถึง LINE กลุ่มพยาบาล — แจ้งพยาบาลทางอื่นด้วย\n'+why,'danger',15000);
+      }
       delete _orderDrafts[alertId];
       if(document.activeElement) document.activeElement.blur();
       loadSessionAlerts();

@@ -91,6 +91,19 @@ def line_quota(info):
         _STATE["line"]["quota"] = dict(info or {}, checked_at=_iso())
 
 
+def set_config_problems(problems):
+    """🛡 26 พ.ย. 2569: ผลตรวจค่าตั้งค่าสำคัญ (settings_guard.check_all) ล่าสุด —
+    โชว์ในกระดาน ops/status จนกว่าจะแก้ (ว่าง = ปกติ)."""
+    with _LOCK:
+        _STATE["config_problems"] = list(problems or [])
+        _STATE["config_checked_at"] = _iso()
+
+
+def config_problems():
+    with _LOCK:
+        return list(_STATE.get("config_problems") or [])
+
+
 def quota_remaining():
     q = _STATE["line"].get("quota") or {}
     if not q.get("value") or q.get("used") is None:
@@ -178,6 +191,12 @@ def snapshot():
     lo = s["line"].get("last_ok")
     if le and (not lo or (s["line"].get("last_error_at") or "") > lo):
         problems.append("LINE ส่งไม่สำเร็จล่าสุด: " + le[:80])
+    # 🛡 26 พ.ย. 2569: ค่าตั้งค่าสำคัญหาย/ผิดรูปแบบ (ตรวจทุกชั่วโมง + ตอนเปิดหน้า)
+    with _LOCK:
+        cfg = list(_STATE.get("config_problems") or [])
+        s["config_checked_at"] = _STATE.get("config_checked_at")
+    s["config_problems"] = cfg
+    problems.extend(cfg)
     s["problems"] = problems
     s["healthy"] = not problems
     return s

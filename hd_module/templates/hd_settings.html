@@ -111,6 +111,13 @@
   </div>
 </div>
 
+<!-- 🛡 26 พ.ย. 2569: โหลดค่าเดิมไม่สำเร็จ → ห้ามบันทึก (เหตุการณ์ 25 พ.ย. 17:52 ค่าว่างทับค่าจริง) -->
+<div id="settingsLoadBanner" style="display:none;background:#fdecea;border:2px solid #e74c3c;color:#b71c1c;border-radius:10px;padding:12px 14px;margin-bottom:12px;font-weight:600;">
+  ⛔ โหลดค่าตั้งค่าเดิมจากเซิร์ฟเวอร์ไม่สำเร็จ — ช่องที่เห็นว่าง<u>ไม่ใช่ค่าจริง</u> ปุ่มบันทึกถูกล็อกไว้กันบันทึกค่าว่างทับ
+  <button class="btn btn-secondary" onclick="location.reload()" style="margin-left:8px;">🔄 โหลดใหม่</button>
+</div>
+<div id="settingsGuardBanner" style="display:none;background:#fff4e5;border:2px solid #e67e22;color:#7a4100;border-radius:10px;padding:12px 14px;margin-bottom:12px;font-weight:600;"></div>
+
 <!-- Alert Recipients -->
 <div class="card setting-card">
   <div class="card-header">
@@ -496,6 +503,38 @@ async function opsTestLine(){
 document.addEventListener('DOMContentLoaded', ()=>loadOpsStatus(false));
 
 /* Load current settings */
+/* 🛡 26 พ.ย. 2569 Settings Guard — ฝั่งหน้าเว็บ
+   • _settingsLoaded=false จนกว่าจะโหลดค่าเดิมสำเร็จ → ทุกปุ่มบันทึกถูกล็อก (กันค่าว่างทับ)
+   • ค่าสำคัญ 3 ตัว: ตรวจรูปแบบ LINE ID ก่อนส่ง / ค่าว่างต้องยืนยัน "ล้างค่า" */
+var _settingsLoaded = false;
+var SG_CRITICAL = {nurse_group_id:'LINE Group ID กลุ่มพยาบาล', alert_recipients:'LINE User ID ผู้รับ alert', physician_line_id:'LINE User ID แพทย์'};
+function sgNormalize(key, v){
+  v = (v||'').trim();
+  if(key==='alert_recipients') return v.replace(/\n/g,',').split(',').map(x=>x.trim()).filter(Boolean).join(',');
+  if(key==='nurse_group_id' || key==='physician_line_id') return v.replace(/\s+/g,'');
+  return v;
+}
+function sgValidate(key, v){
+  v = sgNormalize(key, v);
+  if(!v) return null;
+  if(key==='nurse_group_id' && !/^[CR][0-9a-f]{32}$/.test(v))
+    return 'Group ID ต้องเป็น C ตามด้วย 32 ตัว (รวม 33 ตัว) — ที่ใส่มี '+v.length+' ตัว · คัดลอกจากข้อความบอท (พิมพ์ groupid ในกลุ่ม) ทั้งก้อน';
+  if(key==='physician_line_id' && !/^U[0-9a-f]{32}$/.test(v))
+    return 'User ID ต้องเป็น U ตามด้วย 32 ตัว (รวม 33 ตัว) — ที่ใส่มี '+v.length+' ตัว';
+  if(key==='alert_recipients'){ const bad = v.split(',').filter(x=>!/^U[0-9a-f]{32}$/.test(x)); if(bad.length) return 'User ID ผิดรูปแบบ '+bad.length+' รายการ (ต้อง U + 32 ตัว คั่นด้วยจุลภาค) เช่น '+bad[0].slice(0,8)+'… ('+bad[0].length+' ตัว)'; }
+  return null;
+}
+function sgLockSaves(lock){
+  document.querySelectorAll('button[onclick*="saveSetting("]').forEach(b=>{ b.disabled = !!lock; b.title = lock ? 'โหลดค่าเดิมไม่สำเร็จ — รีเฟรชหน้าก่อน' : ''; });
+  const bn = document.getElementById('settingsLoadBanner'); if(bn) bn.style.display = lock ? '' : 'none';
+}
+function sgShowGuard(d){
+  const g = document.getElementById('settingsGuardBanner'); if(!g) return;
+  const probs = (d && d.config_problems) || [];
+  g.style.display = probs.length ? '' : 'none';
+  g.innerHTML = probs.length ? '⚠️ ค่าสำคัญหาย/ผิดรูปแบบ — การแจ้งเตือนช่องทางนั้นจะเงียบ:<br>' + probs.map(p=>'• '+p).join('<br>') : '';
+}
+sgLockSaves(true);
 (function loadSettings(){
   const token = getHdToken();
   const headers = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {};
@@ -503,6 +542,7 @@ document.addEventListener('DOMContentLoaded', ()=>loadOpsStatus(false));
     .then(r=>r.ok?r.json():Promise.reject())
     .then(d=>{
       const s = d.settings || {};
+      _settingsLoaded = true; sgLockSaves(false);
       Object.keys(s).forEach(key=>{
         const el = document.getElementById('setting_'+key);
         if(el && s[key].value) el.value = s[key].value;
@@ -514,7 +554,11 @@ document.addEventListener('DOMContentLoaded', ()=>loadOpsStatus(false));
         }
       });
     })
-    .catch(e=>console.warn('loadSettings:', e));
+    .catch(e=>{ console.warn('loadSettings:', e); _settingsLoaded = false; sgLockSaves(true);
+      showToast('โหลดค่าตั้งค่าเดิมไม่สำเร็จ — ล็อกปุ่มบันทึกไว้ กด "โหลดใหม่" ก่อน','danger',10000); });
+
+  /* 🛡 ค่าสำคัญหาย/ผิด → แถบส้มด้านบน (จาก ops/status) */
+  hdFetch('/hd/api/v1/ops/status', {headers}).then(r=>r.ok?r.json():null).then(sgShowGuard).catch(()=>{});
 
   /* Health check */
   hdFetch('/hd/api/v1/health', {headers})
@@ -742,19 +786,38 @@ function weightPreview(){
 }
 setTimeout(weightPreview, 800);
 const WEIGHT_TPL_DEFAULT = "⚖️ บันทึกน้ำหนัก {weight} กก. แล้ว ({date})\n━━━━━━━━━━━━\nหลังฟอกครั้งล่าสุด {prev_post} กก. → ขึ้นมา {gain} กก.\nเกณฑ์ไม่ควรเกิน {limit_kg} กก. ({limit_pct}% ของน้ำหนักแห้ง {dw} กก.)\n{status}\n{next_line}";
-function saveSetting(key){
+function saveSetting(key, confirmClear){
   const el = document.getElementById('setting_'+key);
   if(!el) return;
-  const value = el.value.trim();
   const st = document.getElementById('status_'+key);
+  /* 🛡 โหลดค่าเดิมไม่สำเร็จ → ห้ามบันทึก (ค่าว่างที่เห็นไม่ใช่ค่าจริง) */
+  if(!_settingsLoaded){
+    showToast('ยังโหลดค่าตั้งค่าเดิมไม่สำเร็จ — ไม่บันทึก กันค่าว่างทับค่าจริง · กด "โหลดใหม่"','danger',8000);
+    if(st){ st.innerHTML = '⛔ ไม่บันทึก — โหลดค่าเดิมไม่สำเร็จ'; st.style.color = 'var(--danger)'; }
+    return;
+  }
+  let value = el.value.trim();
+  if(SG_CRITICAL[key]){
+    value = sgNormalize(key, value); el.value = value;
+    const err = sgValidate(key, value);
+    if(err){ if(st){ st.innerHTML = '❌ '+err; st.style.color = 'var(--danger)'; } showToast(err,'danger',10000); return; }
+    if(!value && !confirmClear){
+      if(!confirm('ช่อง "'+SG_CRITICAL[key]+'" ว่าง\n\nถ้าบันทึก ระบบจะส่งข้อความช่องทางนี้ไม่ได้อีก (คำสั่งแพทย์/สรุปเวร/alert)\n\nต้องการล้างค่าเดิมจริงหรือไม่?')){
+        if(st){ st.innerHTML = '↩️ ยกเลิก — ไม่ได้บันทึกค่าว่าง'; st.style.color = 'var(--warning)'; }
+        return;
+      }
+      confirmClear = true;
+    }
+  }
 
   hdFetch('/hd/api/v1/settings', {
     method:'POST',
-    body:JSON.stringify({key:key, value:value})
+    body:JSON.stringify({key:key, value:value, confirm_clear: !!confirmClear})
   }).then(r=>r.json()).then(d=>{
     if(d.status==='saved'){
       if(st){ st.innerHTML = '✅ บันทึกสำเร็จ'; st.style.color = 'var(--success)'; }
       showToast('บันทึก '+key+' สำเร็จ','success');
+      if(SG_CRITICAL[key]) hdFetch('/hd/api/v1/ops/status').then(r=>r.ok?r.json():null).then(sgShowGuard).catch(()=>{});
     } else {
       if(st){ st.innerHTML = '❌ '+d.error; st.style.color = 'var(--danger)'; }
       showToast(d.error||'ไม่สามารถบันทึกได้','danger');

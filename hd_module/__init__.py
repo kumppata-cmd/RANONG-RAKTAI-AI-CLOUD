@@ -816,9 +816,12 @@ def _start_daily_reminder_scheduler(app):
                         _lab_alerts = st.get("alerts") or []
                         if _lab_alerts:
                             _lp = app.config.get("LINE_PUSH_FN")
-                            if _lp:
+                            # 🛡 26 พ.ย. 2569: push_fn ต้องการ (user_id, text) — เดิมส่ง arg เดียว → TypeError เงียบ ไม่เคยถึงแพทย์
+                            from .blueprint import get_setting_value as _gsv_lab
+                            _pid_lab = (_gsv_lab("physician_line_id", "") or _gsv_lab("alert_recipients", "") or "").split(",")[0].strip()
+                            if _lp and _pid_lab:
                                 try:
-                                    _lp("🧪 ใบแล็บใหม่จาก LINE ต้องดู:\n" + "\n".join(_lab_alerts[:10])
+                                    _lp(_pid_lab, "🧪 ใบแล็บใหม่จาก LINE ต้องดู:\n" + "\n".join(_lab_alerts[:10])
                                         + ("\n…และอีก " + str(len(_lab_alerts) - 10) + " รายการ" if len(_lab_alerts) > 10 else "")
                                         + "\n👉 เปิด 🗂 กล่องรอหมอ เพื่อยืนยัน")
                                 except Exception as _le:
@@ -851,6 +854,23 @@ def _start_daily_reminder_scheduler(app):
                             except Exception:
                                 pass
                             ops.check_line_quota(_os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip())
+                # 🛡 26 พ.ย. 2569: ทุกชั่วโมง ตรวจค่าตั้งค่าสำคัญ (nurse_group_id / alert_recipients /
+                #    physician_line_id) — ว่างหรือผิดรูปแบบ → โชว์ใน ops status + push แพทย์ (ชั่วโมงละครั้ง ข้าม restart ด้วย GCS marker)
+                if lab_tick % 12 == 0:
+                    try:
+                        with app.app_context():
+                            from . import settings_guard as _sg
+                            from .blueprint import get_setting_value as _gsv_sg
+                            _probs = _sg.check_all(lambda k: _gsv_sg(k, ""))
+                            ops.set_config_problems(_probs)
+                            if _probs:
+                                logger.warning("settings guard: %s", _probs)
+                                _pf_sg = app.config.get("LINE_PUSH_FN")
+                                _pid_sg = (_gsv_sg("physician_line_id", "") or _gsv_sg("alert_recipients", "") or "").split(",")[0].strip()
+                                if _pf_sg and _pid_sg and _claim_once(app, f"settings_guard_h{now.hour:02d}", now.date()):
+                                    _pf_sg(_pid_sg, _sg.physician_warning(_probs))
+                    except Exception as _sge:
+                        logger.warning("settings guard tick: %s", _sge)
                 lab_tick += 1
                 # 🌅 06:30: Pre-HD Check-in — ลิงก์ถาม 3 ข้อถึงคนไข้ที่มีคิวฟอกวันนี้ (WOW 21 พ.ย. 2026)
                 if now.hour == 6 and now.minute >= 30 and last_checkin_date != now.date():

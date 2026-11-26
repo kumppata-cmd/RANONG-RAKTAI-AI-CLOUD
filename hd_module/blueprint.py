@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone  # noqa: F401
 from flask import (  # noqa: F401
     Blueprint, request, jsonify, g, render_template, redirect, url_for,
@@ -62,6 +63,48 @@ def push_nurse_group(message, fallback_recipients=True):
         except Exception as e:
             logger.warning("nurse fallback push %s: %s", uid[:6], e)
     return {"sent": n > 0, "method": "push", "count": n, "error": None if n else err}
+
+
+def _relay_failure_detail(err):
+    """🛡 26 พ.ย. 2569: ประกอบข้อความสาเหตุที่ส่งเข้ากลุ่มไม่ได้ ให้คนอ่านรู้ว่าต้องแก้อะไร
+    — ถ้า LINE เพิ่งตอบ error (ops_status.line.last_error ภายใน 2 นาที) แนบข้อความจริงด้วย."""
+    err = err or "ไม่ทราบสาเหตุ"
+    try:
+        from . import ops_status as ops
+        L = ops.snapshot().get("line") or {}
+        le, at = L.get("last_error"), L.get("last_error_at")
+        if le and at:
+            age = (datetime.now(timezone(timedelta(hours=7))) - datetime.fromisoformat(at)).total_seconds()
+            if 0 <= age <= 120 and le not in err:
+                err = f"{err} · LINE ตอบ: {le[:120]}"
+    except Exception:
+        pass
+    if "nurse_group_id" in err:
+        err += " → เปิด ⚙️ ตั้งค่าระบบ ใส่ Group ID กลุ่มพยาบาล"
+    elif "'to'" in err or "invalid" in err.lower():
+        err += " → Group ID ผิดรูปแบบ (ต้อง C + 32 ตัว) ตรวจใน ⚙️ ตั้งค่าระบบ"
+    return err
+
+
+def _notify_physician_relay_failed(bed, hn, err):
+    """🛡 26 พ.ย. 2569: push 1:1 ถึงแพทย์ทันทีเมื่อคำสั่งแพทย์ไม่ถึงกลุ่มพยาบาล
+    (เหตุการณ์ 25–26 พ.ย.: เงียบ 16 ชม. โดยไม่มีใครรู้). ไม่ส่งซ้ำถี่กว่า 10 นาที."""
+    from flask import current_app
+    push_fn = current_app.config.get("LINE_PUSH_FN")
+    pid = (get_setting_value("physician_line_id", "") or get_setting_value("alert_recipients", "") or "").split(",")[0].strip()
+    if not push_fn or not pid:
+        return False
+    now = time.time()
+    if now - _RELAY_FAIL_NOTIFIED.get("at", 0) < 600:
+        return False
+    _RELAY_FAIL_NOTIFIED["at"] = now
+    msg = (f"⚠️ คำสั่งแพทย์ เตียง {bed or '-'} (HN {hn or '-'}) บันทึกแล้ว "
+           f"แต่ยังไม่ถึง LINE กลุ่มพยาบาล\nสาเหตุ: {err}\n"
+           f"👉 แจ้งพยาบาลทางอื่นก่อน แล้วแก้ใน ⚙️ ตั้งค่าระบบ")
+    return push_fn(pid, msg) is not False
+
+
+_RELAY_FAIL_NOTIFIED = {}
 
 
 def _safe_int(val):
@@ -2853,6 +2896,12 @@ def ops_status_api():
         pass
     if request.args.get("refresh_quota"):
         ops.check_line_quota(os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "").strip())
+    # 🛡 26 พ.ย. 2569: ตรวจค่าตั้งค่าสำคัญสดทุกครั้งที่เปิดกระดาน (3 query เล็ก ๆ)
+    try:
+        from . import settings_guard as sg
+        ops.set_config_problems(sg.check_all(lambda k: get_setting_value(k, "")))
+    except Exception as e:
+        logger.info("settings guard: %s", e)
     s = ops.snapshot()
     s["text"] = ops.line_text(s)
     return jsonify(s)
@@ -7434,15 +7483,28 @@ def physician_order(alert_id):
         # Relay to the nursing team LINE group (Messaging API); never fatal
         relayed = False
         relay_method = None
+        relay_error = None
         try:
             msg = (f"✍️ คำสั่งแพทย์ ({who})\n👤 {pr[0]} (HN {pr[1]}) เตียง {pr[2] or '-'}\n"
                    f"⚠️ {title}\n📝 {order}\n"
                    f"👉 รับทราบใน HD Smart Monitoring → เตียง {pr[2] or '-'}")
             r = push_nurse_group(msg, fallback_recipients=False)
             relayed, relay_method = r["sent"], r["method"]
+            relay_error = r.get("error")
         except Exception as e:
             logger.warning("order relay: %s", e)
-        return jsonify({"ok": True, "alert_id": alert_id, "relayed_to_nurses": relayed, "relay_method": relay_method})
+            relay_error = str(e)
+        # 🛡 26 พ.ย. 2569: ส่งเข้ากลุ่มไม่ได้ต้อง "ไม่เงียบ" — แนบ error จริงจาก LINE
+        #    ให้หน้าเว็บขึ้นเตือนแดง และ push หาแพทย์ 1:1 ทันที (คนละช่องทางกับกลุ่ม)
+        if not relayed:
+            relay_error = _relay_failure_detail(relay_error)
+            logger.warning("physician order %s NOT relayed to nurse group: %s", alert_id, relay_error)
+            try:
+                _notify_physician_relay_failed(pr[2], pr[1], relay_error)
+            except Exception as e:
+                logger.warning("relay-failure notify: %s", e)
+        return jsonify({"ok": True, "alert_id": alert_id, "relayed_to_nurses": relayed,
+                        "relay_method": relay_method, "relay_error": relay_error})
     except Exception as e:
         logger.error("physician_order: %s", e)
         return jsonify({"error": str(e)}), 500
@@ -11078,6 +11140,7 @@ def test_line_push():
 def update_settings():
     """Update HD settings in database."""
     import os
+    from . import settings_guard as sg
     data = request.get_json(silent=True) or {}
     key = data.get("key", "").strip()
     value = data.get("value", "").strip()
@@ -11114,6 +11177,19 @@ def update_settings():
     ]
     if key not in allowed_keys:
         return jsonify({"error": f"Invalid setting key: {key}"}), 400
+
+    # 🛡 26 พ.ย. 2569 (เหตุการณ์ค่าหาย 25 พ.ย. 17:52): ค่าสำคัญ 3 ตัว
+    #   • ห้ามบันทึกค่าว่างทับ เว้นแต่ส่ง confirm_clear:true (หน้าเว็บถามยืนยันก่อน)
+    #   • ตรวจรูปแบบ LINE ID (C/U + 32 ตัว) ก่อนบันทึก — กัน "ขาด 1 ตัว" แบบเช้า 26 พ.ย.
+    if sg.is_critical(key):
+        value = sg.normalize(key, value)
+        if not value and not data.get("confirm_clear"):
+            return jsonify({"error": f"ช่อง {sg.LABELS.get(key, key)} ว่าง — ไม่บันทึกทับค่าเดิม "
+                                     f"(ถ้าต้องการล้างค่าจริง ให้ยืนยัน 'ล้างค่า')",
+                            "code": "empty_critical", "key": key}), 400
+        ok, err = sg.validate(key, value)
+        if not ok:
+            return jsonify({"error": err, "code": "invalid_format", "key": key}), 400
 
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not db_url:
