@@ -203,9 +203,43 @@ def sanitize(raw, model):
     if seen and p:
         g = guess_model(model_text=str(seen))
         mismatch = bool(g and g != model)
+    uf_check = uf_math_check(out, uncertain)
     return {"values": out, "confidence": conf_out, "uncertain": uncertain, "dropped": dropped,
-            "model_seen": seen, "model_mismatch": mismatch,
+            "model_seen": seen, "model_mismatch": mismatch, "uf_check": uf_check,
             "reason": (raw or {}).get("unreadable_reason")}
+
+
+UF_MATH_TOL = 0.12   # ±12% — เครื่องปัดอัตราเป็นหลักสิบ/เวลาเป็นนาที
+
+
+def uf_math_check(values, uncertain):
+    """🧮 26 พ.ย. 2569 (จากผลทดสอบ DBB-27 25 ใบ): จอที่มี UF goal/removed/rate/เวลาเหลือ ตรวจตัวเองได้
+    ด้วยสมการ  rate × เวลาเหลือ ≈ goal − removed
+    - uf_rate ที่ AI "ไม่แน่ใจ" แต่ตรงสมการ (±12%) → ยกเป็นค่ามั่นใจ (ใบ 6: 1050, ใบ 9: 370, ใบ 14: 30 ล้วนตรง)
+    - uf_rate ที่ AI มั่นใจ แต่ผิดสมการ >35% → ย้ายไป "ไม่แน่ใจ" (จับอ่านผิด)
+    แก้ dict ในที่ · คืน {"status": ok|promoted|demoted|skip, "expected": …}"""
+    goal, rem, t = values.get("uf_goal"), values.get("uf_removed"), values.get("time_left_min")
+    if goal is None or rem is None or not t or t <= 0:
+        return {"status": "skip"}
+    need = goal - rem
+    if need <= 0:
+        return {"status": "skip", "note": "ครบเป้าแล้ว"}
+    expected = need / t * 60.0
+    rate = values.get("uf_rate")
+    if rate is None:
+        for u in list(uncertain):
+            if u.get("field") == "uf_rate" and u.get("value") and abs(u["value"] - expected) / expected <= UF_MATH_TOL:
+                uncertain.remove(u)
+                values["uf_rate"] = u["value"]
+                return {"status": "promoted", "expected": round(expected), "value": u["value"],
+                        "note": f"UF rate {u['value']} ยืนยันด้วยสมการ (ต้องดึงอีก {need:.0f} mL ใน {t} นาที ≈ {expected:.0f} mL/h)"}
+        return {"status": "skip", "expected": round(expected)}
+    if abs(rate - expected) / expected > 0.35 and abs(rate - expected) > 60:
+        values.pop("uf_rate", None)
+        uncertain.append({"field": "uf_rate", "value": rate, "confidence": 0.5,
+                          "note": f"ไม่ตรงสมการ: ต้องดึงอีก {need:.0f} mL ใน {t} นาที ≈ {expected:.0f} mL/h"})
+        return {"status": "demoted", "expected": round(expected), "value": rate}
+    return {"status": "ok", "expected": round(expected), "value": rate}
 
 
 # ── กัน 502: อ่านรูปพร้อมกันได้จำกัด (Claude Vision ค้าง thread ได้นานสุด = timeout) ─────────────

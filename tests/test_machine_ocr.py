@@ -206,3 +206,34 @@ class TestNotOnScreen:
         raw = {"values": {"ap": -1, "vp": 102, "uf_goal": 3.2, "sbp": 130}, "confidence": {"ap": .9, "vp": .9, "uf_goal": .9, "sbp": .9}}
         r = mo.sanitize(raw, "nikkiso_dbb07")     # DBB-07 ไม่มี AP และ UF goal บนจอ
         assert r["values"] == {"vp": 102, "sbp": 130} and set(r["dropped"]) == {"ap", "uf_goal"}
+
+
+class TestUfMathCheck:
+    """🧮 สมการ UF จากผลทดสอบ DBB-27 จริง 26 พ.ย. 2569"""
+
+    def test_promote_uncertain_rate_when_consistent(self):
+        from hd_module.machine_ocr import uf_math_check
+        v = {"uf_goal": 2800, "uf_removed": 2460, "time_left_min": 55}
+        unc = [{"field": "uf_rate", "value": 370, "confidence": 0.65}]
+        r = uf_math_check(v, unc)
+        assert r["status"] == "promoted" and v["uf_rate"] == 370 and unc == []
+        v2 = {"uf_goal": 2500, "uf_removed": 2480, "time_left_min": 43}
+        unc2 = [{"field": "uf_rate", "value": 30, "confidence": 0.6}]
+        assert uf_math_check(v2, unc2)["status"] == "promoted"   # ใบ 14: 30 mL/h ถูกจริง (ใกล้ครบเป้า)
+
+    def test_demote_confident_rate_when_inconsistent(self):
+        from hd_module.machine_ocr import uf_math_check
+        v = {"uf_goal": 1700, "uf_removed": 990, "time_left_min": 98, "uf_rate": 4400}   # อ่านผิด 440→4400
+        unc = []
+        r = uf_math_check(v, unc)
+        assert r["status"] == "demoted" and "uf_rate" not in v and unc[0]["value"] == 4400
+        v_ok = {"uf_goal": 1700, "uf_removed": 990, "time_left_min": 98, "uf_rate": 440}
+        assert uf_math_check(v_ok, [])["status"] == "ok"
+
+    def test_skip_when_missing(self):
+        from hd_module.machine_ocr import uf_math_check, sanitize
+        assert uf_math_check({"uf_goal": 2000}, [])["status"] == "skip"
+        assert uf_math_check({"uf_goal": 2000, "uf_removed": 2000, "time_left_min": 5}, [])["status"] == "skip"
+        out = sanitize({"values": {"uf_goal": 2800, "uf_removed": 2460, "time_left_min": 55, "uf_rate": 370},
+                        "confidence": {"uf_goal": .9, "uf_removed": .9, "time_left_min": .9, "uf_rate": .6}}, "nikkiso_dbb27")
+        assert out["uf_check"]["status"] == "promoted" and out["values"]["uf_rate"] == 370
