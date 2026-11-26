@@ -224,15 +224,29 @@ def uf_math_check(values, uncertain):
     ด้วยสมการ  rate × เวลาเหลือ ≈ goal − removed
     - uf_rate ที่ AI "ไม่แน่ใจ" แต่ตรงสมการ (±12%) → ยกเป็นค่ามั่นใจ (ใบ 6: 1050, ใบ 9: 370, ใบ 14: 30 ล้วนตรง)
     - uf_rate ที่ AI มั่นใจ แต่ผิดสมการ >35% → ย้ายไป "ไม่แน่ใจ" (จับอ่านผิด)
+    - time_left_min ที่ AI "ไม่แน่ใจ" แต่ตรงสมการ (±12%) → ยกเป็นค่ามั่นใจ (Fresenius 5008S 5/8 ใบ)
     แก้ dict ในที่ · คืน {"status": ok|promoted|demoted|skip, "expected": …}"""
     goal, rem, t = values.get("uf_goal"), values.get("uf_removed"), values.get("time_left_min")
-    if goal is None or rem is None or not t or t <= 0:
+    if goal is None or rem is None:
         return {"status": "skip"}
     need = goal - rem
+    rate = values.get("uf_rate")
+    if (not t or t <= 0) and rate and need > 0:
+        # 🧮 Fresenius 5008S live test 26 พ.ย. 2569: เวลาเหลือ (hh:mm บนจอ) ถูก AI ตีว่า "ไม่แน่ใจ" 5/8 ใบ
+        # ทั้งที่ตรงสมการทุกใบ → ถ้า rate × t/60 ≈ goal − removed (±12%) ยกเวลาเหลือเป็นค่ามั่นใจ
+        for u in list(uncertain):
+            tv = u.get("value")
+            if u.get("field") == "time_left_min" and tv and tv > 0 and abs(rate * tv / 60.0 - need) / need <= UF_MATH_TOL:
+                uncertain.remove(u)
+                values["time_left_min"] = tv
+                return {"status": "promoted", "field": "time_left_min", "expected": round(need / tv * 60.0), "value": tv,
+                        "note": f"เวลาเหลือ {tv} นาที ยืนยันด้วยสมการ ({rate} mL/h × {tv} นาที ≈ {need:.0f} mL ที่ต้องดึงอีก)"}
+        return {"status": "skip"}
+    if not t or t <= 0:
+        return {"status": "skip"}
     if need <= 0:
         return {"status": "skip", "note": "ครบเป้าแล้ว"}
     expected = need / t * 60.0
-    rate = values.get("uf_rate")
     if rate is None:
         for u in list(uncertain):
             if u.get("field") == "uf_rate" and u.get("value") and abs(u["value"] - expected) / expected <= UF_MATH_TOL:

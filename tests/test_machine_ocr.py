@@ -230,6 +230,23 @@ class TestUfMathCheck:
         v_ok = {"uf_goal": 1700, "uf_removed": 990, "time_left_min": 98, "uf_rate": 440}
         assert uf_math_check(v_ok, [])["status"] == "ok"
 
+    def test_promote_uncertain_time_left_when_consistent(self):
+        """Fresenius 5008S ใบ 1/4/5/7/8 (26 พ.ย. 2569): เวลาเหลือ 62/87/171/217/74 ถูกตีว่าไม่แน่ใจ แต่ตรงสมการทุกใบ"""
+        from hd_module.machine_ocr import uf_math_check, sanitize
+        for goal, rem, rate, t in ((2300, 1702, 575, 62), (2300, 1465, 575, 87), (2300, 662, 575, 171),
+                                   (2300, 209, 575, 217), (2200, 1610, 480, 74)):
+            v = {"uf_goal": goal, "uf_removed": rem, "uf_rate": rate}
+            unc = [{"field": "time_left_min", "value": t, "confidence": 0.6}]
+            r = uf_math_check(v, unc)
+            assert r["status"] == "promoted" and r["field"] == "time_left_min" and v["time_left_min"] == t and unc == []
+        # เวลาเหลือที่ไม่ตรงสมการ → คงไว้ใน "ไม่แน่ใจ"
+        v = {"uf_goal": 2300, "uf_removed": 1702, "uf_rate": 575}
+        unc = [{"field": "time_left_min", "value": 162, "confidence": 0.6}]
+        assert uf_math_check(v, unc)["status"] == "skip" and "time_left_min" not in v and len(unc) == 1
+        out = sanitize({"values": {"uf_goal": 2300, "uf_removed": 1702, "uf_rate": 575, "time_left_min": 62},
+                        "confidence": {"uf_goal": .9, "uf_removed": .9, "uf_rate": .9, "time_left_min": .6}}, "fresenius_5008s")
+        assert out["values"]["time_left_min"] == 62 and out["uf_check"]["status"] == "promoted"
+
     def test_skip_when_missing(self):
         from hd_module.machine_ocr import uf_math_check, sanitize
         assert uf_math_check({"uf_goal": 2000}, [])["status"] == "skip"
