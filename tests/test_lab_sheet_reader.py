@@ -347,3 +347,95 @@ class TestEndpoint(unittest.TestCase):
             out, rs = self._call(b"%PDF-1.4 ...", "scan.pdf", lambda *a, **k: res)
         self.assertEqual(len(out.get_json()["pages"]), 2)
         self.assertEqual(rs.call_count, 2)
+
+
+class TestStage2(unittest.TestCase):
+    def test_form_payload_and_units(self):
+        r = lsr.analyze(json.loads(json.dumps(RAW_CHEM)))
+        f = lsr.form_payload(r)
+        self.assertEqual(f["ferritin"], 226.1); self.assertEqual(f["ipth"], 1227.0); self.assertEqual(f["iron"], 54.0)
+        self.assertEqual(f["tibc"], 198.0); self.assertEqual(f["vitamin_d"], 46.17); self.assertEqual(f["tsat"], 27.27)
+        self.assertEqual(f["hepatitis_b"], "negative"); self.assertEqual(f["anti_hbs"], "positive")
+        self.assertEqual(f["anti_hbc"], "positive"); self.assertEqual(f["hiv"], "negative")
+        # หน่วยมาตรฐานแทนหน่วยที่พิมพ์เหลื่อมบนใบ (ใบ 444: GFR มี mg/dl, Creatinine ไม่มี)
+        raw = json.loads(json.dumps(RAW_ROUTINE_2BLOCK))
+        raw["blocks"][1]["rows"][1]["unit"] = "mg/dl"; raw["blocks"][1]["rows"][2]["unit"] = ""
+        r2 = lsr.analyze(raw)
+        self.assertEqual(r2["values"]["gfr"]["unit"], "mL/min"); self.assertEqual(r2["values"]["creatinine"]["unit"], "mg/dl")
+        self.assertEqual(r2["values"]["gfr"]["unit_sheet"], "mg/dl")
+
+    def test_outcome_and_record_samples(self):
+        self.assertEqual(lsr.outcome_of("ferritin", 226.1, 226), "match")
+        self.assertEqual(lsr.outcome_of("ferritin", 226.1, 262), "mismatch")
+        self.assertEqual(lsr.outcome_of("hepatitis_b", "negative", "Negative"), "match")
+        self.assertEqual(lsr.outcome_of("tsat", 27.27, None), "blank")
+        self.assertEqual(lsr.outcome_of("ipth", None, 1227, uncertain=True), "manual")
+        self.assertEqual(lsr.outcome_of("ipth", None, None), "unused")
+        cur = mock.Mock()
+        st = lsr.record_samples(cur, "LSx-1", {"ferritin": 226.1, "iron": 54, "tsat": 27.27, "hepatitis_b": "negative"},
+                                ["ipth"], {"ferritin": 226.1, "iron": 45, "tsat": None, "hepatitis_b": "negative", "ipth": 1227}, nurse_id=3)
+        self.assertEqual(st, {"match": 2, "mismatch": 1, "blank": 1, "manual": 1})
+        self.assertEqual(cur.execute.call_count, 5)
+        args = [c.args[1] for c in cur.execute.call_args_list]
+        self.assertTrue(any(a[1] == "iron" and a[5] == "mismatch" for a in args))
+        self.assertTrue(any(a[1] == "ipth" and a[3] is True and a[5] == "manual" for a in args))
+
+    def test_accuracy_report(self):
+        cur = mock.Mock()
+        cur.fetchall.return_value = [("ferritin", "match", 10), ("ferritin", "mismatch", 1), ("tsat", "blank", 2)]
+        cur.fetchone.return_value = (12,)
+        rep = lsr.accuracy_report(cur, 30)
+        self.assertEqual(rep["fields"]["ferritin"]["match"], 10)
+        self.assertEqual(rep["total"]["mismatch"], 1)
+        self.assertFalse(rep["gate_ok"])
+        cur.fetchall.return_value = [("ferritin", "match", 60)]; cur.fetchone.return_value = (55,)
+        self.assertTrue(lsr.accuracy_report(cur, 30)["gate_ok"])
+
+    def test_read_endpoint_includes_form(self):
+        import io
+        from flask import Flask
+        from hd_module import blueprint as bp
+        res = lsr.analyze(json.loads(json.dumps(RAW_CHEM)))
+        app = Flask(__name__)
+        with app.test_request_context(method="POST", data={"file": (io.BytesIO(b"\xff\xd8"), "a.jpg")}, content_type="multipart/form-data"), \
+             mock.patch.dict("os.environ", {"ANTHROPIC_API_KEY": "k", "HD_DATABASE_URL": ""}), \
+             mock.patch.object(lsr, "read_sheet", return_value=res), mock.patch.object(bp, "log_action"), \
+             mock.patch("hd_module.patient_engage.ai_model", return_value="m"):
+            j = bp.lab_sheet_read.__wrapped__().get_json()
+        pg = j["pages"][0]
+        self.assertEqual(pg["form"]["ferritin"], 226.1)
+        self.assertEqual(pg["form_uncertain"], [])
+        self.assertTrue(pg["read_id"].startswith("LS") and pg["read_id"].endswith("-1"))
+        self.assertEqual(j["read_id"], pg["read_id"][:-2])
+
+    def test_save_lab_with_sheet_meta(self):
+        """POST labs: คอลัมน์ใหม่เข้าเฉพาะเมื่อส่งมา · sheet meta → samples + hospital_hn confirm"""
+        import sys
+        from flask import Flask
+        from hd_module import blueprint as bp
+        fake_pg = mock.MagicMock()
+        cur = fake_pg.connect.return_value.cursor.return_value.__enter__.return_value
+        cur.fetchone.side_effect = [(7,), (99,)]
+        cur.rowcount = 1
+        app = Flask(__name__)
+        body = {"lab_date": "2026-11-26", "ferritin": 226.1, "vitamin_d": 46.17, "anti_hbs": "positive",
+                "sheet_read_id": "LSx-1", "sheet_ai": {"ferritin": 226.1, "vitamin_d": 46.17}, "sheet_uncertain": [],
+                "confirm_hospital_hn": "00012345"}
+        with app.test_request_context(json=body), mock.patch.dict(sys.modules, {"psycopg2": fake_pg}), \
+             mock.patch.dict("os.environ", {"HD_DATABASE_URL": "postgresql://x"}), mock.patch.object(bp, "log_action"):
+            out = bp.save_lab_result.__wrapped__("67379")
+        resp = out[0]; self.assertEqual(out[1], 201)
+        j = resp.get_json(); self.assertTrue(j["saved"]); self.assertEqual(j["sheet_stats"], {"match": 2, "mismatch": 0, "blank": 0, "manual": 0})
+        sqls = [str(c.args[0]) for c in cur.execute.call_args_list]
+        ins = [q for q in sqls if "INSERT INTO hd_lab_results" in q][0]
+        self.assertIn("vitamin_d", ins); self.assertIn("anti_hbs", ins); self.assertIn("sheet_read_id", ins); self.assertNotIn("anti_hbc", ins)
+        self.assertTrue(any("hd_lab_sheet_samples" in q for q in sqls))
+        self.assertTrue(any("SET hospital_hn" in q for q in sqls))
+        # ฟอร์มเก่า (ไม่มี sheet meta) → ไม่มีคอลัมน์ใหม่ ไม่แตะ samples/hospital_hn
+        cur.reset_mock(); cur.fetchone.side_effect = [(7,), (100,)]
+        with app.test_request_context(json={"lab_date": "2026-11-26", "ferritin": 200}), mock.patch.dict(sys.modules, {"psycopg2": fake_pg}), \
+             mock.patch.dict("os.environ", {"HD_DATABASE_URL": "postgresql://x"}), mock.patch.object(bp, "log_action"):
+            out = bp.save_lab_result.__wrapped__("67379")
+        sqls = [str(c.args[0]) for c in cur.execute.call_args_list]
+        ins = [q for q in sqls if "INSERT INTO hd_lab_results" in q][0]
+        self.assertNotIn("vitamin_d", ins); self.assertFalse(any("hd_lab_sheet_samples" in q or "SET hospital_hn" in q for q in sqls))

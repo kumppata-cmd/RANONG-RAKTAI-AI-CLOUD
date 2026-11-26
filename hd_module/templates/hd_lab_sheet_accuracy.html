@@ -1,0 +1,32 @@
+{% extends "hd_base.html" %}
+{% block title %}📄📊 ความแม่นอ่านใบแล็บ{% endblock %}
+{% block content %}
+<div style="max-width:900px;margin:0 auto;padding:10px">
+  <h2 style="margin:0">📄📊 ความแม่นตัวอ่านใบแล็บ <span style="font-weight:400;font-size:.85rem;color:var(--fg-muted)">AI อ่าน vs พยาบาลบันทึกจริง (ขั้น 2)</span></h2>
+  <div style="margin:8px 0;font-size:.8rem">ช่วง: <select id="laDays" class="form-control" style="width:auto;display:inline-block" onchange="laLoad()"><option value="7">7 วัน</option><option value="30" selected>30 วัน</option><option value="90">90 วัน</option></select>
+    <span id="laGate" style="margin-left:10px;font-weight:600"></span></div>
+  <div id="laTotal" style="font-size:.85rem;margin-bottom:8px"></div>
+  <div style="overflow:auto"><table style="width:100%;border-collapse:collapse;font-size:.8rem" id="laTable">
+    <thead><tr><th style="text-align:left;padding:4px">ค่า</th><th>✅ ตรง</th><th>❌ ผิด</th><th>⬜ เว้นว่าง</th><th>✍️ AI ไม่แน่ใจ พยาบาลกรอก</th><th>% ตรง (ของที่ AI ใส่)</th></tr></thead>
+    <tbody id="laBody"><tr><td colspan="6" style="color:var(--fg-muted);padding:8px">กำลังโหลด…</td></tr></tbody></table></div>
+  <div style="font-size:.74rem;color:var(--fg-muted);margin-top:8px;line-height:1.5">"ผิด" = AI ใส่ค่าแล้วพยาบาลแก้เป็นค่าอื่นก่อนบันทึก — ต้องเป็น 0 · "เว้นว่าง" = AI ใส่แต่พยาบาลลบออก (มักเป็นค่าที่ไม่ต้องการเก็บ) · ตัวอย่างไม่มี HN/ชื่อ</div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+function laLoad(){
+  const days = document.getElementById('laDays').value;
+  hdFetch('/hd/api/v1/lab-sheet/accuracy?days='+days).then(r=>r.json()).then(d=>{
+    if(d.error){ document.getElementById('laBody').innerHTML='<tr><td colspan="6" style="color:var(--danger)">'+d.error+'</td></tr>'; return; }
+    const t=d.total||{};
+    document.getElementById('laTotal').innerHTML = 'ใบที่บันทึกผ่าน AI: <b>'+(d.sheets||0)+'</b> · ตรง <b style="color:var(--success)">'+(t.match||0)+'</b> · ผิด <b style="color:var(--danger)">'+(t.mismatch||0)+'</b> · เว้นว่าง '+(t.blank||0)+' · กรอกเอง '+(t.manual||0);
+    document.getElementById('laGate').innerHTML = d.gate_ok ? '<span style="color:var(--success)">🟢 ผ่านเกณฑ์ไปขั้น 3</span>' : '<span style="color:#a04000">🟡 '+(d.gate||'')+'</span>';
+    const rows = Object.entries(d.fields||{}).sort((a,b)=>(b[1].match+b[1].mismatch)-(a[1].match+a[1].mismatch));
+    document.getElementById('laBody').innerHTML = rows.length ? rows.map(([f,v])=>{ const n=(v.match||0)+(v.mismatch||0); const pct=n?Math.round(v.match/n*100):null;
+      return '<tr><td style="padding:4px">'+f+'</td><td style="text-align:center">'+(v.match||0)+'</td><td style="text-align:center;color:'+(v.mismatch?'var(--danger)':'inherit')+'">'+(v.mismatch||0)+'</td><td style="text-align:center">'+(v.blank||0)+'</td><td style="text-align:center">'+(v.manual||0)+'</td><td style="text-align:center">'+(pct==null?'—':pct+'%')+'</td></tr>'; }).join('')
+      : '<tr><td colspan="6" style="color:var(--fg-muted);padding:8px">ยังไม่มีตัวอย่าง — ใช้ปุ่ม 📄 อ่านใบแล็บ ในหน้า Lab แล้วกดบันทึก</td></tr>';
+  }).catch(()=>{ document.getElementById('laBody').innerHTML='<tr><td colspan="6" style="color:var(--danger)">โหลดไม่ได้</td></tr>'; });
+}
+laLoad();
+</script>
+{% endblock %}

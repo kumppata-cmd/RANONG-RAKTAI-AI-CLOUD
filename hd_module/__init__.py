@@ -338,6 +338,31 @@ def _run_hd_migrations():
             fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS hco3 NUMERIC(4,1)")
             fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS wbc NUMERIC(6,2)")
             fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS antihiv VARCHAR(20)")
+            # 📄 Lab Sheet Reader ขั้น 2 (26 พ.ย. 2569): Iron / TIBC / Vitamin D / HBc Ab — เพิ่มอย่างเดียว
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS iron NUMERIC(6,1)")
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS tibc NUMERIC(6,1)")
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS vitd NUMERIC(6,2)")
+            fixes.append("ALTER TABLE hd_lab_docs ADD COLUMN IF NOT EXISTS antihbc VARCHAR(20)")
+            fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS vitamin_d NUMERIC(6,2)")
+            fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS anti_hbs VARCHAR(20)")
+            fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS anti_hbc VARCHAR(20)")
+            fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS hco3 NUMERIC(4,1)")
+            fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS glucose NUMERIC(6,1)")
+            fixes.append("ALTER TABLE hd_lab_results ADD COLUMN IF NOT EXISTS sheet_read_id VARCHAR(40)")
+            # ตัวอย่างเฉลย "AI อ่านใบแล็บ vs พยาบาลยืนยัน" — ไม่มี HN/ชื่อ
+            fixes.append("""
+                CREATE TABLE IF NOT EXISTS hd_lab_sheet_samples (
+                    id SERIAL PRIMARY KEY,
+                    read_id VARCHAR(40),
+                    field VARCHAR(30) NOT NULL,
+                    ai_value VARCHAR(30),
+                    ai_uncertain BOOLEAN DEFAULT FALSE,
+                    nurse_value VARCHAR(30),
+                    outcome VARCHAR(20) NOT NULL,
+                    nurse_id INTEGER,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
             # one-time seed for rows that existed before the gate (idempotent):
             # doc-system "approved" means the physician already reviewed them there
             fixes.append("""
@@ -357,12 +382,13 @@ def _run_hd_migrations():
                        kt_v AS ktv, urr,
                        bun, creatinine,
                        NULL::NUMERIC AS glucose,
-                       hepatitis_b AS hbsag, hepatitis_c AS antihcv, NULL::VARCHAR AS antihbs,
+                       hepatitis_b AS hbsag, hepatitis_c AS antihcv, anti_hbs::VARCHAR AS antihbs,
                        source, 'lab_results' AS _table,
                        'manual'::VARCHAR AS verified_status, NULL::TEXT AS delta_flags,
                        NULL::INTEGER AS doc_row_id,
-                       NULL::NUMERIC AS plt, NULL::NUMERIC AS hco3,
-                       NULL::NUMERIC AS wbc, NULL::VARCHAR AS antihiv
+                       platelet::NUMERIC AS plt, hco3::NUMERIC AS hco3,
+                       wbc::NUMERIC AS wbc, hiv::VARCHAR AS antihiv,
+                       iron, tibc, vitamin_d AS vitd, anti_hbc AS antihbc
                 FROM hd_lab_results
                 UNION ALL
                 SELECT patient_id, COALESCE(specimen_date, doc_date) AS lab_date,
@@ -378,7 +404,8 @@ def _run_hd_migrations():
                        'ocr' AS source, 'lab_docs' AS _table,
                        COALESCE(verified_status, 'pending') AS verified_status, delta_flags,
                        id AS doc_row_id,
-                       plt, hco3, wbc, antihiv
+                       plt, hco3, wbc, antihiv,
+                       iron, tibc, vitd, antihbc
                 FROM hd_lab_docs
             """)
 

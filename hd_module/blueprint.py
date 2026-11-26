@@ -414,6 +414,12 @@ def hd_ocr_test_page():
     return render_template("hd_ocr_test.html")
 
 
+@hd_web.route("/lab-sheet-accuracy")
+def hd_lab_sheet_accuracy_page():
+    """📄📊 ความแม่นตัวอ่านใบแล็บ (AI vs พยาบาล) — ขั้น 2"""
+    return render_template("hd_lab_sheet_accuracy.html")
+
+
 @hd_web.route("/lab-sheet-test")
 def hd_lab_sheet_test_page():
     """🧪 ทดสอบอ่านใบแล็บ รพ.ระนอง (Lab Sheet Reader ขั้นที่ 1) — ไม่บันทึกค่า ไม่แตะทางเดิน LINE เดิม"""
@@ -3842,7 +3848,10 @@ _UNIFIED_TO_TEMPLATE = {"hb": "hemoglobin", "hct": "hematocrit", "k": "potassium
                         "ferritin": "ferritin", "tsat": "tsat", "ktv": "kt_v", "urr": "urr",
                         "bun": "bun", "creatinine": "creatinine", "hbsag": "hep_b", "antihcv": "hep_c",
                         "plt": "plt", "hco3": "hco3", "wbc": "wbc",
-                        "antihbs": "anti_hbs", "antihiv": "anti_hiv"}
+                        "antihbs": "anti_hbs", "antihiv": "anti_hiv",
+                        "iron": "iron", "tibc": "tibc", "vitd": "vitamin_d", "antihbc": "anti_hbc"}
+# 📄 ขั้น 2 (26 พ.ย. 2569): คอลัมน์ใหม่ใน VIEW — ลองก่อน ถ้า VIEW ยังไม่อัปเดต ถอยไปชุดเดิม (ไม่ทำหน้าพัง)
+_UNIFIED_EXTRA = ["iron", "tibc", "vitd", "antihbc"]
 
 
 @hd_bp.route("/patients/hn/<hn>/labs-unified", methods=["GET"])
@@ -3857,15 +3866,25 @@ def get_patient_labs_unified(hn):
     try:
         conn = psycopg2.connect(db_url, connect_timeout=5)
         conn.autocommit = True
-        with conn.cursor() as cur:
-            # _table DESC → lab_results (กรอกมือ) มาก่อน lab_docs (รูปถ่าย) ในวันเดียวกัน
-            cur.execute(f"""SELECT l.lab_date, l._table, l.source, {', '.join('l.' + c for c in _UNIFIED_COLS)}
-                            FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
-                            WHERE p.hn = %s AND l.lab_date IS NOT NULL
-                              AND (l.verified_status IS DISTINCT FROM 'rejected')
-                            ORDER BY l.lab_date DESC, l._table DESC, l.doc_row_id DESC NULLS LAST
-                            LIMIT 80""", (hn,))
-            rows = cur.fetchall()
+        cols = _UNIFIED_COLS + _UNIFIED_EXTRA
+        rows = None
+        for attempt_cols in (cols, _UNIFIED_COLS):
+            try:
+                with conn.cursor() as cur:
+                    # _table DESC → lab_results (กรอกมือ) มาก่อน lab_docs (รูปถ่าย) ในวันเดียวกัน
+                    cur.execute(f"""SELECT l.lab_date, l._table, l.source, {', '.join('l.' + c for c in attempt_cols)}
+                                    FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
+                                    WHERE p.hn = %s AND l.lab_date IS NOT NULL
+                                      AND (l.verified_status IS DISTINCT FROM 'rejected')
+                                    ORDER BY l.lab_date DESC, l._table DESC, l.doc_row_id DESC NULLS LAST
+                                    LIMIT 80""", (hn,))
+                    rows = cur.fetchall()
+                cols = attempt_cols
+                break
+            except Exception as col_err:
+                if attempt_cols is _UNIFIED_COLS:
+                    raise
+                logger.info("labs-unified: extra cols unavailable (%s) — using base cols", type(col_err).__name__)
         conn.close()
         labs, seen = [], set()
         for r in rows:
@@ -3877,9 +3896,9 @@ def get_patient_labs_unified(hn):
             entry = {"date": r[0].isoformat() if r[0] else None,
                      "source_type": "photo" if r[1] == "lab_docs" else "manual",
                      "source": r[2] or ""}
-            for i, c in enumerate(_UNIFIED_COLS):
+            for i, c in enumerate(cols):
                 v = r[3 + i]
-                entry[_UNIFIED_TO_TEMPLATE[c]] = (float(v) if v is not None and c not in ("hbsag", "antihcv", "antihbs", "antihiv") else v)
+                entry[_UNIFIED_TO_TEMPLATE[c]] = (float(v) if v is not None and c not in ("hbsag", "antihcv", "antihbs", "antihiv", "antihbc") else v)
             labs.append(entry)
             if len(labs) >= 24:
                 break
@@ -8661,16 +8680,43 @@ def lab_sheet_read():
             except Exception as e:
                 logger.info("lab-sheet match: %s", type(e).__name__)
         res["patient"] = patient
+        res["form"] = lsr.form_payload(res)
+        res["form_uncertain"] = sorted({lsr.FORM_FIELDS[u["key"]] for u in (res.get("uncertain") or []) if u["key"] in lsr.FORM_FIELDS})
         res["summary"] = lsr.summary_lines(res, patient)
         res["page"] = idx + 1
         pages.append(res)
+    read_id = lsr.new_read_id()
+    for p in pages:
+        p["read_id"] = f"{read_id}-{p.get('page', 1)}"
     log_action(user_id=g.get("hd_user_id"), action="lab_sheet.read", resource_type="lab_sheet", resource_id=None,
-               new_values={"pages": len(pages), "double": double, "pdf": is_pdf,
+               new_values={"pages": len(pages), "double": double, "pdf": is_pdf, "read_id": read_id,
                            "found": [len((p.get("values") or {})) for p in pages],
                            "uncertain": [len((p.get("uncertain") or [])) for p in pages],
                            "matched": [((p.get("patient") or {}).get("status")) for p in pages]},
                ip_address=request.remote_addr or "")
-    return jsonify({"pages": pages, "profile": lsr.PROFILE_ID, "double": double})
+    return jsonify({"pages": pages, "profile": lsr.PROFILE_ID, "double": double, "read_id": read_id})
+
+
+@hd_bp.route("/lab-sheet/accuracy", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def lab_sheet_accuracy():
+    """📄📊 ความแม่นตัวอ่านใบแล็บ: AI อ่าน vs พยาบาลบันทึกจริง (hd_lab_sheet_samples) รายค่า · ?days=30"""
+    import os
+    from . import lab_sheet_reader as lsr
+    days = _safe_int(request.args.get("days")) or 30
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "no db"}), 503
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            rep = lsr.accuracy_report(cur, days)
+        conn.close()
+        return jsonify(rep)
+    except Exception as e:
+        logger.info("lab-sheet accuracy: %s", type(e).__name__)
+        return jsonify({"error": str(e)}), 500
 
 
 @hd_bp.route("/machine-screen/models", methods=["GET"])
@@ -13385,6 +13431,12 @@ def save_lab_result(hn):
                         "albumin","ipth","hemoglobin","hematocrit","ferritin","tsat",
                         "iron","tibc","wbc","platelet","hba1c","uric_acid","ast","alt",
                         "hepatitis_b","hepatitis_c","hiv","notes","source","kt_v","urr"]
+            # 📄 Lab Sheet Reader ขั้น 2 (26 พ.ย. 2569): คอลัมน์ใหม่ — ใส่เฉพาะเมื่อส่งมา (ฟอร์มเก่าส่งไม่มา = เหมือนเดิมทุกประการ)
+            for extra in ("vitamin_d", "anti_hbs", "anti_hbc", "hco3", "glucose", "sheet_read_id"):
+                if data.get(extra) is not None:
+                    lab_cols.append(extra)
+            if data.get("sheet_read_id") and not data.get("source"):
+                data["source"] = "lab_sheet_ai"
             vals = [data.get(c) for c in lab_cols]
             placeholders = ", ".join(["%s"] * (len(lab_cols) + 2))
             col_str = ", ".join(["patient_id", "lab_date"] + lab_cols)
@@ -13393,9 +13445,28 @@ def save_lab_result(hn):
                 [pr[0], data["lab_date"]] + vals
             )
             lid = cur.fetchone()[0]
+            # 📄 ขั้น 2: ตัวอย่างเฉลย AI vs พยาบาล (ไม่มี HN/ชื่อ) + จำ HN รพ. เมื่อพยาบาลยืนยัน
+            sheet_stats = None
+            if data.get("sheet_read_id"):
+                try:
+                    from . import lab_sheet_reader as lsr
+                    sheet_stats = lsr.record_samples(cur, data["sheet_read_id"], data.get("sheet_ai") or {},
+                                                     data.get("sheet_uncertain") or [], data, g.get("hd_user_id"))
+                except Exception as e:
+                    logger.info("lab-sheet samples: %s", type(e).__name__)
+            if data.get("confirm_hospital_hn"):
+                try:
+                    cur.execute("""UPDATE hd_patient_mapping SET hospital_hn = %s
+                                   WHERE id = %s AND COALESCE(hospital_hn, '') = ''""",
+                                (str(data["confirm_hospital_hn"])[:20], pr[0]))
+                    log_action(user_id=g.get("hd_user_id"), action="patient.hospital_hn_confirm", resource_type="patient",
+                               resource_id=pr[0], new_values={"hospital_hn_set": cur.rowcount == 1},
+                               ip_address=request.remote_addr or "")
+                except Exception as e:
+                    logger.info("hospital_hn confirm: %s", type(e).__name__)
         conn.commit()
         conn.close()
-        return jsonify({"id": lid, "saved": True}), 201
+        return jsonify({"id": lid, "saved": True, "sheet_stats": sheet_stats}), 201
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 

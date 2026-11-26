@@ -76,6 +76,10 @@
 <div class="add-overlay" id="addOverlay" onclick="if(event.target===this)closeAddLab()">
   <div class="add-sheet">
     <h3>➕ เพิ่มผล Lab</h3>
+    <!-- 📄 ขั้น 2 (26 พ.ย. 2569): ตัวอ่านใบแล็บ รพ.ระนอง (AI อ่าน 2 รอบ + ตรวจ 6 ชั้น) — เติมช่อง พยาบาลตรวจแล้วกดบันทึกเอง -->
+    <button class="btn" onclick="document.getElementById('labSheetInput').click()" style="width:100%;background:#1e8449;color:#fff;padding:12px;margin-bottom:6px">📄 อ่านใบแล็บ รพ.ระนอง (AI ตรวจ 2 รอบ) — รูปหรือ PDF</button>
+    <input type="file" id="labSheetInput" accept="image/*,.pdf,application/pdf" style="display:none" onchange="readLabSheet(this)">
+    <div id="sheetStatus" style="font-size:.76rem;min-height:0;margin-bottom:6px;line-height:1.5"></div>
     <button class="btn" onclick="document.getElementById('labPhotoInput').click()" style="width:100%;background:#6f42c1;color:#fff;padding:12px;margin-bottom:6px">📸 ถ่ายรูปใบแล็บ — ระบบเติมค่าให้ แล้วตรวจก่อนบันทึก</button>
     <input type="file" id="labPhotoInput" accept="image/*" capture="environment" style="display:none" onchange="readLabPhoto(this)">
     <div id="photoStatus" style="font-size:.75rem;min-height:16px;margin-bottom:6px"></div>
@@ -108,6 +112,25 @@
       <div class="add-field"><label>HBsAg</label><select id="lHbv"><option value="">—</option><option value="negative">Negative</option><option value="positive">Positive</option></select></div>
       <div class="add-field"><label>Anti-HCV</label><select id="lHcv"><option value="">—</option><option value="negative">Negative</option><option value="positive">Positive</option></select></div>
     </div>
+    <h4 style="font-size:.8rem;color:var(--fg-muted);margin:8px 0 4px">🧲 Iron study · 🌞 Vitamin D · 🦠 Serology เพิ่มเติม</h4>
+    <div class="add-grid">
+      <div class="add-field"><label>Iron (µg/dL)</label><input type="number" step="0.1" id="lIron"></div>
+      <div class="add-field"><label>TIBC (µg/dL)</label><input type="number" step="0.1" id="lTibc"></div>
+      <div class="add-field"><label>Vitamin D total (ng/mL)</label><input type="number" step="0.01" id="lVitD"></div>
+      <div class="add-field"><label>HBs Ab (Anti-HBs)</label><select id="lHbsAb"><option value="">—</option><option value="negative">Negative</option><option value="positive">Positive</option></select></div>
+      <div class="add-field"><label>HBc Ab (Anti-HBc)</label><select id="lHbcAb"><option value="">—</option><option value="negative">Negative</option><option value="positive">Positive</option></select></div>
+      <div class="add-field"><label>Anti HIV <span style="color:var(--fg-muted);font-weight:400">(ไม่ออก LINE)</span></label><select id="lHiv"><option value="">—</option><option value="negative">Negative</option><option value="positive">Positive</option></select></div>
+    </div>
+    <h4 style="font-size:.8rem;color:var(--fg-muted);margin:8px 0 4px">🧪 CBC · เคมีอื่น</h4>
+    <div class="add-grid">
+      <div class="add-field"><label>WBC (×10³/µL)</label><input type="number" step="0.01" id="lWbc"></div>
+      <div class="add-field"><label>PLT (×10³/µL)</label><input type="number" step="1" id="lPlt"></div>
+      <div class="add-field"><label>HCO3 (mEq/L)</label><input type="number" step="0.1" id="lHco3"></div>
+      <div class="add-field"><label>Glucose/FBS (mg/dL)</label><input type="number" step="0.1" id="lGlucose"></div>
+      <div class="add-field"><label>Uric acid (mg/dL)</label><input type="number" step="0.1" id="lUric"></div>
+      <div class="add-field"><label>AST (U/L)</label><input type="number" step="0.1" id="lAst"></div>
+      <div class="add-field"><label>ALT (U/L)</label><input type="number" step="0.1" id="lAlt"></div>
+    </div>
     <button class="btn btn-success" onclick="saveLab()" style="width:100%;padding:14px;font-size:1rem;margin-top:12px">💾 บันทึก</button>
     <button class="btn" onclick="closeAddLab()" style="width:100%;margin-top:8px;padding:10px">ยกเลิก</button>
   </div>
@@ -117,9 +140,10 @@
 {% block extra_js %}
 <script>
 const HN='{{ patient_hn }}';
-const RANGES={bun:[7,20],creatinine:[0.6,1.2],potassium:[3.5,5.0],sodium:[136,145],calcium:[8.5,10.5],phosphate:[2.5,4.5],albumin:[3.5,5.0],ipth:[150,600],hemoglobin:[10,12],hematocrit:[30,36],ferritin:[200,500],tsat:[20,50],kt_v:[1.2,2.5],urr:[65,100],plt:[150,400],hco3:[20,26],wbc:[4,11]};
-const UNITS={bun:'mg/dL',creatinine:'mg/dL',potassium:'mEq/L',sodium:'mEq/L',calcium:'mg/dL',phosphate:'mg/dL',albumin:'g/dL',ipth:'pg/mL',hemoglobin:'g/dL',hematocrit:'%',ferritin:'ng/mL',tsat:'%',kt_v:'',urr:'%',plt:'×10³/µL',hco3:'mEq/L',wbc:'×10³/µL'};
-const LABELS={bun:'BUN',creatinine:'Cr',potassium:'K',sodium:'Na',calcium:'Ca',phosphate:'PO4',albumin:'Alb',ipth:'iPTH',hemoglobin:'Hb',hematocrit:'Hct',ferritin:'Ferritin',tsat:'TSAT',kt_v:'Kt/V',urr:'URR',plt:'PLT',hco3:'HCO3',wbc:'WBC'};
+const RANGES={bun:[7,20],creatinine:[0.6,1.2],potassium:[3.5,5.0],sodium:[136,145],calcium:[8.5,10.5],phosphate:[2.5,4.5],albumin:[3.5,5.0],ipth:[150,600],hemoglobin:[10,12],hematocrit:[30,36],ferritin:[200,500],tsat:[20,50],kt_v:[1.2,2.5],urr:[65,100],plt:[150,400],hco3:[20,26],wbc:[4,11],iron:[40,160],tibc:[250,425],vitamin_d:[30,100]};
+const UNITS={bun:'mg/dL',creatinine:'mg/dL',potassium:'mEq/L',sodium:'mEq/L',calcium:'mg/dL',phosphate:'mg/dL',albumin:'g/dL',ipth:'pg/mL',hemoglobin:'g/dL',hematocrit:'%',ferritin:'ng/mL',tsat:'%',kt_v:'',urr:'%',plt:'×10³/µL',hco3:'mEq/L',wbc:'×10³/µL',iron:'µg/dL',tibc:'µg/dL',vitamin_d:'ng/mL'};
+/* 📄 ขั้น 2 (26 พ.ย. 2569): + Iron / TIBC / Vitamin D (การ์ดล่าสุด + เปรียบเทียบ) */
+const LABELS={bun:'BUN',creatinine:'Cr',potassium:'K',sodium:'Na',calcium:'Ca',phosphate:'PO4',albumin:'Alb',ipth:'iPTH',hemoglobin:'Hb',hematocrit:'Hct',ferritin:'Ferritin',tsat:'TSAT',kt_v:'Kt/V',urr:'URR',plt:'PLT',hco3:'HCO3',wbc:'WBC',iron:'Iron',tibc:'TIBC',vitamin_d:'Vit D'};
 
 function flagClass(key,val){
   if(!val||!RANGES[key]) return '';
@@ -154,7 +178,22 @@ function saveLab(){
     urr:parseFloat(document.getElementById('lUrr').value)||null,
     hepatitis_b:document.getElementById('lHbv').value||null,
     hepatitis_c:document.getElementById('lHcv').value||null,
+    /* 📄 ขั้น 2: ฟิลด์ใหม่ (ว่าง = null ไม่กระทบฟอร์มเดิม) */
+    iron:parseFloat(document.getElementById('lIron').value)||null,
+    tibc:parseFloat(document.getElementById('lTibc').value)||null,
+    vitamin_d:parseFloat(document.getElementById('lVitD').value)||null,
+    anti_hbs:document.getElementById('lHbsAb').value||null,
+    anti_hbc:document.getElementById('lHbcAb').value||null,
+    hiv:document.getElementById('lHiv').value||null,
+    wbc:parseFloat(document.getElementById('lWbc').value)||null,
+    platelet:parseInt(document.getElementById('lPlt').value)||null,
+    hco3:parseFloat(document.getElementById('lHco3').value)||null,
+    glucose:parseFloat(document.getElementById('lGlucose').value)||null,
+    uric_acid:parseFloat(document.getElementById('lUric').value)||null,
+    ast:parseFloat(document.getElementById('lAst').value)||null,
+    alt:parseFloat(document.getElementById('lAlt').value)||null,
   };
+  if(_sheet.readId){ data.sheet_read_id=_sheet.readId; data.sheet_ai=_sheet.ai; data.sheet_uncertain=_sheet.uncertain; if(_sheet.confirmHospitalHn && document.getElementById('lsRememberHn') && document.getElementById('lsRememberHn').checked) data.confirm_hospital_hn=_sheet.confirmHospitalHn; }
   hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)})
     .then(r=>r.json()).then(d=>{
       if(d.error){showToast(d.error,'danger');return}
@@ -250,6 +289,87 @@ function drawTrend(key, label, unit){
   ctx.fillStyle=getComputedStyle(document.body).getPropertyValue('--fg')||'#333'; ctx.font='bold 12px sans-serif'; ctx.textAlign='left';
   ctx.fillText(`${label} ${unit?'('+unit+')':''}`, pad.l, 16);
 }
+
+/* ── 📄 ขั้น 2 (26 พ.ย. 2569): ตัวอ่านใบแล็บ รพ.ระนอง — AI อ่าน 2 รอบ + ตรวจ 6 ชั้น → เติมช่อง → พยาบาลตรวจ/กดบันทึกเอง ── */
+const _SHEET_FIELD_IDS = {bun:'lBun', creatinine:'lCr', potassium:'lK', sodium:'lNa', calcium:'lCa', phosphate:'lPO4',
+  albumin:'lAlb', ipth:'lIpth', hemoglobin:'lHb', hematocrit:'lHct', ferritin:'lFerritin', tsat:'lTsat',
+  iron:'lIron', tibc:'lTibc', vitamin_d:'lVitD', hepatitis_b:'lHbv', hepatitis_c:'lHcv', hiv:'lHiv',
+  anti_hbs:'lHbsAb', anti_hbc:'lHbcAb', wbc:'lWbc', platelet:'lPlt', hco3:'lHco3', glucose:'lGlucose',
+  uric_acid:'lUric', ast:'lAst', alt:'lAlt', kt_v:'lKtv', urr:'lUrr'};
+const _SHEET_LABELS = {bun:'BUN', creatinine:'Cr', potassium:'K', sodium:'Na', calcium:'Ca', phosphate:'PO4', albumin:'Alb', ipth:'iPTH',
+  hemoglobin:'Hb', hematocrit:'Hct', ferritin:'Ferritin', tsat:'TSAT', iron:'Iron', tibc:'TIBC', vitamin_d:'Vit D', hepatitis_b:'HBsAg',
+  hepatitis_c:'Anti-HCV', hiv:'Anti HIV', anti_hbs:'HBs Ab', anti_hbc:'HBc Ab', wbc:'WBC', platelet:'PLT', hco3:'HCO3', glucose:'Glucose',
+  uric_acid:'Uric', ast:'AST', alt:'ALT'};
+let _sheet = {readId:null, ai:{}, uncertain:[], confirmHospitalHn:null, needConfirm:false};
+function _sheetReset(){ _sheet = {readId:null, ai:{}, uncertain:[], confirmHospitalHn:null, needConfirm:false};
+  const st=document.getElementById('sheetStatus'); if(st) st.innerHTML='';
+  Object.values(_SHEET_FIELD_IDS).forEach(id=>{ const el=document.getElementById(id); if(el) el.style.background=''; }); }
+function _sheetEsc(x){ return String(x==null?'':x).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function sheetUse(field, value){
+  const el = document.getElementById(_SHEET_FIELD_IDS[field]); if(!el) return;
+  el.value = value; el.style.background='rgba(230,126,34,.18)';
+  _sheet.ai[field] = value;          /* เก็บไว้วัดผล: พยาบาลเลือกใช้ค่าที่ AI ไม่แน่ใจ */
+  showToast('ใส่ '+(_SHEET_LABELS[field]||field)+' = '+value+' แล้ว — ตรวจกับใบอีกครั้ง','info');
+}
+function readLabSheet(input){
+  const f = input.files && input.files[0]; if(!f) return;
+  const st = document.getElementById('sheetStatus');
+  _sheetReset();
+  st.innerHTML = '<span style="color:var(--accent)">⏳ AI กำลังอ่านใบ 2 รอบ (~10–25 วิ)…</span>';
+  const fd = new FormData(); fd.append('file', f); fd.append('double', '1');
+  hdFetch('/hd/api/v1/lab-sheet/read', {method:'POST', body:fd}).then(async r=>{ const d = await r.json().catch(()=>({})); d._status=r.status; return d; }).then(d=>{
+    input.value='';
+    if(d._status===429){ st.innerHTML='<span style="color:#e67e22">⏳ มีคนกำลังอ่านรูปพร้อมกัน — รอ 10 วิแล้วลองใหม่</span>'; return; }
+    if(d.error){ st.innerHTML='<span style="color:var(--danger)">❌ '+_sheetEsc(d.error)+'</span>'; return; }
+    const pages = (d.pages||[]).filter(p=>!p.failed);
+    if(!pages.length){ st.innerHTML='<span style="color:var(--danger)">❌ AI อ่านใบไม่สำเร็จ — ถ่ายใหม่ให้ตรง/ชัด หรือกรอกเอง</span>'; return; }
+    const pg = pages[0];
+    const h = pg.header||{}, pt = pg.patient||{};
+    /* 1) คนไข้ต้องเป็นคนเดียวกับหน้านี้ */
+    let who = '';
+    if(pt.status==='matched' || pt.status==='matched_by_name'){
+      if(String(pt.hn)!==String(HN)){
+        st.innerHTML = '<span style="color:var(--danger)">⛔ ใบนี้เป็นของ <b>'+_sheetEsc(pt.patient_name)+'</b> (HN คลินิก '+_sheetEsc(pt.hn)+') ไม่ใช่คนไข้หน้านี้ (HN '+HN+') — ไม่เติมค่า</span>';
+        return;
+      }
+      who = '✅ ตรงคนไข้หน้านี้: '+_sheetEsc(pt.patient_name)+(pt.by==='hospital_hn'?' (จับคู่ด้วย HN รพ.)':'');
+      if(pt.status==='matched_by_name'){ _sheet.confirmHospitalHn = h.hn||null; who += ' <label style="font-weight:600;color:#a04000"><input type="checkbox" id="lsRememberHn" checked> จำ HN รพ. '+_sheetEsc(h.hn)+' ให้คนไข้นี้</label>'; }
+    } else {
+      _sheet.needConfirm = true;
+      who = '<span style="color:#a04000">⚠️ ไม่พบ HN รพ. '+_sheetEsc(h.hn)+' / ชื่อ "'+_sheetEsc(h.name)+'" ในทะเบียน — <b>ตรวจว่าใบนี้เป็นของคนไข้หน้านี้จริง</b> <label><input type="checkbox" id="lsSameConfirm"> ยืนยันว่าใช่</label> <label><input type="checkbox" id="lsRememberHn"> จำ HN รพ. นี้ให้คนไข้</label></span>';
+      _sheet.confirmHospitalHn = h.hn||null;
+    }
+    /* 2) วันที่ + เติมค่าที่ผ่านการตรวจ */
+    if(h.lab_date) document.getElementById('labDate').value = h.lab_date;
+    const form = pg.form||{}; let filled=0;
+    for(const [field,val] of Object.entries(form)){
+      const el = document.getElementById(_SHEET_FIELD_IDS[field]); if(!el || val==null) continue;
+      el.value = val; el.style.background='rgba(39,174,96,.14)'; filled++;
+    }
+    _sheet.readId = pg.read_id||d.read_id||null; _sheet.ai = Object.assign({}, form); _sheet.uncertain = pg.form_uncertain||[];
+    /* 3) ค่าที่ไม่แน่ใจ → ปุ่มให้เลือกใช้ (ไม่ใส่ให้เอง) */
+    const unc = (pg.uncertain||[]).map(u=>{
+      const field = Object.keys(_SHEET_LABELS).find(k=>_SHEET_LABELS[k]===u.label) || null;
+      const btn = (u.value!=null && field && _SHEET_FIELD_IDS[field]) ? ' <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="sheetUse(\''+field+'\','+JSON.stringify(u.value)+')">ใช้ '+_sheetEsc(u.value)+'</button>'+(u.alt!=null?' <button class="btn" style="font-size:.7rem;padding:2px 6px" onclick="sheetUse(\''+field+'\','+JSON.stringify(u.alt)+')">ใช้ '+_sheetEsc(u.alt)+'</button>':'') : '';
+      return '<div>❓ <b>'+_sheetEsc(u.label)+'</b> อ่านได้ '+_sheetEsc(u.raw||u.value)+(u.alt!=null?' / '+_sheetEsc(u.alt):'')+' — '+_sheetEsc(u.why)+btn+'</div>';
+    }).join('');
+    const probs = (pg.problems||[]).map(p=>'<div>⚠️ '+_sheetEsc(p)+'</div>').join('');
+    const tsat = pg.computed && pg.computed.tsat!=null ? ' · TSAT คำนวณ '+pg.computed.tsat+'% ('+_sheetEsc(pg.computed.tsat_check||'')+')' : '';
+    st.innerHTML = '<div>'+who+'</div>'
+      + '<div><span style="color:var(--success)">✅ เติมให้ '+filled+' ค่า (ช่องเขียว = 2 รอบอ่านตรงกัน)</span>'+tsat+' · ใบ '+_sheetEsc(h.request_form||'')+' '+_sheetEsc(h.request_date||'')+' — <b>ตรวจทุกช่องกับใบจริงก่อนกดบันทึก</b></div>'
+      + (unc ? '<div style="color:#b71c1c;margin-top:4px">'+unc+'</div>' : '')
+      + (probs ? '<div style="color:#b71c1c;margin-top:4px">'+probs+'</div>' : '')
+      + (pages.length>1 ? '<div style="color:var(--fg-muted)">ไฟล์นี้มี '+pages.length+' หน้า — เติมจากหน้าแรกเท่านั้น</div>' : '');
+  }).catch(e=>{ input.value=''; st.innerHTML='<span style="color:var(--danger)">❌ อ่านใบไม่สำเร็จ: '+_sheetEsc(e.message||e)+'</span>'; });
+}
+/* ครอบ saveLab: ถ้าใบไม่ตรงทะเบียน ต้องติ๊กยืนยันก่อน · บันทึกแล้วล้างสถานะใบ */
+const _saveLabBeforeSheet = saveLab;
+saveLab = function(){
+  if(_sheet.readId && _sheet.needConfirm){ const c=document.getElementById('lsSameConfirm'); if(!c || !c.checked){ showToast('ใบนี้ยังไม่ยืนยันว่าเป็นของคนไข้หน้านี้ — ติ๊ก "ยืนยันว่าใช่" ก่อนบันทึก','danger'); return; } }
+  return _saveLabBeforeSheet.apply(this, arguments);
+};
+const _closeAddLabBeforeSheet = closeAddLab;
+closeAddLab = function(){ _sheetReset(); return _closeAddLabBeforeSheet.apply(this, arguments); };
 
 /* (2) ถ่ายรูปใบแล็บ → OCR เติมฟอร์ม → คนตรวจก่อนบันทึก */
 const _PHOTO_FIELD_IDS = {hemoglobin:'lHb', hematocrit:'lHct', potassium:'lK', sodium:'lNa',

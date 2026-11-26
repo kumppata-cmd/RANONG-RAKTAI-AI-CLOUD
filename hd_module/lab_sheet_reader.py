@@ -61,7 +61,7 @@ _a("mono", "Monocyte", [r"^mono"], unit="%", lo=0, hi=100, group="cbc")
 _a("eos", "Eosinophil", [r"^eos"], unit="%", lo=0, hi=100, group="cbc")
 _a("baso", "Basophil", [r"^baso"], unit="%", lo=0, hi=100, group="cbc")
 # renal / chem
-_a("gfr", "GFR", [r"^e?gfr"], unit="", lo=0.5, hi=200, group="renal")
+_a("gfr", "GFR", [r"^e?gfr"], unit="mL/min", lo=0.5, hi=200, group="renal")
 _a("creatinine", "Creatinine", [r"^creat", r"^cr\.?$"], unit="mg/dl", lo=0.1, hi=40, group="renal")
 _a("bun", "BUN", [r"^bun", r"^urea"], unit="mg/dl", lo=1, hi=300, group="renal")
 _a("uric", "Uric acid", [r"^uric"], unit="mg/dl", lo=0.5, hi=25, group="renal")
@@ -274,7 +274,9 @@ def analyze(raw):
                 out["unknown_rows"].append({"no": no, "parameter": param[:40], "result": str(r.get("result") or "")[:20]})
                 continue
             val, note = parse_value(key, str(r.get("result") or ""))
-            entry = {"value": val, "unit": str(r.get("unit") or "").strip(), "no": no, "conf": conf,
+            # หน่วย: ใช้หน่วยมาตรฐานของค่านั้น (ใบจริงบางใบพิมพ์หน่วยเหลื่อมแถว เช่น GFR/Creatinine ใบ 444)
+            entry = {"value": val, "unit": A[key]["unit"] or str(r.get("unit") or "").strip(),
+                     "unit_sheet": str(r.get("unit") or "").strip()[:12], "no": no, "conf": conf,
                      "param": param[:40], "raw": str(r.get("result") or "")[:20]}
             if val is None:
                 out["uncertain"].append({"key": key, "label": A[key]["label"], **entry, "why": note})
@@ -583,3 +585,88 @@ def summary_lines(res, patient=None):
     for p in res.get("problems") or []:
         lines.append("⚠️ " + p)
     return lines
+
+
+# ── ขั้น 2: ฟอร์ม Lab ของ HD + ตัวอย่างเฉลย AI vs พยาบาล ──────────────────────────────────────
+# key ของตัวอ่าน → ชื่อฟิลด์ที่ POST /patients/hn/<hn>/labs รับ (คอลัมน์ hd_lab_results)
+FORM_FIELDS = {
+    "bun": "bun", "creatinine": "creatinine", "k": "potassium", "na": "sodium", "ca": "calcium", "phos": "phosphate",
+    "albumin": "albumin", "pth": "ipth", "hb": "hemoglobin", "hct": "hematocrit", "ferritin": "ferritin",
+    "iron": "iron", "tibc": "tibc", "wbc": "wbc", "plt": "platelet", "uric": "uric_acid", "ast": "ast", "alt": "alt",
+    "hbsag": "hepatitis_b", "antihcv": "hepatitis_c", "antihiv": "hiv",
+    "vitd": "vitamin_d", "antihbs": "anti_hbs", "antihbc": "anti_hbc", "hco3": "hco3", "glucose": "glucose",
+}
+# ค่าที่ต้องตรงภายในเท่าไรจึงนับว่า "ตรง" (ฟอร์มปัดทศนิยม เช่น Ferritin step 1)
+SAMPLE_TOL = {"ferritin": 0.6, "ipth": 0.6, "platelet": 0.6, "tsat": 0.06}
+
+
+def new_read_id():
+    import secrets
+    return "LS" + secrets.token_hex(4)
+
+
+def form_payload(res):
+    """ผลวิเคราะห์ → {field: value} สำหรับเติมฟอร์ม (เฉพาะค่าที่ผ่าน) + tsat คำนวณ"""
+    out = {}
+    for key, e in (res.get("values") or {}).items():
+        f = FORM_FIELDS.get(key)
+        if f:
+            out[f] = e["value"]
+    if (res.get("computed") or {}).get("tsat") is not None:
+        out["tsat"] = res["computed"]["tsat"]
+    return out
+
+
+def outcome_of(field, ai_value, nurse_value, uncertain=False):
+    """match / mismatch / blank (พยาบาลเว้นว่าง) / manual (AI ไม่แน่ใจ พยาบาลกรอกเอง) / unused"""
+    if nurse_value in (None, ""):
+        return "blank" if ai_value not in (None, "") else "unused"
+    if ai_value in (None, ""):
+        return "manual" if uncertain else "unused"
+    if isinstance(ai_value, str) and not _NUM.fullmatch(str(ai_value).strip() or "x"):
+        return "match" if str(ai_value).strip().lower() == str(nurse_value).strip().lower() else "mismatch"
+    try:
+        a, n = float(ai_value), float(nurse_value)
+    except (TypeError, ValueError):
+        return "match" if str(ai_value) == str(nurse_value) else "mismatch"
+    return "match" if abs(a - n) <= SAMPLE_TOL.get(field, 0.06) else "mismatch"
+
+
+def record_samples(cur, read_id, ai_values, uncertain_fields, saved, nurse_id=None):
+    """บันทึกตัวอย่างเฉลยต่อฟิลด์ (ไม่มี HN/ชื่อ) → สรุป {match, mismatch, blank, manual}"""
+    stats = {"match": 0, "mismatch": 0, "blank": 0, "manual": 0}
+    fields = set(ai_values or {}) | set(uncertain_fields or [])
+    for field in sorted(fields):
+        if field not in set(FORM_FIELDS.values()) | {"tsat"}:
+            continue
+        ai = (ai_values or {}).get(field)
+        unc = field in (uncertain_fields or [])
+        nv = saved.get(field)
+        oc = outcome_of(field, ai, nv, unc)
+        if oc == "unused":
+            continue
+        stats[oc] = stats.get(oc, 0) + 1
+        cur.execute("""INSERT INTO hd_lab_sheet_samples (read_id, field, ai_value, ai_uncertain, nurse_value, outcome, nurse_id)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+                    (str(read_id)[:40], field, None if ai is None else str(ai)[:30], unc,
+                     None if nv in (None, "") else str(nv)[:30], oc, nurse_id))
+    return stats
+
+
+def accuracy_report(cur, days=30):
+    cur.execute("""SELECT field, outcome, COUNT(*) FROM hd_lab_sheet_samples
+                   WHERE created_at >= NOW() - (%s || ' days')::interval GROUP BY field, outcome""", (str(int(days)),))
+    per = {}
+    for field, oc, n in cur.fetchall() or []:
+        per.setdefault(field, {"match": 0, "mismatch": 0, "blank": 0, "manual": 0})
+        per[field][oc] = per[field].get(oc, 0) + int(n)
+    cur.execute("SELECT COUNT(DISTINCT read_id) FROM hd_lab_sheet_samples WHERE created_at >= NOW() - (%s || ' days')::interval",
+                (str(int(days)),))
+    sheets = (cur.fetchone() or [0])[0]
+    tot = {"match": 0, "mismatch": 0, "blank": 0, "manual": 0}
+    for v in per.values():
+        for k in tot:
+            tot[k] += v.get(k, 0)
+    return {"days": days, "sheets": sheets, "fields": per, "total": tot,
+            "gate_ok": sheets >= 50 and tot["mismatch"] == 0,
+            "gate": "ไปขั้น 3 (LINE OA) ได้เมื่อ ≥50 ใบ และผิด 0"}
