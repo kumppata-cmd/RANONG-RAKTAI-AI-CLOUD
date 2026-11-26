@@ -3872,7 +3872,8 @@ def get_patient_labs_unified(hn):
             try:
                 with conn.cursor() as cur:
                     # _table DESC → lab_results (กรอกมือ) มาก่อน lab_docs (รูปถ่าย) ในวันเดียวกัน
-                    cur.execute(f"""SELECT l.lab_date, l._table, l.source, {', '.join('l.' + c for c in attempt_cols)}
+                    cur.execute(f"""SELECT l.lab_date, l._table, l.source, {', '.join('l.' + c for c in attempt_cols)},
+                                           l.verified_status, l.doc_row_id
                                     FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
                                     WHERE p.hn = %s AND l.lab_date IS NOT NULL
                                       AND (l.verified_status IS DISTINCT FROM 'rejected')
@@ -3887,22 +3888,28 @@ def get_patient_labs_unified(hn):
                 logger.info("labs-unified: extra cols unavailable (%s) — using base cols", type(col_err).__name__)
         conn.close()
         labs, seen = [], set()
+        ncol = len(cols)
         for r in rows:
             # ยุบแถวซ้ำ: วันที่ + ค่าทุกตัวเหมือนกัน → แสดงครั้งเดียว (เช่น กดบันทึกซ้ำ / รูปถ่ายของชุดเดียวกัน)
-            key = (r[0],) + tuple(str(v) for v in r[3:])
+            key = (r[0],) + tuple(str(v) for v in r[3:3 + ncol])
             if key in seen:
                 continue
             seen.add(key)
             entry = {"date": r[0].isoformat() if r[0] else None,
                      "source_type": "photo" if r[1] == "lab_docs" else "manual",
-                     "source": r[2] or ""}
+                     "source": r[2] or "",
+                     "verified_status": r[3 + ncol], "doc_row_id": r[4 + ncol]}
             for i, c in enumerate(cols):
                 v = r[3 + i]
                 entry[_UNIFIED_TO_TEMPLATE[c]] = (float(v) if v is not None and c not in ("hbsag", "antihcv", "antihbs", "antihiv", "antihbc") else v)
             labs.append(entry)
-            if len(labs) >= 24:
+            if len(labs) >= 48:
                 break
-        return jsonify({"labs": labs, "total": len(labs)})
+        # 🧬 26 พ.ย. 2569: "1 ชุดต่อ 1 วัน" (LINE OA + HD รวมกัน) + ค่าล่าสุดที่มีจริงของแต่ละตัว
+        from . import lab_merge as _lm
+        merged = _lm.merge_by_date(labs)[:24]
+        latest = _lm.latest_by_analyte(labs)
+        return jsonify({"labs": merged, "total": len(merged), "raw_rows": len(labs), "latest": latest})
     except Exception as e:
         logger.error("labs-unified: %s", e)
         return jsonify({"labs": [], "error": str(e)})
@@ -4159,18 +4166,94 @@ def labs_check_date(hn):
         conn = psycopg2.connect(db_url, connect_timeout=5)
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute("""SELECT l._table, l.source, l.hb, l.k, l.ktv
+            cur.execute("""SELECT l._table, l.source, l.hb, l.k, l.ktv, l.doc_row_id, l.verified_status
                            FROM hd_labs l JOIN hd_patient_mapping p ON p.id = l.patient_id
                            WHERE p.hn = %s AND l.lab_date = %s LIMIT 5""", (hn, d))
             rows = [{"source_type": "photo" if r[0] == "lab_docs" else "manual", "source": r[1] or "",
                      "hb": float(r[2]) if r[2] is not None else None,
                      "k": float(r[3]) if r[3] is not None else None,
-                     "ktv": float(r[4]) if r[4] is not None else None} for r in cur.fetchall()]
+                     "ktv": float(r[4]) if r[4] is not None else None,
+                     # 🧬 26 พ.ย. 2569: ให้หน้า Lab เสนอ "รวมเข้ากับชุดจาก LINE OA" แทนสร้างซ้ำ
+                     "doc_row_id": r[5], "verified_status": r[6]} for r in cur.fetchall()]
         conn.close()
         return jsonify({"exists": bool(rows), "date": d.isoformat(), "rows": rows})
     except Exception as e:
         logger.warning("labs_check_date: %s", e)
         return jsonify({"exists": False, "rows": [], "error": str(e)})
+
+
+_DOC_ROW_COLS = {  # ฟิลด์ฟอร์ม → คอลัมน์ hd_lab_docs (ที่มีแน่) · คอลัมน์ใหม่ 26 พ.ย. ตรวจก่อนใช้
+    "hemoglobin": "hb", "hematocrit": "hct", "potassium": "k", "sodium": "na", "calcium": "ca",
+    "phosphate": "phos", "albumin": "albumin", "ipth": "pth", "ferritin": "ferritin", "tsat": "tsat",
+    "kt_v": "ktv", "urr": "urr", "creatinine": "creatinine", "bun": "bun", "glucose": "glucose",
+    "hepatitis_b": "hbsag", "hepatitis_c": "antihcv", "anti_hbs": "antihbs", "platelet": "plt",
+    "hco3": "hco3", "wbc": "wbc", "hiv": "antihiv",
+    "iron": "iron", "tibc": "tibc", "vitamin_d": "vitd", "anti_hbc": "antihbc",
+}
+
+
+@hd_bp.route("/patients/hn/<hn>/labs/merge-into-doc", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def labs_merge_into_doc(hn):
+    """🧬 26 พ.ย. 2569 — ใบเดียวกันมาทาง LINE OA แล้ว (hd_lab_docs) และพยาบาลตรวจค่าในหน้า Lab อีกครั้ง
+    → รวมค่าที่ตรวจแล้วเข้าแถวเดิม + ยืนยัน แทนสร้างแถวใหม่ซ้ำวันเดียวกัน
+    body: {doc_row_id, values{field: value}, sheet_read_id?, sheet_ai?, sheet_uncertain?}
+    ค่าจากฟอร์ม "ทับ" ค่าจากรูป (คนตรวจแล้ว) · ค่าว่างในฟอร์มไม่ลบค่าเดิม"""
+    import os
+    data = request.get_json(silent=True) or {}
+    row_id = _safe_int(data.get("doc_row_id"))
+    values = data.get("values") or {}
+    if not row_id:
+        return jsonify({"error": "ต้องระบุ doc_row_id"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return jsonify({"error": "No database"}), 503
+    uid = g.get("hd_user_id")
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT d.id FROM hd_lab_docs d JOIN hd_patient_mapping p ON p.id = d.patient_id
+                           WHERE d.id = %s AND p.hn = %s""", (row_id, hn))
+            if not cur.fetchone():
+                conn.close()
+                return jsonify({"error": "ไม่พบชุดผลจาก LINE OA ของคนไข้นี้"}), 404
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'hd_lab_docs'")
+            have = {r[0] for r in cur.fetchall()}
+            sets, params, applied, skipped = [], [], [], []
+            for field, val in values.items():
+                col = _DOC_ROW_COLS.get(field)
+                if not col or val in (None, ""):
+                    continue
+                if col not in have:
+                    skipped.append(field)
+                    continue
+                sets.append(f"{col} = %s")
+                params.append(str(val).lower() if col in ("hbsag", "antihcv", "antihbs", "antihiv", "antihbc") else val)
+                applied.append(field)
+            sets.append("verified_status = 'verified'")
+            sets.append("verified_by = %s")
+            params.append(f"hd_user:{uid}")
+            sets.append("verified_at = NOW()")
+            params.append(row_id)
+            cur.execute(f"UPDATE hd_lab_docs SET {', '.join(sets)} WHERE id = %s", params)
+            stats = None
+            if data.get("sheet_read_id"):
+                try:
+                    from . import lab_sheet_reader as lsr
+                    stats = lsr.record_samples(cur, data["sheet_read_id"], data.get("sheet_ai") or {},
+                                               data.get("sheet_uncertain") or [], values, uid)
+                except Exception as e:
+                    logger.info("merge samples: %s", type(e).__name__)
+        conn.commit()
+        conn.close()
+        log_action(user_id=uid, action="labs.merge_into_doc", resource_type="hd_lab_docs", resource_id=row_id,
+                   new_values={"applied": applied, "skipped": skipped}, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "doc_row_id": row_id, "applied": applied, "skipped": skipped,
+                        "verified_status": "verified", "sheet_stats": stats})
+    except Exception as e:
+        logger.error("labs_merge_into_doc: %s", e)
+        return jsonify({"error": str(e)}), 500
 
 
 @hd_bp.route("/labs/sync", methods=["POST"])

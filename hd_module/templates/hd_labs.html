@@ -215,18 +215,31 @@ loadLabs = function(){
   _fetchLabHistory().then(d=>{
     if(d.error){document.getElementById('labPatient').textContent='Error: '+d.error;return}
     const latest=d.labs&&d.labs[0]?d.labs[0]:{};
-    document.getElementById('labPatient').textContent='HN '+HN+' — ผล Lab ล่าสุด '+(latest.date||'-');
+    document.getElementById('labPatient').textContent='HN '+HN+' — ผล Lab ล่าสุด '+(latest.date||'-')+(d.raw_rows&&d.raw_rows>d.total?' · รวม LINE OA + HD เป็นชุดเดียวต่อวัน':'');
     const cards=document.getElementById('latestCards');
     cards.innerHTML='';
+    /* 🧬 26 พ.ย. 2569: การ์ด "ล่าสุด" = ค่าล่าสุดที่มีจริงของแต่ละตัว (ไม่ใช่แถววันที่ใหม่สุดที่อาจว่าง) + วันที่กำกับ */
+    const lat = d.latest || {};
     for(const[k,label] of Object.entries(LABELS)){
-      const v=latest[k]; const cls=flagClass(k,v); const r=RANGES[k];
-      cards.innerHTML+=`<div class="lab-card ${cls}"><div class="name">${label}</div><div class="val">${v!=null?v:'—'}</div><div class="unit">${UNITS[k]||''}</div><div class="range">${r?r[0]+'-'+r[1]:''}</div></div>`;
+      const hit = lat[k]; const v = hit ? hit.value : latest[k]; const cls=flagClass(k,v); const r=RANGES[k];
+      const when = hit && hit.date && hit.date!==latest.date ? '<div style="font-size:.6rem;color:var(--fg-muted)">'+hit.date.slice(5)+(hit.pending?' ⏳':'')+'</div>' : (hit&&hit.pending?'<div style="font-size:.6rem;color:#a04000">⏳ รอยืนยัน</div>':'');
+      cards.innerHTML+=`<div class="lab-card ${cls}"><div class="name">${label}</div><div class="val">${v!=null?v:'—'}</div>${when}<div class="unit">${UNITS[k]||''}</div><div class="range">${r?r[0]+'-'+r[1]:''}</div></div>`;
     }
     const tbody=document.getElementById('labHistoryBody');
     if(!d.labs||!d.labs.length){tbody.innerHTML='<tr><td colspan="17" style="color:var(--fg-muted)">ยังไม่มีผล Lab</td></tr>';return}
+    const SHOWN=['bun','creatinine','potassium','sodium','calcium','phosphate','albumin','hemoglobin','plt','hco3','wbc','ferritin','ipth','kt_v','hep_b'];
+    const OTHER_LABEL={hematocrit:'Hct',tsat:'TSAT',urr:'URR',iron:'Iron',tibc:'TIBC',vitamin_d:'VitD',hep_c:'HCV',anti_hbs:'HBsAb',anti_hbc:'HBcAb',anti_hiv:'HIV'};
     tbody.innerHTML=d.labs.map(l=>{
       function cell(k){const v=l[k];if(v==null)return'<td>—</td>';const c=flagClass(k,v);return'<td class="'+(c==='high'?'flag-high':c==='low'?'flag-low':'')+'">'+v+'</td>'}
-      const srcTag = l.source_type==='photo' ? '<td title="จากรูปถ่าย/LINE">📸</td>' : '<td title="กรอกมือ/Excel">✍️</td>';
+      const srcs = (l.sources && l.sources.length) ? l.sources : [l.source_type];
+      const srcIcons = srcs.map(s=>s==='photo'?'📸':'✍️').join('');
+      const badge = l.pending && l.doc_row_id ? '<br><button class="btn" style="font-size:.62rem;padding:1px 5px;background:#e67e22;color:#fff" title="ค่าจากรูป LINE OA ยังไม่ได้ยืนยัน — กดเพื่อยืนยัน" onclick="verifyDocRow('+l.doc_row_id+')">⏳ ยืนยัน</button>' : (l.pending?'<br><span style="font-size:.6rem;color:#a04000">⏳</span>':'');
+      const srcTag = '<td title="'+(srcs.includes('photo')?'รูปถ่าย/LINE OA':'')+(srcs.length>1?' + ':'')+(srcs.includes('manual')?'กรอกมือ/อ่านใบใน HD':'')+'">'+srcIcons+badge+'</td>';
+      const blank = SHOWN.every(k=>l[k]==null);
+      if(blank){
+        const others = Object.keys(OTHER_LABEL).filter(k=>l[k]!=null).map(k=>OTHER_LABEL[k]+' '+(typeof l[k]==='string'?(l[k]==='positive'?'+':'−'):l[k]));
+        return'<tr><td>'+l.date+'</td>'+srcTag+'<td colspan="15" style="color:var(--fg-muted);font-size:.74rem;text-align:left">'+(others.length?'ค่าอื่น: '+others.join(' · '):'(ไม่มีค่าในชุดนี้)')+'</td></tr>';
+      }
       return'<tr><td>'+l.date+'</td>'+srcTag+cell('bun')+cell('creatinine')+cell('potassium')+cell('sodium')+cell('calcium')+cell('phosphate')+cell('albumin')+cell('hemoglobin')+cell('plt')+cell('hco3')+cell('wbc')+cell('ferritin')+cell('ipth')+cell('kt_v')+'<td>'+(l.hep_b?(l.hep_b==='positive'?'<span style="color:var(--danger);font-weight:700">+</span>':'−'):'')+'</td></tr>';
     }).join('');
     /* Store for trend + compare */
@@ -417,13 +430,49 @@ function renderCompare(latest, prev){
 }
 
 /* (3) กันซ้ำข้ามแหล่ง: เตือนก่อนบันทึกถ้าวันนั้นมีผลอยู่แล้ว (ทุกแหล่ง) — ครอบ saveLab เดิม ไม่แก้ข้างใน */
+/* 🧬 26 พ.ย. 2569: ยืนยันค่าจากรูป LINE OA จากตาราง (แพทย์/แอดมิน) */
+function verifyDocRow(rowId){
+  if(!confirm('ยืนยันว่าค่าชุดนี้ (จากรูปที่ส่งทาง LINE OA) ถูกต้องตามใบจริง?')) return;
+  hdFetch('/hd/api/v1/labs/doc-rows/'+rowId+'/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'verify'})})
+    .then(r=>r.json()).then(d=>{ if(d.error){showToast(d.error,'danger');return;} showToast('✅ ยืนยันแล้ว','success'); loadLabs(); })
+    .catch(()=>showToast('ยืนยันไม่สำเร็จ','danger'));
+}
+/* 🧬 ค่าที่กรอกในฟอร์ม (ไม่รวมค่าว่าง) — ใช้ตอน "รวมเข้ากับชุดจาก LINE OA" */
+function _formLabValues(){
+  const num=id=>{const v=parseFloat(document.getElementById(id).value); return isNaN(v)?null:v;};
+  const sel=id=>document.getElementById(id).value||null;
+  const o={bun:num('lBun'),creatinine:num('lCr'),potassium:num('lK'),sodium:num('lNa'),calcium:num('lCa'),phosphate:num('lPO4'),
+    hemoglobin:num('lHb'),hematocrit:num('lHct'),ferritin:num('lFerritin'),tsat:num('lTsat'),ipth:num('lIpth'),albumin:num('lAlb'),
+    kt_v:num('lKtv'),urr:num('lUrr'),hepatitis_b:sel('lHbv'),hepatitis_c:sel('lHcv'),iron:num('lIron'),tibc:num('lTibc'),vitamin_d:num('lVitD'),
+    anti_hbs:sel('lHbsAb'),anti_hbc:sel('lHbcAb'),hiv:sel('lHiv'),wbc:num('lWbc'),platelet:num('lPlt'),hco3:num('lHco3'),glucose:num('lGlucose'),
+    uric_acid:num('lUric'),ast:num('lAst'),alt:num('lAlt')};
+  Object.keys(o).forEach(k=>{ if(o[k]==null) delete o[k]; });
+  return o;
+}
 const _origSaveLab = saveLab;
 saveLab = function(){
+  if(_sheet.readId && _sheet.needConfirm){ const c=document.getElementById('lsSameConfirm'); if(!c || !c.checked){ showToast('ใบนี้ยังไม่ยืนยันว่าเป็นของคนไข้หน้านี้ — ติ๊ก "ยืนยันว่าใช่" ก่อนบันทึก','danger'); return; } }
   const d = document.getElementById('labDate').value;
   if(!d){ _origSaveLab(); return; }
   hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs/check-date?date='+encodeURIComponent(d))
     .then(r=>r.json()).then(c=>{
       if(c && c.exists){
+        /* 🧬 26 พ.ย. 2569: ใบเดียวกันมาทาง LINE OA แล้ว → รวม + ยืนยัน แทนสร้างซ้ำ (ระบบเดียว) */
+        const photo = (c.rows||[]).find(r=>r.source_type==='photo' && r.doc_row_id);
+        if(photo){
+          const vals = _formLabValues();
+          if(confirm('📸 วันที่ '+d+' มีชุดผลที่ส่งทาง LINE OA อยู่แล้ว'+(photo.verified_status==='pending'?' (ยังรอยืนยัน)':'')+'\n\nตกลง = รวมค่าที่ตรวจแล้ว '+Object.keys(vals).length+' ค่า เข้าชุดนั้นและยืนยัน (ไม่สร้างซ้ำ)\nยกเลิก = ไม่บันทึก')){
+            const body={doc_row_id:photo.doc_row_id, values:vals};
+            if(_sheet.readId){ body.sheet_read_id=_sheet.readId; body.sheet_ai=_sheet.ai; body.sheet_uncertain=_sheet.uncertain; }
+            hdFetch('/hd/api/v1/patients/hn/'+HN+'/labs/merge-into-doc',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})
+              .then(r=>r.json()).then(m=>{
+                if(m.error){showToast(m.error,'danger');return;}
+                showToast('✅ รวมเข้าชุดจาก LINE OA และยืนยันแล้ว ('+(m.applied||[]).length+' ค่า)','success');
+                closeAddLab(); loadLabs();
+              }).catch(()=>showToast('รวมไม่สำเร็จ','danger'));
+          }
+          return;
+        }
         const srcs = (c.rows||[]).map(r=>r.source_type==='photo'?'📸 รูปถ่าย/LINE':'✍️ กรอกมือ/Excel');
         const uniq = [...new Set(srcs)].join(', ');
         if(!confirm('⚠️ วันที่ '+d+' คนไข้นี้มีผลแล็บอยู่แล้ว ('+uniq+')\n\nถ้าเป็นผลชุดเดียวกัน ไม่ต้องบันทึกซ้ำ\nต้องการบันทึกเพิ่มอีกชุดหรือไม่?')) return;

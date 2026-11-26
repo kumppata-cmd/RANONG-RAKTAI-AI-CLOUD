@@ -336,26 +336,47 @@ def latest_for_patients(cur, patient_ids):
         return {}
     out = {}
     try:
+        # 🧬 26 พ.ย. 2569: แถวใหม่สุดอาจว่างเกือบหมด (เช่น กรอกแค่ serology) → เอา 8 แถวล่าสุดต่อคน
+        # แล้ว "เติมค่าแต่ละตัวจากแถวที่ใหม่สุดที่มีค่านั้นจริง" (วันที่หลัก = แถวใหม่สุดที่มี Hb หรือ K)
         cur.execute(f"""
-            SELECT DISTINCT ON (patient_id) patient_id, lab_date, source,
+            SELECT patient_id, lab_date, source,
                    {', '.join(NUMERIC_COLS + TEXT_COLS)},
                    verified_status, delta_flags, doc_row_id
-            FROM hd_labs WHERE patient_id = ANY(%s)
-              AND (verified_status IS DISTINCT FROM 'rejected')
+            FROM (
+                SELECT *, ROW_NUMBER() OVER (PARTITION BY patient_id
+                                             ORDER BY lab_date DESC NULLS LAST, doc_row_id DESC NULLS LAST) AS rn
+                FROM hd_labs WHERE patient_id = ANY(%s)
+                  AND (verified_status IS DISTINCT FROM 'rejected')
+            ) t WHERE rn <= 8
             ORDER BY patient_id, lab_date DESC NULLS LAST, doc_row_id DESC NULLS LAST
         """, (list(patient_ids),))
+        keys = NUMERIC_COLS + TEXT_COLS + ["verified_status", "delta_flags", "doc_row_id"]
         for r in cur.fetchall():
             pid, lab_date, src = r[0], r[1], r[2]
-            row = dict(zip(NUMERIC_COLS + TEXT_COLS + ["verified_status", "delta_flags", "doc_row_id"], r[3:]))
+            row = dict(zip(keys, r[3:]))
             for c in NUMERIC_COLS:
                 if row[c] is not None:
                     row[c] = float(row[c])
-            d_iso = lab_date.isoformat() if lab_date else None
-            age = (_thai_today() - lab_date).days if lab_date else None
-            row.update({"date": d_iso, "status": src or "unknown", "doc_id": "",
-                        "age_days": age, "source": src or "unknown"})
+            has_core = row.get("hb") is not None or row.get("k") is not None
+            if pid not in out:
+                d_iso = lab_date.isoformat() if lab_date else None
+                age = (_thai_today() - lab_date).days if lab_date else None
+                row.update({"date": d_iso, "status": src or "unknown", "doc_id": "",
+                            "age_days": age, "source": src or "unknown", "_core_dated": has_core})
+                out[pid] = row
+                continue
+            cur_row = out[pid]
+            for c in NUMERIC_COLS + TEXT_COLS:
+                if cur_row.get(c) is None and row.get(c) is not None:
+                    cur_row[c] = row[c]
+            if not cur_row.get("_core_dated") and has_core and lab_date:
+                cur_row.update({"date": lab_date.isoformat(), "age_days": (_thai_today() - lab_date).days,
+                                "status": src or "unknown", "source": src or "unknown", "_core_dated": True,
+                                "verified_status": row.get("verified_status"), "doc_row_id": row.get("doc_row_id"),
+                                "delta_flags": row.get("delta_flags")})
+        for pid, row in out.items():
+            row.pop("_core_dated", None)
             row["flags"] = flags_for(row)
-            out[pid] = row
     except Exception as e:
         logger.warning("latest_for_patients hd_labs: %s", e)
 
