@@ -28,10 +28,15 @@ ANALYTE_COL = {
     "HBsAg": "hbsag", "Anti-HCV": "antihcv", "Anti-HBs": "antihbs",
     # 2026-11-22 แพทย์สั่งเพิ่ม: PLT / HCO3 / WBC / Anti-HIV
     "Platelet": "plt", "Bicarbonate": "hco3", "WBC": "wbc", "Anti-HIV": "antihiv",
+    # 2026-11-26 Lab Sheet Reader ขั้น 2/3: Iron / TIBC / Vitamin D / Anti-HBc (คอลัมน์เพิ่มใน hd_module/__init__ fixes)
+    "Iron": "iron", "TIBC": "tibc", "Vitamin D": "vitd", "Anti-HBc": "antihbc",
 }
 NUMERIC_COLS = ["hb", "hct", "k", "na", "ca", "phos", "albumin", "pth", "ferritin", "tsat",
                 "ktv", "urr", "creatinine", "bun", "glucose", "plt", "hco3", "wbc"]
 TEXT_COLS = ["hbsag", "antihcv", "antihbs", "antihiv"]
+# คอลัมน์ใหม่ (26 พ.ย. 2569) — ใส่ใน INSERT เฉพาะเมื่อตารางมีจริง (กัน sync ล้มทั้งรอบถ้า migration ยังไม่ผ่าน)
+EXTRA_NUMERIC_COLS = ["iron", "tibc", "vitd"]
+EXTRA_TEXT_COLS = ["antihbc"]
 
 CREATE_SQL = """
 CREATE TABLE IF NOT EXISTS hd_lab_docs (
@@ -83,13 +88,13 @@ def _doc_hn(doc):
 
 def report_to_row(report: dict):
     """Flatten a _lab_results JSON into column values."""
-    row = {c: None for c in NUMERIC_COLS + TEXT_COLS}
+    row = {c: None for c in NUMERIC_COLS + TEXT_COLS + EXTRA_NUMERIC_COLS + EXTRA_TEXT_COLS}
     for r in report.get("results", []):
         col = ANALYTE_COL.get(r.get("analyte"))
         if not col:
             continue
         v = r.get("value")
-        if col in TEXT_COLS:
+        if col in TEXT_COLS or col in EXTRA_TEXT_COLS:
             raw = (r.get("raw_text") or "").lower()
             if v is None:
                 row[col] = "positive" if "pos" in raw or "reactive" in raw else ("negative" if "neg" in raw else None)
@@ -238,6 +243,16 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
         have = {r[0] for r in cur.fetchall()}
         cur.execute("SELECT id, hn FROM hd_patient_mapping")
         pid_by_hn = {str(r[1]).strip().upper(): r[0] for r in cur.fetchall()}
+        # คอลัมน์ใหม่ (26 พ.ย. 2569) ใช้เฉพาะที่มีจริงในตาราง
+        extra_num, extra_txt = [], []
+        try:
+            cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'hd_lab_docs'")
+            have_cols = {r[0] for r in cur.fetchall()}
+            extra_num = [c for c in EXTRA_NUMERIC_COLS if c in have_cols]
+            extra_txt = [c for c in EXTRA_TEXT_COLS if c in have_cols]
+        except Exception:
+            extra_num, extra_txt = [], []
+        all_cols = NUMERIC_COLS + TEXT_COLS + extra_num + extra_txt
         for d in docs[:max_docs]:
             doc_id = d.get("document_id") or d.get("doc_id") or ""
             if not doc_id or doc_id in have:
@@ -261,7 +276,7 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
             try:
                 rep = json.loads(raw if isinstance(raw, (str, bytes)) else raw.decode("utf-8"))
                 row = report_to_row(rep)
-                if all(row[c] is None for c in NUMERIC_COLS + TEXT_COLS):
+                if all(row[c] is None for c in all_cols):
                     stats["no_json"] += 1
                     continue
                 spec_date = _parse_date(rep.get("specimen_date")) or _parse_date(ddate)
@@ -271,12 +286,15 @@ def sync_labs(conn, storage, doc_index, days=180, max_docs=400):
                 # doc-system "approved" = physician already reviewed it there
                 v_status = "verified" if rep.get("status") == "approved" and not pflags else "pending"
                 v_by = "doc_system" if v_status == "verified" else None
+                # 26 พ.ย. 2569: ยืนยันจาก LINE (ปุ่ม "✅ ยืนยันแล็บ") → verified โดยคนที่กด
+                if v_status == "verified" and rep.get("verified_via") == "line_quick_confirm":
+                    v_by = (rep.get("reviewed_by") or "line")[:80]
                 cols = (["patient_id", "hn", "doc_id", "specimen_date", "doc_date", "status"]
-                        + NUMERIC_COLS + TEXT_COLS
+                        + all_cols
                         + ["verified_status", "verified_by", "delta_flags"])
                 vals = ([pid_by_hn[hn], hn, doc_id, spec_date,
                          _parse_date(ddate), rep.get("status", "")]
-                        + [row[c] for c in NUMERIC_COLS + TEXT_COLS]
+                        + [row[c] for c in all_cols]
                         + [v_status, v_by, "; ".join(pflags) if pflags else None])
                 cur.execute("SAVEPOINT lab_ins")
                 cur.execute(f"INSERT INTO hd_lab_docs ({', '.join(cols)}) VALUES ({', '.join(['%s'] * len(cols))}) "

@@ -11283,6 +11283,7 @@ def update_settings():
         "weekly_health_tips",        # push tip สุขภาพไตรายสัปดาห์ให้ผู้ป่วย (on/off)
         "idwg_limit_pct",            # 17 พ.ย. 2569: เกณฑ์น้ำหนักขึ้นระหว่างรอบ (% DW) ค่าเริ่มต้น 4
         "patient_weight_coach",      # ตอบผู้ป่วยที่ส่ง "น้ำหนัก xx" ทาง LINE (on/off)
+        "lab_sheet_ai",              # 26 พ.ย. 2569: LINE OA ใช้ตัวอ่านใบแล็บ AI (ขั้นที่ 3) on/off — default off
         "tpl_weight_reply",          # ข้อความตอบน้ำหนัก (แก้ได้ มีตัวแปร {weight} {gain} ...)
         "patient_card_note",         # ข้อความจากแพทย์ต่อท้ายการ์ดสรุปหลังฟอกทุกใบ
         "family_liff_id",            # 21 พ.ย. 2569: LIFF ID ของหน้า Family Link (ญาติรับสรุปหลังฟอก)

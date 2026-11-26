@@ -15387,9 +15387,12 @@ def process_file_async(
                         if ocr_status == "ocr"
                         else ExtractionMethod.REGEX_PDF_TEXT.value
                     )
-                    lab_report = extract_lab_results_from_text(
-                        extracted_text, _doc_id, _lab_method
-                    )
+                    # 📄 ขั้นที่ 3 (26 พ.ย. 2569): ถ้าตัวอ่านใบแล็บอ่าน doc นี้ไว้แล้ว ใช้ค่าจากตัวอ่าน
+                    lab_report = _lab_bridge_report(_doc_id, _lab_method)
+                    if lab_report is None:
+                        lab_report = extract_lab_results_from_text(
+                            extracted_text, _doc_id, _lab_method
+                        )
                     if lab_report.results:
                         # ── Phase 2A: OCR Safety Validation ──
                         if ocr_validator is not None:
@@ -15910,6 +15913,10 @@ def process_file_async(
                 _reply_lines.append(
                     f"📋 พบผลตรวจ {len(lab_report.results)} รายการ"
                 )
+                _lb_vals = _lab_bridge_values_line(_doc_id)
+                if _lb_vals:
+                    _reply_lines.append(f"🧪 {_lb_vals}")
+                    _reply_lines.append(f"✅ ถูกต้อง → พิมพ์ 'ยืนยันแล็บ {_doc_id[:8]}'")
                 _reply_lines.append(
                     f"พิมพ์ 'ผลแล็บ {_doc_id[:8]}' เพื่อดูผลตรวจ"
                 )
@@ -15996,6 +16003,8 @@ def process_file_async(
                         str(result.get("ambiguous_with") or "")
                         if category in ("rx", "dialysis") else ""
                     ),
+                    # 📄 ขั้นที่ 3: ค่าที่ตัวอ่านใบแล็บอ่านได้ (โชว์ในสรุปชุด + ปุ่มยืนยัน)
+                    "labvals": (_lab_bridge_values_line(_doc_id) if lab_extracted else ""),
                 }
                 _batch_bubble = None
                 if category != "review":
@@ -17565,6 +17574,220 @@ def _ocr_batch_page(data: bytes, ext: str) -> str:
     return (text or "").strip()
 
 
+# ═══════════════════════════════════════════════════════════
+# 📄 Lab Sheet Reader ขั้นที่ 3 (26 พ.ย. 2569 — แพทย์อนุมัติหลังทดสอบ 50 ใบ ผิด 0)
+# สะพานไป hd_module/line_lab_bridge: อ่านทุกหน้าด้วย Claude Vision 2 รอบ →
+# จัดกลุ่ม "ผู้ป่วย + หน้าต่อ" ก่อนรวม PDF (แก้ "แล็บ 3 คน 3 รูป ถูกรวมเป็นใบเดียว")
+# เปิดด้วย ⚙️ lab_sheet_ai = on เท่านั้น · ปิด/ล้ม/ไม่ใช่ใบแล็บ → ทางเดิมเป๊ะ
+# ═══════════════════════════════════════════════════════════
+
+def _lab_bridge_enabled() -> bool:
+    try:
+        from hd_module.blueprint import get_setting_value as _gsv
+        from hd_module import line_lab_bridge as _llb
+        return _llb.is_enabled(_gsv)
+    except Exception:
+        return False
+
+
+def _lab_bridge_read_pages(pages_data: list) -> list:
+    """อ่านทุกหน้าด้วยตัวอ่านใบแล็บ → list[res|None] (None = ไม่ใช่ใบแล็บ/อ่านไม่ได้/คิวเต็ม)"""
+    from hd_module import line_lab_bridge as _llb
+    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
+    if not api_key:
+        return [None] * len(pages_data)
+    try:
+        from hd_module.patient_engage import ai_model as _ai_model
+        model_id = _ai_model()
+    except Exception:
+        model_id = ""
+    if not model_id:
+        return [None] * len(pages_data)
+    out = []
+    for entry in pages_data:
+        try:
+            out.append(_llb.read_page(entry[0], api_key, model_id))
+        except Exception as _e:
+            logger.info("lab-bridge read page: %s", type(_e).__name__)
+            out.append(None)
+    return out
+
+
+def _lab_bridge_folder(group: dict) -> str:
+    """แฟ้มผู้ป่วยจากทะเบียน (HN รพ. บนใบ + ชื่อต้องสอดคล้อง) · "" = ให้ pipeline เดิมตัดสินเอง"""
+    if not group.get("hn") or not master_registry:
+        return ""
+    try:
+        _p, _how, _warn = _pick_patient_for_doc(
+            [group.get("hn_sheet") or group["hn"], group["hn"]], group.get("name") or "",
+        )
+        if _p and not _warn:
+            return _p.folder_name
+    except Exception as _e:
+        logger.info("lab-bridge folder: %s", type(_e).__name__)
+    return ""
+
+
+def _lab_bridge_pdf(pages: list):
+    """รวมรูปหลายหน้าของใบเดียวกันเป็น PDF (เหมือนโหมด A เดิม) · None ถ้าทำไม่ได้"""
+    if not HAS_PYMUPDF:
+        return None
+    try:
+        _pdf = pymupdf.open()
+        for page_data, page_ext, _, _, _ in pages:
+            _img = pymupdf.open(stream=page_data, filetype=page_ext.lstrip("."))
+            _rect = _img[0].rect
+            _pg = _pdf.new_page(width=_rect.width, height=_rect.height)
+            _pg.insert_image(_rect, stream=page_data)
+            _img.close()
+        out = _pdf.tobytes(garbage=3, deflate=True)
+        _pdf.close()
+        return out
+    except Exception as _e:
+        logger.warning("lab-bridge PDF merge ล้มเหลว: %s", type(_e).__name__)
+        return None
+
+
+def _lab_bridge_dispatch(pages_data: list, user_hash: str, line_user_id: str, submitted_at_ms: int) -> bool:
+    """คืน True = ส่งทุกหน้าเข้า pipeline แล้ว (ตามกลุ่มผู้ป่วย) · False = ให้ทางเดิมทำ"""
+    if not pages_data or not _lab_bridge_enabled():
+        return False
+    from hd_module import line_lab_bridge as _llb
+    results = _lab_bridge_read_pages(pages_data)
+    if not any(results):
+        return False
+    groups = _llb.plan_groups(results)
+    # รวม PDF ของกลุ่มหลายหน้าให้เสร็จก่อนลงทะเบียนชุด — ทำไม่ได้ → แตกเป็นหน้าเดี่ยว (ไม่ให้รูปหาย)
+    final_groups = []
+    for g in groups:
+        if len(g["pages"]) > 1:
+            pdf = _lab_bridge_pdf([pages_data[i] for i in g["pages"]])
+            if pdf:
+                final_groups.append(dict(g, pdf=pdf))
+                continue
+            for i in g["pages"]:
+                final_groups.append({"pages": [i], "hn": g.get("hn", ""), "hn_sheet": g.get("hn_sheet", ""),
+                                     "name": g.get("name", ""), "res": results[i], "lab": bool(results[i])})
+        else:
+            final_groups.append(g)
+    n_pages = len(pages_data)
+    batch_id = f"BATCH-{pages_data[0][3][:8]}-{n_pages}" if n_pages > 1 else None
+    logger.info(
+        "lab-bridge: pages=%d read=%d groups=%d batch=%s",
+        n_pages, sum(1 for r in results if r), len(final_groups), batch_id,
+    )
+    if batch_id:
+        _batch_register(batch_id, len(final_groups), line_user_id, owner_hash=user_hash)
+    for gi, g in enumerate(final_groups, 1):
+        idxs = g["pages"]
+        res = g.get("res")
+        folder = _lab_bridge_folder(g) if (g.get("lab") and res) else ""
+        if len(idxs) == 1:
+            data, ext, sha256_hex, doc_id, filename = pages_data[idxs[0]]
+            if res:
+                _llb.remember(doc_id, res)
+            filepath = save_to_inbox(data, filename)
+            process_file_async(
+                filepath, None, doc_id=doc_id, sha256_hex=sha256_hex,
+                owner_hash=user_hash, line_user_id=line_user_id,
+                merged_ocr_text=(_llb.page_text(res) if res else None), merged_page_count=0,
+                submitted_at_ms=submitted_at_ms, batch_id=batch_id,
+                batch_patient_folder=folder, batch_index=gi,
+            )
+            continue
+        sub = [pages_data[i] for i in idxs]
+        primary_doc_id = sub[0][3]
+        page_shas = [p[2] for p in sub]
+        combined_sha256 = hashlib.sha256("|".join(page_shas).encode("utf-8")).hexdigest()
+        merged_text = "\n\n".join(
+            _llb.page_text(results[i] or res, j, len(idxs)) for j, i in enumerate(idxs, 1)
+        )
+        _llb.remember(primary_doc_id, res)
+        pdf_filepath = save_to_inbox(g["pdf"], f"{primary_doc_id}.pdf")
+        process_file_async(
+            pdf_filepath, None, doc_id=primary_doc_id, sha256_hex=combined_sha256,
+            owner_hash=user_hash, line_user_id=line_user_id,
+            merged_ocr_text=merged_text, merged_page_count=len(idxs),
+            submitted_at_ms=submitted_at_ms, page_sha256s=page_shas,
+            batch_id=batch_id, batch_patient_folder=folder, batch_index=gi,
+        )
+    return True
+
+
+def _lab_bridge_report(doc_id: str, extraction_method: str):
+    """LabReport จากตัวอ่านใบแล็บ (ถ้ามีผลของ doc นี้) · None = ใช้ regex เดิม"""
+    try:
+        from hd_module import line_lab_bridge as _llb
+        res = _llb.recall(doc_id)
+        if not res:
+            return None
+        return _llb.lab_report(res, doc_id, extraction_method)
+    except Exception as _e:
+        logger.info("lab-bridge report: %s", type(_e).__name__)
+        return None
+
+
+def _lab_bridge_values_line(doc_id: str) -> str:
+    try:
+        from hd_module import line_lab_bridge as _llb
+        res = _llb.recall(doc_id)
+        return _llb.value_summary(res) if res else ""
+    except Exception:
+        return ""
+
+
+_LAB_CONFIRM_RE = re.compile(r"^\s*(?:ยืนยันแล็บ|ยืนยันแลป|labok|lab\s*ok)\s+([0-9a-fA-F]{6,12})\s*$")
+
+
+def _lab_confirm_command(doc8: str, user_hash: str) -> str:
+    """'ยืนยันแล็บ <รหัส>' จาก LINE → ติ๊ก approved ใน _lab_results JSON + verified ใน hd_lab_docs"""
+    from hd_module import line_lab_bridge as _llb
+    who = "physician" if user_hash in PHYSICIAN_USERS else ("admin" if user_hash in ADMIN_USERS else "staff")
+    try:
+        doc_index._ensure_fresh()
+        cands = [d for d in list(doc_index._docs)
+                 if str(d.get("document_id", "")).lower().startswith(doc8.lower())]
+    except Exception:
+        cands = []
+    if len(cands) != 1:
+        return f"❌ ไม่พบเอกสารรหัส {doc8} (หรือพบหลายใบ) — ตรวจรหัสจากข้อความสรุป"
+    doc = cands[0]
+    doc_id = doc.get("document_id", "")
+    if doc.get("category") != "lab":
+        return f"❌ เอกสาร {doc8} ไม่ใช่ผลแล็บ"
+    lab_path = f"{LAB_RESULTS_PREFIX}{doc_id}.json"
+    try:
+        raw = storage.get(lab_path)
+    except Exception:
+        raw = None
+    if not raw:
+        return f"❌ เอกสาร {doc8} ยังไม่มีค่าผลแล็บที่อ่านได้ (รอสักครู่แล้วลองใหม่)"
+    new_json = _llb.approve_report_json(raw, who)
+    if not new_json:
+        return f"❌ อ่านข้อมูลผลแล็บของ {doc8} ไม่ได้"
+    try:
+        storage.put(lab_path, new_json.encode("utf-8"), content_type="application/json")
+    except Exception as _e:
+        logger.warning("lab confirm put: %s", type(_e).__name__)
+        return "❌ บันทึกการยืนยันไม่สำเร็จ — ลองใหม่อีกครั้ง"
+    hd_note = ""
+    try:
+        import psycopg2
+        _db = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+        if _db:
+            _conn = psycopg2.connect(_db, connect_timeout=5)
+            with _conn.cursor() as _cur:
+                n = _llb.confirm_in_hd(_cur, doc_id, who)
+            _conn.commit()
+            _conn.close()
+            hd_note = " · HD Smart Monitoring: ยืนยันแล้ว" if n else " · HD Smart Monitoring: จะเข้าเป็น 'ยืนยันแล้ว' ในรอบซิงก์ถัดไป (≤30 นาที)"
+    except Exception as _e:
+        logger.info("lab confirm hd: %s", type(_e).__name__)
+    audit_logger.log("lab_confirmed_via_line", user_hash, {"doc_id": doc8, "role": who})
+    folder = doc.get("patient_hn_folder") or ""
+    return f"✅ ยืนยันผลแล็บ {doc8} แล้ว" + (f" (แฟ้ม {folder})" if folder else "") + hd_note
+
+
 def _multipage_flush(user_hash: str):
     """ประมวลผลรูปภาพทั้งหมดในบัฟเฟอร์ของผู้ใช้เมื่อหมดเวลารอ.
 
@@ -17652,6 +17875,13 @@ def _multipage_flush(user_hash: str):
 
     # จากนี้ทำงานนอก lock — ประมวลผลข้อมูลที่อ่านมาแล้ว
     actual_count = len(pages_data)
+
+    # 📄 ขั้นที่ 3 (26 พ.ย. 2569): ตัวอ่านใบแล็บ — จัดกลุ่มตามผู้ป่วยก่อน (เปิดด้วย ⚙️ lab_sheet_ai)
+    try:
+        if _lab_bridge_dispatch(pages_data, user_hash, line_user_id, submitted_at_ms):
+            return
+    except Exception as _lb_err:
+        logger.warning("lab-bridge dispatch ล้มเหลว: %s — ใช้ทางเดิม", type(_lb_err).__name__)
 
     if actual_count == 1:
         # รูปเดียว — ประมวลผลปกติ
@@ -17950,6 +18180,12 @@ def _batch_summary_text(col: dict, partial: bool) -> str:
             f"{_batch_num(i.get('n', 0))}{i.get('emoji', '📄')}{i.get('doc8', '')}"
             for i in ok
         ))
+    # 📄 ขั้นที่ 3: ค่าที่อ่านได้ต่อใบ (เฉพาะใบที่ผ่านตัวอ่านใบแล็บ)
+    for i in ok:
+        if i.get("labvals"):
+            lines.append(f"🧪 {_batch_num(i.get('n', 0))}{i.get('doc8', '')}: {i['labvals']}")
+    if any(i.get("labvals") for i in ok):
+        lines.append("✅ ตรวจแล้วถูกต้อง → กดปุ่ม 'ยืนยันแล็บ' หรือพิมพ์ 'ยืนยันแล็บ <รหัส>'")
     unsure = [i for i in ok if i.get("ambiguous")]
     if unsure:
         lines.append(
@@ -18034,6 +18270,18 @@ def _batch_flush(batch_id: str, from_timer: bool) -> None:
         fix_items = _batch_fix_quick_items(col)
     except Exception:
         fix_items = []
+    # 📄 ขั้นที่ 3: ปุ่ม "✅ ยืนยันแล็บ ①" ต่อใบ — เจ้าหน้าที่ที่ส่งเอง (allowlist) กดได้
+    confirm_items = []
+    try:
+        from hd_module import line_lab_bridge as _llb
+        if col.get("owner_hash") and is_authorized_user(col["owner_hash"]):
+            confirm_items = _llb.confirm_quick_items(col.get("items", []))
+    except Exception:
+        confirm_items = []
+    if sender and confirm_items:
+        _items = (confirm_items + (fix_items if _can_recategorize(col.get("owner_hash", "")) else []))[:13]
+        if push_messages(sender, [{"type": "text", "text": text[:5000], "quickReply": {"items": _items}}]):
+            sender = ""  # ส่งแล้ว — ข้ามทางเดิมด้านล่าง
     if sender:
         if fix_items and _can_recategorize(col.get("owner_hash", "")):
             # แพทย์/ผู้ดูแลส่งเอง → แนบปุ่มแก้ประเภทกับข้อความสรุป
@@ -19472,6 +19720,19 @@ def webhook():
                 # พอเลยช่วงนั้นไปแล้วไม่มีวิธีแก้เลย — ตรวจ production
                 # 26 ต.ค. 2026 พบเอกสาร 2 ใบถูกจัดเป็น lab ทั้งที่ไม่มี
                 # ชื่อรายการตรวจแม้แต่ชนิดเดียว และแก้ไม่ได้ด้วยคำสั่งใด
+                # ── 📄 ขั้นที่ 3 (26 พ.ย. 2569): ยืนยันผลแล็บที่ตัวอ่านใบแล็บอ่านได้ (ปุ่ม/พิมพ์) ──
+                elif _LAB_CONFIRM_RE.match(text or ""):
+                    _lc_doc8 = _LAB_CONFIRM_RE.match(text).group(1)
+                    if not (user_hash in PHYSICIAN_USERS or user_hash in ADMIN_USERS
+                            or is_authorized_user(user_hash)):
+                        reply_message(reply_token, "⚠️ เฉพาะเจ้าหน้าที่ที่ลงทะเบียนเท่านั้นที่ยืนยันผลแล็บได้")
+                    else:
+                        try:
+                            _lc_msg = _lab_confirm_command(_lc_doc8, user_hash)
+                        except Exception as _lc_err:
+                            logger.warning("lab confirm: %s", type(_lc_err).__name__)
+                            _lc_msg = "❌ ยืนยันไม่สำเร็จ — ลองใหม่อีกครั้ง"
+                        reply_message(reply_token, _lc_msg)
                 elif _parse_change_category(text) is not None:
                     _cc_doc, _cc_cat, _cc_hn = _parse_change_category(text)
                     if (user_hash not in PHYSICIAN_USERS

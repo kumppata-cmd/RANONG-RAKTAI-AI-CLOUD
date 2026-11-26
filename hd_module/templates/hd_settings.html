@@ -166,6 +166,23 @@
   </div>
 </div>
 
+<!-- 📄 Lab Sheet Reader ขั้นที่ 3 (26 พ.ย. 2569): สวิตช์ให้ LINE OA ใช้ตัวอ่านใบแล็บ AI -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>📄 LINE OA อ่านใบแล็บ รพ.ระนอง ด้วย AI (ขั้นที่ 3)</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('lab_sheet_ai')">💾 บันทึก</button>
+  </div>
+  <div class="form-group">
+    <select class="form-control" id="setting_lab_sheet_ai">
+      <option value="off">ปิด — รูปที่ส่งเข้า LINE OA ใช้ตัวอ่านเดิม (Tesseract) เหมือนก่อน</option>
+      <option value="on">เปิด — รูป/ชุดรูปที่ส่งเข้า LINE OA อ่านด้วย AI 2 รอบ + จัดกลุ่มตามผู้ป่วยก่อนรวม PDF + ปุ่ม ✅ ยืนยันแล็บ</option>
+    </select>
+    <div class="setting-desc">เปิดเมื่อหน้า "📄 ความแม่นอ่านใบแล็บ" ผ่านเกณฑ์ (≥50 ใบ ผิด 0) · ปิดเมื่อไหร่ระบบกลับไปทางเดิมทันที ไม่มีอะไรค้าง ·
+      เมื่อเปิด: แล็บหลายคนส่งพร้อมกันจะแยกคนให้ถูก · ใบหลายหน้าของคนเดียวรวมเป็นไฟล์เดียว · ค่าที่อ่านได้เข้า HD เป็น "รอยืนยัน" จนกว่าจะกดปุ่ม ✅ ยืนยันแล็บ ใน LINE หรือยืนยันในหน้า Lab</div>
+    <div class="setting-status" id="status_lab_sheet_ai"></div>
+  </div>
+</div>
+
 <!-- Physician LINE ID -->
 <div class="card setting-card">
   <div class="card-header">
