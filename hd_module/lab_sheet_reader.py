@@ -143,6 +143,23 @@ def normalize_hn(hn):
     return d.lstrip("0") or ("0" if d else "")
 
 
+def parse_sheet_date(s):
+    """'19/11/2026' (ค.ศ. ตามฟอร์ม รพ.ระนอง) หรือ '19/11/2569' (พ.ศ.) → date · None ถ้าอ่านไม่ออก"""
+    from datetime import date as _date
+    m = re.search(r"(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{2,4})", str(s or ""))
+    if not m:
+        return None
+    dd, mm, yy = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if yy < 100:
+        yy += 2000
+    if yy > 2400:
+        yy -= 543
+    try:
+        return _date(yy, mm, dd)
+    except ValueError:
+        return None
+
+
 _TITLES = re.compile(r"^(นาย|นางสาว|นาง|น\.ส\.|ด\.ช\.|ด\.ญ\.|เด็กชาย|เด็กหญิง|mr\.?|mrs\.?|ms\.?|miss)\s*", re.I)
 
 
@@ -178,7 +195,9 @@ def build_prompt(variant=0):
         '"rows":[{"no":1,"parameter":"Ferritin","result":"226.1","unit":"ng/ml","reference":"","conf":0.98}]}],'
         '"handwritten":["TSAT=27.27%"],"quality":{"blur":false,"cut":false,"note":""}}\n'
         "กติกา:\n"
-        "- ลอกตัวพิมพ์ตามที่เห็น ห้ามเดา ห้ามแก้หน่วย ห้ามคำนวณ ถ้าอ่านไม่ชัดใส่ conf ต่ำ (<0.7) และใส่ค่าที่เห็นดีที่สุด\n"
+        "- ลอกตัวพิมพ์ตามที่เห็น ห้ามเดา ห้ามแก้หน่วย ห้ามคำนวณ\n"
+        "- conf = ความมั่นใจว่าตัวเลขในช่อง Result อ่านถูกทุกหลักรวมจุดทศนิยม (0-1) เท่านั้น — "
+        "คอลัมน์ Reference ขวาสุดมักถูกตัดขอบ ไม่ต้องสนใจ ไม่มีผลต่อ conf · ถ้า Result ชัดให้ conf ≥ 0.9 · ถ้าอ่านไม่ชัดใส่ conf < 0.7 และใส่ค่าที่เห็นดีที่สุด\n"
         "- result ของค่าเชิงคุณภาพคือคำว่า Negative/Positive ตามใบ\n"
         "- เลข no ต้องเป็นเลขลำดับที่พิมพ์ในคอลัมน์ No. ของแถวนั้นจริง ๆ\n"
         "- hn ลอกทุกหลักรวมศูนย์นำ · วันที่ลอกตามใบ (dd/mm/yyyy)\n"
@@ -212,6 +231,17 @@ def analyze(raw):
         h = {k: str(v or "").strip() for k, v in headers[0].items()}
         h["hn_norm"] = normalize_hn(h.get("hn"))
         out["header"] = h
+        d = parse_sheet_date(h.get("request_date") or h.get("receive_date"))
+        if d:
+            h["lab_date"] = d.isoformat()
+            from datetime import date as _date, timedelta as _td
+            today = _date.today()
+            if d > today + _td(days=1):
+                out["problems"].append(f"วันที่บนใบ {d.strftime('%d/%m/%Y')} อยู่ในอนาคต — อ่านปีผิด?")
+            elif d < today - _td(days=730):
+                out["problems"].append(f"วันที่บนใบ {d.strftime('%d/%m/%Y')} เก่ากว่า 2 ปี — อ่านปีผิด? (ตรวจกับใบ)")
+        elif h.get("request_date"):
+            out["problems"].append(f"อ่านวันที่ไม่ออก ('{h.get('request_date')[:12]}')")
         # 2 หัวใบใน 1 หน้าที่ HN ต่างกัน = คนละคน → ห้ามรวม
         other = [normalize_hn(x.get("hn")) for x in headers[1:] if normalize_hn(x.get("hn"))]
         if any(o != h["hn_norm"] for o in other):
@@ -312,31 +342,69 @@ def merge_passes(p1, p2):
         return p1
     out = dict(p1)
     out["double_checked"] = True
-    vals, unc = {}, list(p1["uncertain"])
-    seen_unc = {u["key"] for u in unc}
-    for key, e in p1["values"].items():
-        f = p2["values"].get(key)
-        if f is None:
-            # รอบ 2 ไม่เห็น/ไม่มั่นใจ → ไม่แน่ใจ
-            if key not in seen_unc:
-                unc.append({"key": key, "label": A[key]["label"], **e, "why": "รอบที่ 2 อ่านไม่ได้/ไม่มั่นใจ"})
-            continue
-        same = (e["value"] == f["value"]) if A[key]["kind"] == "qual" else abs(float(e["value"]) - float(f["value"])) <= 1e-9
-        if same:
-            vals[key] = e
+    def _same(key, a, b):
+        if a is None or b is None:
+            return False
+        if A[key]["kind"] == "qual":
+            return a == b
+        try:
+            return abs(float(a) - float(b)) <= 1e-9
+        except (TypeError, ValueError):
+            return False
+
+    # ค่าที่รอบนั้น "อ่านได้แต่ไม่มั่นใจ" (parse ผ่าน, conf 0.5–0.7) — ใช้เทียบข้ามรอบได้
+    def _low(p):
+        return {u["key"]: u for u in p["uncertain"] if u.get("value") is not None and (u.get("conf") or 0) >= 0.5}
+    low1, low2 = _low(p1), _low(p2)
+    vals, unc = {}, []
+    keys = list(dict.fromkeys(list(p1["values"]) + list(p2["values"]) + list(low1) + list(low2)))
+    for key in keys:
+        e, f = p1["values"].get(key), p2["values"].get(key)
+        u1, u2 = low1.get(key), low2.get(key)
+        if e and f:
+            if _same(key, e["value"], f["value"]):
+                vals[key] = e
+            else:
+                unc.append({"key": key, "label": A[key]["label"], **e, "alt": f["value"],
+                            "why": f"2 รอบอ่านไม่ตรงกัน ({e['value']} / {f['value']})"})
+        elif e and u2 and _same(key, e["value"], u2["value"]):
+            # รอบ 2 เห็นค่าเดียวกันแต่รายงานไม่มั่นใจ (มักเพราะ reference ถูกตัดขอบ) → 2 รอบตรงกันถือว่าผ่าน
+            vals[key] = dict(e, agree_low_conf=True)
+        elif f and u1 and _same(key, f["value"], u1["value"]):
+            vals[key] = dict(f, agree_low_conf=True)
+        elif u1 and u2 and _same(key, u1["value"], u2["value"]):
+            vals[key] = dict({k: v for k, v in u1.items() if k not in ("why", "label", "key")}, agree_low_conf=True)
+        elif e or f:
+            src = e or f
+            unc.append({"key": key, "label": A[key]["label"], **src,
+                        "why": "รอบที่ 2 อ่านไม่ได้/ไม่มั่นใจ" if e else "รอบแรกไม่เห็นค่านี้",
+                        **({"alt": (u2 or u1)["value"]} if (u2 or u1) else {})})
         else:
-            unc.append({"key": key, "label": A[key]["label"], **e, "alt": f["value"],
-                        "why": f"2 รอบอ่านไม่ตรงกัน ({e['value']} / {f['value']})"})
-    for key, f in p2["values"].items():
-        if key not in p1["values"] and key not in {u["key"] for u in unc}:
-            unc.append({"key": key, "label": A[key]["label"], **f, "why": "รอบแรกไม่เห็นค่านี้"})
+            u = u1 or u2
+            unc.append({"key": key, "label": A[key]["label"], **{k: v for k, v in u.items() if k not in ("why", "label", "key")},
+                        "why": u.get("why", "AI ไม่มั่นใจ")})
+    # ค่าที่ parse ไม่ผ่าน (นอกช่วง/ไม่ใช่ตัวเลข) ของรอบแรก คงไว้
+    have = set(vals) | {u["key"] for u in unc}
+    for u in p1["uncertain"]:
+        if u["key"] not in have:
+            unc.append(u)
+            have.add(u["key"])
     out["values"] = vals
     out["uncertain"] = unc
-    # หัวใบต้องตรงกัน
+    # หัวใบ: วันที่/ชื่อ 2 รอบต้องตรงกัน (ตัวอย่าง 26 พ.ย.: ปี 2026 ถูกอ่านเป็น 2025 1 รอบ)
     h1, h2 = p1.get("header") or {}, p2.get("header") or {}
+    probs = list(p1["problems"])
+    for fld, label in (("request_date", "วันที่ขอตรวจ"), ("receive_date", "วันที่รับ"), ("name", "ชื่อผู้ป่วย"), ("an", "AN")):
+        a, b = (h1.get(fld) or "").strip(), (h2.get(fld) or "").strip()
+        if a and b and a != b and not (fld == "name" and names_match(a, b)):
+            probs.append(f"{label} 2 รอบอ่านไม่ตรง ({a} / {b}) — ตรวจกับใบ")
+            if out.get("header"):
+                out["header"] = dict(out["header"], **{fld + "_alt": b})
+    out["problems"] = probs
+    # HN ต้องตรงกัน
     if h1 and h2 and h1.get("hn_norm") and h2.get("hn_norm") and h1["hn_norm"] != h2["hn_norm"]:
-        out["problems"] = list(p1["problems"]) + [f"HN อ่าน 2 รอบไม่ตรง ({h1.get('hn')} / {h2.get('hn')}) — ห้ามผูกคนไข้"]
-        out["header"] = dict(h1, hn_conflict=True)
+        out["problems"] = out["problems"] + [f"HN อ่าน 2 รอบไม่ตรง ({h1.get('hn')} / {h2.get('hn')}) — ห้ามผูกคนไข้"]
+        out["header"] = dict(out["header"] or h1, hn_conflict=True)
     # คำนวณ TSAT ใหม่จากค่าที่ผ่านทั้ง 2 รอบ
     out["computed"] = dict(p1.get("computed") or {})
     if ("iron" not in vals or "tibc" not in vals) and "tsat" in out["computed"]:
@@ -453,17 +521,37 @@ def match_patient(cur, header):
     """HN บนใบ → ทะเบียน hd_patient_mapping · คืน {patient_id, hn, patient_name, name_match, status}
     status: matched / name_mismatch / not_found / no_hn"""
     hn = (header or {}).get("hn_norm") or ""
-    if not hn:
+    name = (header or {}).get("name") or ""
+    if not hn and not name:
         return {"status": "no_hn"}
-    cur.execute("SELECT id, hn, patient_name FROM hd_patient_mapping WHERE hn = %s OR hn = %s LIMIT 2",
-                (hn, (header or {}).get("hn") or hn))
-    rows = cur.fetchall() or []
-    if not rows:
-        return {"status": "not_found", "hn": hn}
-    pid, reg_hn, reg_name = rows[0]
-    nm = names_match((header or {}).get("name"), reg_name)
-    return {"status": "matched" if nm is not False else "name_mismatch", "patient_id": pid, "hn": reg_hn,
-            "patient_name": reg_name, "name_match": nm}
+    rows = []
+    if hn:
+        # HN บนใบคือ HN ของ รพ.ระนอง (hospital_hn) — ไม่ใช่ HN คลินิก (hn) · เทียบแบบตัดศูนย์นำทั้งสองฝั่ง
+        cur.execute("""SELECT id, hn, patient_name, hospital_hn FROM hd_patient_mapping
+                       WHERE ltrim(regexp_replace(COALESCE(hospital_hn,''), '\\D', '', 'g'), '0') = %s
+                          OR ltrim(regexp_replace(hn, '\\D', '', 'g'), '0') = %s
+                       ORDER BY (hospital_hn IS NOT NULL AND hospital_hn <> '') DESC LIMIT 3""", (hn, hn))
+        rows = cur.fetchall() or []
+    if rows:
+        pid, reg_hn, reg_name, reg_hosp = rows[0]
+        nm = names_match(name, reg_name)
+        return {"status": "matched" if nm is not False else "name_mismatch", "patient_id": pid, "hn": reg_hn,
+                "hospital_hn": reg_hosp, "patient_name": reg_name, "name_match": nm, "by": "hospital_hn" if reg_hosp else "hn"}
+    # ไม่เจอ HN → ลองชื่อ (ทะเบียนคลินิกอาจยังไม่กรอก hospital_hn) — ต้องให้คนยืนยันก่อนผูก
+    toks = [t for t in name_tokens(name) if len(t) >= 3]
+    if toks:
+        cur.execute("SELECT id, hn, patient_name, hospital_hn FROM hd_patient_mapping WHERE "
+                    + " OR ".join(["patient_name ILIKE %s"] * len(toks)) + " LIMIT 5",
+                    tuple("%" + t + "%" for t in toks))
+        cands = [r for r in (cur.fetchall() or []) if names_match(name, r[2])]
+        if len(cands) == 1:
+            pid, reg_hn, reg_name, reg_hosp = cands[0]
+            return {"status": "matched_by_name", "patient_id": pid, "hn": reg_hn, "hospital_hn": reg_hosp,
+                    "patient_name": reg_name, "name_match": True, "by": "name", "sheet_hn": hn,
+                    "hint": "HN รพ. บนใบยังไม่อยู่ในทะเบียน — ยืนยันแล้วระบบจะจำ hospital_hn ให้ (ขั้น 2)"}
+        if len(cands) > 1:
+            return {"status": "ambiguous_name", "hn": hn, "candidates": [{"hn": r[1], "patient_name": r[2]} for r in cands]}
+    return {"status": "not_found", "hn": hn}
 
 
 def summary_lines(res, patient=None):
@@ -474,9 +562,11 @@ def summary_lines(res, patient=None):
         lines.append(f"HN {h.get('hn_norm') or h.get('hn') or '?'} · {h.get('name','')[:30]} · {h.get('request_form','')} {h.get('request_date','')}")
     if patient:
         st = patient.get("status")
-        lines.append({"matched": "✅ ตรงทะเบียน: " + str(patient.get("patient_name", "")),
+        lines.append({"matched": "✅ ตรงทะเบียน: " + str(patient.get("patient_name", "")) + f" (HN คลินิก {patient.get('hn','')})",
+                      "matched_by_name": "🟡 พบจากชื่อ (HN รพ. ยังไม่อยู่ในทะเบียน): " + str(patient.get("patient_name", "")) + f" (HN คลินิก {patient.get('hn','')})",
+                      "ambiguous_name": "⚠️ ชื่อซ้ำหลายคนในทะเบียน — ต้องเลือกเอง",
                       "name_mismatch": "⚠️ HN พบในทะเบียนแต่ชื่อไม่ตรง: " + str(patient.get("patient_name", "")),
-                      "not_found": "❌ HN ไม่อยู่ในทะเบียนคลินิก", "no_hn": "❌ อ่าน HN ไม่ได้"}.get(st, st or ""))
+                      "not_found": "❌ HN รพ. และชื่อ ไม่อยู่ในทะเบียนคลินิก", "no_hn": "❌ อ่าน HN ไม่ได้"}.get(st, st or ""))
     v = res.get("values") or {}
     order = [k for k in PRIORITY if k in v] + [k for k in v if k not in PRIORITY]
     for k in order:

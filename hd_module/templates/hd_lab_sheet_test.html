@@ -42,9 +42,11 @@ const _lsResults = [];
 function lsEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function lsPatientPill(p){
   if(!p) return '<span class="ls-pill mut">ไม่ได้ตรวจทะเบียน</span>';
-  return {matched:'<span class="ls-pill ok">✅ ตรงทะเบียน: '+lsEsc(p.patient_name)+'</span>',
+  return {matched:'<span class="ls-pill ok">✅ ตรงทะเบียน: '+lsEsc(p.patient_name)+' (HN คลินิก '+lsEsc(p.hn)+(p.by==='hospital_hn'?' · จับคู่ด้วย HN รพ.':'')+')</span>',
+          matched_by_name:'<span class="ls-pill warn">🟡 พบจากชื่อ: '+lsEsc(p.patient_name)+' (HN คลินิก '+lsEsc(p.hn)+') — HN รพ. '+lsEsc(p.sheet_hn)+' ยังไม่อยู่ในทะเบียน</span>',
+          ambiguous_name:'<span class="ls-pill warn">⚠️ ชื่อซ้ำหลายคน: '+lsEsc((p.candidates||[]).map(c=>c.patient_name+' ('+c.hn+')').join(', '))+'</span>',
           name_mismatch:'<span class="ls-pill warn">⚠️ HN พบ แต่ชื่อไม่ตรง: '+lsEsc(p.patient_name)+'</span>',
-          not_found:'<span class="ls-pill bad">❌ HN '+lsEsc(p.hn)+' ไม่อยู่ในทะเบียน</span>',
+          not_found:'<span class="ls-pill bad">❌ HN รพ. '+lsEsc(p.hn)+' และชื่อ ไม่อยู่ในทะเบียนคลินิก</span>',
           no_hn:'<span class="ls-pill bad">❌ อ่าน HN ไม่ได้</span>'}[p.status] || '<span class="ls-pill mut">'+lsEsc(p.status)+'</span>';
 }
 function lsRender(fname, pg, secs){
@@ -53,7 +55,7 @@ function lsRender(fname, pg, secs){
   const h = pg.header || {};
   const vals = pg.values || {}, unc = pg.uncertain || [];
   const keys = LS_PRI.filter(k=>k in vals).concat(Object.keys(vals).filter(k=>!LS_PRI.includes(k)));
-  let cells = keys.map(k=>'<div class="ls-v'+(LS_PRI.includes(k)?' pri':'')+'"><b>'+lsEsc(vals[k].param||k)+' <span style="font-weight:400">#'+(vals[k].no??'-')+'</span></b>'+lsEsc(vals[k].value)+' <span style="color:var(--fg-muted)">'+lsEsc(vals[k].unit)+'</span></div>').join('');
+  let cells = keys.map(k=>'<div class="ls-v'+(LS_PRI.includes(k)?' pri':'')+'"><b>'+lsEsc(vals[k].param||k)+' <span style="font-weight:400">#'+(vals[k].no??'-')+'</span></b>'+lsEsc(vals[k].value)+' <span style="color:var(--fg-muted)">'+lsEsc(vals[k].unit)+'</span>'+(vals[k].agree_low_conf?' <span title="2 รอบอ่านตรงกัน แต่รอบหนึ่งรายงานไม่มั่นใจ" style="font-size:.62rem;color:var(--fg-muted)">✓✓</span>':'')+'</div>').join('');
   if(pg.computed && pg.computed.tsat != null) cells += '<div class="ls-v pri"><b>TSAT (คำนวณ Iron÷TIBC)</b>'+pg.computed.tsat+' % <span style="color:var(--fg-muted);font-size:.68rem">'+lsEsc(pg.computed.tsat_check||'')+'</span></div>';
   cells += unc.map(u=>'<div class="ls-v u"><b>'+lsEsc(u.label)+' #'+(u.no??'-')+' ❓</b>'+lsEsc(u.raw||u.value)+(u.alt!=null?' / '+lsEsc(u.alt):'')+'<div style="font-size:.66rem;color:#b71c1c">'+lsEsc(u.why)+'</div></div>').join('');
   const nOk = keys.length, nU = unc.length, nP = (pg.problems||[]).length;

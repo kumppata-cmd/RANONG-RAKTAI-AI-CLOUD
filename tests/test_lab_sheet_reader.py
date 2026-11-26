@@ -6,10 +6,14 @@ from unittest import mock
 from hd_module import lab_sheet_reader as lsr
 
 
+from datetime import date as _date
+TODAY_STR = _date.today().strftime("%d/%m/%Y")   # ฟิกซ์เจอร์ใช้วันนี้ กัน test พังเมื่อเวลาผ่าน (เช็ค "เก่ากว่า 2 ปี")
+
+
 def _hdr(hn="00012345", name="นายทดสอบ ระบบ", form="Chemistry"):
     return {"hn": hn, "an": "691119080434", "name": name, "request_form": form, "request_by": "นพ.ก",
-            "request_date": "19/11/2026", "request_time": "08:04:34", "request_number": "2979186",
-            "visit_type": "OPD", "receive_date": "19/11/2026", "receive_time": "07:12:46"}
+            "request_date": TODAY_STR, "request_time": "08:04:34", "request_number": "2979186",
+            "visit_type": "OPD", "receive_date": TODAY_STR, "receive_time": "07:12:46"}
 
 
 def _row(no, p, r, u="", ref="", conf=0.98):
@@ -187,6 +191,49 @@ class TestMergePasses(unittest.TestCase):
         self.assertTrue(m["header"].get("hn_conflict"))
         self.assertTrue(any("HN อ่าน 2 รอบไม่ตรง" in p for p in m["problems"]))
 
+    def test_agreeing_value_with_low_conf_in_one_pass_is_accepted(self):
+        """ผลจริง 26 พ.ย.: PTH/RDW/Cr/K ถูกรายงาน conf 0.6 เพราะ reference ถูกตัดขอบ แม้ค่าตรงกันทั้ง 2 รอบ"""
+        p1 = lsr.analyze(json.loads(json.dumps(RAW_CHEM)))
+        raw2 = json.loads(json.dumps(RAW_CHEM)); raw2["blocks"][0]["rows"][1]["conf"] = 0.6     # PTH รอบ 2 ไม่มั่นใจ
+        m = lsr.merge_passes(p1, lsr.analyze(raw2))
+        self.assertEqual(m["values"]["pth"]["value"], 1227.0)
+        self.assertTrue(m["values"]["pth"].get("agree_low_conf"))
+        # ไม่มั่นใจทั้ง 2 รอบ แต่ค่าตรงกัน → ผ่าน
+        raw1 = json.loads(json.dumps(RAW_CHEM)); raw1["blocks"][0]["rows"][1]["conf"] = 0.6
+        m2 = lsr.merge_passes(lsr.analyze(raw1), lsr.analyze(raw2))
+        self.assertEqual(m2["values"]["pth"]["value"], 1227.0)
+        # ไม่มั่นใจรอบ 2 และค่าต่าง → ไม่แน่ใจ พร้อม alt
+        raw3 = json.loads(json.dumps(RAW_CHEM)); raw3["blocks"][0]["rows"][1].update(conf=0.6, result="1277.0")
+        m3 = lsr.merge_passes(p1, lsr.analyze(raw3))
+        self.assertNotIn("pth", m3["values"])
+        u = [x for x in m3["uncertain"] if x["key"] == "pth"][0]
+        self.assertEqual(u["alt"], 1277.0)
+        # ค่านอกช่วงของรอบแรกยังคงอยู่ใน uncertain
+        raw4 = json.loads(json.dumps(RAW_CHEM)); raw4["blocks"][0]["rows"][1]["result"] = "12270"
+        m4 = lsr.merge_passes(lsr.analyze(raw4), lsr.analyze(raw4))
+        self.assertTrue(any(x["key"] == "pth" and "นอกช่วง" in x["why"] for x in m4["uncertain"]))
+
+    def test_header_date_mismatch_between_passes(self):
+        """ผลจริง 26 พ.ย. ใบ 444: ปี 2026 ถูกอ่านเป็น 2025 ในรอบหนึ่ง"""
+        p1 = lsr.analyze(json.loads(json.dumps(RAW_CHEM)))
+        raw2 = json.loads(json.dumps(RAW_CHEM)); raw2["blocks"][0]["header"]["request_date"] = "19/11/2025"
+        m = lsr.merge_passes(p1, lsr.analyze(raw2))
+        self.assertTrue(any("วันที่ขอตรวจ 2 รอบอ่านไม่ตรง" in p for p in m["problems"]))
+        self.assertEqual(m["header"]["request_date_alt"], "19/11/2025")
+
+    def test_sheet_date_parse_and_sanity(self):
+        from datetime import date, timedelta
+        self.assertEqual(lsr.parse_sheet_date("19/11/2026"), date(2026, 11, 19))
+        self.assertEqual(lsr.parse_sheet_date("19/11/2569"), date(2026, 11, 19))
+        self.assertIsNone(lsr.parse_sheet_date("xx"))
+        raw = json.loads(json.dumps(RAW_CHEM))
+        raw["blocks"][0]["header"]["request_date"] = (date.today() + timedelta(days=40)).strftime("%d/%m/%Y")
+        self.assertTrue(any("อนาคต" in p for p in lsr.analyze(raw)["problems"]))
+        raw["blocks"][0]["header"]["request_date"] = "01/01/2019"
+        self.assertTrue(any("เก่ากว่า 2 ปี" in p for p in lsr.analyze(raw)["problems"]))
+        r = lsr.analyze(json.loads(json.dumps(RAW_CHEM)))
+        self.assertEqual(r["header"]["lab_date"], _date.today().isoformat())
+
     def test_single_pass(self):
         p1 = lsr.analyze(json.loads(json.dumps(RAW_CHEM)))
         self.assertFalse(lsr.merge_passes(p1, None)["double_checked"])
@@ -235,14 +282,23 @@ class TestSummaryAndMatch(unittest.TestCase):
         self.assertIn("✅ ตรงทะเบียน", txt)
         self.assertNotIn("HIV", txt)
 
-    def test_match_patient(self):
+    def test_match_patient_by_hospital_hn(self):
         cur = mock.Mock()
-        cur.fetchall.return_value = [(7, "12345", "นายทดสอบ ระบบ")]
-        self.assertEqual(lsr.match_patient(cur, {"hn_norm": "12345", "hn": "00012345", "name": "นายทดสอบ ระบบ"})["status"], "matched")
-        self.assertEqual(lsr.match_patient(cur, {"hn_norm": "12345", "hn": "00012345", "name": "นางคนอื่น ไกล"})["status"], "name_mismatch")
-        cur.fetchall.return_value = []
-        self.assertEqual(lsr.match_patient(cur, {"hn_norm": "12345", "hn": "00012345"})["status"], "not_found")
+        cur.fetchall.return_value = [(7, "67379", "นางยุพิน โพธิ์ยิ้ม", "00013373")]
+        r = lsr.match_patient(cur, {"hn_norm": "13373", "hn": "00013373", "name": "น.ส.ยุพิน โพธิ์ยิ้ม"})
+        self.assertEqual(r["status"], "matched"); self.assertEqual(r["hn"], "67379"); self.assertEqual(r["by"], "hospital_hn")
+        self.assertEqual(lsr.match_patient(cur, {"hn_norm": "13373", "hn": "00013373", "name": "นางคนอื่น ไกล"})["status"], "name_mismatch")
         self.assertEqual(lsr.match_patient(cur, {"hn_norm": ""})["status"], "no_hn")
+
+    def test_match_patient_by_name_when_hospital_hn_unknown(self):
+        cur = mock.Mock()
+        cur.fetchall.side_effect = [[], [(7, "67379", "นางยุพิน โพธิ์ยิ้ม", None), (8, "60001", "นายยุพล อื่น", None)]]
+        r = lsr.match_patient(cur, {"hn_norm": "13373", "hn": "00013373", "name": "น.ส.ยุพิน โพธิ์ยิ้ม"})
+        self.assertEqual(r["status"], "matched_by_name"); self.assertEqual(r["hn"], "67379"); self.assertEqual(r["sheet_hn"], "13373")
+        cur.fetchall.side_effect = [[], []]
+        self.assertEqual(lsr.match_patient(cur, {"hn_norm": "13373", "hn": "00013373", "name": "นายไม่มี ในทะเบียน"})["status"], "not_found")
+        cur.fetchall.side_effect = [[], [(7, "1", "นายสมชาย ก", None), (8, "2", "นายสมชาย ข", None)]]
+        self.assertEqual(lsr.match_patient(cur, {"hn_norm": "9", "hn": "9", "name": "นายสมชาย"})["status"], "ambiguous_name")
 
 
 if __name__ == "__main__":
