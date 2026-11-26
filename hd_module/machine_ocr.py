@@ -95,9 +95,13 @@ MACHINE_PROFILES = {
         "bargraph": [],
         "hint": ("จอขาว-เขียว: แถวบน ART (ติดลบ เช่น -191), VEN, TMP เป็นตัวเลขใหญ่. กล่องเขียวขวา 'UF volume' **ลิตร** (2.38 = 2380) "
                  "และ 'UF rate' **L/h** (1.13 = 1130); ตัวเลขเล็กใต้แถบ (เช่น 4.50) คือ UF goal เป็นลิตร. "
-                 "'Remain time h:mm' กลางจอ. ขวา COND mS/cm, TEMP °C (dialysate), Heparin mL/h. ล่างขวา 'BF rate' = BFR mL/min"),
+                 "'Remain time h:mm' กลางจอ. ขวา COND mS/cm, TEMP °C (dialysate), Heparin mL/h. ล่างขวา 'BF rate' = BFR mL/min. "
+                 "รุ่นย่อย DBB-EXA ES: มีกล่อง BP (SBP/DBP) และ HR ให้อ่านด้วย; ถ้า ART ไม่ใช่เลขติดลบชัดเจน (เห็นแค่ 0/1) ให้เว้น ap ไว้"),
     },
 }
+
+# ค่า AP (ความดันก่อนปั๊ม) ขณะฟอกต้องเป็นลบชัดเจน — 26 พ.ย. 2569 จอ EXA ES ให้ "ap 1/0" ทั้ง 8 ใบ (ไม่ใช่ค่าจริง)
+AP_IMPLAUSIBLE_ABS = 20
 
 GENERIC_HINT = ("ถ้าไม่รู้รุ่น: ค่าที่ลงท้าย L หรือ L/h ให้แปลงเป็น mL / mL/h (×1000). "
                 "AP/VP/TMP ที่แสดงเป็นแท่งไฟ ไม่ใช่ตัวเลข → null")
@@ -193,6 +197,9 @@ def sanitize(raw, model):
         except (TypeError, ValueError):
             c = 0.5
         v = round(v, 1) if k in ("conductivity", "dialysate_temp", "heparin_rate") else round(v)
+        if k == "ap" and abs(v) < AP_IMPLAUSIBLE_ABS:
+            dropped.append("ap")          # 0/±1 ไม่ใช่ค่า AP จริง (จอไม่โชว์/อ่านสัญลักษณ์)
+            continue
         if c < CONF_MIN:
             uncertain.append({"field": k, "value": v, "confidence": round(c, 2)})
             continue

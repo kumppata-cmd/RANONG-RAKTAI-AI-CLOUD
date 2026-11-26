@@ -237,3 +237,12 @@ class TestUfMathCheck:
         out = sanitize({"values": {"uf_goal": 2800, "uf_removed": 2460, "time_left_min": 55, "uf_rate": 370},
                         "confidence": {"uf_goal": .9, "uf_removed": .9, "time_left_min": .9, "uf_rate": .6}}, "nikkiso_dbb27")
         assert out["uf_check"]["status"] == "promoted" and out["values"]["uf_rate"] == 370
+
+
+class TestApImplausible:
+    def test_ap_near_zero_dropped(self):
+        from hd_module.machine_ocr import sanitize
+        out = sanitize({"values": {"ap": 1, "vp": 76, "bfr": 300}, "confidence": {"ap": .85, "vp": .9, "bfr": .9}}, "nikkiso_exa")
+        assert "ap" not in out["values"] and "ap" in out["dropped"] and out["values"]["vp"] == 76
+        out2 = sanitize({"values": {"ap": -191}, "confidence": {"ap": .9}}, "nikkiso_exa")
+        assert out2["values"]["ap"] == -191
