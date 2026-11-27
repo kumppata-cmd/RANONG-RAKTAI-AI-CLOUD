@@ -1,0 +1,104 @@
+{% extends "hd_base.html" %}
+{% block title %}💊📄 อ่านใบยา (AI){% endblock %}
+{% block nav_medsheet %}active{% endblock %}
+{% block extra_css %}
+<style>
+.ms-wrap{max-width:1100px;margin:0 auto;padding:10px}
+.ms-card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-top:10px}
+.ms-note{font-size:.74rem;color:var(--fg-muted);line-height:1.5;margin-top:6px}
+.ms-pill{padding:2px 8px;border-radius:999px;font-size:.72rem;font-weight:600;display:inline-block;margin-right:4px}
+.ok{background:rgba(39,174,96,.15);color:#1e8449}.warn{background:rgba(230,126,34,.15);color:#a04000}.bad{background:rgba(231,76,60,.15);color:#b71c1c}.mut{background:rgba(127,140,141,.15);color:var(--fg-muted)}
+table.ms{width:100%;border-collapse:collapse;font-size:.82rem;margin-top:6px}table.ms td,table.ms th{padding:5px 6px;border-bottom:1px solid var(--border);text-align:left;vertical-align:top}table.ms th{color:var(--fg-muted);font-weight:600;font-size:.74rem}
+.ms-stat{display:flex;gap:10px;flex-wrap:wrap;margin:6px 0}
+.ms-stat div{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:.8rem}
+</style>
+{% endblock %}
+{% block content %}
+<div class="ms-wrap">
+  <h2 style="margin:0">💊📄 อ่านใบยา (AI) <span style="font-weight:400;font-size:.85rem;color:var(--fg-muted)">ใบตรวจรักษา รพ.ระนอง / Medication Record คลินิก · กล้อง-รูป-PDF · อ่าน 2 รอบเทียบกัน · รูปไม่ถูกเก็บ</span></h2>
+  <div class="ms-card">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
+      <label class="btn btn-success" style="cursor:pointer;margin:0">📷 ถ่าย/เลือกใบยา (หลายไฟล์ได้)
+        <input type="file" id="msFiles" accept="image/*,.pdf,application/pdf" capture="environment" multiple style="display:none" onchange="msRun(this)"></label>
+      <label style="font-size:.8rem"><input type="checkbox" id="msDouble" checked> อ่าน 2 รอบ (แม่นกว่า ช้ากว่า)</label>
+      <span id="msStatus" style="font-size:.78rem;color:var(--fg-muted)"></span>
+      <a class="btn btn-secondary" href="/hd/pending-inbox" style="margin-left:auto">📥 กล่องรอยืนยัน</a>
+    </div>
+    <div class="ms-stat" id="msAcc"></div>
+    <div class="ms-note">ผลที่อ่านได้จะเป็น "ร่าง" เสมอ — กด "สร้างร่างให้ผู้ป่วย" แล้วไปยืนยันทีละรายการในกล่องรอยืนยัน (💊 ร่างยาใหม่) ระบบเทียบกับรายการปัจจุบันให้ (ใหม่/เปลี่ยน/หาย) · ยา <b>off/#0</b> และลายมือ <b>hold</b> ถูกติดป้ายไว้ในโน้ต · ระบบทักหน่วยผิด (เช่น Epiao เป็น mg) และขนาดผิดปกติ · เกณฑ์ก่อนเปิดทาง LINE: ≥50 ใบ ผิด 0</div>
+  </div>
+  <div id="msOut"></div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+const ST = {active:['ใช้อยู่','ok'], off:['หยุด','bad'], hold:['hold','warn']};
+function flagTh(f){
+  if(f.startsWith('unit_mismatch')) return '⚠️ หน่วยผิด '+f.split(':')[1];
+  if(f.startsWith('dose_out_of_range')) return '⚠️ ขนาดผิดปกติ';
+  if(f.startsWith('pass_conflict')) return '2 รอบอ่านไม่ตรง: '+f.split(':').slice(1).join(':');
+  return {misspelled:'สะกดผิดบนใบ', unknown_drug:'นอกพจนานุกรม', duplicate:'ซ้ำ', zero_dose:'ขนาด 0', only_in_pass1:'เห็นรอบเดียว', only_in_pass2:'เห็นรอบเดียว', agree_low_conf:'ตรงกัน 2 รอบ'}[f] || f;
+}
+function renderPage(p, fname){
+  if(p.error) return `<div class="ms-card"><b>${esc(fname)}</b> หน้า ${p.page}: <span class="ms-pill bad">${esc(p.error)}</span></div>`;
+  const pt = p.patient || {};
+  let ptHtml = '<span class="ms-pill warn">⚠️ ยังจับคู่ผู้ป่วยไม่ได้ — ระบุ HN คลินิกเอง</span>';
+  if(pt.status==='matched') ptHtml = `<span class="ms-pill ok">✅ ${esc(pt.patient_name)} (HN ${esc(pt.hn)})${pt.name_match===false?' — ชื่อไม่ตรง!':''}</span>`;
+  else if(pt.status==='matched_by_name') ptHtml = `<span class="ms-pill warn">จับคู่ด้วยชื่อ: ${esc(pt.patient_name)} (HN ${esc(pt.hn)}) — ยืนยันแล้วระบบจะจำ HN รพ.</span>`;
+  else if(pt.status==='name_mismatch') ptHtml = `<span class="ms-pill bad">⛔ HN ตรงแต่ชื่อไม่ตรง: ${esc(pt.patient_name)} — ตรวจก่อน</span>`;
+  else if(pt.status==='ambiguous_name') ptHtml = `<span class="ms-pill warn">ชื่อซ้ำหลายคน — ระบุ HN เอง</span>`;
+  const rows = (p.items||[]).concat((p.uncertain||[]).map(u=>Object.assign({},u,{_unc:true})));
+  const tbl = rows.map(it=>`<tr style="${it._unc?'opacity:.75;background:rgba(230,126,34,.06)':''}">
+      <td>${esc(it.no||'')}</td><td><b>${esc(it.drug)}</b>${it.name_raw&&it.name_raw.toLowerCase()!==String(it.drug).toLowerCase()?'<div style="font-size:.7rem;color:var(--fg-muted)">บนใบ: '+esc(it.name_raw)+'</div>':''}</td>
+      <td>${it.per_dose!=null?esc(it.per_dose)+' '+esc(it.unit):'-'}</td><td>${esc(it.frequency||it.sig_text||'')}${it.sig_code?' <span class="ms-pill mut">'+esc(it.sig_code)+'</span>':''}</td>
+      <td>${esc(it.route)}</td><td><span class="ms-pill ${ST[it.status][1]}">${ST[it.status][0]}</span>${it.handwritten?'<div style="font-size:.72rem">✍️ '+esc(it.handwritten)+'</div>':''}</td>
+      <td>${Math.round((it.conf||0)*100)}%${it._unc?' <span class="ms-pill warn">ไม่แน่ใจ</span>':''}<div style="font-size:.7rem;color:#a04000">${(it.flags||[]).map(flagTh).map(esc).join('<br>')}</div></td></tr>`).join('');
+  const h = p.header||{};
+  return `<div class="ms-card" id="pg_${p.read_id}">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><b>${esc(fname)}</b> หน้า ${p.page} · <span class="ms-pill mut">${p.form==='hospital'?'ใบตรวจรักษา รพ.':(p.form==='clinic'?'Medication Record คลินิก':'ไม่ทราบฟอร์ม')}</span> ${h.hn_norm?'<span class="ms-pill mut">HN รพ. '+esc(h.hn_norm)+'</span>':''} ${h.date?'<span class="ms-pill mut">'+esc(h.date)+'</span>':''} <span class="ms-pill mut">อ่าน ${p.passes} รอบ</span> ${ptHtml}</div>
+    ${(h.allergies&&h.allergies.length)?'<div style="margin-top:6px;color:#b71c1c;font-weight:700">🚫 แพ้ยาบนใบ: '+esc(h.allergies.join(', '))+'</div>':''}
+    ${(p.flags||[]).length?'<div style="font-size:.76rem;color:#a04000;margin-top:4px">'+p.flags.map(esc).join(' · ')+'</div>':''}
+    <table class="ms"><tr><th>#</th><th>ยา</th><th>ขนาด/ครั้ง</th><th>วิธีใช้</th><th>ทาง</th><th>สถานะ</th><th>มั่นใจ</th></tr>${tbl||'<tr><td colspan="7">ไม่พบรายการยา</td></tr>'}</table>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:8px">
+      <input class="form-control" id="hn_${p.read_id}" placeholder="HN คลินิก" value="${esc(pt.hn||'')}" style="max-width:140px">
+      <label style="font-size:.78rem"><input type="checkbox" id="unc_${p.read_id}"> รวมรายการที่ไม่แน่ใจด้วย</label>
+      ${(h.allergies&&h.allergies.length)?'<label style="font-size:.78rem"><input type="checkbox" id="alg_'+p.read_id+'" checked> อัปเดตแพ้ยาในทะเบียน (แพทย์)</label>':''}
+      ${pt.status==='matched_by_name'?'<label style="font-size:.78rem"><input type="checkbox" id="hhn_'+p.read_id+'" checked> จำ HN รพ. '+esc(pt.sheet_hn||'')+' ให้ผู้ป่วยนี้</label>':''}
+      <button class="btn btn-primary" onclick="msDrafts('${p.read_id}')">📝 สร้างร่างให้ผู้ป่วย → ยืนยันในกล่องรอยืนยัน</button>
+      <span id="st_${p.read_id}" style="font-size:.78rem"></span>
+    </div>
+    <div style="font-size:.7rem;color:var(--fg-muted);margin-top:4px">${(p.summary||[]).map(esc).join('<br>')}</div>
+  </div>`;
+}
+async function msRun(inp){
+  const files = Array.from(inp.files||[]); if(!files.length) return;
+  const out = document.getElementById('msOut'), st = document.getElementById('msStatus');
+  for(let i=0;i<files.length;i++){
+    const f = files[i]; st.textContent = `กำลังอ่าน ${i+1}/${files.length} — ${f.name} (2 รอบ ~20–40 วิ)`;
+    const fd = new FormData(); fd.append('file', f); fd.append('double', document.getElementById('msDouble').checked?'1':'0');
+    let d = {}, status = 0;
+    try{ const r = await hdFetch('/hd/api/v1/med-sheet/read', {method:'POST', body: fd}); status = r.status; d = await r.json().catch(()=>({})); }catch(e){ status = 0; }
+    if(status===429){ st.textContent='AI คิวเต็ม รอ 10 วิ…'; await new Promise(r=>setTimeout(r,10000)); i--; continue; }
+    if(status!==200){ out.insertAdjacentHTML('afterbegin', `<div class="ms-card"><b>${esc(f.name)}</b> <span class="ms-pill bad">⚠️ ${esc(d.error||('HTTP '+status))}</span></div>`); continue; }
+    (d.pages||[]).forEach(p=>out.insertAdjacentHTML('afterbegin', renderPage(p, f.name)));
+  }
+  st.textContent = 'เสร็จ'; inp.value='';
+}
+async function msDrafts(rid){
+  const hn = (document.getElementById('hn_'+rid).value||'').trim(), st = document.getElementById('st_'+rid);
+  if(!hn){ st.textContent='⚠️ ระบุ HN คลินิกก่อน'; return; }
+  st.textContent = '⏳ กำลังสร้างร่าง…';
+  const body = {read_id: rid, hn, include_uncertain: !!(document.getElementById('unc_'+rid)||{}).checked,
+                apply_allergies: !!(document.getElementById('alg_'+rid)||{}).checked, confirm_hospital_hn: !!(document.getElementById('hhn_'+rid)||{}).checked};
+  try{
+    const r = await hdFetch('/hd/api/v1/med-sheet/drafts', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok) throw new Error(d.error||r.status);
+    st.innerHTML = `✅ สร้างร่าง ${d.drafts} รายการให้ HN ${esc(d.hn)}${d.allergy?' · '+esc(d.allergy):''} — <a href="/hd/pending-inbox">ไปยืนยันในกล่องรอยืนยัน →</a>`;
+  }catch(e){ st.textContent = '❌ '+(e.message||e); }
+}
+hdFetch('/hd/api/v1/med-sheet/accuracy').then(r=>r.ok?r.json():null).then(a=>{ if(!a) return;
+  document.getElementById('msAcc').innerHTML = `<div>📄 ใบที่อ่าน 30 วัน: <b>${a.sheets}</b></div><div>ตัดสินแล้ว <b>${a.judged}</b> รายการ · ถูก ${a.totals.accepted} · ต้องแก้ ${a.totals.changed} · ผิด ${a.totals.rejected} · รอ ${a.totals.pending}</div><div>ความแม่น <b>${a.accuracy_pct==null?'-':a.accuracy_pct+'%'}</b> · เกณฑ์เปิด LINE ${a.gate.ok?'✅ ผ่าน':'⏳ ยังไม่ครบ (≥50 ใบ ผิด 0)'}</div>`; }).catch(()=>{});
+</script>
+{% endblock %}

@@ -2318,6 +2318,167 @@ def run_idh_twin_outcomes():
         conn.close()
 
 
+# ── 💊📄 Med Sheet Reader ขั้น 1–2 (28 พ.ย. 2569 แพทย์อนุมัติ) ──
+_MED_READS = {}   # read_id → (ts, result) ต่อ worker, TTL 30 นาที
+
+
+def _med_remember(read_id, res):
+    import time as _t
+    now = _t.time()
+    for k in [k for k, (ts, _) in _MED_READS.items() if now - ts > 1800]:
+        _MED_READS.pop(k, None)
+    _MED_READS[read_id] = (now, res)
+
+
+def _med_recall(read_id):
+    hit = _MED_READS.get(read_id)
+    return hit[1] if hit else None
+
+
+@hd_bp.route("/med-sheet/read", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def med_sheet_read():
+    """อ่านใบยา (jpg/png/pdf ≤12 MB) 2 รอบ → รายการ + สิ่งที่ไม่แน่ใจ + จับคู่ผู้ป่วย · ไม่บันทึกอะไร"""
+    import os
+    import psycopg2
+    from . import med_sheet_reader as msr
+    from .lab_sheet_reader import pdf_pages_to_jpeg, match_patient
+    from .patient_engage import ai_model
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"error": "no file"}), 400
+    ext = os.path.splitext(f.filename or "")[1].lower()
+    if ext not in (".jpg", ".jpeg", ".png", ".webp", ".pdf"):
+        return jsonify({"error": "รองรับ jpg/png/pdf"}), 400
+    data = f.read()
+    if len(data) > 12 * 1024 * 1024:
+        return jsonify({"error": "ไฟล์ใหญ่เกิน 12 MB"}), 400
+    api_key = (os.environ.get("ANTHROPIC_API_KEY", "") or "").strip()
+    if not api_key:
+        return jsonify({"error": "ไม่มี ANTHROPIC_API_KEY"}), 503
+    double = (request.form.get("double") or "1") != "0"
+    pages = pdf_pages_to_jpeg(data, max_pages=3) if ext == ".pdf" else [data]
+    if not pages:
+        return jsonify({"error": "แปลง PDF ไม่ได้"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    out = []
+    for i, img in enumerate(pages, start=1):
+        try:
+            res = msr.read_sheet(img, api_key, ai_model(), double=double)
+        except RuntimeError:
+            return jsonify({"error": "AI กำลังอ่านรูปอื่นอยู่ — รอ 10 วิ แล้วลองใหม่"}), 429
+        if res is None:
+            out.append({"page": i, "error": "AI อ่านไม่สำเร็จ"})
+            continue
+        patient = None
+        if db_url:
+            try:
+                conn = psycopg2.connect(db_url, connect_timeout=5)
+                try:
+                    with conn.cursor() as cur:
+                        patient = match_patient(cur, res["header"])
+                finally:
+                    conn.close()
+            except Exception as e:  # noqa: BLE001
+                logger.info("med-sheet match: %s", e)
+        res["patient"] = patient
+        res["drafts"] = msr.to_drafts(res)
+        res["summary"] = msr.summary_lines(res, patient)
+        res["page"] = i
+        _med_remember(res["read_id"], res)
+        out.append(res)
+    log_action(user_id=g.get("hd_user_id"), action="med_sheet.read", resource_type="document",
+               new_values={"pages": len(out), "items": sum(len(p.get("items") or []) for p in out)}, ip_address=request.remote_addr or "")
+    return jsonify({"pages": out})
+
+
+@hd_bp.route("/med-sheet/drafts", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def med_sheet_drafts():
+    """{read_id, hn, include_uncertain?, allergies?} → สร้างร่าง ai_draft ของ HN นั้น (ทางเดียวกับรูปยาจาก LINE)
+    → ไปยืนยันต่อในกล่องรอยืนยัน (reconcile/apply เดิม) · แพ้ยาใหม่ → อัปเดต patient mapping เฉพาะแพทย์/admin"""
+    import os
+    import psycopg2
+    from . import med_sheet_reader as msr
+    from .medications import med_warnings, ST_AI
+    data = request.get_json(silent=True) or {}
+    res = _med_recall(str(data.get("read_id") or ""))
+    hn = str(data.get("hn") or "").strip()
+    if not res or not hn:
+        return jsonify({"error": "ไม่พบผลอ่าน (หมดอายุ 30 นาที) หรือไม่ระบุ HN — อ่านใหม่"}), 400
+    drafts = msr.to_drafts(res, include_uncertain=bool(data.get("include_uncertain")))
+    if not drafts:
+        return jsonify({"error": "ไม่มีรายการยาที่อ่านได้"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    ids, allergy_note = [], None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, allergies FROM hd_patient_mapping WHERE hn = %s AND is_active = TRUE", (hn,))
+            pr = cur.fetchone()
+            if not pr:
+                return jsonify({"error": f"ไม่พบ HN {hn}"}), 404
+            pid, cur_allergy = pr
+            src_doc = f"sheet:{res['read_id']}"
+            for d in drafts:
+                warns = []
+                try:
+                    warns = med_warnings(cur, pid, d["drug"])
+                except Exception:
+                    pass
+                notes = "; ".join(x for x in ([d.get("notes") or ""] + list(warns or [])) if x)[:300] or None
+                cur.execute("""INSERT INTO hd_medication_orders
+                                   (patient_id, drug_name, dose, route, frequency, drug_category, is_active, verify_status,
+                                    source, notes, updated_at, source_doc, ordered_by)
+                               VALUES (%s,%s,%s,%s,%s,'other',FALSE,%s,'hd_sheet',%s,NOW(),%s,%s) RETURNING id""",
+                            (pid, d["drug"][:100], (d.get("dose") or "")[:50], d.get("route") or "PO", (d.get("frequency") or "")[:50],
+                             ST_AI, notes, src_doc, g.get("hd_user_id")))
+                ids.append(cur.fetchone()[0])
+            msr.record_samples(cur, res["read_id"], res.get("form"), hn, drafts, ids)
+            new_allergy = [a for a in (res.get("header") or {}).get("allergies") or [] if a and a.lower() not in (cur_allergy or "").lower()]
+            if new_allergy and data.get("apply_allergies") and g.get("hd_role") in ("physician", "admin"):
+                merged = ", ".join(x for x in ([cur_allergy.strip()] if cur_allergy else []) + new_allergy)[:300]
+                cur.execute("UPDATE hd_patient_mapping SET allergies = %s, updated_at = NOW() WHERE id = %s", (merged, pid))
+                allergy_note = f"อัปเดตแพ้ยา: {merged}"
+            # จำ hospital_hn เมื่อจับคู่ด้วยชื่อ
+            pt = res.get("patient") or {}
+            if pt.get("status") == "matched_by_name" and pt.get("sheet_hn") and data.get("confirm_hospital_hn"):
+                cur.execute("UPDATE hd_patient_mapping SET hospital_hn = %s WHERE id = %s AND COALESCE(hospital_hn,'') = ''", (pt["sheet_hn"], pid))
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="med_sheet.drafts", resource_type="patient", resource_id=hn,
+               new_values={"read_id": res["read_id"], "form": res.get("form"), "drafts": len(ids), "allergies": allergy_note},
+               ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "hn": hn, "drafts": len(ids), "order_ids": ids, "allergy": allergy_note,
+                    "new_allergies": [a for a in (res.get("header") or {}).get("allergies") or []],
+                    "next": f"/hd/pending-inbox"})
+
+
+@hd_bp.route("/med-sheet/accuracy", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def med_sheet_accuracy():
+    import os
+    import psycopg2
+    from . import med_sheet_reader as msr
+    days = max(1, min(int(request.args.get("days", 30) or 30), 365))
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            rep = msr.accuracy_report(cur, days)
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify(rep)
+
+
+@hd_web.route("/med-sheet-test")
+def hd_med_sheet_test_page():
+    """💊📄 ทดสอบอ่านใบยา (ขั้น 1) + สร้างร่างให้ผู้ป่วย (ขั้น 2)"""
+    return render_template("hd_med_sheet_test.html")
+
+
 # ── ว้าว B ระยะ 1 (27 พ.ย. 2569): Lab-to-Order Autopilot — แล็บอื่น ๆ (เหล็ก / Ca-P-PTH / VitD / HBV / HCV) ──
 
 def _lab_ap_protocol():
@@ -3881,6 +4042,21 @@ def medication_reconcile_apply(hn):
                 n["dismissed"] += cur.rowcount
         conn.commit()
         conn.close()
+        # 💊📄 Med Sheet Reader (28 พ.ย. 2569): บันทึกผลตัดสินของร่างจากใบยา เพื่อวัดความแม่น (ล้มเงียบ ไม่กระทบทางเดิม)
+        try:
+            from .med_sheet_reader import mark_outcome
+            conn2 = psycopg2.connect(db_url, connect_timeout=5)
+            try:
+                with conn2.cursor() as c2:
+                    who = g.get("hd_username") or str(uid or "")
+                    mark_outcome(c2, [int(x) for x in (data.get("new") or [])], "accepted", who)
+                    mark_outcome(c2, [int(p[0]) for p in (data.get("changed") or []) if isinstance(p, (list, tuple)) and p], "accepted", who)
+                    mark_outcome(c2, [int(x) for x in (data.get("dismiss") or [])], "rejected", who)
+                conn2.commit()
+            finally:
+                conn2.close()
+        except Exception as _mo:  # noqa: BLE001
+            logger.debug("med sheet outcome: %s", _mo)
         log_action(user_id=uid, action="med.reconcile", resource_type="patient",
                    new_values={"hn": hn, **n}, ip_address=request.remote_addr or "")
         return jsonify({"ok": True, **n})
