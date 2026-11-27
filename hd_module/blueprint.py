@@ -2104,6 +2104,136 @@ def esa_decide(pid):
     return jsonify({"ok": True, "decision": decision, "applied": applied})
 
 
+# ── ว้าว A (27 พ.ย. 2569): 🩸 Kidney Twin — IDH early warning, event-driven ──
+
+import re as _re_twin
+_TWIN_PATH_RE = _re_twin.compile(r"^/hd/api/v1/sessions/(\d+)/(vitals|uf|flowsheet|intra-record)$")
+
+
+def _twin_push(text):
+    from . import ops_status as _ops
+    with _ops.critical():
+        return push_nurse_group(text)
+
+
+def _twin_log(session_id, hn, res, reason, trigger):
+    log_action(user_id=None, action="idh_twin.alert", resource_type="session", resource_id=session_id,
+               new_values={"hn": hn, "score": res["score"], "reason": reason, "trigger": trigger,
+                           "factors": [x["text"] for x in res["factors"][:5]]}, ip_address="")
+
+
+def _twin_kick(session_id, trigger):
+    """คำนวณ Kidney Twin ใน thread แยกหลังบันทึกสำเร็จ — ไม่ทำให้ request ช้า/ล้ม"""
+    import os
+    import threading
+    from flask import current_app
+    from . import idh_twin as twin
+    if not twin.is_enabled(get_setting_value):
+        return
+    cfg = twin.config(get_setting_value)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return
+    app = current_app._get_current_object()
+
+    def _run():
+        with app.app_context():
+            try:
+                import psycopg2
+                conn = psycopg2.connect(db_url, connect_timeout=5)
+                try:
+                    r = twin.evaluate(conn, session_id, trigger, cfg, push_fn=_twin_push, log_fn=_twin_log)
+                finally:
+                    conn.close()
+                if r.get("alerted"):
+                    logger.info("Kidney Twin alert session %s score %s (%s)", session_id, r.get("score"), r.get("reason"))
+            except Exception as e:  # noqa: BLE001
+                logger.warning("idh twin kick: %s", e)
+    threading.Thread(target=_run, daemon=True, name=f"idh-twin-{session_id}").start()
+
+
+@hd_bp.after_request
+def _twin_after_request(resp):
+    """hook เดียว ครอบ 4 endpoint บันทึกระหว่างรอบ (vitals / uf / flowsheet / intra-record) — เฉพาะ POST ที่สำเร็จ"""
+    try:
+        if request.method == "POST" and 200 <= resp.status_code < 300:
+            m = _TWIN_PATH_RE.match(request.path)
+            if m:
+                _twin_kick(int(m.group(1)), m.group(2))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("twin after_request: %s", e)
+    return resp
+
+
+@hd_bp.route("/sessions/<int:session_id>/idh-twin", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def session_idh_twin(session_id):
+    """คะแนนสดของรอบนี้ (คำนวณใหม่ตอนเรียก ไม่เตือน ไม่บันทึก)"""
+    import os
+    import psycopg2
+    from . import idh_twin as twin
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            f = twin.live_features(cur, session_id)
+            res = twin.score_live(f) if f else None
+            st = None
+            try:
+                cur.execute(twin.CREATE_SQL)
+                st = twin._load_state(cur, session_id)
+            except Exception:
+                conn.rollback()
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"enabled": twin.is_enabled(get_setting_value), "risk": res, "state": st, "features": f})
+
+
+@hd_bp.route("/idh-twin/stats", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def idh_twin_stats():
+    import os
+    import psycopg2
+    from . import idh_twin as twin
+    days = max(1, min(int(request.args.get("days", 30) or 30), 365))
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        twin.record_outcomes(conn)
+        st = twin.stats(conn, days)
+        with conn.cursor() as cur:
+            cur.execute("""SELECT t.session_id, p.hn, p.patient_name, s.session_date, s.bed_number, t.peak_score, t.alert_count,
+                                  t.alerted_at, t.outcome, t.outcome_detail, t.last_factors
+                           FROM hd_idh_twin_state t JOIN hd_sessions s ON s.id = t.session_id JOIN hd_patient_mapping p ON p.id = s.patient_id
+                           WHERE t.updated_at >= NOW() - (%s || ' days')::interval
+                           ORDER BY t.updated_at DESC LIMIT 100""", (str(days),))
+            rows = [{"session_id": r[0], "hn": r[1], "name": r[2], "date": r[3].isoformat() if r[3] else None, "bed": r[4],
+                     "peak_score": r[5], "alert_count": r[6], "alerted_at": (r[7] + timedelta(hours=7)).strftime("%d/%m %H:%M") if r[7] else None,
+                     "outcome": r[8], "outcome_detail": r[9], "factors": r[10]} for r in cur.fetchall()]
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"enabled": twin.is_enabled(get_setting_value), "config": twin.config(get_setting_value), "stats": st, "recent": rows})
+
+
+def run_idh_twin_outcomes():
+    """scheduler รายชั่วโมง: บันทึกผลจริงของรอบที่จบแล้ว (ใช้วัดความแม่น)"""
+    import os
+    from . import idh_twin as twin
+    if not twin.is_enabled(get_setting_value):
+        return {"recorded": 0, "enabled": False}
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"recorded": 0}
+    import psycopg2
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        return {"recorded": twin.record_outcomes(conn), "enabled": True}
+    finally:
+        conn.close()
+
+
 # ── ว้าว B ระยะ 1 (27 พ.ย. 2569): Lab-to-Order Autopilot — แล็บอื่น ๆ (เหล็ก / Ca-P-PTH / VitD / HBV / HCV) ──
 
 def _lab_ap_protocol():
@@ -9923,8 +10053,21 @@ def _bed_dashboard_impl():
                 # ว้าว #1: IDH risk score for active sessions (advisory only)
                 try:
                     from .idh_predictor import features_for, score as idh_score
+                    # ว้าว A (27 พ.ย. 2569): Kidney Twin เปิด → ใช้ข้อมูลสด (flowsheet/UF/เวลา) แทนคะแนนตั้งต้น
+                    _twin_on = False
+                    try:
+                        from . import idh_twin as _twin
+                        _twin_on = _twin.is_enabled(get_setting_value)
+                    except Exception:
+                        _twin_on = False
                     for sid, bnum in session_ids:
                         if 1 <= bnum <= len(beds) and beds[bnum - 1].get("status") in ("active", "warning", "critical"):
+                            if _twin_on:
+                                feats = _twin.live_features(cur, sid)
+                                if feats:
+                                    beds[bnum - 1]["idh_risk"] = _twin.score_live(feats)
+                                    beds[bnum - 1]["idh_risk"]["live"] = True
+                                continue
                             feats = features_for(cur, sid)
                             if feats:
                                 beds[bnum - 1]["idh_risk"] = idh_score(feats)
@@ -11864,6 +12007,7 @@ def update_settings():
         "passport_enabled",          # 27 พ.ย. 2569: 🪪 Dialysis Passport (บัตรฟอกไตฉุกเฉิน) on/off — default off
         "passport_ttl_hours",        # อายุลิงก์บัตรฉุกเฉิน (ชั่วโมง) default 72
         "lab_autopilot",             # 27 พ.ย. 2569: 🧪→💊 Lab-to-Order Autopilot on/off — default off
+        "idh_twin", "idh_twin_channel", "idh_twin_high", "idh_twin_realert_min", "idh_twin_realert_rise",   # 27 พ.ย. 2569: 🩸 Kidney Twin
         "lab_ap_tsat_high", "lab_ap_p_high", "lab_ap_p_low", "lab_ap_ca_high", "lab_ap_ca_low",
         "lab_ap_pth_high", "lab_ap_pth_low", "lab_ap_vitd_low", "lab_ap_antihbs_low",
         "lab_ap_min_interval_days", "lab_ap_lookback_days",

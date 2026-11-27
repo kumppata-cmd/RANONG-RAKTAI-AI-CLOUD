@@ -200,6 +200,39 @@
   </div>
 </div>
 
+<!-- 🩸 Kidney Twin (27 พ.ย. 2569): IDH early warning -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🩸 Kidney Twin — เตือนความดันตกระหว่างฟอก (IDH) ล่วงหน้า</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('idh_twin')">💾 บันทึก</button>
+  </div>
+  <div class="form-group">
+    <select class="form-control" id="setting_idh_twin">
+      <option value="off">ปิด — การ์ดเตียงแสดงคะแนนเสี่ยง IDH แบบเดิม (คำนวณตอนเปิดแดชบอร์ด)</option>
+      <option value="on">เปิด — คำนวณใหม่ทุกครั้งที่บันทึก vitals / UF / flowsheet / ถ่ายจอ และเตือนเมื่อข้ามเป็น "สูง"</option>
+    </select>
+    <div class="setting-desc">คะแนน 0–100 อธิบายได้ทุกข้อ (UF/kg/h, IDWG, SBP ตกต่อเนื่อง, SBP ปัจจุบัน, ประวัติ IDH, Hb, albumin, อายุ) + ปัจจัยสด (UF rate จริงของเครื่อง, ดึงน้ำเร็วกว่าเวลา, ช่วงท้ายรอบ, HR ขึ้น) ·
+      เตือน <b>1 ครั้งต่อรอบ</b> (ซ้ำได้เมื่อผ่าน 45 นาทีและคะแนนขึ้น ≥15) · เป็นข้อเสนอให้วัด BP ถี่ขึ้น/พิจารณาลด UF — ไม่สั่งการ · จบรอบระบบบันทึกเองว่าเกิด IDH จริงไหม เพื่อวัดความแม่นที่ <code>/hd/api/v1/idh-twin/stats</code></div>
+    <div class="setting-status" id="status_idh_twin"></div>
+  </div>
+  <div class="form-group">
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">
+      <div><div style="font-size:.74rem;color:var(--fg-muted)">ช่องทางเตือน</div>
+        <div style="display:flex;gap:4px"><select class="form-control" id="setting_idh_twin_channel"><option value="group">กลุ่มพยาบาล LINE + การ์ดเตียง</option><option value="card">การ์ดเตียงอย่างเดียว</option></select>
+        <button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('idh_twin_channel')">💾</button></div><div class="setting-status" id="status_idh_twin_channel"></div></div>
+      <div><div style="font-size:.74rem;color:var(--fg-muted)">เตือนเมื่อคะแนน ≥</div>
+        <div style="display:flex;gap:4px"><input type="number" class="form-control" id="setting_idh_twin_high" placeholder="60">
+        <button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('idh_twin_high')">💾</button></div><div class="setting-status" id="status_idh_twin_high"></div></div>
+      <div><div style="font-size:.74rem;color:var(--fg-muted)">เตือนซ้ำได้หลัง (นาที)</div>
+        <div style="display:flex;gap:4px"><input type="number" class="form-control" id="setting_idh_twin_realert_min" placeholder="45">
+        <button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('idh_twin_realert_min')">💾</button></div><div class="setting-status" id="status_idh_twin_realert_min"></div></div>
+      <div><div style="font-size:.74rem;color:var(--fg-muted)">และคะแนนขึ้น ≥</div>
+        <div style="display:flex;gap:4px"><input type="number" class="form-control" id="setting_idh_twin_realert_rise" placeholder="15">
+        <button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('idh_twin_realert_rise')">💾</button></div><div class="setting-status" id="status_idh_twin_realert_rise"></div></div>
+    </div>
+  </div>
+</div>
+
 <!-- 🧪→💊 Lab-to-Order Autopilot (27 พ.ย. 2569) -->
 <div class="card setting-card">
   <div class="card-header">

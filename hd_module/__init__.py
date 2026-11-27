@@ -875,6 +875,14 @@ def _start_daily_reminder_scheduler(app):
                                     logger.info("Lab autopilot: %s proposals", rl["created"])
                             except Exception as _le:  # noqa: BLE001
                                 logger.warning("lab autopilot tick: %s", _le)
+                            # ว้าว A (27 พ.ย. 2569): Kidney Twin — บันทึกผลจริงของรอบที่จบ (วัด sensitivity/false alarm)
+                            try:
+                                from .blueprint import run_idh_twin_outcomes
+                                rt = ops.run_guarded("idh_twin_outcomes", run_idh_twin_outcomes, timeout=120) or {}
+                                if rt.get("recorded"):
+                                    logger.info("Kidney Twin outcomes: %s", rt["recorded"])
+                            except Exception as _te:  # noqa: BLE001
+                                logger.warning("idh twin tick: %s", _te)
                         # ว้าว รอบ 2 #1: Dry Weight review — once a day at the 07:00 tick
                         if lab_tick % 12 == 0 and now.hour == 7:
                             from .blueprint import run_dw_autopilot
