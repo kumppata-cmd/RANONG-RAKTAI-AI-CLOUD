@@ -867,6 +867,14 @@ def _start_daily_reminder_scheduler(app):
                             r = ops.run_guarded("esa_autopilot", run_esa_autopilot, timeout=180) or {}
                             if r.get("created"):
                                 logger.info("ESA autopilot: %s proposals", r["created"])
+                            # ว้าว B ระยะ 1 (27 พ.ย. 2569): แล็บอื่น ๆ → ข้อเสนอคำสั่ง (สวิตช์ lab_autopilot, default off)
+                            try:
+                                from .blueprint import run_lab_autopilot
+                                rl = ops.run_guarded("lab_autopilot", run_lab_autopilot, timeout=180) or {}
+                                if rl.get("created"):
+                                    logger.info("Lab autopilot: %s proposals", rl["created"])
+                            except Exception as _le:  # noqa: BLE001
+                                logger.warning("lab autopilot tick: %s", _le)
                         # ว้าว รอบ 2 #1: Dry Weight review — once a day at the 07:00 tick
                         if lab_tick % 12 == 0 and now.hour == 7:
                             from .blueprint import run_dw_autopilot

@@ -200,6 +200,46 @@
   </div>
 </div>
 
+<!-- 🧪→💊 Lab-to-Order Autopilot (27 พ.ย. 2569) -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🧪→💊 Lab-to-Order Autopilot — แล็บยืนยันแล้ว → ร่างคำสั่งให้แพทย์อนุมัติ</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('lab_autopilot')">💾 บันทึก</button>
+  </div>
+  <div class="form-group">
+    <select class="form-control" id="setting_lab_autopilot">
+      <option value="off">ปิด — ไม่สร้างข้อเสนอจากแล็บ (ESA Autopilot เดิมไม่เกี่ยว ยังทำงานตามสวิตช์ของมัน)</option>
+      <option value="on">เปิด — เหล็ก / Ca-P-PTH / วิตามินดี / HBV / HCV → ข้อเสนอในหน้า 💊 Autopilot แท็บ 🧪 + LINE แพทย์ 1 ข้อความต่อชุด</option>
+    </select>
+    <div class="setting-desc">ระบบ <b>เสนอ</b> เท่านั้น — คำสั่งไปถึงพยาบาลเมื่อแพทย์กด ✓ ในหน้า Autopilot · ทำงานทุกชั่วโมง 06–20 น. และทันทีหลังแพทย์ยืนยันแล็บในหน้า Lab · K สูงไม่อยู่ที่นี่ (มี alert วิกฤตส่งทันทีอยู่แล้ว) · เกณฑ์ด้านล่างแก้ได้ ค่าว่าง = ค่าเริ่มต้น</div>
+    <div class="setting-status" id="status_lab_autopilot"></div>
+  </div>
+  <div class="form-group">
+    <label>เกณฑ์ตัวเลข (ค่าเริ่มต้นแนว KDIGO/KDOQI — แพทย์ทบทวนก่อนเปิด)</label>
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px">
+      {% for key, label, ph in [
+        ('anemia_tsat_low','TSAT ต่ำ (%)','20'), ('anemia_ferritin_low','Ferritin ต่ำ','200'), ('anemia_ferritin_high','Ferritin สูง (งดเหล็ก)','800'), ('lab_ap_tsat_high','TSAT สูง (งดเหล็ก)','50'),
+        ('lab_ap_p_high','P สูง','5.5'), ('lab_ap_p_low','P ต่ำ','2.5'), ('lab_ap_ca_high','Ca สูง','10.2'), ('lab_ap_ca_low','Ca ต่ำ','8.4'),
+        ('lab_ap_pth_high','PTH สูง','600'), ('lab_ap_pth_low','PTH ต่ำ','130'), ('lab_ap_vitd_low','VitD ต่ำ (ng/mL)','30'), ('lab_ap_antihbs_low','anti-HBs ต่ำ','10'),
+        ('lab_ap_min_interval_days','เว้น (วัน/หมวด)','28'), ('lab_ap_lookback_days','ดูแล็บย้อนหลัง (วัน)','45')] %}
+      <div><div style="font-size:.74rem;color:var(--fg-muted)">{{ label }}</div>
+        <div style="display:flex;gap:4px"><input type="number" step="any" class="form-control" id="setting_{{ key }}" placeholder="{{ ph }}">
+        <button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('{{ key }}')">💾</button></div>
+        <div class="setting-status" id="status_{{ key }}"></div></div>
+      {% endfor %}
+    </div>
+  </div>
+  <div class="form-group">
+    <label>ข้อความคำสั่งที่จะเสนอ (regimen ของคลินิก — แก้ให้ตรงกับที่ใช้จริง)</label>
+    {% for key, label in [('lab_ap_iron_regimen','เหล็ก IV'), ('lab_ap_binder_regimen','ฟอสเฟตสูง'), ('lab_ap_pth_regimen','PTH สูง'), ('lab_ap_vitd_regimen','วิตามินดีต่ำ'), ('lab_ap_hbv_regimen','anti-HBs ต่ำ')] %}
+    <div style="margin-top:6px"><div style="font-size:.74rem;color:var(--fg-muted)">{{ label }}</div>
+      <div style="display:flex;gap:4px"><input type="text" class="form-control" id="setting_{{ key }}" placeholder="ว่าง = ค่าเริ่มต้น">
+      <button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('{{ key }}')">💾</button></div>
+      <div class="setting-status" id="status_{{ key }}"></div></div>
+    {% endfor %}
+  </div>
+</div>
+
 <!-- 🪪 Dialysis Passport (27 พ.ย. 2569): บัตรฟอกไตฉุกเฉินสำหรับ ER/รพ.อื่น -->
 <div class="card setting-card">
   <div class="card-header">

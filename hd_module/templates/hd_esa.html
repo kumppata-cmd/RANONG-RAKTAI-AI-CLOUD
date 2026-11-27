@@ -55,9 +55,12 @@
   <button data-tab="all" onclick="setTab('all')">💊 ประวัติ ESA</button>
   <button data-tab="dw" onclick="setTab('dw')">🎯 Dry Weight รออนุมัติ <span id="cntDw"></span></button>
   <button data-tab="dwall" onclick="setTab('dwall')">🎯 ประวัติ DW</button>
+  <button data-tab="lab" onclick="setTab('lab')">🧪 Lab→Order รออนุมัติ <span id="cntLab"></span></button>
+  <button data-tab="laball" onclick="setTab('laball')">🧪 ประวัติ Lab→Order</button>
 </div>
 <div class="esa-list" id="list"><div class="esa-empty">กำลังโหลด…</div></div>
 <div class="esa-note" id="dwNote" style="display:none">🎯 <b>Dry Weight Autopilot</b> ทบทวนทุกเช้า 07:00 จาก 10 รอบล่าสุด: น้ำหนักหลังฟอกเทียบ DW, IDH/ตะคริว, BP หลังฟอก, บวม, UF ไม่ถึงเป้า → <b>เสนอ</b> ปรับ ±0.5 kg พร้อมเหตุผล · DW ในระบบเปลี่ยนเมื่อแพทย์กด ✓ เท่านั้น (แก้ตัวเลขก่อนกดได้) แล้วแจ้งกลุ่มพยาบาล · เว้นอย่างน้อย 21 วันหลังตัดสินใจครั้งล่าสุด</div>
+<div class="esa-note" id="labNote" style="display:none">🧪 <b>Lab-to-Order Autopilot</b> (27 พ.ย. 2569) เมื่อมีผลแล็บใหม่ที่ยืนยันแล้ว ระบบ <b>เสนอ</b> คำสั่งตามโปรโตคอลที่แพทย์ตั้งใน ⚙️: เหล็ก IV (TSAT/Ferritin), Ca/P/PTH (binder, active vit D, cinacalcet), วิตามินดี, HBV booster (anti-HBs ต่ำ), HBsAg/anti-HCV บวกใหม่ → แพทย์แก้ข้อความ/กด ✓ แล้วระบบส่งคำสั่งเข้ากลุ่มพยาบาลทันที · ไม่มีอะไรถูกสั่งเอง · เว้น min interval ต่อหมวดหลังตัดสิน</div>
 <div class="esa-note">ระบบ <b>เสนอ</b> ขนาดยาตาม protocol ที่แพทย์ตั้งไว้ จาก Hb ใหม่ล่าสุด (เอกสารแล็บ/บันทึกรอบฟอก) — ไม่มีการปรับยาอัตโนมัติ
 ขนาดยาในระบบจะเปลี่ยนเฉพาะเมื่อแพทย์กด ✓ อนุมัติ (แก้ขนาดก่อนกดได้) และจะแจ้งกลุ่มพยาบาลทันที · ไม่เสนอซ้ำภายในช่วง min interval หลังการตัดสินใจครั้งล่าสุด</div>
 {% endblock %}
@@ -70,9 +73,64 @@ let tab = 'pending';
 const ROLE = (function(){ try { let p=((getHdToken()||'').split('.')[1]||'').replace(/-/g,'+').replace(/_/g,'/'); p+='='.repeat((4-p.length%4)%4); return JSON.parse(atob(p)).role || ''; } catch(e){ return ''; } })();
 
 function setTab(t){ tab = t; document.querySelectorAll('.esa-tabs button').forEach(b=>b.classList.toggle('on', b.dataset.tab===t));
-  const isDw = t.startsWith('dw'); document.getElementById('dwNote').style.display = isDw ? '' : 'none';
-  document.getElementById('btnRun').textContent = isDw ? '🔄 ทบทวน Dry Weight ตอนนี้' : '🔄 รัน ESA Autopilot ตอนนี้';
-  isDw ? loadDw() : load(); }
+  const isDw = t.startsWith('dw'), isLab = t.startsWith('lab'); document.getElementById('dwNote').style.display = isDw ? '' : 'none';
+  document.getElementById('labNote').style.display = isLab ? '' : 'none';
+  document.getElementById('btnRun').textContent = isDw ? '🔄 ทบทวน Dry Weight ตอนนี้' : (isLab ? '🔄 ตรวจแล็บใหม่ตอนนี้' : '🔄 รัน ESA Autopilot ตอนนี้');
+  isDw ? loadDw() : (isLab ? loadLab() : load()); }
+
+/* 🧪 Lab→Order (ว้าว B ระยะ 1) */
+const PRI_TH = {urgent:'🚨 ด่วน', routine:'ปกติ'};
+async function loadLab(){
+  const list = document.getElementById('list');
+  try{
+    const r = await hdFetch('/hd/api/v1/lab-ap/proposals?status=' + (tab==='laball'?'all':'pending'));
+    const d = await r.json();
+    const p = d.protocol || {};
+    document.getElementById('proto').innerHTML = (d.enabled ? '' : '<span style="color:#c0392b">⛔ สวิตช์ Lab→Order ปิดอยู่ (เปิดใน ⚙️ ตั้งค่า)</span>') +
+      `<span>เหล็ก: TSAT &lt; <b>${p.anemia_tsat_low}</b>% / Ferritin &lt; <b>${p.anemia_ferritin_low}</b> → IV · งดเมื่อ Ferritin &gt; <b>${p.anemia_ferritin_high}</b></span>` +
+      `<span>P &gt; <b>${p.lab_ap_p_high}</b> · Ca <b>${p.lab_ap_ca_low}–${p.lab_ap_ca_high}</b> · PTH <b>${p.lab_ap_pth_low}–${p.lab_ap_pth_high}</b></span>` +
+      `<span>VitD &lt; <b>${p.lab_ap_vitd_low}</b> · anti-HBs &lt; <b>${p.lab_ap_antihbs_low}</b></span><span>เว้น <b>${p.lab_ap_min_interval_days}</b> วัน/หมวด</span>`;
+    const items = d.items || [];
+    if (tab==='lab') document.getElementById('cntLab').textContent = items.length ? `(${items.length})` : '';
+    if (!items.length){ list.innerHTML = `<div class="esa-empty">${tab==='lab'?'✅ ไม่มีข้อเสนอจากแล็บรออนุมัติ':'ยังไม่มีประวัติ'}</div>`; return; }
+    list.innerHTML = items.map(it=>{
+      const canAct = it.status==='pending' && (ROLE==='physician'||ROLE==='admin');
+      return `<div class="esa-item ${it.priority==='urgent'?'hold':'review'}">
+        <div>
+          <div class="esa-who">${esc(it.name||'')}<small>HN ${esc(it.hn||'')}</small>
+            <span class="esa-badge b-${it.status}">${ST_TH[it.status]||it.status}</span>
+            ${it.priority==='urgent'?'<span class="esa-badge b-rejected">🚨 ด่วน</span>':''}
+            ${it.relayed?'<span class="esa-badge b-approved">📨 ส่งพยาบาลแล้ว</span>':''}</div>
+          <div style="display:flex;gap:16px;align-items:center;margin-top:6px;flex-wrap:wrap">
+            <div class="esa-hb" style="font-size:1rem">${esc(it.trigger_text||'')}<small>${esc(it.domain_th)} · ${fmtDate(it.lab_date)}</small></div>
+            <div class="esa-dose"><b>${esc(it.action_th)}</b><span class="arrow">→</span><span class="new">${esc(it.proposed||'')}</span></div>
+          </div>
+          <div class="esa-why">${esc(it.rationale||'')}</div>
+          ${it.status!=='pending' ? `<div class="esa-why">โดย ${esc(it.decided_by||'')} · ${fmtDate(it.decided_at)}${it.note?' · '+esc(it.note):''}</div>` : ''}
+        </div>
+        ${canAct ? `<div class="esa-act">
+          <input id="lprop_${it.id}" placeholder="แก้ข้อความคำสั่ง (ถ้าต้องการ)" value="">
+          <input id="lnote_${it.id}" placeholder="หมายเหตุถึงพยาบาล (ไม่บังคับ)">
+          <div class="row">
+            <button class="btn btn-primary" onclick="decideLab(${it.id},'approve')">✓ อนุมัติ + ส่งพยาบาล</button>
+            <button class="btn btn-secondary" onclick="decideLab(${it.id},'reject')">✗ ไม่ปรับ</button>
+          </div></div>` : (it.status==='pending' ? `<div class="esa-act" style="font-size:.75rem;color:var(--fg-muted)">รอแพทย์อนุมัติ</div>` : '')}
+      </div>`;
+    }).join('');
+  }catch(e){ list.innerHTML = `<div class="esa-empty">โหลดไม่สำเร็จ: ${esc(e.message||e)}</div>`; }
+}
+async function decideLab(id, decision){
+  const proposed = (document.getElementById('lprop_'+id)||{}).value || '';
+  const note = (document.getElementById('lnote_'+id)||{}).value || '';
+  const s = document.getElementById('runStatus');
+  try{
+    const r = await hdFetch(`/hd/api/v1/lab-ap/proposals/${id}/decide`, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({decision, proposed, note})});
+    const d = await r.json();
+    if(!r.ok) throw new Error(d.error||r.status);
+    s.textContent = decision==='approve' ? (d.relayed_to_nurses ? '✅ อนุมัติแล้ว — ส่งเข้ากลุ่มพยาบาลแล้ว' : '✅ อนุมัติแล้ว — ⚠️ ยังไม่ถึงกลุ่มพยาบาล' + (d.relay_error?(' ('+d.relay_error+')'):'' ) + ' โปรดแจ้งเอง') : '✓ บันทึก "ไม่ปรับ" แล้ว';
+    loadLab();
+  }catch(e){ s.textContent = '❌ ' + (e.message||e); }
+}
 
 async function loadDw(){
   const list = document.getElementById('list');
@@ -173,16 +231,17 @@ async function decide(id, decision){
 
 async function runNow(){
   const b = document.getElementById('btnRun'), s = document.getElementById('runStatus');
-  const isDw = tab.startsWith('dw');
-  b.disabled = true; s.textContent = isDw ? 'กำลังทบทวน DW จาก 10 รอบล่าสุด…' : 'กำลังตรวจ Hb ใหม่…';
+  const isDw = tab.startsWith('dw'), isLab = tab.startsWith('lab');
+  b.disabled = true; s.textContent = isDw ? 'กำลังทบทวน DW จาก 10 รอบล่าสุด…' : (isLab ? 'กำลังตรวจผลแล็บล่าสุดทุกคน…' : 'กำลังตรวจ Hb ใหม่…');
   try{
-    const r = await hdFetch(isDw ? '/hd/api/v1/dw/run' : '/hd/api/v1/esa/run', {method:'POST'});
+    const r = await hdFetch(isDw ? '/hd/api/v1/dw/run' : (isLab ? '/hd/api/v1/lab-ap/run' : '/hd/api/v1/esa/run'), {method:'POST'});
     const d = await r.json();
     if(!r.ok) throw new Error(d.error||r.status);
     s.textContent = d.created ? `✅ เสนอใหม่ ${d.created} รายการ (LINE แพทย์ ${d.line_sent})` : (isDw ? '✅ ไม่มีผู้ป่วยที่ควรปรับ DW ตอนนี้' : '✅ ไม่มี Hb ใหม่ที่ต้องปรับ');
     if(isDw && d.stats){ const t = d.stats;
       s.textContent += ` · ยกเลิกข้อเสนอเก่าที่ DW เปลี่ยน ${t.superseded||0} · ตรวจ ${t.patients} คน: มี DW ${t.with_dw} · มี BCM ≤180 วัน ${t.with_bcm} · มี ≥5 รอบ ${t.enough_sessions} · เสนอจาก BCM ${t.from_bcm} / จากรอบฟอก ${t.from_sessions} / ทั้งสอง ${t.both} · รอตัดสินใจอยู่แล้ว ${t.skipped_pending} · เพิ่งตัดสินใจ <21 วัน ${t.skipped_recent_decision} · ไม่มีสัญญาณ ${t.no_signal}`; }
-    setTab(isDw ? 'dw' : 'pending');
+    if(isLab && d.enabled===false) s.textContent = '⛔ สวิตช์ Lab→Order ปิดอยู่ — เปิดใน ⚙️ ตั้งค่า';
+    setTab(isDw ? 'dw' : (isLab ? 'lab' : 'pending'));
   }catch(e){ s.textContent = '❌ ' + (e.message||e); }
   b.disabled = false;
 }

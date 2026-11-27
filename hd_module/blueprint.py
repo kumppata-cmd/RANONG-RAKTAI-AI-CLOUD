@@ -2104,6 +2104,165 @@ def esa_decide(pid):
     return jsonify({"ok": True, "decision": decision, "applied": applied})
 
 
+# ── ว้าว B ระยะ 1 (27 พ.ย. 2569): Lab-to-Order Autopilot — แล็บอื่น ๆ (เหล็ก / Ca-P-PTH / VitD / HBV / HCV) ──
+
+def _lab_ap_protocol():
+    from .lab_autopilot import protocol
+    return protocol(get_setting_value)
+
+
+def run_lab_autopilot(trigger="scheduled"):
+    """สร้างข้อเสนอจากผลแล็บล่าสุด + LINE แพทย์ 1 ข้อความต่อชุด · สวิตช์ปิด → ไม่ทำอะไร"""
+    import os
+    from flask import current_app
+    from . import lab_autopilot as lap
+    if not lap.is_enabled(get_setting_value):
+        return {"created": 0, "enabled": False}
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return {"created": 0}
+    import psycopg2
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        created = lap.generate(conn, _lab_ap_protocol())
+    finally:
+        conn.close()
+    sent = 0
+    if created:
+        push_fn = current_app.config.get("LINE_PUSH_FN")
+        ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+        base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+        msg = lap.line_summary(created, base)
+        for uid in [r.strip() for r in ids.split(",") if r.strip()]:
+            try:
+                if push_fn and push_fn(uid, msg) is not False:
+                    sent += 1
+            except Exception as e:
+                logger.warning("lab autopilot push: %s", e)
+        log_action(user_id=None, action="lab_ap.proposals_created", resource_type="lab_ap",
+                   new_values={"count": len(created), "trigger": trigger, "line_sent": sent,
+                               "domains": sorted({c["domain"] for c in created})}, ip_address="")
+    return {"created": len(created), "line_sent": sent, "items": created, "enabled": True}
+
+
+def _lab_ap_kick(trigger):
+    """เรียกหลังยืนยันแล็บ — รันใน thread แยก ไม่ให้ช้า/ล้มทางเดิม"""
+    import threading
+    from flask import current_app
+    if not get_setting_value("lab_autopilot", "off") or str(get_setting_value("lab_autopilot", "off")).lower() != "on":
+        return
+    app = current_app._get_current_object()
+
+    def _run():
+        with app.app_context():
+            try:
+                r = run_lab_autopilot(trigger=trigger)
+                if r.get("created"):
+                    logger.info("lab autopilot (%s): %s proposals", trigger, r["created"])
+            except Exception as e:  # noqa: BLE001
+                logger.warning("lab autopilot kick failed: %s", e)
+    threading.Thread(target=_run, daemon=True, name="lab-ap-kick").start()
+
+
+@hd_bp.route("/lab-ap/proposals", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def lab_ap_proposals():
+    import os
+    import psycopg2
+    from . import lab_autopilot as lap
+    status = request.args.get("status", "pending")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(lap.CREATE_SQL)
+            conn.commit()
+            q = """SELECT l.id, l.patient_id, l.hn, p.patient_name, l.domain, l.lab_date, l.trigger_text, l.action, l.proposed,
+                          l.rationale, l.priority, l.status, l.created_at, l.decided_by, l.decided_at, l.note, l.relayed
+                   FROM hd_lab_proposals l JOIN hd_patient_mapping p ON p.id = l.patient_id"""
+            if status == "pending":
+                cur.execute(q + " WHERE l.status = 'pending' ORDER BY (l.priority = 'urgent') DESC, l.created_at DESC")
+            else:
+                cur.execute(q + " ORDER BY l.created_at DESC LIMIT 200")
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    items = [{"id": r[0], "patient_id": r[1], "hn": r[2], "name": r[3], "domain": r[4], "domain_th": lap.DOMAIN_TH.get(r[4], r[4]),
+              "lab_date": r[5].isoformat() if r[5] else None, "trigger_text": r[6], "action": r[7],
+              "action_th": lap.ACTION_TH.get(r[7], r[7]), "proposed": r[8], "rationale": r[9], "priority": r[10],
+              "status": r[11], "created_at": r[12].isoformat() if r[12] else None, "decided_by": r[13],
+              "decided_at": r[14].isoformat() if r[14] else None, "note": r[15], "relayed": bool(r[16])} for r in rows]
+    return jsonify({"items": items, "enabled": lap.is_enabled(get_setting_value), "protocol": _lab_ap_protocol()})
+
+
+@hd_bp.route("/lab-ap/proposals/<int:pid>/decide", methods=["POST"])
+@require_role("physician", "admin")
+def lab_ap_decide(pid):
+    """แพทย์อนุมัติ (แก้ข้อความได้) / ไม่ปรับ · อนุมัติแล้วส่งเข้ากลุ่มพยาบาลผ่านท่อ physician_order เดิม"""
+    import os
+    import psycopg2
+    from . import lab_autopilot as lap
+    data = request.get_json(silent=True) or {}
+    decision = data.get("decision")
+    note = (data.get("note") or "").strip()[:300]
+    override = (data.get("proposed") or "").strip()[:400]
+    relay = data.get("relay", True)
+    if decision not in ("approve", "reject"):
+        return jsonify({"error": "decision must be approve|reject"}), 400
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    who = g.get("hd_username") or str(g.get("hd_user_id") or "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    row = None
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT l.id, l.hn, p.patient_name, l.domain, l.trigger_text, l.action, l.proposed, l.rationale, l.status
+                           FROM hd_lab_proposals l JOIN hd_patient_mapping p ON p.id = l.patient_id WHERE l.id = %s""", (pid,))
+            r = cur.fetchone()
+            if not r:
+                return jsonify({"error": "not found"}), 404
+            if r[8] != "pending":
+                return jsonify({"error": f"already {r[8]}"}), 409
+            row = {"id": r[0], "hn": r[1], "name": r[2], "domain": r[3], "trigger_text": r[4], "action": r[5],
+                   "proposed": override or r[6], "rationale": r[7]}
+            cur.execute("""UPDATE hd_lab_proposals SET status = %s, decided_by = %s, decided_at = NOW(), note = %s,
+                           proposed = COALESCE(NULLIF(%s, ''), proposed) WHERE id = %s""",
+                        ("approved" if decision == "approve" else "rejected", who, note, override, pid))
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action=f"lab_ap.{decision}", resource_type="lab_ap", resource_id=pid,
+               new_values={"hn": row["hn"], "domain": row["domain"], "action": row["action"], "proposed": row["proposed"], "note": note},
+               ip_address=request.remote_addr or "")
+    relayed = {"sent": False}
+    if decision == "approve" and relay:
+        try:
+            txt = lap.nurse_order_text(row, who) + (f"\nหมายเหตุ: {note}" if note else "")
+            relayed = push_nurse_group(txt, fallback_recipients=False) or {"sent": False}
+            if relayed.get("sent"):
+                conn = psycopg2.connect(db_url, connect_timeout=5)
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute("UPDATE hd_lab_proposals SET relayed = TRUE WHERE id = %s", (pid,))
+                    conn.commit()
+                finally:
+                    conn.close()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("lab_ap nurse push: %s", e)
+            relayed = {"sent": False, "error": str(e)[:120]}
+    return jsonify({"ok": True, "decision": decision, "relayed_to_nurses": bool(relayed.get("sent")),
+                    "relay_error": relayed.get("error")})
+
+
+@hd_bp.route("/lab-ap/run", methods=["POST"])
+@require_role("physician", "admin")
+def lab_ap_run_now():
+    try:
+        return jsonify(run_lab_autopilot(trigger="manual"))
+    except Exception as e:  # noqa: BLE001
+        logger.error("lab autopilot run: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
 @hd_bp.route("/esa/run", methods=["POST"])
 @require_role("physician", "admin")
 def esa_run_now():
@@ -4105,6 +4264,11 @@ def lab_doc_verify(row_id):
         conn.close()
         if not r:
             return jsonify({"error": "ไม่พบรายการแล็บนี้"}), 404
+        if action == "verify":
+            try:   # ว้าว B: แล็บยืนยันแล้ว → ร่างข้อเสนอคำสั่ง (thread แยก, สวิตช์ปิด = ไม่ทำ)
+                _lab_ap_kick("verify")
+            except Exception as _ke:  # noqa: BLE001
+                logger.info("lab_ap kick skipped: %s", _ke)
         return jsonify({"ok": True, "id": row_id, "verified_status": new_status,
                         "hn": r[0], "doc_id": r[1],
                         "specimen_date": r[2].isoformat() if r[2] else None})
@@ -11699,6 +11863,11 @@ def update_settings():
         "doc_classify_ai",           # 26 พ.ย. 2569: ใบที่ตัวจัดประเภทไม่แน่ใจ (ใบยา/ใบฟอก) → ถาม Claude Vision on/off — default off
         "passport_enabled",          # 27 พ.ย. 2569: 🪪 Dialysis Passport (บัตรฟอกไตฉุกเฉิน) on/off — default off
         "passport_ttl_hours",        # อายุลิงก์บัตรฉุกเฉิน (ชั่วโมง) default 72
+        "lab_autopilot",             # 27 พ.ย. 2569: 🧪→💊 Lab-to-Order Autopilot on/off — default off
+        "lab_ap_tsat_high", "lab_ap_p_high", "lab_ap_p_low", "lab_ap_ca_high", "lab_ap_ca_low",
+        "lab_ap_pth_high", "lab_ap_pth_low", "lab_ap_vitd_low", "lab_ap_antihbs_low",
+        "lab_ap_min_interval_days", "lab_ap_lookback_days",
+        "lab_ap_iron_regimen", "lab_ap_binder_regimen", "lab_ap_pth_regimen", "lab_ap_vitd_regimen", "lab_ap_hbv_regimen",
         "tpl_weight_reply",          # ข้อความตอบน้ำหนัก (แก้ได้ มีตัวแปร {weight} {gain} ...)
         "patient_card_note",         # ข้อความจากแพทย์ต่อท้ายการ์ดสรุปหลังฟอกทุกใบ
         "family_liff_id",            # 21 พ.ย. 2569: LIFF ID ของหน้า Family Link (ญาติรับสรุปหลังฟอก)
