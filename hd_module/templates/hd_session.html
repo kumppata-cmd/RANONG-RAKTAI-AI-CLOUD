@@ -325,7 +325,9 @@
     <div id="idhAdvice" style="font-size:.82rem;font-weight:600;margin:4px 0"></div>
     <div id="idhFactors" style="display:flex;flex-wrap:wrap;gap:6px;margin-top:4px"></div>
     <div id="idhRecs" style="margin-top:8px;display:none"></div>
-    <div style="font-size:.68rem;color:var(--fg-muted);margin-top:6px">คะแนนจาก UF rate, IDWG, แนวโน้ม SBP, ประวัติ IDH, Hb/Alb, อายุ — เป็นคำแนะนำให้เฝ้าระวัง <b>ไม่ใช่คำสั่งการรักษา</b></div>
+    <div id="idhPlan" style="margin-top:8px;display:none;font-size:.82rem;font-weight:700;padding:6px 10px;border-radius:8px"></div>
+    <div id="idhFp" style="margin-top:6px;display:none;font-size:.76rem;padding:6px 10px;border-radius:8px;background:var(--bg);border:1px dashed var(--border)"></div>
+    <div style="font-size:.68rem;color:var(--fg-muted);margin-top:6px">คะแนนจาก UF rate, IDWG, แนวโน้ม SBP, ประวัติ IDH, Hb/Alb, อายุ + 🧬 ลายนิ้วมือ IDH ส่วนตัว (จุดหัก UF/เวลาที่ผู้ป่วยรายนี้เคยตก) — เป็นคำแนะนำให้เฝ้าระวัง <b>ไม่ใช่คำสั่งการรักษา</b></div>
   </div>
 
   <!-- WOW #4: AI UF Coach -->
@@ -2044,6 +2046,12 @@ function loadIdhRisk(){
       recsEl.innerHTML = `<div style="font-size:.78rem;font-weight:700;margin-bottom:4px;color:${col}">💡 คำแนะนำเฉพาะราย:</div>` +
         recs.map(x=>`<div style="font-size:.78rem;padding:4px 8px;margin:3px 0;border-left:3px solid ${pri[x.priority]||'var(--border)'};background:var(--bg);border-radius:0 6px 6px 0">${x.icon} ${x.text}</div>`).join('');
     } else { recsEl.style.display = 'none'; }
+    /* 🧬 ลายนิ้วมือ IDH ส่วนตัว + เทียบเป้า UF กับซองปลอดภัย */
+    const fpEl = document.getElementById('idhFp'), planEl = document.getElementById('idhPlan');
+    if(fpEl){ if(r.fingerprint_text){ fpEl.style.display='block'; fpEl.innerHTML = '🧬 <b>ลายนิ้วมือ IDH ของผู้ป่วย:</b> ' + r.fingerprint_text; } else fpEl.style.display='none'; }
+    if(planEl){ const pc = r.plan_check; if(pc){ planEl.style.display='block';
+        const c = pc.level==='high' ? ['#fdecea','#c0392b','⛔'] : pc.level==='moderate' ? ['#fff4e5','#a04000','⚠️'] : ['#eafaf1','#1e8449','✅'];
+        planEl.style.background=c[0]; planEl.style.color=c[1]; planEl.textContent = c[2]+' '+pc.text; } else planEl.style.display='none'; }
   }).catch(()=>{});
 }
 

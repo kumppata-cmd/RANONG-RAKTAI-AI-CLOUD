@@ -15,11 +15,14 @@ Anti-HIV ไม่เกี่ยวข้องและไม่ถูกอ�
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
 SETTING_KEY = "lab_autopilot"
+# ระยะ 2: คำสั่ง LINE — 'อนุมัติแล็บ 41' / 'ไม่ปรับแล็บ 41' (ปุ่ม quick reply ส่งข้อความนี้ให้ ไม่ต้องพิมพ์)
+LINE_CMD_RE = re.compile(r"^\s*(อนุมัติแล็บ|ไม่ปรับแล็บ|labyes|labno)\s*#?(\d{1,7})\s*$", re.I)
 
 DEFAULTS = {
     # iron (ใช้คีย์เดียวกับ anemia.py เพื่อให้เกณฑ์ตรงกันทั้งระบบ)
@@ -295,8 +298,20 @@ def line_summary(created: list[dict], base_url: str) -> str:
     if len(created) > 10:
         L.append(f"… อีก {len(created) - 10} รายการ")
     L.append("━━━━━━━━━━━━")
-    L.append(f"✍️ อนุมัติ/แก้/ไม่ปรับ ทีละรายการ: {base_url}/hd/esa (แท็บ 🧪 Lab→Order)")
+    L.append(f"✍️ กดปุ่ม ✓/✗ ด้านล่าง หรือพิมพ์ 'อนุมัติแล็บ <เลข>' · แก้ข้อความ/ดูทั้งหมด: {base_url}/hd/esa (แท็บ 🧪 Lab→Order)")
     return "\n".join(L)
+
+
+def quick_reply_items(created: list[dict], max_items: int = 12) -> list[dict]:
+    """ปุ่ม LINE quick reply คู่ อนุมัติ/ไม่ปรับ ต่อข้อเสนอ (สูงสุด 13 ปุ่มตาม LINE) — เรียงด่วนก่อน"""
+    items = []
+    for c in sorted(created, key=lambda x: (x.get("priority") != "urgent", x.get("hn") or "")):
+        if len(items) + 2 > max_items:
+            break
+        tag = f"#{c['id']} {(c.get('name') or '')[:8]}"
+        items.append({"type": "action", "action": {"type": "message", "label": f"✓ {tag}"[:20], "text": f"อนุมัติแล็บ {c['id']}"}})
+        items.append({"type": "action", "action": {"type": "message", "label": f"✗ {tag}"[:20], "text": f"ไม่ปรับแล็บ {c['id']}"}})
+    return items
 
 
 def nurse_order_text(row: dict, physician_name: str) -> str:

@@ -1,0 +1,80 @@
+{% extends "hd_base.html" %}
+{% block title %}🔧 Drift Radar เครื่องฟอก{% endblock %}
+{% block nav_drift %}active{% endblock %}
+{% block extra_css %}
+<style>
+.dr-wrap{max-width:1100px;margin:0 auto;padding:10px}
+.dr-sum{display:flex;gap:10px;flex-wrap:wrap;margin:8px 0}
+.dr-tile{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:8px 14px;min-width:120px}
+.dr-tile b{font-size:1.4rem;display:block}
+.dr-m{background:var(--card);border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-top:10px}
+.dr-m.alert{border-color:#c0392b}.dr-m.watch{border-color:#e67e22}
+.dr-head{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:baseline}
+.dr-pill{padding:2px 8px;border-radius:999px;font-size:.74rem;font-weight:600}
+.p-alert{background:rgba(231,76,60,.15);color:#b71c1c}.p-watch{background:rgba(230,126,34,.15);color:#a04000}.p-ok{background:rgba(39,174,96,.15);color:#1e8449}.p-mut{background:rgba(127,140,141,.15);color:var(--fg-muted)}
+.dr-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;margin-top:8px}
+.dr-sp{font-size:.74rem;color:var(--fg-muted)}
+.dr-sp svg{width:100%;height:48px;display:block}
+.dr-sp polyline{fill:none;stroke:var(--accent,#1f5fa8);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.dr-sp circle{fill:var(--card);stroke:var(--accent,#1f5fa8);stroke-width:2}
+.dr-flag{font-size:.84rem;margin-top:4px}
+.dr-note{font-size:.74rem;color:var(--fg-muted);line-height:1.5;margin-top:8px}
+table.dr-w{width:100%;border-collapse:collapse;font-size:.84rem}table.dr-w td,table.dr-w th{padding:5px 6px;border-bottom:1px solid var(--border);text-align:left}
+</style>
+{% endblock %}
+{% block content %}
+<div class="dr-wrap">
+  <h2 style="margin:0">🔧 Drift Radar เครื่องฟอก <span style="font-weight:400;font-size:.85rem;color:var(--fg-muted)">สัญญาณจาก TMP / VP / AP / Conductivity / Temp ที่พยาบาลบันทึกอยู่แล้ว — ให้ช่างดูก่อนเครื่องเสีย</span></h2>
+  <div style="display:flex;gap:8px;align-items:center;margin-top:6px;flex-wrap:wrap">
+    <label style="font-size:.82rem">ช่วง <select id="drDays" class="form-control" style="display:inline-block;width:auto" onchange="drLoad()"><option value="28">28 วัน</option><option value="56">56 วัน</option><option value="90">90 วัน</option></select></label>
+    <span id="drStatus" style="font-size:.78rem;color:var(--fg-muted)"></span>
+  </div>
+  <div class="dr-sum" id="drSum"></div>
+  <div id="drList"></div>
+  <div class="dr-m" id="drWater" style="display:none"></div>
+  <div class="dr-note">เกณฑ์: TMP ขึ้น > 15 mmHg/สัปดาห์ หรือ 3 รอบล่าสุด > 1.5× baseline (≥6 รอบ) = 🔴 ควรตรวจ · VP ขึ้น > 10/สัปดาห์, AP ติดลบมากขึ้น > 10/สัปดาห์ = 🟠 เฝ้าระวัง (ปนปัจจัยผู้ป่วย/เข็ม) · Conductivity SD 7 วัน > 0.3 หรือนอก 13.5–14.5 · Dialysate temp เบี่ยง > 0.5 ≥3 ครั้ง · จัดกลุ่มตามทะเบียนเครื่อง↔เตียง (⚙️ อุปกรณ์) — ถ้าย้ายเครื่องให้อัปเดตทะเบียน ไม่งั้นสัญญาณจะปนกัน · เป็นสัญญาณให้ช่างดู ไม่ใช่การวินิจฉัย</div>
+</div>
+{% endblock %}
+{% block extra_js %}
+<script>
+const LV = {alert:['🔴','ควรตรวจ','p-alert'], watch:['🟠','เฝ้าระวัง','p-watch'], ok:['🟢','ปกติ','p-ok']};
+function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function spark(label, pts, unit){
+  if(!pts || pts.length < 2) return `<div class="dr-sp">${esc(label)}<div style="padding:14px 0;text-align:center">— ข้อมูลไม่พอ (${pts?pts.length:0} รอบ)</div></div>`;
+  const W=220,H=48,P=6, vs=pts.map(p=>p[1]); const mn=Math.min(...vs), mx=Math.max(...vs), rg=(mx-mn)||1;
+  const xy=pts.map((p,i)=>[P+i*(W-2*P)/(pts.length-1), H-P-((p[1]-mn)/rg)*(H-2*P)]);
+  const poly=xy.map(a=>a.map(v=>v.toFixed(1)).join(',')).join(' ');
+  const last=xy[xy.length-1];
+  const dots=xy.map((a,i)=>`<circle cx="${a[0].toFixed(1)}" cy="${a[1].toFixed(1)}" r="4" opacity="0"><title>${pts[i][0]}: ${pts[i][1]} ${unit}</title></circle>`).join('');
+  return `<div class="dr-sp">${esc(label)} <b style="color:var(--fg)">${vs[vs.length-1]} ${unit}</b> <span>(${pts.length} รอบ · ต่ำสุด ${mn} สูงสุด ${mx})</span>
+    <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(label)} ${pts.length} รอบ"><polyline points="${poly}"/><circle cx="${last[0].toFixed(1)}" cy="${last[1].toFixed(1)}" r="3.5"/>${dots}</svg></div>`;
+}
+async function drLoad(){
+  const days = document.getElementById('drDays').value, st = document.getElementById('drStatus');
+  st.textContent = 'กำลังคำนวณ…';
+  try{
+    const r = await hdFetch('/hd/api/v1/drift-radar?days='+days); const d = await r.json();
+    if(!r.ok) throw new Error(d.error||r.status);
+    st.textContent = 'คำนวณเมื่อ '+d.generated_at;
+    document.getElementById('drSum').innerHTML = ['alert','watch','ok'].map(k=>`<div class="dr-tile"><span class="dr-pill ${LV[k][2]}">${LV[k][0]} ${LV[k][1]}</span><b>${d.summary[k]||0}</b><span style="font-size:.74rem;color:var(--fg-muted)">เครื่อง</span></div>`).join('');
+    const list = document.getElementById('drList');
+    if(!d.machines.length){ list.innerHTML = '<div class="dr-m">ยังไม่มีข้อมูล flowsheet ในช่วงนี้ — Radar จะมีความหมายเมื่อสะสม ≥6 รอบต่อเครื่อง</div>'; }
+    else list.innerHTML = d.machines.map(m=>{
+      const lv = LV[m.level]||LV.ok;
+      return `<div class="dr-m ${m.level}">
+        <div class="dr-head"><div><b>เตียง ${m.bed}</b> · ${esc(m.name)}${m.serial?' <span style="color:var(--fg-muted);font-size:.78rem">S/N '+esc(m.serial)+'</span>':''}</div>
+          <div><span class="dr-pill ${lv[2]}">${lv[0]} ${lv[1]}</span> <span class="dr-pill p-mut">${m.n_sessions} รอบ</span>${m.next_pm?' <span class="dr-pill p-mut">PM ถัดไป '+esc(m.next_pm)+'</span>':''}</div></div>
+        ${m.flags.map(f=>`<div class="dr-flag">${f.level==='alert'?'🔴':'🟠'} ${esc(f.text)}</div>`).join('')}
+        ${!m.enough_data?'<div class="dr-flag" style="color:var(--fg-muted)">ℹ️ ข้อมูลยังน้อยกว่า 6 รอบ — ยังไม่ประเมิน trend</div>':''}
+        <div class="dr-grid">${spark('TMP', m.series.tmp, 'mmHg')}${spark('VP', m.series.vp, 'mmHg')}${spark('AP', m.series.ap, 'mmHg')}</div>
+      </div>`; }).join('');
+    const w = document.getElementById('drWater');
+    if(d.water && d.water.length){ w.style.display='';
+      w.innerHTML = '<b>💧 คุณภาพน้ำ RO (ผลล่าสุดต่อชนิด)</b><table class="dr-w"><tr><th>ชนิด</th><th>วันที่</th><th>ผล</th><th>สถานะ</th></tr>' +
+        d.water.map(x=>{const lv=LV[x.level]||LV.ok; return `<tr><td>${esc(x.type)}</td><td>${esc(x.date)} <span style="color:var(--fg-muted)">(${x.age_days} วัน)</span></td><td>${esc(x.value||'')} ${esc(x.unit||'')}</td><td><span class="dr-pill ${lv[2]}">${lv[0]} ${x.pass_fail==='fail'?'ไม่ผ่าน':(x.overdue?'เกินกำหนดตรวจ':lv[1])}</span></td></tr>`;}).join('') + '</table>'; }
+    else w.style.display='none';
+  }catch(e){ st.textContent = '❌ '+(e.message||e); }
+}
+drLoad();
+</script>
+{% endblock %}

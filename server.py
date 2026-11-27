@@ -17746,6 +17746,8 @@ def _lab_bridge_values_line(doc_id: str) -> str:
 
 
 _LAB_CONFIRM_RE = re.compile(r"^\s*(?:ยืนยันแล็บ|ยืนยันแลป|labok|lab\s*ok)\s+([0-9a-fA-F]{6,12})\s*$")
+# ว้าว B ระยะ 2 (27 พ.ย. 2569 อนุมัติ): แพทย์กดปุ่ม/พิมพ์ 'อนุมัติแล็บ <id>' / 'ไม่ปรับแล็บ <id>' จาก LINE → hd_module ตัดสิน + ส่งกลุ่มพยาบาล
+_LAB_AP_RE = re.compile(r"^\s*(?:อนุมัติแล็บ|ไม่ปรับแล็บ|labyes|labno)\s*#?\d{1,7}\s*$", re.I)
 
 
 def _lab_confirm_command(doc8: str, user_hash: str) -> str:
@@ -17847,6 +17849,7 @@ def _hd_file_lab_sheet(data: bytes, ext: str, hd_user: str, clinic_hn: str, res:
 
 app.config["HD_FILE_LAB_SHEET_FN"] = _hd_file_lab_sheet   # เรียกจาก hd_module POST /lab-sheet/file
 app.config["DOC_KEYWORD_CLASSIFY_FN"] = classify_with_keywords   # 26 พ.ย. 2569: หน้าทดสอบ /hd/doc-classify-test เทียบตัวเดิมกับ AI (อ่านอย่างเดียว)
+app.config["LINE_PUSH_QR_FN"] = lambda uid, text, items: push_messages(uid, [{"type": "text", "text": text[:5000], "quickReply": {"items": items[:13]}}])   # 27 พ.ย. 2569: ปุ่มอนุมัติ Lab→Order ใน LINE
 
 
 def _multipage_flush(user_hash: str):
@@ -19794,6 +19797,18 @@ def webhook():
                             logger.warning("lab confirm: %s", type(_lc_err).__name__)
                             _lc_msg = "❌ ยืนยันไม่สำเร็จ — ลองใหม่อีกครั้ง"
                         reply_message(reply_token, _lc_msg)
+                elif _LAB_AP_RE.match(text or ""):
+                    if not (user_hash in PHYSICIAN_USERS or user_hash in ADMIN_USERS):
+                        reply_message(reply_token, "⚠️ เฉพาะแพทย์เท่านั้นที่อนุมัติข้อเสนอจากแล็บได้")
+                    else:
+                        try:
+                            from hd_module.blueprint import lab_ap_line_command as _lap_cmd
+                            with app.app_context():
+                                _lap_msg = _lap_cmd(text, "physician" if user_hash in PHYSICIAN_USERS else "admin")
+                        except Exception as _lap_err:
+                            logger.warning("lab_ap line cmd: %s", type(_lap_err).__name__)
+                            _lap_msg = "❌ ไม่สำเร็จ — ลองใหม่ หรือตัดสินในหน้า Autopilot"
+                        reply_message(reply_token, _lap_msg or "❌ รูปแบบคำสั่งไม่ถูกต้อง")
                 elif _parse_change_category(text) is not None:
                     _cc_doc, _cc_cat, _cc_hn = _parse_change_category(text)
                     if (user_hash not in PHYSICIAN_USERS

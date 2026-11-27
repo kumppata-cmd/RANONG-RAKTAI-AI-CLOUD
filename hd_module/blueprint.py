@@ -1657,6 +1657,23 @@ def session_idh_risk(session_id):
     out["features"] = {k: (float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else v)
                        for k, v in f.items() if k != "sbp_series"}
     out["features"]["sbp_series"] = f.get("sbp_series")
+    # 🧬 ว้าว พิเศษ (27 พ.ย. 2569): ลายนิ้วมือ IDH ส่วนตัว + เทียบเป้า UF กับซองปลอดภัยของผู้ป่วยรายนี้
+    try:
+        from .idh_fingerprint import fingerprint_for, plan_check, summary_text
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        conn.autocommit = True
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT patient_id FROM hd_sessions WHERE id = %s", (session_id,))
+                pr = cur.fetchone()
+                fp = fingerprint_for(cur, pr[0], exclude_session=session_id) if pr else {"enough": False}
+        finally:
+            conn.close()
+        out["fingerprint"] = fp
+        out["fingerprint_text"] = summary_text(fp)
+        out["plan_check"] = plan_check(fp, f.get("uf_goal"))
+    except Exception as e:  # noqa: BLE001
+        logger.debug("idh fingerprint: %s", e)
     return jsonify(out)
 
 
@@ -2104,6 +2121,53 @@ def esa_decide(pid):
     return jsonify({"ok": True, "decision": decision, "applied": applied})
 
 
+# ── ว้าว พิเศษ (27 พ.ย. 2569): 🧬 IDH Fingerprint — จุดหักส่วนตัวของผู้ป่วย ──
+
+@hd_bp.route("/patients/hn/<hn>/idh-fingerprint", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def patient_idh_fingerprint(hn):
+    import os
+    import psycopg2
+    from .idh_fingerprint import fingerprint_for, summary_text
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM hd_patient_mapping WHERE hn = %s AND is_active = TRUE", (hn,))
+            r = cur.fetchone()
+            if not r:
+                return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+            fp = fingerprint_for(cur, r[0], limit=int(request.args.get("limit", 12) or 12))
+    finally:
+        conn.close()
+    return jsonify({"hn": hn, "fingerprint": fp, "text": summary_text(fp)})
+
+
+# ── ว้าว D (27 พ.ย. 2569): 🔧 Machine Drift Radar — อ่านอย่างเดียว ──
+
+@hd_bp.route("/drift-radar", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def drift_radar_api():
+    import os
+    import psycopg2
+    from . import drift_radar as dr
+    days = max(7, min(int(request.args.get("days", 28) or 28), 180))
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        data = dr.collect(conn, days)
+    finally:
+        conn.close()
+    return jsonify(data)
+
+
+@hd_web.route("/drift-radar")
+def drift_radar_page():
+    """🔧 เครื่องไหนกำลังจะมีปัญหา — จาก TMP/VP/AP/Cond ที่บันทึกอยู่แล้ว"""
+    return render_template("hd_drift_radar.html")
+
+
 # ── ว้าว A (27 พ.ย. 2569): 🩸 Kidney Twin — IDH early warning, event-driven ──
 
 import re as _re_twin
@@ -2260,12 +2324,23 @@ def run_lab_autopilot(trigger="scheduled"):
     sent = 0
     if created:
         push_fn = current_app.config.get("LINE_PUSH_FN")
+        push_qr = current_app.config.get("LINE_PUSH_QR_FN")   # ระยะ 2: ปุ่มอนุมัติ/ไม่ปรับใน LINE (ถ้า server.py ลงทะเบียน)
         ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
         base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
         msg = lap.line_summary(created, base)
+        items = lap.quick_reply_items(created)
         for uid in [r.strip() for r in ids.split(",") if r.strip()]:
             try:
-                if push_fn and push_fn(uid, msg) is not False:
+                ok = False
+                if push_qr and items:
+                    try:
+                        ok = push_qr(uid, msg, items) is not False
+                    except Exception as e:  # noqa: BLE001
+                        logger.info("lab autopilot quick-reply push failed, fallback text: %s", e)
+                        ok = False
+                if not ok and push_fn:
+                    ok = push_fn(uid, msg) is not False
+                if ok:
                     sent += 1
             except Exception as e:
                 logger.warning("lab autopilot push: %s", e)
@@ -2325,44 +2400,39 @@ def lab_ap_proposals():
     return jsonify({"items": items, "enabled": lap.is_enabled(get_setting_value), "protocol": _lab_ap_protocol()})
 
 
-@hd_bp.route("/lab-ap/proposals/<int:pid>/decide", methods=["POST"])
-@require_role("physician", "admin")
-def lab_ap_decide(pid):
-    """แพทย์อนุมัติ (แก้ข้อความได้) / ไม่ปรับ · อนุมัติแล้วส่งเข้ากลุ่มพยาบาลผ่านท่อ physician_order เดิม"""
+def lab_ap_apply_decision(pid, decision, who, note="", override="", relay=True, user_id=None, ip=""):
+    """แกนการตัดสิน (ใช้ทั้งหน้าเว็บและคำสั่ง LINE) → (payload, http_status)
+    อนุมัติ → อัปเดตสถานะ + ส่งคำสั่งเข้ากลุ่มพยาบาลผ่านท่อ physician_order เดิม"""
     import os
     import psycopg2
     from . import lab_autopilot as lap
-    data = request.get_json(silent=True) or {}
-    decision = data.get("decision")
-    note = (data.get("note") or "").strip()[:300]
-    override = (data.get("proposed") or "").strip()[:400]
-    relay = data.get("relay", True)
+    note = (note or "").strip()[:300]
+    override = (override or "").strip()[:400]
     if decision not in ("approve", "reject"):
-        return jsonify({"error": "decision must be approve|reject"}), 400
+        return {"error": "decision must be approve|reject"}, 400
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
-    who = g.get("hd_username") or str(g.get("hd_user_id") or "")
     conn = psycopg2.connect(db_url, connect_timeout=5)
     row = None
     try:
         with conn.cursor() as cur:
             cur.execute("""SELECT l.id, l.hn, p.patient_name, l.domain, l.trigger_text, l.action, l.proposed, l.rationale, l.status
-                           FROM hd_lab_proposals l JOIN hd_patient_mapping p ON p.id = l.patient_id WHERE l.id = %s""", (pid,))
+                           FROM hd_lab_proposals l JOIN hd_patient_mapping p ON p.id = l.patient_id WHERE l.id = %s""", (int(pid),))
             r = cur.fetchone()
             if not r:
-                return jsonify({"error": "not found"}), 404
+                return {"error": "not found"}, 404
             if r[8] != "pending":
-                return jsonify({"error": f"already {r[8]}"}), 409
+                return {"error": f"already {r[8]}", "status": r[8], "hn": r[1], "name": r[2]}, 409
             row = {"id": r[0], "hn": r[1], "name": r[2], "domain": r[3], "trigger_text": r[4], "action": r[5],
                    "proposed": override or r[6], "rationale": r[7]}
             cur.execute("""UPDATE hd_lab_proposals SET status = %s, decided_by = %s, decided_at = NOW(), note = %s,
                            proposed = COALESCE(NULLIF(%s, ''), proposed) WHERE id = %s""",
-                        ("approved" if decision == "approve" else "rejected", who, note, override, pid))
+                        ("approved" if decision == "approve" else "rejected", (who or "")[:100], note, override, int(pid)))
         conn.commit()
     finally:
         conn.close()
-    log_action(user_id=g.get("hd_user_id"), action=f"lab_ap.{decision}", resource_type="lab_ap", resource_id=pid,
-               new_values={"hn": row["hn"], "domain": row["domain"], "action": row["action"], "proposed": row["proposed"], "note": note},
-               ip_address=request.remote_addr or "")
+    log_action(user_id=user_id, action=f"lab_ap.{decision}", resource_type="lab_ap", resource_id=int(pid),
+               new_values={"hn": row["hn"], "domain": row["domain"], "action": row["action"], "proposed": row["proposed"],
+                           "note": note, "by": who}, ip_address=ip or "")
     relayed = {"sent": False}
     if decision == "approve" and relay:
         try:
@@ -2372,15 +2442,49 @@ def lab_ap_decide(pid):
                 conn = psycopg2.connect(db_url, connect_timeout=5)
                 try:
                     with conn.cursor() as cur:
-                        cur.execute("UPDATE hd_lab_proposals SET relayed = TRUE WHERE id = %s", (pid,))
+                        cur.execute("UPDATE hd_lab_proposals SET relayed = TRUE WHERE id = %s", (int(pid),))
                     conn.commit()
                 finally:
                     conn.close()
         except Exception as e:  # noqa: BLE001
             logger.warning("lab_ap nurse push: %s", e)
             relayed = {"sent": False, "error": str(e)[:120]}
-    return jsonify({"ok": True, "decision": decision, "relayed_to_nurses": bool(relayed.get("sent")),
-                    "relay_error": relayed.get("error")})
+    return {"ok": True, "decision": decision, "relayed_to_nurses": bool(relayed.get("sent")),
+            "relay_error": relayed.get("error"), "hn": row["hn"], "name": row["name"], "proposed": row["proposed"],
+            "action_th": lap.ACTION_TH.get(row["action"], row["action"])}, 200
+
+
+@hd_bp.route("/lab-ap/proposals/<int:pid>/decide", methods=["POST"])
+@require_role("physician", "admin")
+def lab_ap_decide(pid):
+    """แพทย์อนุมัติ (แก้ข้อความได้) / ไม่ปรับ · อนุมัติแล้วส่งเข้ากลุ่มพยาบาลผ่านท่อ physician_order เดิม"""
+    data = request.get_json(silent=True) or {}
+    who = g.get("hd_username") or str(g.get("hd_user_id") or "")
+    body, status = lab_ap_apply_decision(pid, data.get("decision"), who, note=data.get("note"), override=data.get("proposed"),
+                                         relay=data.get("relay", True), user_id=g.get("hd_user_id"), ip=request.remote_addr or "")
+    return jsonify(body), status
+
+
+def lab_ap_line_command(text, who_label):
+    """ว้าว B ระยะ 2 (27 พ.ย. 2569): คำสั่ง LINE 'อนุมัติแล็บ <id>' / 'ไม่ปรับแล็บ <id>' จากแพทย์ → ข้อความตอบ"""
+    import re as _re
+    from . import lab_autopilot as lap
+    m = lap.LINE_CMD_RE.match(text or "")
+    if not m:
+        return None
+    decision = "approve" if m.group(1).lower() in ("อนุมัติแล็บ", "labyes") else "reject"
+    pid = int(m.group(2))
+    body, status = lab_ap_apply_decision(pid, decision, who_label, relay=True)
+    if status == 404:
+        return f"❌ ไม่พบข้อเสนอ #{pid}"
+    if status == 409:
+        return f"ℹ️ ข้อเสนอ #{pid} ({body.get('name', '')}) ถูกตัดสินไปแล้ว: {body.get('status')}"
+    if status != 200:
+        return f"❌ {body.get('error', 'ไม่สำเร็จ')}"
+    if decision == "approve":
+        tail = "📨 ส่งเข้ากลุ่มพยาบาลแล้ว" if body.get("relayed_to_nurses") else "⚠️ ยังไม่ถึงกลุ่มพยาบาล — โปรดแจ้งเอง"
+        return f"✅ อนุมัติ #{pid} {body.get('name', '')} (HN {body.get('hn')})\n{body.get('action_th')}: {body.get('proposed')}\n{tail}"
+    return f"✓ บันทึก \"ไม่ปรับ\" #{pid} {body.get('name', '')} (HN {body.get('hn')}) แล้ว"
 
 
 @hd_bp.route("/lab-ap/run", methods=["POST"])

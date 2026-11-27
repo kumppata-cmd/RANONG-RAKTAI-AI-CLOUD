@@ -146,3 +146,34 @@ class TestWiring:
         assert "loadLab()" in tpl and "decideLab(" in tpl and "/hd/api/v1/lab-ap/run" in tpl
         st = open(os.path.join(ROOT, "hd_module", "templates", "hd_settings.html"), encoding="utf-8").read()
         assert 'id="setting_lab_autopilot"' in st and "'lab_ap_iron_regimen'" in st and "'lab_ap_pth_high'" in st
+
+
+class TestPhase2Line:
+    def test_quick_reply_items_and_regex(self):
+        created = [{"id": 41, "hn": "6526", "name": "นาย ก", "priority": "routine"}, {"id": 42, "hn": "7001", "name": "นาง ข", "priority": "urgent"}]
+        items = lap.quick_reply_items(created)
+        assert len(items) == 4 and items[0]["action"]["text"] == "อนุมัติแล็บ 42" and items[1]["action"]["text"] == "ไม่ปรับแล็บ 42"
+        assert all(len(i["action"]["label"]) <= 20 for i in items)
+        assert len(lap.quick_reply_items([{"id": i, "hn": "x", "name": "n", "priority": "routine"} for i in range(20)])) <= 12
+        assert lap.LINE_CMD_RE.match("อนุมัติแล็บ 41") and lap.LINE_CMD_RE.match(" ไม่ปรับแล็บ #41 ") and not lap.LINE_CMD_RE.match("อนุมัติ APR-12")
+
+    def test_line_command_replies(self):
+        from unittest import mock
+        from hd_module import blueprint as bp
+        with mock.patch.object(bp, "lab_ap_apply_decision", return_value=({"ok": True, "relayed_to_nurses": True, "hn": "6526", "name": "นาย ก",
+                                                                           "proposed": "Iron IV", "action_th": "ให้เหล็ก IV"}, 200)) as m:
+            r = bp.lab_ap_line_command("อนุมัติแล็บ 41", "physician")
+            assert "✅ อนุมัติ #41" in r and "ส่งเข้ากลุ่มพยาบาลแล้ว" in r
+            assert m.call_args[0][:3] == (41, "approve", "physician")
+        with mock.patch.object(bp, "lab_ap_apply_decision", return_value=({"error": "already approved", "status": "approved", "name": "นาย ก"}, 409)):
+            assert "ตัดสินไปแล้ว" in bp.lab_ap_line_command("ไม่ปรับแล็บ 41", "physician")
+        with mock.patch.object(bp, "lab_ap_apply_decision", return_value=({"error": "not found"}, 404)):
+            assert "ไม่พบ" in bp.lab_ap_line_command("labno 9", "admin")
+        assert bp.lab_ap_line_command("สวัสดี", "physician") is None
+
+    def test_server_wiring(self):
+        src = open(os.path.join(ROOT, "server.py"), encoding="utf-8").read()
+        assert "_LAB_AP_RE = re.compile" in src and 'elif _LAB_AP_RE.match(text or ""):' in src
+        assert 'app.config["LINE_PUSH_QR_FN"]' in src
+        i = src.index('elif _LAB_AP_RE.match(text or ""):')
+        assert "PHYSICIAN_USERS" in src[i:i + 400] and "lab_ap_line_command" in src[i:i + 900]

@@ -120,11 +120,18 @@ def live_features(cur, session_id) -> dict | None:
     except Exception as e:  # noqa: BLE001
         logger.debug("idh twin uf: %s", e)
     try:
-        cur.execute("SELECT started_at FROM hd_sessions WHERE id = %s", (session_id,))
+        cur.execute("SELECT started_at, patient_id FROM hd_sessions WHERE id = %s", (session_id,))
         r = cur.fetchone()
         if r and r[0]:
             started = r[0] if r[0].tzinfo else r[0].replace(tzinfo=timezone.utc)
             f["elapsed_min"] = max(0.0, (datetime.now(timezone.utc) - started).total_seconds() / 60.0)
+        if r and r[1]:
+            # 🧬 ลายนิ้วมือ IDH ส่วนตัว (จากรอบก่อน ๆ ของผู้ป่วยรายนี้)
+            try:
+                from .idh_fingerprint import fingerprint_for
+                f["fingerprint"] = fingerprint_for(cur, r[1], exclude_session=session_id)
+            except Exception as e:  # noqa: BLE001
+                logger.debug("idh twin fingerprint: %s", e)
     except Exception:
         pass
     return f
@@ -153,6 +160,14 @@ def score_live(f: dict) -> dict:
     hr0, hr1 = _f(f.get("hr_first")), _f(f.get("hr_last"))
     if hr0 and hr1 and hr1 - hr0 >= 20:
         pts += 8; factors.append({"text": f"HR ขึ้น {int(hr0)}→{int(hr1)} (≥20) — สัญญาณชดเชย", "points": 8})
+    fp = f.get("fingerprint") or {}
+    if fp.get("enough"):
+        try:
+            from .idh_fingerprint import live_factor
+            for x in live_factor(fp, removed, elapsed):
+                pts += x["points"]; factors.append(x)
+        except Exception:  # noqa: BLE001
+            pass
     pts = min(100, int(pts))
     level = "high" if pts >= 60 else ("moderate" if pts >= 35 else "low")
     res.update({"score": pts, "level": level, "factors": factors})
