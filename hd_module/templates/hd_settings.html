@@ -200,6 +200,33 @@
   </div>
 </div>
 
+<!-- 🪪 Dialysis Passport (27 พ.ย. 2569): บัตรฟอกไตฉุกเฉินสำหรับ ER/รพ.อื่น -->
+<div class="card setting-card">
+  <div class="card-header">
+    <span>🆘 Dialysis Passport — บัตรฟอกไตฉุกเฉินสำหรับ ER / รพ.อื่น</span>
+    <button class="btn btn-primary save-btn" onclick="saveSetting('passport_enabled')">💾 บันทึก</button>
+  </div>
+  <div class="form-group">
+    <select class="form-control" id="setting_passport_enabled">
+      <option value="off">ปิด — สร้างลิงก์ไม่ได้ และลิงก์ที่เคยสร้างเปิดไม่ได้</option>
+      <option value="on">เปิด — ผู้ป่วยสร้างเองจาก Patient Portal / เจ้าหน้าที่สร้างจากหน้าผู้ป่วย</option>
+    </select>
+    <div class="setting-desc"><b>ชุดข้อมูลที่แสดง (การเปิดสวิตช์ = แพทย์อนุมัติชุดนี้):</b> ชื่อ, HN, อายุ/เพศ, กรุ๊ปเลือด, การวินิจฉัย, น้ำหนักแห้ง, เส้นเลือดฟอก (+คำเตือนห้ามวัด BP/เจาะแขนนั้น),
+      สูตรฟอกล่าสุด (dialyzer, Qb, Qd, heparin, เวลา, UF), ESA, ผลเลือดล่าสุด (K, Hb, Cr, Ca, P, HBsAg, anti-HBs, anti-HCV), ยาปัจจุบัน, แพ้ยา, เบอร์คลินิก ·
+      <b>ไม่มี Anti-HIV และเลขบัตรประชาชน</b> · ลิงก์สุ่ม อ่านอย่างเดียว หมดอายุเอง เพิกถอนได้ นับการเปิดทุกครั้งใน audit · ไม่ถูก search engine เก็บ · ไทย/อังกฤษ</div>
+    <div class="setting-status" id="status_passport_enabled"></div>
+  </div>
+  <div class="form-group">
+    <label>อายุลิงก์ (ชั่วโมง)</label>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="number" class="form-control" id="setting_passport_ttl_hours" min="1" max="720" placeholder="72" style="max-width:140px">
+      <button class="btn btn-primary" onclick="saveSetting('passport_ttl_hours')">💾 บันทึก</button>
+    </div>
+    <div class="setting-desc">ค่าเริ่มต้น 72 ชม. (เหมาะกับการเดินทาง 2–3 วัน) · ผู้ป่วยกดสร้างใหม่ได้ทุกครั้ง · เปิดได้สูงสุด 3 ลิงก์ต่อคน</div>
+    <div class="setting-status" id="status_passport_ttl_hours"></div>
+  </div>
+</div>
+
 <!-- Physician LINE ID -->
 <div class="card setting-card">
   <div class="card-header">

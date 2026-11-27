@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="{{ 'en' if lang == 'en' else 'th' }}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>{% if lang == 'en' %}Dialysis Passport{% else %}บัตรฟอกไตฉุกเฉิน{% endif %}</title>
+<style>
+:root{--bg:#f4f6fa;--card:#fff;--fg:#1d2a3a;--mut:#6b7a8c;--line:#e3e8ef;--red:#c0392b;--redbg:#fdecea;--blue:#1f5fa8;--green:#1e8449}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font-family:-apple-system,"Segoe UI",Roboto,"Noto Sans Thai","Sarabun",sans-serif;font-size:16px;line-height:1.45}
+.wrap{max-width:640px;margin:0 auto;padding:14px}
+.top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}
+.top h1{font-size:1.15rem;margin:0}.lang a{font-size:.8rem;color:var(--blue);text-decoration:none;border:1px solid var(--line);border-radius:999px;padding:3px 10px;background:#fff}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:10px}
+.card h2{font-size:.95rem;margin:0 0 6px;color:var(--blue)}
+.warn{background:var(--redbg);border:2px solid var(--red);color:var(--red);font-weight:700;font-size:1.05rem;padding:12px 14px;border-radius:12px;margin-bottom:10px}
+.kv{display:grid;grid-template-columns:minmax(120px,38%) 1fr;gap:4px 10px;font-size:.95rem}.kv b{color:var(--mut);font-weight:600}
+.big{font-size:1.5rem;font-weight:800}
+.mut{color:var(--mut);font-size:.8rem}
+table{width:100%;border-collapse:collapse;font-size:.92rem}td,th{padding:5px 6px;border-bottom:1px solid var(--line);text-align:left}th{color:var(--mut);font-weight:600;font-size:.8rem}
+.foot{font-size:.78rem;color:var(--mut);text-align:center;margin:14px 0}
+.err{background:#fff;border:1px solid var(--line);border-radius:12px;padding:28px 16px;text-align:center}
+.err .ico{font-size:2.4rem}
+@media print{body{background:#fff}.lang,.noprint{display:none}.card{break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="wrap">
+{% set en = (lang == 'en') %}
+{% if status != 'active' %}
+  <div class="err">
+    <div class="ico">{% if status in ('expired','revoked') %}⌛{% elif status == 'rate' %}⏳{% else %}🔒{% endif %}</div>
+    {% if status == 'expired' %}
+      <h2>{{ 'This passport link has expired' if en else 'ลิงก์บัตรฉุกเฉินนี้หมดอายุแล้ว' }}</h2>
+      <p>{{ 'Ask the patient to generate a new one from their patient portal, or call the clinic.' if en else 'ให้ผู้ป่วยสร้างใหม่จากหน้า Patient Portal หรือโทรคลินิก' }}</p>
+    {% elif status == 'revoked' %}
+      <h2>{{ 'This passport link was revoked' if en else 'ลิงก์บัตรฉุกเฉินนี้ถูกยกเลิกแล้ว' }}</h2>
+    {% elif status == 'rate' %}
+      <h2>{{ 'Too many requests — try again in a few minutes' if en else 'เปิดถี่เกินไป — ลองใหม่ในอีกสักครู่' }}</h2>
+    {% elif status == 'disabled' %}
+      <h2>{{ 'Dialysis Passport is not enabled' if en else 'ยังไม่เปิดใช้บัตรฟอกไตฉุกเฉิน' }}</h2>
+    {% elif status == 'unavailable' %}
+      <h2>{{ 'Service temporarily unavailable' if en else 'ระบบไม่พร้อมชั่วคราว' }}</h2>
+    {% else %}
+      <h2>{{ 'Link not found' if en else 'ไม่พบลิงก์นี้' }}</h2>
+    {% endif %}
+    <p class="mut"><a href="?lang={{ 'th' if en else 'en' }}">{{ 'ภาษาไทย' if en else 'English' }}</a></p>
+  </div>
+{% else %}
+  {% set p = data.profile %}{% set rx = data.prescription %}{% set labs = data.labs %}
+  <div class="top">
+    <h1>🪪 {{ 'Dialysis Passport' if en else 'บัตรฟอกไตฉุกเฉิน' }}</h1>
+    <span class="lang"><a href="?lang={{ 'th' if en else 'en' }}">{{ 'ภาษาไทย' if en else 'English' }}</a></span>
+  </div>
+  <div class="mut" style="margin-bottom:8px">{{ data.clinic.name }}{% if data.clinic.phone %} · ☎ <a href="tel:{{ data.clinic.phone }}">{{ data.clinic.phone }}</a>{% endif %} · {{ 'valid until' if en else 'ใช้ได้ถึง' }} {{ expires_at }}</div>
+
+  {% if access_warn %}<div class="warn">⚠️ {{ access_warn.en if en else access_warn.th }}</div>{% endif %}
+  {% if p.allergies %}<div class="warn">🚫 {{ 'ALLERGY: ' if en else 'แพ้ยา: ' }}{{ p.allergies }}</div>{% endif %}
+
+  <div class="card">
+    <h2>👤 {{ 'Patient' if en else 'ผู้ป่วย' }}</h2>
+    <div class="kv">
+      <b>{{ 'Name' if en else 'ชื่อ' }}</b><span class="big" style="font-size:1.15rem">{{ p.name }}</span>
+      <b>HN</b><span>{{ p.hn }}</span>
+      {% if p.age %}<b>{{ 'Age / Sex' if en else 'อายุ / เพศ' }}</b><span>{{ p.age }} {{ 'y' if en else 'ปี' }}{% if p.gender %} · {{ p.gender }}{% endif %}</span>{% endif %}
+      {% if p.blood_type %}<b>{{ 'Blood group' if en else 'กรุ๊ปเลือด' }}</b><span class="big" style="font-size:1.1rem">{{ p.blood_type }}</span>{% endif %}
+      {% if p.diagnosis %}<b>{{ 'Diagnosis' if en else 'การวินิจฉัย' }}</b><span>{{ p.diagnosis }}</span>{% endif %}
+      <b>{{ 'Dialysis' if en else 'ฟอกเลือด' }}</b><span>{{ 'Maintenance hemodialysis' if en else 'ฟอกเลือดด้วยเครื่องไตเทียมประจำ' }}{% if p.schedule_days %} · {{ p.schedule_days }}{% endif %}</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>💧 {{ 'Dry weight & access' if en else 'น้ำหนักแห้ง & เส้นเลือด' }}</h2>
+    <div class="kv">
+      <b>{{ 'Dry weight' if en else 'น้ำหนักแห้ง (DW)' }}</b><span class="big">{% if p.dry_weight %}{{ '%.1f'|format(p.dry_weight) }} kg{% else %}-{% endif %}</span>
+      <b>{{ 'Vascular access' if en else 'เส้นเลือดฟอก' }}</b><span>{{ p.vascular_access or '-' }}</span>
+    </div>
+  </div>
+
+  {% if rx %}
+  <div class="card">
+    <h2>⚙️ {{ 'Latest dialysis prescription' if en else 'สูตรฟอกล่าสุด' }} <span class="mut">({{ rx.date or '' }})</span></h2>
+    <div class="kv">
+      {% if rx.dialyzer %}<b>Dialyzer</b><span>{{ rx.dialyzer }}</span>{% endif %}
+      {% if rx.hours %}<b>{{ 'Duration' if en else 'เวลาฟอก' }}</b><span>{{ rx.hours }} {{ 'h' if en else 'ชม.' }}</span>{% endif %}
+      {% if rx.bfr %}<b>Blood flow (Qb)</b><span>{{ rx.bfr|int }} mL/min</span>{% endif %}
+      {% if rx.dfr %}<b>Dialysate flow (Qd)</b><span>{{ rx.dfr|int }} mL/min</span>{% endif %}
+      {% if rx.heparin %}<b>Heparin</b><span>{{ rx.heparin }}</span>{% endif %}
+      {% if rx.uf_goal %}<b>UF goal</b><span>{{ rx.uf_goal|int }} mL</span>{% endif %}
+      {% if rx.post_weight %}<b>{{ 'Post-HD weight' if en else 'น้ำหนักหลังฟอก' }}</b><span>{{ '%.1f'|format(rx.post_weight) }} kg</span>{% endif %}
+      {% if p.esa %}<b>ESA</b><span>{{ p.esa }}</span>{% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  {% if labs %}
+  <div class="card">
+    <h2>🧪 {{ 'Latest labs' if en else 'ผลเลือดล่าสุด' }}</h2>
+    <table><tr><th></th><th>{{ 'Result' if en else 'ผล' }}</th><th>{{ 'Date' if en else 'วันที่' }}</th></tr>
+      {% for key, label in [('k','Potassium (K)'),('hb','Hemoglobin (Hb)'),('creatinine','Creatinine'),('ca','Calcium'),('phos','Phosphate'),('hbsag','HBsAg'),('antihbs','Anti-HBs'),('antihcv','Anti-HCV')] %}
+        {% if labs.get(key) %}<tr><td>{{ label }}</td><td><b>{{ labs[key].value }}</b></td><td class="mut">{{ labs[key].date or '' }}</td></tr>{% endif %}
+      {% endfor %}
+    </table>
+  </div>
+  {% endif %}
+
+  {% if data.medications %}
+  <div class="card">
+    <h2>💊 {{ 'Current medications' if en else 'ยาปัจจุบัน' }}</h2>
+    <table>
+      {% for m in data.medications %}<tr><td><b>{{ m.name }}</b></td><td>{{ m.dose or '' }} {{ m.route or '' }} {{ m.freq or '' }}</td></tr>{% endfor %}
+    </table>
+  </div>
+  {% endif %}
+
+  <div class="card noprint" style="text-align:center">
+    <button onclick="window.print()" style="font-size:.9rem;padding:8px 16px;border-radius:8px;border:1px solid var(--line);background:#fff">🖨 {{ 'Print' if en else 'พิมพ์' }}</button>
+  </div>
+  <div class="foot">
+    {{ 'Generated' if en else 'สร้างเมื่อ' }} {{ data.generated_at }} · {{ 'Read-only emergency summary shared by the patient. Verify with the clinic before treatment decisions.' if en else 'ข้อมูลสรุปฉุกเฉินที่ผู้ป่วยเป็นผู้แชร์ อ่านอย่างเดียว — โปรดยืนยันกับคลินิกก่อนตัดสินใจรักษา' }}
+  </div>
+{% endif %}
+</div>
+</body>
+</html>

@@ -68,10 +68,37 @@
     <button onclick="loadTwin()" class="btn" style="flex:1;padding:10px;text-align:center;background:linear-gradient(135deg,#7c3aed,#1e40af);color:#fff">🧬 Digital Twin</button>
     <button onclick="sendPortalLink()" class="btn" style="flex:1;padding:10px;text-align:center;">📱 ส่งลิงก์ดูผลให้คนไข้</button>
     <a href="/hd/patient/{{ patient_hn }}/card.pdf" target="_blank" class="btn" style="flex:1;padding:10px;text-align:center;">🪪 บัตรผู้ป่วย PDF</a>
+    <button onclick="issuePassport()" class="btn" style="flex:1;padding:10px;text-align:center;background:linear-gradient(135deg,#c0392b,#e67e22);color:#fff">🆘 บัตรฟอกไตฉุกเฉิน (ER)</button>
   </div>
   <div id="portalLinkResult" style="margin-top:8px;font-size:.82rem;text-align:center"></div>
+  <div id="passportResult" style="margin-top:8px;font-size:.82rem;text-align:center"></div>
 </div>
 <script>
+/* 🪪 Dialysis Passport (27 พ.ย. 2569): ลิงก์+QR อ่านอย่างเดียว อายุ 72 ชม. สำหรับ ER/รพ.อื่น */
+async function issuePassport(){
+  const el = document.getElementById('passportResult');
+  el.innerHTML = '⏳ กำลังสร้างบัตรฉุกเฉิน…';
+  try{
+    const r = await hdFetch('/hd/api/v1/patients/hn/{{ patient_hn }}/passport', {method:'POST'});
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){ el.innerHTML = '<span style="color:#c0392b">⚠️ '+(d.error||('HTTP '+r.status))+'</span>'; return; }
+    const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    el.innerHTML = '<div style="border:1px solid var(--border);border-radius:10px;padding:10px;background:var(--card)">'
+      + '<div style="font-weight:700">🆘 บัตรฟอกไตฉุกเฉิน — ใช้ได้ถึง '+esc(d.expires_at)+' ('+esc(d.ttl_hours)+' ชม.)</div>'
+      + (d.qr ? '<img src="'+d.qr+'" alt="QR" style="width:180px;height:180px;margin:8px auto;display:block">' : '')
+      + '<div style="word-break:break-all"><a href="'+esc(d.url)+'" target="_blank">'+esc(d.url)+'</a></div>'
+      + '<div style="margin-top:6px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap">'
+      + '<button class="btn btn-secondary" onclick="navigator.clipboard.writeText(\''+esc(d.url)+'\').then(()=>alert(\'คัดลอกลิงก์แล้ว\'))">📋 คัดลอกลิงก์</button>'
+      + '<button class="btn btn-secondary" onclick="window.open(\''+esc(d.url)+'\',\'_blank\')">👁 เปิดดู</button>'
+      + '<button class="btn btn-secondary" onclick="revokePassport('+Number(d.token_id)+')">🛑 ยกเลิกลิงก์นี้</button>'
+      + '</div><div style="color:var(--fg-muted);font-size:.74rem;margin-top:4px">ให้ผู้ป่วยสแกนเก็บไว้ หรือพิมพ์หน้า QR ใส่กระเป๋า · ไม่มีผล Anti-HIV · ทุกการเปิดถูกบันทึก</div></div>';
+  }catch(e){ el.innerHTML = '<span style="color:#c0392b">⚠️ '+e+'</span>'; }
+}
+async function revokePassport(id){
+  if(!confirm('ยกเลิกลิงก์บัตรฉุกเฉินนี้?')) return;
+  const r = await hdFetch('/hd/api/v1/passport/'+id+'/revoke', {method:'POST'});
+  document.getElementById('passportResult').innerHTML = r.ok ? '🛑 ยกเลิกแล้ว' : '⚠️ ยกเลิกไม่สำเร็จ';
+}
 async function loadTwin(){
   let el = document.getElementById('twinResult');
   if(!el){

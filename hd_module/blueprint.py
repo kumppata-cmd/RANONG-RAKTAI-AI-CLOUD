@@ -8322,6 +8322,205 @@ def patient_portal_link(hn):
     return jsonify({"hn": hn, "url": url, "qr": qr})
 
 
+# ══════════════════════════════════════════════════════════
+# 🪪 Dialysis Passport — บัตรฟอกไตฉุกเฉินสำหรับ ER/รพ.อื่น (ว้าว C, 27 พ.ย. 2569)
+# ══════════════════════════════════════════════════════════
+
+def _passport_db():
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return None
+    return psycopg2.connect(db_url, connect_timeout=5)
+
+
+def _passport_qr(url):
+    try:
+        import base64 as _b64
+        import io as _io
+        import segno
+        buf = _io.BytesIO()
+        segno.make(url, error="m").save(buf, kind="png", scale=6, border=2)
+        return "data:image/png;base64," + _b64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return None
+
+
+def _passport_issue_response(hn, created_by, via):
+    """ออกลิงก์ + QR (ใช้ร่วมกันระหว่างเจ้าหน้าที่และ Portal) → (json, status)"""
+    import os
+    from . import passport as pp
+    if not pp.is_enabled():
+        return {"error": "ฟีเจอร์บัตรฟอกไตฉุกเฉินยังไม่เปิดใช้ (⚙️ ตั้งค่า → Dialysis Passport)", "code": "disabled"}, 403
+    conn = _passport_db()
+    if not conn:
+        return {"error": "ระบบไม่พร้อม"}, 503
+    try:
+        with conn.cursor() as cur:
+            pp.ensure_schema(cur)
+            cur.execute("SELECT 1 FROM hd_patient_mapping WHERE hn = %s AND is_active = TRUE", (str(hn),))
+            if not cur.fetchone():
+                return {"error": "ไม่พบผู้ป่วย"}, 404
+            row = pp.issue(cur, hn, created_by, via=via, hours=pp.ttl_hours())
+        conn.commit()
+    finally:
+        conn.close()
+    base = (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+    url = f"{base}/hd/passport/{row['token']}"
+    exp = row["expires_at"] + timedelta(hours=7)
+    return {"hn": hn, "url": url, "qr": _passport_qr(url), "token_id": row["id"],
+            "expires_at": exp.strftime("%Y-%m-%d %H:%M"), "ttl_hours": pp.ttl_hours(), "via": via}, 200
+
+
+@hd_bp.route("/patients/hn/<hn>/passport", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def passport_issue_staff(hn):
+    """เจ้าหน้าที่สร้างบัตรฉุกเฉินให้ผู้ป่วย (แสดง QR ให้สแกน/พิมพ์)"""
+    body, status = _passport_issue_response(hn, f"hd_user:{g.get('hd_user_id')}", "staff")
+    if status == 200:
+        log_action(user_id=g.get("hd_user_id"), action="passport.issue", resource_type="patient", resource_id=hn,
+                   new_values={"token_id": body["token_id"], "via": "staff"}, ip_address=request.remote_addr or "")
+    return jsonify(body), status
+
+
+@hd_bp.route("/patients/hn/<hn>/passport", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def passport_list_staff(hn):
+    from . import passport as pp
+    conn = _passport_db()
+    if not conn:
+        return jsonify({"error": "ระบบไม่พร้อม"}), 503
+    try:
+        with conn.cursor() as cur:
+            pp.ensure_schema(cur)
+            rows = pp.active_for(cur, hn)
+        conn.commit()
+    finally:
+        conn.close()
+    out = []
+    for r in rows:
+        out.append({"id": r["id"], "via": r["created_via"], "views": r["views"],
+                    "created_at": (r["created_at"] + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M") if r["created_at"] else None,
+                    "expires_at": (r["expires_at"] + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M"),
+                    "last_viewed_at": (r["last_viewed_at"] + timedelta(hours=7)).strftime("%Y-%m-%d %H:%M") if r["last_viewed_at"] else None})
+    return jsonify({"hn": hn, "enabled": pp.is_enabled(), "active": out})
+
+
+@hd_bp.route("/passport/<int:token_id>/revoke", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def passport_revoke_staff(token_id):
+    from . import passport as pp
+    conn = _passport_db()
+    if not conn:
+        return jsonify({"error": "ระบบไม่พร้อม"}), 503
+    try:
+        with conn.cursor() as cur:
+            ok = pp.revoke(cur, token_id)
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="passport.revoke", resource_type="passport", resource_id=str(token_id),
+               ip_address=request.remote_addr or "")
+    return jsonify({"revoked": ok})
+
+
+@hd_bp.route("/my/<token>/passport", methods=["POST"])
+def passport_issue_portal(token):
+    """ผู้ป่วยกดสร้างเองจาก Patient Portal (ลิงก์ HMAC ของผู้ป่วย) = ความยินยอม · ใช้ token เดิมถ้ายัง active"""
+    hn = _portal_hn_from_token(token)
+    if not hn:
+        return jsonify({"error": "ลิงก์ไม่ถูกต้อง"}), 404
+    body, status = _passport_issue_response(hn, "patient_portal", "portal")
+    if status == 200:
+        log_action(user_id=None, action="passport.issue", resource_type="patient", resource_id=hn,
+                   new_values={"token_id": body["token_id"], "via": "portal"}, ip_address=request.remote_addr or "")
+    return jsonify(body), status
+
+
+@hd_bp.route("/my/<token>/passport/revoke", methods=["POST"])
+def passport_revoke_portal(token):
+    """ผู้ป่วยเพิกถอนบัตรฉุกเฉินของตัวเองทั้งหมด"""
+    from . import passport as pp
+    hn = _portal_hn_from_token(token)
+    if not hn:
+        return jsonify({"error": "ลิงก์ไม่ถูกต้อง"}), 404
+    conn = _passport_db()
+    if not conn:
+        return jsonify({"error": "ระบบไม่พร้อม"}), 503
+    n = 0
+    try:
+        with conn.cursor() as cur:
+            pp.ensure_schema(cur)
+            for r in pp.active_for(cur, hn):
+                n += 1 if pp.revoke(cur, r["id"], hn) else 0
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=None, action="passport.revoke_all", resource_type="patient", resource_id=hn,
+               new_values={"count": n}, ip_address=request.remote_addr or "")
+    return jsonify({"revoked": n})
+
+
+_PASSPORT_VIEWS = {}   # ip → [timestamps] กันยิงเดา token (ต่อ worker)
+
+
+def _passport_rate_ok(ip, limit=30, window=300):
+    import time as _t
+    now = _t.time()
+    hist = [t for t in _PASSPORT_VIEWS.get(ip, []) if now - t < window]
+    hist.append(now)
+    _PASSPORT_VIEWS[ip] = hist
+    if len(_PASSPORT_VIEWS) > 5000:
+        _PASSPORT_VIEWS.clear()
+    return len(hist) <= limit
+
+
+@hd_web.route("/passport/<token>")
+def passport_public_page(token):
+    """🪪 หน้าสาธารณะอ่านอย่างเดียว (ไม่ต้อง login) — ER/รพ.อื่นเปิดจาก QR · noindex · นับการเปิด"""
+    from . import passport as pp
+    lang = "en" if (request.args.get("lang") or "").lower() == "en" else "th"
+    ip = request.remote_addr or ""
+    def _page(st, code, **kw):
+        r = make_response(render_template("hd_passport.html", status=st, lang=lang, token=token,
+                                          data=kw.get("data"), access_warn=kw.get("access_warn"), expires_at=kw.get("expires_at")), code)
+        r.headers["X-Robots-Tag"] = "noindex, nofollow"
+        r.headers["Cache-Control"] = "no-store"
+        r.headers["Referrer-Policy"] = "no-referrer"
+        return r
+    if not _passport_rate_ok(ip):
+        return _page("rate", 429)
+    if not pp.is_enabled():
+        return _page("disabled", 404)
+    conn = _passport_db()
+    if not conn:
+        return _page("unavailable", 503)
+    status, row, data = "missing", None, None
+    try:
+        with conn.cursor() as cur:
+            pp.ensure_schema(cur)
+            status, row = pp.lookup(cur, token)
+            if status == "active":
+                data = pp.assemble(cur, row["hn"])
+                pp.record_view(cur, row["id"])
+        conn.commit()
+    except Exception as e:  # noqa: BLE001
+        logger.warning("passport page: %s", e)
+        status = "unavailable"
+    finally:
+        conn.close()
+    if status == "active" and row:
+        log_action(user_id=None, action="passport.view", resource_type="passport", resource_id=str(row["id"]),
+                   new_values={"hn": row["hn"], "lang": lang}, ip_address=ip)
+    if status == "active" and not data:
+        status = "missing"
+    warn = pp.access_warning((data or {}).get("profile", {}).get("vascular_access")) if data else None
+    exp = (row["expires_at"] + timedelta(hours=7)).strftime("%d/%m/%Y %H:%M") if row else None
+    return _page(status, 200 if status == "active" else (410 if status in ("expired", "revoked") else 404),
+                 data=data, access_warn=warn, expires_at=exp)
+
+
 @hd_bp.route("/patients/<hn>/card.pdf", methods=["GET"])
 @require_role("physician", "nurse", "admin")
 def patient_card_pdf(hn):
@@ -11498,6 +11697,8 @@ def update_settings():
         "patient_weight_coach",      # ตอบผู้ป่วยที่ส่ง "น้ำหนัก xx" ทาง LINE (on/off)
         "lab_sheet_ai",              # 26 พ.ย. 2569: LINE OA ใช้ตัวอ่านใบแล็บ AI (ขั้นที่ 3) on/off — default off
         "doc_classify_ai",           # 26 พ.ย. 2569: ใบที่ตัวจัดประเภทไม่แน่ใจ (ใบยา/ใบฟอก) → ถาม Claude Vision on/off — default off
+        "passport_enabled",          # 27 พ.ย. 2569: 🪪 Dialysis Passport (บัตรฟอกไตฉุกเฉิน) on/off — default off
+        "passport_ttl_hours",        # อายุลิงก์บัตรฉุกเฉิน (ชั่วโมง) default 72
         "tpl_weight_reply",          # ข้อความตอบน้ำหนัก (แก้ได้ มีตัวแปร {weight} {gain} ...)
         "patient_card_note",         # ข้อความจากแพทย์ต่อท้ายการ์ดสรุปหลังฟอกทุกใบ
         "family_liff_id",            # 21 พ.ย. 2569: LIFF ID ของหน้า Family Link (ญาติรับสรุปหลังฟอก)

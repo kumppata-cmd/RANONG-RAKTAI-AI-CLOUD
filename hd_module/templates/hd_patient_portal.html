@@ -91,6 +91,16 @@ function render(D){
     <div class="info-row"><span class="label">ยากระตุ้นเม็ดเลือด</span><span class="value">${esc(p.esa_drug||'-')} ${esc(p.esa_dose||'')}</span></div>
   </div>`;
 
+  /* 🪪 Dialysis Passport (27 พ.ย. 2569) — ผู้ป่วยกดสร้างเอง = ความยินยอม */
+  h += `<div class="card" id="passportCard" style="border:2px solid #e67e22"><h2>🆘 บัตรฟอกไตฉุกเฉิน (สำหรับไป รพ.อื่น / ห้องฉุกเฉิน)</h2>
+    <div style="font-size:.85rem;color:var(--muted);line-height:1.5">สร้าง QR ที่แพทย์ต่างโรงพยาบาลสแกนแล้วเห็นข้อมูลสำคัญของฉันทันที: น้ำหนักแห้ง สูตรฟอก เส้นเลือด แพ้ยา ยาที่ใช้ ผลเลือดล่าสุด · ลิงก์ใช้ได้ 72 ชั่วโมง แล้วหมดอายุเอง · กดสร้างใหม่ได้ทุกครั้งที่จะเดินทาง</div>
+    <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+      <button class="btn" style="flex:1;padding:10px;background:#e67e22;color:#fff;border:0;border-radius:8px;font-weight:700" onclick="issueMyPassport()">🆘 สร้างบัตรฉุกเฉิน</button>
+      <button class="btn" style="padding:10px;background:#fff;border:1px solid var(--border);border-radius:8px" onclick="revokeMyPassport()">🛑 ยกเลิกทั้งหมด</button>
+    </div>
+    <div id="passportOut" style="margin-top:8px;text-align:center;font-size:.85rem"></div>
+  </div>`;
+
   /* Physician goal */
   if(D.goal && D.goal.text){
     h += `<div class="card" style="border:2px solid var(--accent)"><h2>🎯 เป้าหมายจากแพทย์ของฉัน</h2>
@@ -278,6 +288,29 @@ async function sendMsg(text){
 }
 
 function handleChatKey(e){ if(e.key==='Enter'){ e.preventDefault(); sendMsg(document.getElementById('chatInput').value.trim()); }}
+
+/* 🪪 Dialysis Passport */
+async function issueMyPassport(){
+  const el = document.getElementById('passportOut'); el.textContent = '⏳ กำลังสร้าง…';
+  try{
+    const r = await fetch('/hd/api/v1/my/'+encodeURIComponent(TOKEN)+'/passport', {method:'POST'});
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){ el.innerHTML = '<span style="color:#c0392b">⚠️ '+esc(d.error||('HTTP '+r.status))+'</span>'; return; }
+    el.innerHTML = '<div style="font-weight:700">ใช้ได้ถึง '+esc(d.expires_at)+'</div>'
+      + (d.qr ? '<img src="'+d.qr+'" alt="QR" style="width:200px;height:200px;margin:8px auto;display:block">' : '')
+      + '<div style="word-break:break-all;font-size:.78rem"><a href="'+esc(d.url)+'" target="_blank">'+esc(d.url)+'</a></div>'
+      + '<div style="margin-top:6px;display:flex;gap:6px;justify-content:center;flex-wrap:wrap">'
+      + '<button class="btn" style="padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:#fff" onclick="navigator.clipboard.writeText(\''+esc(d.url)+'\').then(()=>alert(\'คัดลอกลิงก์แล้ว\'))">📋 คัดลอกลิงก์</button>'
+      + (navigator.share ? '<button class="btn" style="padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:#fff" onclick="navigator.share({title:\'บัตรฟอกไตฉุกเฉิน\',url:\''+esc(d.url)+'\'})">📤 แชร์</button>' : '')
+      + '</div><div style="color:var(--muted);font-size:.74rem;margin-top:4px">บันทึกภาพ QR นี้ไว้ในโทรศัพท์ หรือแชร์ให้ญาติ</div>';
+  }catch(e){ el.innerHTML = '<span style="color:#c0392b">⚠️ '+e+'</span>'; }
+}
+async function revokeMyPassport(){
+  if(!confirm('ยกเลิกบัตรฉุกเฉินทั้งหมดที่เคยสร้าง?')) return;
+  const r = await fetch('/hd/api/v1/my/'+encodeURIComponent(TOKEN)+'/passport/revoke', {method:'POST'});
+  const d = await r.json().catch(()=>({}));
+  document.getElementById('passportOut').textContent = r.ok ? ('🛑 ยกเลิกแล้ว '+(d.revoked||0)+' ลิงก์') : '⚠️ ยกเลิกไม่สำเร็จ';
+}
 </script>
 
 <!-- Chat FAB -->
