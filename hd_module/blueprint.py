@@ -2168,6 +2168,26 @@ def drift_radar_page():
     return render_template("hd_drift_radar.html")
 
 
+# ── 27 พ.ย. 2569: cache ค่าตั้งค่าสั้น ๆ สำหรับ hook ที่ถูกเรียกทุกครั้งที่พยาบาลบันทึก
+#    (get_setting_value เปิด DB connection ทุกครั้ง — hook ใหม่ห้ามเพิ่มภาระนั้นต่อทุก request) ──
+_SETTING_CACHE = {}
+_SETTING_CACHE_TTL = 30.0
+
+
+def _setting_cached(key, default=""):
+    import time as _t
+    now = _t.time()
+    hit = _SETTING_CACHE.get(key)
+    if hit and now - hit[0] < _SETTING_CACHE_TTL:
+        return hit[1]
+    try:
+        v = get_setting_value(key, default)
+    except Exception:
+        v = hit[1] if hit else default
+    _SETTING_CACHE[key] = (now, v)
+    return v
+
+
 # ── ว้าว A (27 พ.ย. 2569): 🩸 Kidney Twin — IDH early warning, event-driven ──
 
 import re as _re_twin
@@ -2192,9 +2212,9 @@ def _twin_kick(session_id, trigger):
     import threading
     from flask import current_app
     from . import idh_twin as twin
-    if not twin.is_enabled(get_setting_value):
+    if not twin.is_enabled(_setting_cached):
         return
-    cfg = twin.config(get_setting_value)
+    cfg = twin.config(_setting_cached)
     db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
     if not db_url:
         return
@@ -2354,7 +2374,7 @@ def _lab_ap_kick(trigger):
     """เรียกหลังยืนยันแล็บ — รันใน thread แยก ไม่ให้ช้า/ล้มทางเดิม"""
     import threading
     from flask import current_app
-    if not get_setting_value("lab_autopilot", "off") or str(get_setting_value("lab_autopilot", "off")).lower() != "on":
+    if str(_setting_cached("lab_autopilot", "off") or "off").lower() != "on":
         return
     app = current_app._get_current_object()
 
