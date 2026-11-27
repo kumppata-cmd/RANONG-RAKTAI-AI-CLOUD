@@ -50,12 +50,51 @@ def _iso(dt=None):
     return (dt or _now()).isoformat(timespec="seconds")
 
 
+# ── 27 พ.ย. 2569: แชร์สถานะ scheduler ข้าม gunicorn worker ──
+# ตั้งแต่ 24 พ.ย. มี worker เดียวที่รัน scheduler (file lock) แต่ _STATE อยู่ในหน่วยความจำต่อ process
+# → /health ที่ตกไปยัง worker อีกตัวรายงาน "scheduler ยังไม่เริ่ม" ทั้งที่ทำงานปกติ (issue #29, #30 เป็นสัญญาณหลอก)
+# แก้: worker ที่ tick เขียนสถานะลงไฟล์ใน /dev/shm (container เดียวกัน) · worker ที่ไม่มี tick อ่านมารวมตอน snapshot
+import json as _json
+import os as _os
+_SHARED_PATH = _os.path.join("/dev/shm" if _os.path.isdir("/dev/shm") else "/tmp", "hd_ops_state.json")
+_SHARED_MAX_AGE_SEC = 20 * 60
+
+
+def _persist():
+    """เขียน _STATE (เฉพาะฟิลด์ที่ JSON ได้) — เรียกภายใต้ _LOCK · ล้มเงียบ"""
+    try:
+        data = {"started_at": _STATE["started_at"], "last_tick": _STATE["last_tick"], "tick_count": _STATE["tick_count"],
+                "restarts": _STATE["restarts"], "jobs": {k: dict(v) for k, v in _STATE["jobs"].items()},
+                "config_problems": list(_STATE.get("config_problems") or []), "config_checked_at": _STATE.get("config_checked_at"),
+                "saved_at": _iso(), "pid": _os.getpid()}
+        tmp = _SHARED_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            _json.dump(data, fh, ensure_ascii=False)
+        _os.replace(tmp, _SHARED_PATH)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _load_shared():
+    """สถานะจาก worker ที่รัน scheduler (ถ้าสดพอ) หรือ None"""
+    try:
+        with open(_SHARED_PATH, "r", encoding="utf-8") as fh:
+            data = _json.load(fh)
+        saved = data.get("saved_at")
+        if not saved or (_now() - datetime.fromisoformat(saved)).total_seconds() > _SHARED_MAX_AGE_SEC:
+            return None
+        return data
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def tick():
     with _LOCK:
         if _STATE["started_at"] is None:
             _STATE["started_at"] = _iso()
         _STATE["last_tick"] = _iso()
         _STATE["tick_count"] += 1
+        _persist()
 
 
 def job_started(name):
@@ -68,6 +107,7 @@ def job_done(name, ok=True, detail="", started=None):
         j = _STATE["jobs"].setdefault(name, {})
         j.update({"last_run": _iso(), "ok": bool(ok), "detail": str(detail)[:200], "running_since": None,
                   "duration_s": round(time.time() - started, 1) if started else None})
+        _persist()
 
 
 def line_result(ok, status=None, body=""):
@@ -155,6 +195,17 @@ def snapshot():
         s = {"started_at": _STATE["started_at"], "last_tick": _STATE["last_tick"], "tick_count": _STATE["tick_count"],
              "restarts": _STATE["restarts"], "jobs": {k: dict(v) for k, v in _STATE["jobs"].items()},
              "line": dict(_STATE["line"])}
+    s["scheduler_in_this_worker"] = s["last_tick"] is not None
+    if s["last_tick"] is None:
+        shared = _load_shared()
+        if shared:
+            s.update({"started_at": shared.get("started_at"), "last_tick": shared.get("last_tick"),
+                      "tick_count": shared.get("tick_count", 0), "restarts": shared.get("restarts", 0),
+                      "jobs": shared.get("jobs") or {}, "from_worker_pid": shared.get("pid")})
+            with _LOCK:
+                if not _STATE.get("config_problems") and shared.get("config_problems"):
+                    _STATE["config_problems"] = list(shared["config_problems"])
+                    _STATE["config_checked_at"] = shared.get("config_checked_at")
     age = None
     if s["last_tick"]:
         try:

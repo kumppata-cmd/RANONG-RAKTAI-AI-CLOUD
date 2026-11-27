@@ -7,6 +7,10 @@ from hd_module import ops_status as ops
 
 class OpsStatusTests(unittest.TestCase):
     def setUp(self):
+        # 27 พ.ย. 2569: สถานะ scheduler ถูกแชร์ข้าม worker ผ่านไฟล์ — แยกไฟล์ต่อการทดสอบ ไม่ให้รั่วข้ามเคส
+        import os
+        import tempfile
+        ops._SHARED_PATH = os.path.join(tempfile.mkdtemp(), "ops.json")
         with ops._LOCK:
             ops._STATE.update({"started_at": None, "last_tick": None, "tick_count": 0, "restarts": 0, "jobs": {},
                                "line": {"last_ok": None, "last_error": None, "last_error_at": None, "ok_count": 0,

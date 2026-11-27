@@ -152,3 +152,26 @@ class TestOpsSnapshotConfigProblems(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestOpsSharedState:
+    """27 พ.ย. 2569: /health บน worker ที่ไม่รัน scheduler ต้องไม่รายงาน 'scheduler ยังไม่เริ่ม' (issue #29/#30 สัญญาณหลอก)"""
+
+    def test_snapshot_reads_scheduler_state_from_shared_file(self, tmp_path):
+        from hd_module import ops_status as ops
+        orig = ops._SHARED_PATH
+        ops._SHARED_PATH = str(tmp_path / "ops.json")
+        try:
+            ops.tick()
+            ops.job_done("lab_sync", True, "ok", None)
+            s0 = ops.snapshot()
+            assert not any("scheduler" in x for x in s0["problems"]) and s0["scheduler_in_this_worker"]
+            with ops._LOCK:
+                ops._STATE.update({"last_tick": None, "started_at": None, "tick_count": 0, "jobs": {}})
+            snap = ops.snapshot()
+            assert "scheduler ยังไม่เริ่ม" not in snap["problems"] and not snap["scheduler_in_this_worker"]
+            assert "lab_sync" in snap["jobs"] and snap["tick_age_sec"] is not None
+            (tmp_path / "ops.json").unlink()
+            assert "scheduler ยังไม่เริ่ม" in ops.snapshot()["problems"]
+        finally:
+            ops._SHARED_PATH = orig
