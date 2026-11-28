@@ -78,6 +78,17 @@ def ask(prompt, system=None, model=None, max_tokens=1200, timeout=40, post_fn=No
                 return None, "no_credit"
             err = f"api:{code}"
             logger.warning("ai_text api %s model=%s: %s", code, body.get("model"), txt[:200].replace("\n", " "))
+            if code == 400:
+                # รุ่นใหม่บางรุ่นไม่รับ temperature → ถอดแล้วลองใหม่ 1 ครั้ง; ถ้ายัง 400 แนบข้อความจาก API ให้เห็นสาเหตุ
+                if "temperature" in body and attempt == 0:
+                    body.pop("temperature", None)
+                    raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                    continue
+                try:
+                    detail = (json.loads(txt).get("error") or {}).get("message", "")
+                except Exception:
+                    detail = txt
+                return None, f"api:400 {str(detail)[:140]}".strip()
             if attempt < retries and code in (429, 500, 502, 503, 529):
                 time.sleep(1.5)
                 continue

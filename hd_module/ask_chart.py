@@ -206,9 +206,11 @@ def answer(conn, question, who="", channel="line", post_fn=None, model=None, tod
     if len(q) > 400:
         q = q[:400]
     model = model or ai_text.model_id(MODEL_KEY)
-    raw, err = ai_text.ask(build_sql_prompt(q, today), model=model, max_tokens=700, timeout=40, post_fn=post_fn, temperature=0)
+    raw, err = ai_text.ask(build_sql_prompt(q, today), model=model, max_tokens=700, timeout=40, post_fn=post_fn)
     if err:
         _log(conn, who, channel, q, None, None, None, None, False, err)
+        if err.startswith("api:400"):
+            return {"text": f"AI ปฏิเสธคำขอ ({err}) — แจ้ง Claude ให้แก้", "error": err}
         hint = {"no_api_key": "ยังไม่ได้ตั้งค่า AI (no_api_key)", "no_credit": "เครดิต AI หมด — แจ้งแอดมินเติมเครดิต",
                 "api:404": f"ไม่รู้จักรุ่น AI '{model}' — ล้างช่อง ask_chart_model ใน ⚙️ ตั้งค่า แล้วลองใหม่",
                 "api:401": "API key ไม่ถูกต้อง (401)", "api:429": "AI ถูกจำกัดอัตรา (429) รอ 1 นาทีแล้วถามใหม่"}.get(err)
@@ -235,7 +237,7 @@ def answer(conn, question, who="", channel="line", post_fn=None, model=None, tod
     table = rows_as_text(cols, rows)
     text = None
     if rows:
-        s2, e2 = ai_text.ask(build_answer_prompt(q, explain, cols, rows), model=model, max_tokens=900, timeout=40, post_fn=post_fn, temperature=0)
+        s2, e2 = ai_text.ask(build_answer_prompt(q, explain, cols, rows), model=model, max_tokens=900, timeout=40, post_fn=post_fn)
         if s2 and not e2:
             text = s2.strip()
     if not text:
