@@ -18,11 +18,16 @@ table.ms{width:100%;border-collapse:collapse;font-size:.82rem;margin-top:6px}tab
   <h2 style="margin:0">💊📄 อ่านใบยา (AI) <span style="font-weight:400;font-size:.85rem;color:var(--fg-muted)">ใบตรวจรักษา รพ.ระนอง / Medication Record คลินิก · กล้อง-รูป-PDF · อ่าน 2 รอบเทียบกัน · รูปไม่ถูกเก็บ</span></h2>
   <div class="ms-card">
     <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
-      <label class="btn btn-success" style="cursor:pointer;margin:0">📷 ถ่าย/เลือกใบยา (หลายไฟล์ได้)
-        <input type="file" id="msFiles" accept="image/*,.pdf,application/pdf" capture="environment" multiple style="display:none" onchange="msRun(this)"></label>
+      <label class="btn btn-success" style="cursor:pointer;margin:0">📷 ถ่ายรูปใบยา
+        <input type="file" id="msCam" accept="image/*" capture="environment" style="display:none" onchange="msRun(this)"></label>
+      <label class="btn btn-primary" style="cursor:pointer;margin:0">🖼 เลือกรูป/PDF (หลายไฟล์ได้)
+        <input type="file" id="msFiles" accept="image/*,.pdf,application/pdf" multiple style="display:none" onchange="msRun(this)"></label>
       <label style="font-size:.8rem"><input type="checkbox" id="msDouble" checked> อ่าน 2 รอบ (แม่นกว่า ช้ากว่า)</label>
-      <span id="msStatus" style="font-size:.78rem;color:var(--fg-muted)"></span>
       <a class="btn btn-secondary" href="/hd/pending-inbox" style="margin-left:auto">📥 กล่องรอยืนยัน</a>
+    </div>
+    <div id="msProg" style="display:none;margin-top:8px;padding:8px 10px;border-radius:8px;background:rgba(39,174,96,.10);border:1px solid rgba(39,174,96,.35);font-size:.85rem">
+      <span id="msStatus"></span>
+      <div style="height:6px;background:var(--border);border-radius:3px;margin-top:6px;overflow:hidden"><div id="msBar" style="height:100%;width:0%;background:#27ae60;transition:width .4s"></div></div>
     </div>
     <div class="ms-stat" id="msAcc"></div>
     <div class="ms-note">ผลที่อ่านได้จะเป็น "ร่าง" เสมอ — กด "สร้างร่างให้ผู้ป่วย" แล้วไปยืนยันทีละรายการในกล่องรอยืนยัน (💊 ร่างยาใหม่) ระบบเทียบกับรายการปัจจุบันให้ (ใหม่/เปลี่ยน/หาย) · ยา <b>off/#0</b> และลายมือ <b>hold</b> ถูกติดป้ายไว้ในโน้ต · ระบบทักหน่วยผิด (เช่น Epiao เป็น mg) และขนาดผิดปกติ · เกณฑ์ก่อนเปิดทาง LINE: ≥50 ใบ ผิด 0</div>
@@ -73,9 +78,11 @@ function renderPage(p, fname){
 }
 async function msRun(inp){
   const files = Array.from(inp.files||[]); if(!files.length) return;
-  const out = document.getElementById('msOut'), st = document.getElementById('msStatus');
+  const out = document.getElementById('msOut'), st = document.getElementById('msStatus'), prog = document.getElementById('msProg'), bar = document.getElementById('msBar');
+  prog.style.display = ''; bar.style.width = '2%';
   for(let i=0;i<files.length;i++){
-    const f = files[i]; st.textContent = `กำลังอ่าน ${i+1}/${files.length} — ${f.name} (2 รอบ ~20–40 วิ)`;
+    const f = files[i]; st.textContent = `⏳ กำลังอ่าน ${i+1}/${files.length} — ${f.name} (AI อ่าน 2 รอบ ใช้เวลา ~20–40 วินาที ผลจะขึ้นด้านล่างอัตโนมัติ)`;
+    bar.style.width = Math.round((i/files.length)*100 + 5) + '%';
     const fd = new FormData(); fd.append('file', f); fd.append('double', document.getElementById('msDouble').checked?'1':'0');
     let d = {}, status = 0;
     try{ const r = await hdFetch('/hd/api/v1/med-sheet/read', {method:'POST', body: fd}); status = r.status; d = await r.json().catch(()=>({})); }catch(e){ status = 0; }
@@ -83,7 +90,8 @@ async function msRun(inp){
     if(status!==200){ out.insertAdjacentHTML('afterbegin', `<div class="ms-card"><b>${esc(f.name)}</b> <span class="ms-pill bad">⚠️ ${esc(d.error||('HTTP '+status))}</span></div>`); continue; }
     (d.pages||[]).forEach(p=>out.insertAdjacentHTML('afterbegin', renderPage(p, f.name)));
   }
-  st.textContent = 'เสร็จ'; inp.value='';
+  bar.style.width = '100%'; st.textContent = `✅ อ่านเสร็จ ${files.length} ไฟล์ — เลื่อนดูผลด้านล่าง แล้วกด "📝 สร้างร่างให้ผู้ป่วย"`; inp.value='';
+  setTimeout(()=>{ prog.style.display='none'; bar.style.width='0%'; }, 6000);
 }
 async function msDrafts(rid){
   const hn = (document.getElementById('hn_'+rid).value||'').trim(), st = document.getElementById('st_'+rid);
