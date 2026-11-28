@@ -117,11 +117,17 @@ function msRestore(){
   try{ const arr = JSON.parse(localStorage.getItem(MS_KEY)||'[]').filter(x=>Date.now()-x.t < 86400000);
     if(!arr.length) return;
     const out = document.getElementById('msOut');
-    out.insertAdjacentHTML('beforeend', `<div class="ms-card" style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:.82rem">🕘 ผลที่อ่านล่าสุดในเครื่องนี้ (${arr.length} ใบ, เก็บ 24 ชม.) — ปุ่ม "สร้างร่าง" ใช้ได้ภายใน 30 นาทีหลังอ่าน</span><button class="btn btn-secondary" onclick="localStorage.removeItem(MS_KEY);location.reload()">🗑 ล้าง</button></div>`);
+    out.insertAdjacentHTML('beforeend', `<div class="ms-card" style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:.82rem">🕘 ผลที่อ่านล่าสุดในเครื่องนี้ (${arr.length} ใบ, เก็บ 24 ชม.) — ปุ่ม "สร้างร่าง" ใช้ได้ภายใน 7 วัน</span><button class="btn btn-secondary" onclick="localStorage.removeItem(MS_KEY);location.reload()">🗑 ล้าง</button></div>`);
     arr.forEach(x=>out.insertAdjacentHTML('beforeend', renderPage(x.page, x.fname + ' · ' + new Date(x.t).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}))));
   }catch(e){}
 }
-msRestore();
+hdFetch('/hd/api/v1/med-sheet/reads').then(r=>r.ok?r.json():null).then(d=>{
+  if(d && d.reads && d.reads.length){
+    const out = document.getElementById('msOut');
+    out.insertAdjacentHTML('beforeend', `<div class="ms-card" style="font-size:.82rem">🕘 ผลที่อ่านใน 24 ชม. (${d.reads.length} ใบ — จากระบบ เห็นทุกเครื่อง) · ปุ่ม "สร้างร่าง" ใช้ได้ภายใน 7 วัน</div>`);
+    d.reads.forEach(x=>out.insertAdjacentHTML('beforeend', renderPage(x.page, 'อ่านเมื่อ ' + x.at)));
+  } else msRestore();
+}).catch(()=>msRestore());
 hdFetch('/hd/api/v1/med-sheet/recent').then(r=>r.ok?r.json():null).then(d=>{ if(!d||!d.reads||!d.reads.length) return;
   const rows = d.reads.map(x=>`<tr><td>${esc(x.at)}</td><td><b>${esc(x.hn)}</b> ${esc(x.name||'')}</td><td>${x.form==='hospital'?'รพ.':(x.form==='clinic'?'คลินิก':'-')}</td><td>${x.items}</td>
      <td>${x.draft?'<span class="ms-pill warn">ค้าง '+x.draft+'</span>':''}${x.accepted?'<span class="ms-pill ok">รับแล้ว '+x.accepted+'</span>':''}${x.closed?'<span class="ms-pill mut">ปิด '+x.closed+'</span>':''}${x.deleted?'<span class="ms-pill mut">ลบ '+x.deleted+'</span>':''}</td>

@@ -37,6 +37,13 @@
 <div class="ib-sec">
   <h3>🧪 ค่าแล็บจากรูปถ่าย — รอยืนยัน <span id="ibLabCount"></span></h3>
   <div class="ib-note">AI อ่านค่าจากรูปแล้ว แต่ยังไม่นับเป็นค่าที่ยืนยัน — แตะ 🖼 เทียบใบจริงก่อนกดยืนยันทุกครั้ง · 🚨 = ระบบสงสัยว่า OCR อาจอ่านพลาด</div>
+  <!-- 28 พ.ย. 2569: ตัวกรอง + จัดการเป็นชุด -->
+  <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin:6px 0">
+    <input id="ibLabFilter" placeholder="🔎 กรอง HN / ชื่อ" oninput="renderLabs(_ibData.labs||[])" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px;font-size:.85rem;min-width:160px">
+    <label style="font-size:.78rem"><input type="checkbox" id="ibLabOld" onchange="renderLabs(_ibData.labs||[])"> แสดงรายการเก่า (>60 วัน)</label>
+    <button class="ib-btn bad" onclick="ibRejectEmpty()">🧹 ปิดทั้งหมดที่ไม่มีค่าตัวเลข</button>
+    <span id="ibLabHidden" style="font-size:.74rem;color:var(--fg-muted)"></span>
+  </div>
   <div id="ibLabs"></div>
 </div>
 
@@ -82,18 +89,34 @@ function ibLoad(){
 }
 
 /* ── ② แล็บรอยืนยัน ── */
-function renderLabs(rows){
-  document.getElementById('ibLabCount').textContent = rows.length ? '(' + rows.length + ')' : '';
+function renderLabs(allRows){
+  document.getElementById('ibLabCount').textContent = allRows.length ? '(' + allRows.length + ')' : '';
   const el = document.getElementById('ibLabs');
-  if(!rows.length){ el.innerHTML = '<div class="ib-empty">✅ ไม่มีค่าแล็บค้างยืนยัน</div>'; return; }
+  if(!allRows.length){ el.innerHTML = '<div class="ib-empty">✅ ไม่มีค่าแล็บค้างยืนยัน</div>'; document.getElementById('ibLabHidden').textContent=''; return; }
+  const q = ((document.getElementById('ibLabFilter')||{}).value||'').trim().toLowerCase();
+  const showOld = !!(document.getElementById('ibLabOld')||{}).checked;
+  const cutoff = Date.now() - 60*86400000;
+  let rows = allRows.filter(r => !q || String(r.hn||'').includes(q) || String(r.name||'').toLowerCase().includes(q));
+  const old = rows.filter(r => r.date && new Date(r.date).getTime() < cutoff);
+  if(!showOld) rows = rows.filter(r => !(r.date && new Date(r.date).getTime() < cutoff));
+  rows = rows.slice().sort((a,b)=> String(b.date||'').localeCompare(String(a.date||'')));
+  document.getElementById('ibLabHidden').textContent = (!showOld && old.length) ? `ซ่อนรายการเก่า ${old.length} ใบ` : '';
+  const byHn = {}; rows.forEach(r => { (byHn[r.hn] = byHn[r.hn] || []).push(r); });
+  const bulkBtn = {};
+  Object.keys(byHn).forEach(hn => { const ids = byHn[hn].filter(r => r.has_values !== false).map(r => r.id); if(ids.length >= 2) bulkBtn[hn] = ids; });
+  const seenHn = {};
+  if(!rows.length){ el.innerHTML = '<div class="ib-empty">ไม่มีรายการตามตัวกรอง' + (old.length && !showOld ? ' (มีรายการเก่าซ่อนอยู่ ' + old.length + ')' : '') + '</div>'; return; }
   el.innerHTML = rows.map(r => {
+    let head = '';
+    if(bulkBtn[r.hn] && !seenHn[r.hn]){ seenHn[r.hn] = true;
+      head = '<div style="margin:8px 0 2px;font-size:.78rem"><button class="ib-btn ok" onclick="ibLabBulk(\'' + esc(r.hn) + '\', [' + bulkBtn[r.hn].join(',') + '])">✅ ยืนยันทั้งชุดของ ' + esc(r.name||r.hn) + ' (' + bulkBtn[r.hn].length + ' ใบ)</button></div>'; }
     const vals = [['Hb', r.hb], ['Hct', r.hct], ['PLT', r.plt], ['K', r.k], ['HCO3', r.hco3], ['Na', r.na], ['Ca', r.ca], ['P', r.phos]]
       .filter(v => v[1] != null).map(v => v[0] + ' ' + v[1]).join(' · ');
     const sero = (r.sero || []).map(s =>
       '<b style="color:#b91c1c;background:#fde8e8;border-radius:6px;padding:0 6px;margin-left:4px">' + esc(s) + ' +</b>').join('');
     const flags = (r.flags || '').split(';').map(s => s.trim()).filter(Boolean)
       .map(f => '<span class="ib-flag">🚨 ' + esc(f) + '</span>').join('');
-    return '<div class="ib-row" id="ibLab' + r.id + '">' +
+    return head + '<div class="ib-row" id="ibLab' + r.id + '">' +
       '<span class="ib-hn">' + esc(r.hn) + '</span> ' + esc(r.name) +
       ' <span class="ib-vals">· เจาะ ' + esc(r.date || '-') + '</span><br>' +
       '<span class="ib-vals">' + esc(vals || '(ไม่มีค่าตัวเลข)') + '</span>' + sero + flags +
@@ -132,12 +155,16 @@ function renderMeds(rows){
   rows.forEach(r => { (byHn[r.hn] = byHn[r.hn] || { name: r.name, items: [] }).items.push(r); });
   el.innerHTML = Object.keys(byHn).map(hn => {
     const g = byHn[hn];
+    const sheetIds = g.items.filter(m => m.source === 'hd_sheet' && m.status === 'ai_draft' && !m.flagged).map(m => m.id);
+    const nFlag = g.items.filter(m => m.source === 'hd_sheet' && m.flagged).length;
     return '<div class="ib-row"><span class="ib-hn">' + esc(hn) + '</span> ' + esc(g.name) +
       ' <span class="ib-vals">(' + g.items.length + ' รายการ)</span>' +
+      (sheetIds.length >= 2 ? ' <button class="ib-btn ok" onclick="ibMedAcceptSheet(\'' + esc(hn) + '\', [' + sheetIds.join(',') + '])">✅ รับทั้งใบ (' + sheetIds.length + ' รายการ' + (nFlag ? ', ยกเว้น ⚠️ ' + nFlag : '') + ')</button>' : '') +
       g.items.map(m =>
         '<div id="ibMed' + m.id + '" style="margin:4px 0 0 10px">· ' + esc(m.drug) +
         ' <span class="ib-vals">' + esc(m.dose) + ' ' + esc(m.freq) +
-        (m.status === 'pending' ? ' — พยาบาลแก้ รอแพทย์รับทราบ' : ' — ร่างจาก AI') + '</span>' +
+        (m.status === 'pending' ? ' — พยาบาลแก้ รอแพทย์รับทราบ' : (m.source === 'hd_sheet' ? ' — 💊📄 จากใบยา AI' : ' — ร่างจาก AI (LINE)')) + '</span>' +
+        (m.notes ? '<div style="font-size:.74rem;color:' + (m.flagged ? '#a04000' : 'var(--fg-muted)') + ';margin-left:10px">' + esc(m.notes) + '</div>' : '') +
         '<div class="ib-acts">' +
           (m.source_doc ? '<button class="ib-btn" onclick="ibZoom(ibMedImg(\'' + esc(m.source_doc) + '\'))">🖼 ใบยา</button>' : '') +
           '<button class="ib-btn ok" onclick="ibMedConfirm(\'' + esc(hn) + '\',' + m.id + ')">✅ รับยา</button>' +
@@ -146,6 +173,26 @@ function renderMeds(rows){
       '</div>';
   }).join('');
 }
+function ibLabBulk(hn, ids){
+  if(!confirm('ยืนยันว่าเทียบใบแล็บจริงของผู้ป่วยนี้ครบ ' + ids.length + ' ใบแล้ว ค่าถูกต้องทั้งหมด?')) return;
+  hdFetch('/hd/api/v1/labs/doc-rows/bulk', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'verify', ids})})
+    .then(r => r.json().then(d => ({ok:r.ok, status:r.status, d})))
+    .then(x => { if(!x.ok){ showToast(x.status===403?'เฉพาะแพทย์/แอดมินเท่านั้น':(x.d.error||'ไม่สำเร็จ'),'error'); return; }
+      (x.d.ids||[]).forEach(id => { const row = document.getElementById('ibLab'+id); if(row) row.innerHTML = '<span class="ib-done">✅ ยืนยันแล้ว (ชุด)</span>'; });
+      showToast('ยืนยันแล้ว ' + x.d.count + ' ใบ', 'success'); })
+    .catch(e => showToast('ผิดพลาด: ' + e, 'error'));
+}
+function ibRejectEmpty(){
+  const n = (_ibData.labs||[]).filter(r => r.has_values === false).length;
+  if(!n){ showToast('ไม่มีรายการที่ไม่มีค่าตัวเลข', 'info'); return; }
+  if(!confirm('ปิด ' + n + ' รายการที่ AI อ่านไม่ได้ค่าตัวเลขเลย (จะถูกบันทึกเป็น "ปฏิเสธ: ไม่มีค่าตัวเลขในใบ" และหายจากกล่องนี้)?')) return;
+  hdFetch('/hd/api/v1/labs/doc-rows/bulk', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({action:'reject_empty'})})
+    .then(r => r.json().then(d => ({ok:r.ok, status:r.status, d})))
+    .then(x => { if(!x.ok){ showToast(x.status===403?'เฉพาะแพทย์/แอดมินเท่านั้น':(x.d.error||'ไม่สำเร็จ'),'error'); return; }
+      showToast('ปิดแล้ว ' + x.d.count + ' รายการ', 'success'); ibLoad(); })
+    .catch(e => showToast('ผิดพลาด: ' + e, 'error'));
+}
+
 function _ibMedApply(hn, payload, id, doneText){
   hdFetch('/hd/api/v1/patients/' + encodeURIComponent(hn) + '/medications/reconcile/apply', {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
@@ -163,6 +210,22 @@ function ibMedConfirm(hn, id){
 function ibMedDismiss(hn, id){
   if(!confirm('ปิดร่างนี้ (ไม่รับเข้าระบบ)?')) return;
   _ibMedApply(hn, { dismiss: [id] }, id, '🗑 ปิดร่างแล้ว');
+}
+/* 28 พ.ย. 2569: รับทั้งใบ — ใช้ reconcile เดิมจัดกลุ่ม ใหม่/เปลี่ยน/ซ้ำ แล้ว apply ครั้งเดียว (ข้ามรายการที่มีธง ⚠️/หยุด/hold ให้แพทย์ดูเอง) */
+async function ibMedAcceptSheet(hn, ids){
+  if(!confirm('รับร่างจากใบยา ' + ids.length + ' รายการของผู้ป่วยนี้เข้าระบบ (รายการที่มีธง ⚠️/หยุด/hold จะไม่ถูกรับอัตโนมัติ)?')) return;
+  try{
+    const r = await hdFetch('/hd/api/v1/patients/' + encodeURIComponent(hn) + '/medications/reconcile');
+    const rec = await r.json(); if(!r.ok) throw new Error(rec.error||r.status);
+    const set = new Set(ids);
+    const payload = { new: (rec.new||[]).filter(d => set.has(d.id)).map(d => d.id),
+                      changed: (rec.changed||[]).filter(x => set.has(x.draft.id)).map(x => [x.draft.id, x.current.id]),
+                      dismiss: (rec.same||[]).filter(x => set.has(x.draft.id)).map(x => x.draft.id) };
+    const r2 = await hdFetch('/hd/api/v1/patients/' + encodeURIComponent(hn) + '/medications/reconcile/apply', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+    const d = await r2.json(); if(!r2.ok) throw new Error(d.error||r2.status);
+    showToast(`รับแล้ว: ใหม่ ${d.new||0} · ปรับขนาด ${d.changed||0} · ซ้ำของเดิม ${d.dismissed||0}` + ((rec.missing||[]).length ? ` · ยาที่ไม่อยู่ในใบ ${rec.missing.length} รายการ (ไม่หยุดอัตโนมัติ)` : ''), 'success');
+    ibLoad();
+  }catch(e){ showToast('ผิดพลาด: ' + (e.message||e), 'error'); }
 }
 
 /* ── ③ เอกสารกองกลาง ── */

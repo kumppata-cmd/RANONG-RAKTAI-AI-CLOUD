@@ -599,6 +599,8 @@ function renderBeds(beds){
       const mism = b.shift_mismatch && b.usual_shift ? ` <span class="bed-access" style="background:#fef3c7;color:#92400e;border:1px solid #f59e0b" title="ปกติฟอกรอบ${SHN[b.usual_shift]} (${b.schedule_days||''})">⇄ ปกติ${SHN[b.usual_shift]}</span>` : '';
       const days = b.schedule_days ? ` <span style="font-size:.6rem;color:var(--fg-dim)">${b.schedule_days}</span>` : '';
       hnLine = `<div class="bed-hn">${pHn ? 'HN '+pHn : ''}${va ? ' <span class="bed-access '+vaClass(va)+'">'+va+'</span>' : ''}${mism}${days}</div>`;
+      /* 28 พ.ย. 2569: ป้ายแพ้ยาบนการ์ดเตียง (จากทะเบียน/ใบยา AI ที่แพทย์ยืนยัน) */
+      if(b.allergies) hnLine += `<div style="margin-top:2px;font-size:.68rem;font-weight:700;color:#b91c1c;background:#fee2e2;border-radius:6px;padding:2px 6px;display:inline-block">🚨 แพ้ยา: ${_esc(String(b.allergies).slice(0,60))}</div>`;
     }
 
     /* Next scheduled badge (when bed has active + scheduled) */

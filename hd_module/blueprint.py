@@ -2319,20 +2319,94 @@ def run_idh_twin_outcomes():
 
 
 # ── 💊📄 Med Sheet Reader ขั้น 1–2 (28 พ.ย. 2569 แพทย์อนุมัติ) ──
-_MED_READS = {}   # read_id → (ts, result) ต่อ worker, TTL 30 นาที
+_MED_READS = {}   # read_id → (ts, result) ต่อ worker (cache) — ของจริงอยู่ใน DB hd_med_sheet_reads (28 พ.ย. 2569)
+_MED_READS_SQL = """
+CREATE TABLE IF NOT EXISTS hd_med_sheet_reads (
+    read_id VARCHAR(20) PRIMARY KEY,
+    hn VARCHAR(20),
+    sheet_hn VARCHAR(20),
+    form VARCHAR(12),
+    n_items INTEGER,
+    result JSONB,
+    created_by VARCHAR(80),
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+"""
 
 
-def _med_remember(read_id, res):
+def _med_remember(read_id, res, who=None):
+    """cache ใน worker + บันทึกลง DB (ไม่มีรูป มีแต่ผลอ่าน) → เห็นข้ามเครื่อง/ข้าม worker และใช้สร้างร่างได้ภายหลัง"""
+    import json as _json
+    import os
     import time as _t
     now = _t.time()
     for k in [k for k, (ts, _) in _MED_READS.items() if now - ts > 1800]:
         _MED_READS.pop(k, None)
     _MED_READS[read_id] = (now, res)
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_MED_READS_SQL)
+                pt = res.get("patient") or {}
+                cur.execute("""INSERT INTO hd_med_sheet_reads (read_id, hn, sheet_hn, form, n_items, result, created_by)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (read_id) DO NOTHING""",
+                            (read_id, (pt.get("hn") or None), ((res.get("header") or {}).get("hn_norm") or None)[:20] if (res.get("header") or {}).get("hn_norm") else None,
+                             (res.get("form") or "")[:12], len(res.get("items") or []), _json.dumps(res, ensure_ascii=False, default=str), (who or "")[:80]))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        logger.info("med read persist: %s", e)
 
 
 def _med_recall(read_id):
+    import os
     hit = _MED_READS.get(read_id)
-    return hit[1] if hit else None
+    if hit:
+        return hit[1]
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url or not read_id:
+        return None
+    try:
+        import psycopg2
+        conn = psycopg2.connect(db_url, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                cur.execute(_MED_READS_SQL)
+                cur.execute("SELECT result FROM hd_med_sheet_reads WHERE read_id = %s AND created_at >= NOW() - INTERVAL '7 days'", (read_id,))
+                r = cur.fetchone()
+            conn.commit()
+        finally:
+            conn.close()
+        return r[0] if r else None
+    except Exception as e:  # noqa: BLE001
+        logger.info("med read recall: %s", e)
+        return None
+
+
+@hd_bp.route("/med-sheet/reads", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def med_sheet_reads():
+    """ผลอ่านล่าสุด (24 ชม., 12 ใบ) จาก DB — หน้าอ่านใบยากู้คืนได้ทุกเครื่อง"""
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(_MED_READS_SQL)
+            cur.execute("""SELECT read_id, result, created_at FROM hd_med_sheet_reads
+                           WHERE created_at >= NOW() - INTERVAL '24 hours' ORDER BY created_at DESC LIMIT 12""")
+            rows = [{"read_id": r[0], "page": r[1], "at": (r[2] + timedelta(hours=7)).strftime("%H:%M") if r[2] else ""} for r in cur.fetchall()]
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"reads": rows})
 
 
 @hd_bp.route("/med-sheet/read", methods=["POST"])
@@ -2385,7 +2459,7 @@ def med_sheet_read():
         res["drafts"] = msr.to_drafts(res)
         res["summary"] = msr.summary_lines(res, patient)
         res["page"] = i
-        _med_remember(res["read_id"], res)
+        _med_remember(res["read_id"], res, g.get("hd_username") or str(g.get("hd_user_id") or ""))
         out.append(res)
     log_action(user_id=g.get("hd_user_id"), action="med_sheet.read", resource_type="document",
                new_values={"pages": len(out), "items": sum(len(p.get("items") or []) for p in out)}, ip_address=request.remote_addr or "")
@@ -3890,7 +3964,7 @@ def pending_inbox():
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute("""SELECT m.id, p.hn, p.patient_name, m.drug_name, m.dose,
-                                  m.frequency, m.verify_status, m.source_doc, m.updated_at
+                                  m.frequency, m.verify_status, m.source_doc, m.updated_at, m.source, m.notes
                            FROM hd_medication_orders m
                            JOIN hd_patient_mapping p ON p.id = m.patient_id
                            WHERE m.verify_status IN ('ai_draft', 'pending')
@@ -3901,7 +3975,9 @@ def pending_inbox():
                 out["meds"] = [{"id": r[0], "hn": r[1], "name": r[2] or "",
                                 "drug": r[3], "dose": r[4] or "", "freq": r[5] or "",
                                 "status": r[6], "source_doc": r[7] or "",
-                                "at": r[8].isoformat()[:16] if r[8] else None}
+                                "at": r[8].isoformat()[:16] if r[8] else None,
+                                "source": r[9] or "", "notes": r[10] or "",
+                                "flagged": ("⚠️" in (r[10] or "")) or ("หยุด" in (r[10] or "")) or ("hold" in (r[10] or "").lower())}
                                for r in med_rows]
             cur.execute("""SELECT d.id, d.hn, p.patient_name, d.specimen_date, d.delta_flags,
                                   d.hb, d.hct, d.k, d.na, d.ca, d.phos, d.doc_id,
@@ -3923,7 +3999,9 @@ def pending_inbox():
                                 "phos": _f(r[10]), "doc8": (r[11] or "")[:8],
                                 "plt": _f(r[12]), "hco3": _f(r[13]),
                                 "sero": [s for s, v in (("HBsAg", r[14]), ("Anti-HCV", r[15]),
-                                                        ("Anti-HIV", r[16])) if v == "positive"]}
+                                                        ("Anti-HIV", r[16])) if v == "positive"],
+                                "has_values": any(x is not None for x in (r[5], r[6], r[7], r[8], r[9], r[10], r[12], r[13]))
+                                              or any(v for v in (r[14], r[15], r[16]))}
                                for r in lab_rows]
         conn.close()
     except Exception as e:
@@ -4688,6 +4766,73 @@ def serology_manual():
 # ═══════════════ LAB VERIFY GATE (2026-11-22) ═══════════════
 # ค่าแล็บจากรูปถ่าย (OCR) ต้องให้แพทย์/แอดมินยืนยันก่อนถือเป็นค่าที่เชื่อถือได้
 # — เหมือนด่านยืนยันยา: verify = ✅ ใช้ได้ · reject = ❌ อ่านผิด ซ่อนจาก bed card
+
+
+@hd_bp.route("/labs/doc-rows/bulk", methods=["POST"])
+@require_role("physician", "admin")
+def labs_doc_rows_bulk():
+    """28 พ.ย. 2569: ยืนยัน/ปฏิเสธหลายแถวในคลิกเดียว {action: verify|reject, ids: [...], reason?} (แพทย์/แอดมิน)
+    หรือ {action: 'reject_empty'} = ปิดทุกแถว pending ที่ไม่มีค่าตัวเลขและไม่มี serology เลย"""
+    import os
+    import psycopg2
+    data = request.get_json(silent=True) or {}
+    action = (data.get("action") or "").strip()
+    if action not in ("verify", "reject", "reject_empty"):
+        return jsonify({"error": "action ต้องเป็น verify | reject | reject_empty"}), 400
+    ids = [int(x) for x in (data.get("ids") or []) if str(x).isdigit()][:300]
+    if action in ("verify", "reject") and not ids:
+        return jsonify({"error": "ไม่มีรายการ"}), 400
+    reason = (data.get("reason") or ("ไม่มีค่าตัวเลขในใบ" if action == "reject_empty" else "ปฏิเสธเป็นชุด")).strip()[:200]
+    uid = g.get("hd_user_id")
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            if action == "reject_empty":
+                cur.execute("""UPDATE hd_lab_docs SET verified_status = 'rejected', verified_by = %s, verified_at = NOW(),
+                                   delta_flags = TRIM(BOTH '; ' FROM COALESCE(delta_flags,'') || %s)
+                               WHERE COALESCE(verified_status, 'pending') = 'pending'
+                                 AND hb IS NULL AND hct IS NULL AND k IS NULL AND na IS NULL AND ca IS NULL AND phos IS NULL
+                                 AND plt IS NULL AND hco3 IS NULL AND COALESCE(bun, cr, creatinine, albumin, ferritin, tsat, pth) IS NULL
+                                 AND COALESCE(hbsag,'') <> 'positive' AND COALESCE(antihcv,'') <> 'positive' AND COALESCE(antihiv,'') <> 'positive'
+                               RETURNING id""", (f"hd_user:{uid}", f"; ปิดเป็นชุดโดยแพทย์: {reason}"))
+            elif action == "verify":
+                cur.execute("""UPDATE hd_lab_docs SET verified_status = 'verified', verified_by = %s, verified_at = NOW()
+                               WHERE id = ANY(%s) AND COALESCE(verified_status, 'pending') = 'pending' RETURNING id""", (f"hd_user:{uid}", ids))
+            else:
+                cur.execute("""UPDATE hd_lab_docs SET verified_status = 'rejected', verified_by = %s, verified_at = NOW(),
+                                   delta_flags = TRIM(BOTH '; ' FROM COALESCE(delta_flags,'') || %s)
+                               WHERE id = ANY(%s) AND COALESCE(verified_status, 'pending') = 'pending' RETURNING id""",
+                            (f"hd_user:{uid}", f"; ปฏิเสธโดยแพทย์: {reason}", ids))
+            done = [r[0] for r in cur.fetchall()]
+        conn.commit()
+    except Exception as e:  # noqa: BLE001 — คอลัมน์บางตัวอาจไม่มีในบางสภาพแวดล้อม → ใช้เงื่อนไขพื้นฐาน
+        conn.rollback()
+        if action != "reject_empty":
+            conn.close()
+            return jsonify({"error": str(e)[:200]}), 500
+        with conn.cursor() as cur:
+            cur.execute("""UPDATE hd_lab_docs SET verified_status = 'rejected', verified_by = %s, verified_at = NOW()
+                           WHERE COALESCE(verified_status, 'pending') = 'pending'
+                             AND hb IS NULL AND hct IS NULL AND k IS NULL AND na IS NULL AND ca IS NULL AND phos IS NULL
+                             AND plt IS NULL AND hco3 IS NULL
+                             AND COALESCE(hbsag,'') <> 'positive' AND COALESCE(antihcv,'') <> 'positive' AND COALESCE(antihiv,'') <> 'positive'
+                           RETURNING id""", (f"hd_user:{uid}",))
+            done = [r[0] for r in cur.fetchall()]
+        conn.commit()
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    log_action(user_id=uid, action=f"lab_doc.bulk_{action}", resource_type="lab_doc", new_values={"count": len(done), "reason": reason},
+               ip_address=request.remote_addr or "")
+    if action == "verify" and done:
+        try:
+            _lab_ap_kick("verify")
+        except Exception:
+            pass
+    return jsonify({"ok": True, "count": len(done), "ids": done})
 
 
 @hd_bp.route("/labs/doc-rows/<int:row_id>/verify", methods=["POST"])
@@ -10216,7 +10361,8 @@ def _bed_dashboard_impl():
                            -- เวลาที่ยืดบนเครื่องล่าสุด (notes 'extend=NN' จากปุ่มบันทึก UF ทุกหน้า) — คอลัมน์ท้ายสุด ไม่ขยับ index เดิม
                            (SELECT u.notes FROM hd_uf_records u WHERE u.session_id = s.id AND u.notes LIKE '%%extend=%%'
                             ORDER BY u.recorded_at DESC, u.id DESC LIMIT 1) AS extend_notes,
-                           s.notes AS session_notes   -- 25 พ.ย. 2569: '[แผนฟอก X ชม.]' จาก UF Planner (ท้ายสุด ไม่ขยับ index)
+                           s.notes AS session_notes,   -- 25 พ.ย. 2569: '[แผนฟอก X ชม.]' จาก UF Planner
+                           p.allergies                 -- 28 พ.ย. 2569: ป้ายแพ้ยาบนการ์ดเตียง (ท้ายสุด index 24 ไม่ขยับของเดิม)
                     FROM hd_sessions s
                     JOIN hd_patient_mapping p ON p.id = s.patient_id
                     WHERE s.session_date = %s
@@ -10316,6 +10462,7 @@ def _bed_dashboard_impl():
                             "start_time": (row[8].isoformat() + "Z") if row[8] else None,
                             "duration_hours": (_plan_hours_from_notes(row[23]) if len(row) > 23 else None) or (float(row[9]) if row[9] else 4),
                             "extend_min": _extend_min_from_notes(row[22] if len(row) > 22 else None),
+                            "allergies": (row[24] or "").strip() if len(row) > 24 and row[24] else "",
                             "esa_given": row[10],
                             "esa_drug_given": row[11],
                             "current_vitals": None,
