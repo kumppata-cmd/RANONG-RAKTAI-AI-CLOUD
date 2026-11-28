@@ -230,11 +230,12 @@ def answer(conn, body, base_url="", ai_fallback=True):
         if low.startswith("แล็บบ้าน") or low.startswith("ส่งแล็บบ้าน") or low.startswith("แลบบ้าน") or low.startswith("ส่งแลบบ้าน"):
             from .patient_engage import lab_friendly_command
             return lab_friendly_command(cur, b)
-        # 28 พ.ย. 2569: ลิงก์ตรวจกำยา / ฟังเสียงเส้น (สะกด ลิงก์/ลิงค์/ลิ้ง ได้หมด)
-        if re.match(r"^(ลิ้?ง[กค]?์?\s*ยา|pill)", low):
+        # 28 พ.ย. 2569: ลิงก์ตรวจกำยา / ฟังเสียงเส้น — ทนสะกดผิด (ลิงก์/ลิงค์/ลิ้ง/ลิงกุ/ลิงค) ด้วยการตัดวรรณยุกต์/สระบนล่างก่อนเทียบ
+        _nl = _strip_marks(low)
+        if re.match(r"^(ลง[กค]?\s*ยา|pill)", _nl):
             from .pill_check import link_command as _pill_link
             return _pill_link(cur, b, base_url or _default_base_url())
-        if re.match(r"^(ลิ้?ง[กค]?์?\s*เส้น|bruit)", low):
+        if re.match(r"^(ลง[กค]?\s*เสน|bruit)", _nl):
             from .bruit_check import link_command as _bruit_link
             return _bruit_link(cur, b, base_url or _default_base_url())
         if re.match(r"^ยา\s*\d", low):
@@ -280,6 +281,14 @@ def answer(conn, body, base_url="", ai_fallback=True):
         import logging
         logging.getLogger(__name__).info("group ask_chart: %s", type(e).__name__)
     return f"ไม่พบ \"{b[:40]}\" — ลองพิมพ์ @รักษ์ไต help"
+
+
+_MARKS_RE = re.compile(r"[\u0e31\u0e34-\u0e3a\u0e47-\u0e4e]")
+
+
+def _strip_marks(t):
+    """ตัดสระบน/ล่างและวรรณยุกต์ออก เพื่อให้คำสั่งที่พิมพ์ผิดเล็กน้อย (ลิงกุเส้น) ยังเข้าใจได้"""
+    return _MARKS_RE.sub("", t or "")
 
 
 def _default_base_url():

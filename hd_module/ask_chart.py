@@ -209,7 +209,10 @@ def answer(conn, question, who="", channel="line", post_fn=None, model=None, tod
     raw, err = ai_text.ask(build_sql_prompt(q, today), model=model, max_tokens=700, timeout=40, post_fn=post_fn, temperature=0)
     if err:
         _log(conn, who, channel, q, None, None, None, None, False, err)
-        return {"text": {"no_api_key": "ยังไม่ได้ตั้งค่า AI (no_api_key)", "no_credit": "เครดิต AI หมด — แจ้งแอดมินเติมเครดิต"}.get(err, "AI ไม่ตอบในรอบนี้ ลองถามใหม่อีกครั้ง"), "error": err}
+        hint = {"no_api_key": "ยังไม่ได้ตั้งค่า AI (no_api_key)", "no_credit": "เครดิต AI หมด — แจ้งแอดมินเติมเครดิต",
+                "api:404": f"ไม่รู้จักรุ่น AI '{model}' — ล้างช่อง ask_chart_model ใน ⚙️ ตั้งค่า แล้วลองใหม่",
+                "api:401": "API key ไม่ถูกต้อง (401)", "api:429": "AI ถูกจำกัดอัตรา (429) รอ 1 นาทีแล้วถามใหม่"}.get(err)
+        return {"text": hint or f"AI ไม่ตอบในรอบนี้ ({err}) — ลองถามใหม่อีกครั้ง หรือดูประวัติที่ {base_url or ''}/hd/ask", "error": err}
     js = ai_text.extract_json(raw) or {}
     sql, explain = js.get("sql"), js.get("explain") or ""
     if not sql:

@@ -77,6 +77,7 @@ def ask(prompt, system=None, model=None, max_tokens=1200, timeout=40, post_fn=No
             if code == 400 and "credit balance" in txt:
                 return None, "no_credit"
             err = f"api:{code}"
+            logger.warning("ai_text api %s model=%s: %s", code, body.get("model"), txt[:200].replace("\n", " "))
             if attempt < retries and code in (429, 500, 502, 503, 529):
                 time.sleep(1.5)
                 continue
@@ -88,6 +89,7 @@ def ask(prompt, system=None, model=None, max_tokens=1200, timeout=40, post_fn=No
         text = "".join(b.get("text", "") for b in (rj.get("content") or []) if b.get("type") == "text").strip()
         if text:
             return text, None
+        logger.warning("ai_text empty reply model=%s stop=%s", body.get("model"), rj.get("stop_reason"))
         if attempt < retries:
             time.sleep(1.0)
     return None, err
