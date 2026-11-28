@@ -17778,3 +17778,89 @@ def time_machine_whatif(hn):
 @hd_web.route("/patient/<hn>/time-machine")
 def time_machine_page(hn):
     return render_template("hd_time_machine.html", patient_hn=hn)
+
+
+# ── 🗑 28 พ.ย. 2569: ทิ้งเอกสารกองกลางที่ไม่ใช่เอกสารผู้ป่วย (รูปอาหาร/ของทั่วไปที่ส่งผิด) ──
+# ใช้ "ซ่อน" ของดัชนีเอกสารเดิม (logical delete — ไฟล์ใน GCS ไม่ถูกลบ, SA ไม่มีสิทธิ์ลบอยู่แล้ว)
+# กู้คืนได้ที่ถังขยะ หรือคำสั่ง LINE 'เลิกซ่อน <รหัส>' เดิม · เฉพาะแพทย์/แอดมิน · ลง audit + hd_doc_cleanup_log
+_DISCARD_PREFIX = "not_document"
+
+
+@hd_bp.route("/documents/<ref>/discard", methods=["POST"])
+@require_role("physician", "admin")
+def document_discard(ref):
+    import os
+    from .patient_docs import srv, doc_hn, log_cleanup
+    data = request.get_json(silent=True) or {}
+    reason = (data.get("reason") or "ไม่ใช่เอกสารผู้ป่วย")[:80]
+    try:
+        s = srv()
+        doc, err = s._find_doc_by_prefix(ref)
+        if doc is None:
+            return jsonify({"error": err}), 404
+        if (doc.get("category") or "") != "review" and not data.get("force"):
+            return jsonify({"error": "ทิ้งได้เฉพาะเอกสารกองกลาง (ยังไม่มีเจ้าของ) — ใบในแฟ้มผู้ป่วยให้ใช้ย้าย/เปลี่ยนหมวดแทน"}), 400
+        di = current_app.config.get("DOC_INDEX")
+        if di is None:
+            return jsonify({"error": "document index ไม่พร้อม"}), 503
+        full_id = doc.get("document_id") or ""
+        who = g.get("hd_username") or str(g.get("hd_user_id") or "")
+        ok = di.set_hidden(full_id, True, reason=f"{_DISCARD_PREFIX}: {reason} (โดย {who})")
+        if not ok:
+            return jsonify({"error": "ซ่อนไม่สำเร็จ"}), 500
+        log_cleanup(os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", ""),
+                    doc_id=full_id[:8], action="discard", hn_from=doc_hn(doc), hn_to="", category_from=doc.get("category", ""),
+                    category_to="trash", path_left=doc.get("gcs_object_path", ""), reason=reason, user_id=g.get("hd_user_id"))
+        log_action(user_id=g.get("hd_user_id"), action="document.discard", resource_type="document", resource_id=full_id[:8],
+                   new_values={"reason": reason, "path": doc.get("gcs_object_path", "")}, ip_address=request.remote_addr or "")
+        return jsonify({"ok": True, "doc8": full_id[:8], "restorable": True})
+    except Exception as e:
+        logger.error("doc discard: %s", e)
+        return jsonify({"error": str(e)}), 500
+
+
+@hd_bp.route("/documents/trash", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def document_trash_list():
+    di = current_app.config.get("DOC_INDEX")
+    if di is None:
+        return jsonify({"items": []})
+    try:
+        di._ensure_fresh()
+    except Exception:
+        pass
+    items = []
+    for d in list(getattr(di, "_doc_map", {}).values()):
+        if d.get("hidden") and str(d.get("hidden_reason") or "").startswith(_DISCARD_PREFIX):
+            doc_id = d.get("document_id") or ""
+            path = d.get("gcs_object_path") or ""
+            items.append({"doc8": doc_id[:8], "hidden_at": (d.get("hidden_at") or "")[:16].replace("T", " "),
+                          "reason": d.get("hidden_reason"), "filename": (d.get("original_filename") or path.rsplit("/", 1)[-1])[:60],
+                          "is_image": path.lower().endswith((".jpg", ".jpeg", ".png")),
+                          "date": (d.get("submitted_at") or d.get("received_at") or d.get("upload_date") or "")[:10]})
+    items.sort(key=lambda x: x["hidden_at"], reverse=True)
+    return jsonify({"items": items[:200], "count": len(items)})
+
+
+@hd_bp.route("/documents/<ref>/restore", methods=["POST"])
+@require_role("physician", "admin")
+def document_restore(ref):
+    di = current_app.config.get("DOC_INDEX")
+    if di is None:
+        return jsonify({"error": "document index ไม่พร้อม"}), 503
+    try:
+        di._ensure_fresh()
+    except Exception:
+        pass
+    prefix = (ref or "").strip().lower()
+    matches = [d for d in getattr(di, "_doc_map", {}).values() if d.get("hidden") and (d.get("document_id") or "").lower().startswith(prefix)]
+    if len(prefix) < 6 or not matches:
+        return jsonify({"error": "ไม่พบรายการในถังขยะ"}), 404
+    if len(matches) > 1:
+        return jsonify({"error": "รหัสกำกวม ระบุให้ยาวขึ้น"}), 400
+    full_id = matches[0].get("document_id") or ""
+    if not di.set_hidden(full_id, False):
+        return jsonify({"error": "กู้คืนไม่สำเร็จ"}), 500
+    log_action(user_id=g.get("hd_user_id"), action="document.restore", resource_type="document", resource_id=full_id[:8],
+               new_values={}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "doc8": full_id[:8]})

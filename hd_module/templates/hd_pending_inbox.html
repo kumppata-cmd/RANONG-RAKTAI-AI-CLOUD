@@ -55,7 +55,9 @@
 
 <div class="ib-sec">
   <h3>📥 เอกสารกองกลาง — รอจัดเข้าแฟ้ม <span id="ibRevCount"></span></h3>
-  <div class="ib-note">ใบที่ระบบหาเจ้าของไม่ได้ — ดูรูปแล้วกด ↪️ เพื่อย้ายเข้า HN ที่ถูกต้อง</div>
+  <div class="ib-note">ใบที่ระบบหาเจ้าของไม่ได้ — ดูรูปแล้วกด ↪️ เพื่อย้ายเข้า HN ที่ถูกต้อง · รูปที่ไม่ใช่เอกสาร (อาหาร/ของทั่วไปที่ส่งผิด) กด 🗑 ทิ้งได้ — กู้คืนได้จากถังขยะ ไฟล์ไม่ถูกลบจริง</div>
+  <div style="margin:4px 0 8px;font-size:.8rem"><a href="#" onclick="ibTrash();return false">🗑 ถังขยะ <span id="ibTrashCount"></span></a></div>
+  <div id="ibTrashBox" style="display:none;border:1px dashed var(--border);border-radius:10px;padding:8px;margin-bottom:8px;font-size:.82rem"></div>
   <div class="ib-grid" id="ibReview"></div>
 </div>
 
@@ -239,7 +241,8 @@ function renderReview(rows){
       ? '<img class="ib-thumb" loading="lazy" src="' + ibImg(d.doc8) + '" onclick="ibZoom(this.src)">'
       : '<div class="ib-thumb" style="display:flex;align-items:center;justify-content:center;font-size:2rem" onclick="window.open(ibImg(\'' + d.doc8 + '\'))">📄</div>') +
     '<div class="ib-meta">' + esc(d.doc8) + ' · ' + esc(d.date || '-') + '<br>' + esc(d.filename) + '</div>' +
-    '<div class="ib-acts"><button class="ib-btn ok" onclick="ibRefile(\'' + d.doc8 + '\')">↪️ ย้ายเข้า HN...</button></div>' +
+    '<div class="ib-acts"><button class="ib-btn ok" onclick="ibRefile(\'' + d.doc8 + '\')">↪️ ย้ายเข้า HN...</button>' +
+    '<button class="ib-btn bad" onclick="ibDiscard(\'' + d.doc8 + '\')" title="ไม่ใช่เอกสารผู้ป่วย — ซ่อนออกจากกองกลาง (กู้คืนได้)">🗑 ทิ้ง</button></div>' +
     '</div>').join('');
 }
 function ibRefile(doc8){
@@ -260,6 +263,38 @@ function ibRefile(doc8){
       showToast('ย้ายเอกสารเรียบร้อย', 'success');
     }).catch(e => showToast('ผิดพลาด: ' + e, 'error'));
 }
+
+/* 🗑 28 พ.ย. 2569: ทิ้ง (ซ่อน) รูปที่ไม่ใช่เอกสาร + ถังขยะกู้คืน */
+function ibDiscard(doc8){
+  const reason = prompt('ทิ้งเอกสาร ' + doc8 + ' — เหตุผลสั้น ๆ (เช่น รูปอาหาร / ส่งผิด):', 'รูปที่ไม่ใช่เอกสารผู้ป่วย');
+  if(reason === null) return;
+  hdFetch('/hd/api/v1/documents/' + doc8 + '/discard', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({reason})})
+    .then(r => r.json().then(d => ({ok:r.ok, status:r.status, d})))
+    .then(x => { if(!x.ok){ showToast(x.status===403?'เฉพาะแพทย์/แอดมินเท่านั้น':(x.d.error||'ไม่สำเร็จ'),'error'); return; }
+      const card = document.getElementById('ibRev' + doc8); if(card) card.innerHTML = '<div class="ib-done" style="padding:20px 6px;text-align:center">🗑 ทิ้งแล้ว (กู้คืนได้ที่ถังขยะ)</div>';
+      showToast('ทิ้งแล้ว — ไฟล์ยังอยู่ กู้คืนได้', 'success'); ibTrashCount(); })
+    .catch(e => showToast('ผิดพลาด: ' + e, 'error'));
+}
+function ibTrashCount(){ hdFetch('/hd/api/v1/documents/trash').then(r=>r.ok?r.json():null).then(d=>{ if(d) document.getElementById('ibTrashCount').textContent = d.count ? '(' + d.count + ')' : ''; }).catch(()=>{}); }
+function ibTrash(){
+  const box = document.getElementById('ibTrashBox');
+  if(box.style.display === 'block'){ box.style.display = 'none'; return; }
+  box.style.display = 'block'; box.textContent = '⏳';
+  hdFetch('/hd/api/v1/documents/trash').then(r=>r.json()).then(d=>{
+    const items = d.items||[];
+    box.innerHTML = items.length ? items.map(t => '<div style="display:flex;gap:8px;align-items:center;padding:4px 0;border-bottom:1px dashed var(--border)">'
+        + (t.is_image ? '<img src="' + ibImg(t.doc8) + '" style="width:44px;height:44px;object-fit:cover;border-radius:6px;cursor:pointer" onclick="ibZoom(this.src)">' : '📄')
+        + '<div style="flex:1"><b>' + esc(t.doc8) + '</b> · ' + esc(t.date) + ' · ' + esc(t.filename) + '<div style="color:var(--fg-muted);font-size:.74rem">' + esc(t.reason||'') + ' · ' + esc(t.hidden_at) + '</div></div>'
+        + '<button class="ib-btn" onclick="ibRestore(\'' + t.doc8 + '\')">↩️ กู้คืน</button></div>').join('')
+      : 'ถังขยะว่าง';
+  }).catch(e => { box.textContent = '⚠️ ' + e; });
+}
+function ibRestore(doc8){
+  hdFetch('/hd/api/v1/documents/' + doc8 + '/restore', {method:'POST'}).then(r => r.json().then(d => ({ok:r.ok, d})))
+    .then(x => { if(!x.ok){ showToast(x.d.error||'ไม่สำเร็จ','error'); return; } showToast('กู้คืนแล้ว — กลับไปอยู่กองกลาง', 'success'); ibLoad(); document.getElementById('ibTrashBox').style.display='none'; ibTrashCount(); })
+    .catch(e => showToast('ผิดพลาด: ' + e, 'error'));
+}
+ibTrashCount();
 
 ibLoad();
 </script>
