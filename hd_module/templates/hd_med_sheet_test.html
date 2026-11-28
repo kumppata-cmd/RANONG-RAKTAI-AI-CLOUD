@@ -30,6 +30,7 @@ table.ms{width:100%;border-collapse:collapse;font-size:.82rem;margin-top:6px}tab
       <div style="height:6px;background:var(--border);border-radius:3px;margin-top:6px;overflow:hidden"><div id="msBar" style="height:100%;width:0%;background:#27ae60;transition:width .4s"></div></div>
     </div>
     <div class="ms-stat" id="msAcc"></div>
+    <div id="msRecent" style="margin-top:6px"></div>
     <div class="ms-note">ผลที่อ่านได้จะเป็น "ร่าง" เสมอ — กด "สร้างร่างให้ผู้ป่วย" แล้วไปยืนยันทีละรายการในกล่องรอยืนยัน (💊 ร่างยาใหม่) ระบบเทียบกับรายการปัจจุบันให้ (ใหม่/เปลี่ยน/หาย) · ยา <b>off/#0</b> และลายมือ <b>hold</b> ถูกติดป้ายไว้ในโน้ต · ระบบทักหน่วยผิด (เช่น Epiao เป็น mg) และขนาดผิดปกติ · เกณฑ์ก่อนเปิดทาง LINE: ≥50 ใบ ผิด 0</div>
   </div>
   <div id="msOut"></div>
@@ -121,6 +122,12 @@ function msRestore(){
   }catch(e){}
 }
 msRestore();
+hdFetch('/hd/api/v1/med-sheet/recent').then(r=>r.ok?r.json():null).then(d=>{ if(!d||!d.reads||!d.reads.length) return;
+  const rows = d.reads.map(x=>`<tr><td>${esc(x.at)}</td><td><b>${esc(x.hn)}</b> ${esc(x.name||'')}</td><td>${x.form==='hospital'?'รพ.':(x.form==='clinic'?'คลินิก':'-')}</td><td>${x.items}</td>
+     <td>${x.draft?'<span class="ms-pill warn">ค้าง '+x.draft+'</span>':''}${x.accepted?'<span class="ms-pill ok">รับแล้ว '+x.accepted+'</span>':''}${x.closed?'<span class="ms-pill mut">ปิด '+x.closed+'</span>':''}${x.deleted?'<span class="ms-pill mut">ลบ '+x.deleted+'</span>':''}</td>
+     <td>${x.draft?'<a href="/hd/pending-inbox">📥 ไปยืนยัน</a>':'<a href="/hd/patient/'+esc(x.hn)+'">👤 ผู้ป่วย</a>'}</td></tr>`).join('');
+  document.getElementById('msRecent').innerHTML = `<details><summary style="cursor:pointer;font-size:.82rem">🗂 ใบยาที่สร้างร่างแล้ว 14 วัน (${d.reads.length} ใบ) — ตามรอยว่าร่างไปอยู่ไหน</summary>
+    <table class="ms"><tr><th>เมื่อ</th><th>ผู้ป่วย</th><th>ฟอร์ม</th><th>รายการ</th><th>สถานะร่างตอนนี้</th><th></th></tr>${rows}</table></details>`; }).catch(()=>{});
 hdFetch('/hd/api/v1/med-sheet/accuracy').then(r=>r.ok?r.json():null).then(a=>{ if(!a) return;
   document.getElementById('msAcc').innerHTML = `<div>📄 ใบที่อ่าน 30 วัน: <b>${a.sheets}</b></div><div>ตัดสินแล้ว <b>${a.judged}</b> รายการ · ถูก ${a.totals.accepted} · ต้องแก้ ${a.totals.changed} · ผิด ${a.totals.rejected} · รอ ${a.totals.pending}</div><div>ความแม่น <b>${a.accuracy_pct==null?'-':a.accuracy_pct+'%'}</b> · เกณฑ์เปิด LINE ${a.gate.ok?'✅ ผ่าน':'⏳ ยังไม่ครบ (≥50 ใบ ผิด 0)'}</div>`; }).catch(()=>{});
 </script>

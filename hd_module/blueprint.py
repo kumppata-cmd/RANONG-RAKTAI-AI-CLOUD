@@ -2473,6 +2473,37 @@ def med_sheet_accuracy():
     return jsonify(rep)
 
 
+@hd_bp.route("/med-sheet/recent", methods=["GET"])
+@require_role("physician", "nurse", "admin", "auditor")
+def med_sheet_recent():
+    """ใบยาที่อ่านแล้วสร้างร่างใน 14 วัน: ต่อใบ → HN, ฟอร์ม, จำนวน, สถานะร่างตอนนี้ (ค้าง/รับแล้ว/ปิด) — ตามรอยได้ว่า 18 รายการไปไหน"""
+    import os
+    import psycopg2
+    from . import med_sheet_reader as msr
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    conn = psycopg2.connect(db_url, connect_timeout=5)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(msr.SAMPLES_SQL)
+            cur.execute("""SELECT s.read_id, MIN(s.created_at), MAX(s.form), MAX(s.hn), MAX(p.patient_name), COUNT(*),
+                                  SUM(CASE WHEN o.verify_status = 'ai_draft' THEN 1 ELSE 0 END),
+                                  SUM(CASE WHEN o.verify_status = 'confirmed' AND o.is_active THEN 1 ELSE 0 END),
+                                  SUM(CASE WHEN o.verify_status IN ('merged','rejected') OR (o.verify_status = 'confirmed' AND NOT o.is_active) THEN 1 ELSE 0 END),
+                                  SUM(CASE WHEN o.id IS NULL THEN 1 ELSE 0 END)
+                           FROM hd_med_sheet_samples s
+                           LEFT JOIN hd_medication_orders o ON o.id = s.order_id
+                           LEFT JOIN hd_patient_mapping p ON p.hn = s.hn
+                           WHERE s.created_at >= NOW() - INTERVAL '14 days'
+                           GROUP BY s.read_id ORDER BY MIN(s.created_at) DESC LIMIT 30""")
+            rows = [{"read_id": r[0], "at": (r[1] + timedelta(hours=7)).strftime("%d/%m %H:%M") if r[1] else None, "form": r[2],
+                     "hn": r[3], "name": r[4], "items": int(r[5] or 0), "draft": int(r[6] or 0), "accepted": int(r[7] or 0),
+                     "closed": int(r[8] or 0), "deleted": int(r[9] or 0)} for r in cur.fetchall()]
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"reads": rows})
+
+
 @hd_web.route("/med-sheet-test")
 def hd_med_sheet_test_page():
     """💊📄 ทดสอบอ่านใบยา (ขั้น 1) + สร้างร่างให้ผู้ป่วย (ขั้น 2)"""
@@ -14173,6 +14204,14 @@ def medication_action(hn, oid):
                 vstat = ST_OK
                 cur.execute("""UPDATE hd_medication_orders SET verify_status = %s, is_active = TRUE,
                                updated_at = NOW(), updated_by = %s WHERE id = %s""", (vstat, uid, oid))
+            # 💊📄 Med Sheet Reader: ร่างจากใบยาที่ถูกรับ (ack) / หยุดทิ้ง (stop) → บันทึกผลวัดความแม่น
+            try:
+                if row[2] == "ai_draft":
+                    from .med_sheet_reader import mark_outcome
+                    mark_outcome(cur, [oid], "accepted" if action in ("ack", "resume") else "rejected",
+                                 g.get("hd_username") or str(uid or ""))
+            except Exception as _mo:  # noqa: BLE001
+                logger.debug("med sheet outcome(action): %s", _mo)
         conn.commit()
         conn.close()
         log_action(user_id=g.get("hd_user_id"), action=f"med.{action}", resource_type="medication",
