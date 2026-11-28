@@ -97,6 +97,48 @@ def build_sql_prompt(question, today=None):
     )
 
 
+_SQL_FENCE_RE = re.compile(r"```(?:sql)?\s*((?:WITH|SELECT)\b.*?)```", re.I | re.S)
+_SQL_LOOSE_RE = re.compile(r"((?:WITH|SELECT)\b[\s\S]*)", re.I)
+_EXPLAIN_RE = re.compile(r'"explain"\s*:\s*"([^"\n]{0,300})')
+
+
+def extract_sql(raw):
+    """Model reply → (sql|None, explain, explicit_none). Tolerates: JSON object, ```json fence,
+    raw newlines inside the JSON string, bare SQL in a ```sql fence, or bare SQL text."""
+    if not raw:
+        return None, "", False
+    js = ai_text.extract_json(raw)
+    if isinstance(js, dict):
+        sql = js.get("sql")
+        explain = str(js.get("explain") or "")
+        if sql and isinstance(sql, str) and sql.strip():
+            return sql.strip(), explain, False
+        if "sql" in js:          # {"sql": null, ...} = AI says the question is outside the schema
+            return None, explain, True
+    # JSON broke (e.g. newline inside string) → pull the sql value / fenced SQL / bare SQL
+    m = re.search(r'"sql"\s*:\s*"', raw)
+    explain_m = _EXPLAIN_RE.search(raw)
+    explain = explain_m.group(1) if explain_m else ""
+    if m:
+        tail = raw[m.end():]
+        end = re.search(r'"\s*,\s*"(?:explain|note)"|"\s*}', tail)
+        cand = tail[:end.start()] if end else tail
+        cand = cand.replace("\\n", "\n").replace('\\"', '"').strip()
+        if re.match(r"(?is)^\s*(with|select)\b", cand):
+            return cand, explain, False
+    if re.search(r'"sql"\s*:\s*null', raw):
+        return None, explain, True
+    f = _SQL_FENCE_RE.search(raw)
+    if f:
+        return f.group(1).strip(), explain, False
+    l = _SQL_LOOSE_RE.search(raw)
+    if l:
+        cand = l.group(1).strip().rstrip("`").strip()
+        cand = re.split(r"\n\s*\n", cand)[0]
+        return cand, explain, False
+    return None, explain, False
+
+
 def validate_sql(sql):
     """→ (clean_sql, None) หรือ (None, reason)."""
     if not sql or not isinstance(sql, str):
@@ -206,7 +248,8 @@ def answer(conn, question, who="", channel="line", post_fn=None, model=None, tod
     if len(q) > 400:
         q = q[:400]
     model = model or ai_text.model_id(MODEL_KEY)
-    raw, err = ai_text.ask(build_sql_prompt(q, today), model=model, max_tokens=700, timeout=40, post_fn=post_fn)
+    raw, err = ai_text.ask(build_sql_prompt(q, today), model=model, max_tokens=1600, timeout=45, post_fn=post_fn,
+                           system="คุณตอบเป็น JSON object เดียวเท่านั้น ไม่มีข้อความอื่นนอก JSON ไม่ต้องอธิบายเพิ่ม")
     if err:
         _log(conn, who, channel, q, None, None, None, None, False, err)
         if err.startswith("api:400"):
@@ -215,11 +258,13 @@ def answer(conn, question, who="", channel="line", post_fn=None, model=None, tod
                 "api:404": f"ไม่รู้จักรุ่น AI '{model}' — ล้างช่อง ask_chart_model ใน ⚙️ ตั้งค่า แล้วลองใหม่",
                 "api:401": "API key ไม่ถูกต้อง (401)", "api:429": "AI ถูกจำกัดอัตรา (429) รอ 1 นาทีแล้วถามใหม่"}.get(err)
         return {"text": hint or f"AI ไม่ตอบในรอบนี้ ({err}) — ลองถามใหม่อีกครั้ง หรือดูประวัติที่ {base_url or ''}/hd/ask", "error": err}
-    js = ai_text.extract_json(raw) or {}
-    sql, explain = js.get("sql"), js.get("explain") or ""
+    sql, explain, explicit_none = extract_sql(raw)
     if not sql:
-        _log(conn, who, channel, q, None, explain, None, None, False, "no_sql")
-        return {"text": "ตอบจากข้อมูลในระบบไม่ได้: " + (explain or "คำถามอยู่นอกตารางที่มี"), "error": "no_sql"}
+        _log(conn, who, channel, q, None, explain or (raw or "")[:300], None, None, False, "no_sql")
+        if explicit_none:
+            return {"text": "ตอบจากข้อมูลในระบบไม่ได้: " + (explain or "คำถามอยู่นอกตารางที่มี"), "error": "no_sql", "raw": (raw or "")[:400]}
+        return {"text": "AI ไม่ได้ส่ง SQL กลับมาในรูปแบบที่อ่านได้ — ลองถามใหม่/เรียบเรียงใหม่\n(AI ตอบว่า: " + (raw or "")[:200].replace("\n", " ") + ")",
+                "error": "no_sql", "raw": (raw or "")[:400]}
     clean, why = validate_sql(sql)
     if not clean:
         _log(conn, who, channel, q, sql, explain, None, None, False, "reject:" + why)
@@ -237,7 +282,7 @@ def answer(conn, question, who="", channel="line", post_fn=None, model=None, tod
     table = rows_as_text(cols, rows)
     text = None
     if rows:
-        s2, e2 = ai_text.ask(build_answer_prompt(q, explain, cols, rows), model=model, max_tokens=900, timeout=40, post_fn=post_fn)
+        s2, e2 = ai_text.ask(build_answer_prompt(q, explain, cols, rows), model=model, max_tokens=1400, timeout=45, post_fn=post_fn)
         if s2 and not e2:
             text = s2.strip()
     if not text:
