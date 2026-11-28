@@ -1,0 +1,47 @@
+{% extends "hd_base.html" %}
+{% block title %}💊 รูปอ้างอิงกำยา{% endblock %}
+{% block page_title %}💊 รูปอ้างอิงกำยา — HN {{ patient_hn }}{% endblock %}
+{% block content %}
+<style>
+  .pr-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
+  .pr-card{border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--card)}
+  .pr-card img{width:100%;border-radius:8px;border:1px solid var(--border);margin-top:6px}
+  .pr-exp{font-size:.8rem;color:var(--fg-muted);line-height:1.5;margin-top:4px}
+  .pr-btn{width:100%;margin-top:8px;padding:10px;border-radius:10px;border:none;background:linear-gradient(135deg,#0f766e,#115e59);color:#fff;font-weight:700;cursor:pointer}
+  .pr-check{font-size:.82rem;padding:6px 0;border-bottom:1px dashed var(--border)}
+</style>
+<div class="card" style="margin-bottom:12px;font-size:.86rem">
+  พยาบาลถ่ายรูป <b>ยาที่จัดให้ผู้ป่วยคนนี้ ทีละมื้อ</b> (วางเม็ดแยกกันบนพื้นขาว) → เมื่อผู้ป่วยถ่ายกำยาจากบ้าน ระบบจะเทียบกับรูปนี้ + รายการยาปัจจุบัน
+  · ถ่ายใหม่ได้ทุกครั้งที่เปลี่ยนยา (รูปเก่าถูกแทนที่) · <span id="prLink"></span>
+  <div style="margin-top:6px"><a href="/hd/patient/{{ patient_hn }}" class="btn btn-secondary">← หน้าผู้ป่วย</a> <a href="/hd/pill-board" class="btn btn-secondary">📋 ผลตรวจจากบ้านทุกคน</a></div>
+</div>
+<div class="pr-grid" id="prGrid"></div>
+<div class="card" style="margin-top:12px"><div style="font-weight:700">🕘 ผู้ป่วยตรวจจากบ้าน 30 วันล่าสุด</div><div id="prChecks"></div></div>
+<input type="file" id="prFile" accept="image/*" capture="environment" style="display:none" onchange="prUpload(this)">
+<script>
+const HN = "{{ patient_hn }}"; const SLOTS = {morning:'เช้า', noon:'กลางวัน', evening:'เย็น', bedtime:'ก่อนนอน'}; let _slot=null;
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function prLoad(){
+  const r = await hdFetch('/hd/api/v1/patients/hn/'+HN+'/pill-refs'); const d = await r.json();
+  document.getElementById('prLink').innerHTML = d.enabled ? (d.link ? 'ลิงก์สำหรับผู้ป่วย: <a href="'+esc(d.link)+'" target="_blank">เปิด</a> <button class="btn btn-secondary" style="padding:2px 8px" onclick="navigator.clipboard.writeText('+JSON.stringify(d.link)+').then(()=>showToast(\'คัดลอกแล้ว\',\'success\'))">📋 คัดลอกลิงก์</button> (หรือพิมพ์ในกลุ่ม LINE: @รักษ์ไต ลิงก์ยา '+HN+')' : '') : '<b style="color:#b45309">ยังไม่เปิดใช้ (⚙️ pill_check)</b> — ถ่ายรูปอ้างอิงเตรียมไว้ได้';
+  const refs = {}; (d.refs||[]).forEach(x=>refs[x.slot]=x);
+  document.getElementById('prGrid').innerHTML = Object.keys(SLOTS).map(s=>{
+    const ref = refs[s], exp = (d.expected||{})[s]||[];
+    return '<div class="pr-card"><div style="font-weight:700">มื้อ'+SLOTS[s]+'</div>'
+      + '<div class="pr-exp">'+(exp.length? exp.map(e=>'• '+esc(e.drug)+(e.dose?' '+esc(e.dose):'')+(e.tabs?' — '+e.tabs+' เม็ด':'')).join('<br>') : 'ไม่มียามื้อนี้ในรายการยาปัจจุบัน')+'</div>'
+      + (ref ? '<img src="/hd/api/v1/patients/hn/'+HN+'/pill-refs/'+ref.id+'/image" alt=""><div class="pr-exp">ถ่ายโดย '+esc(ref.created_by||'')+' · '+esc((ref.created_at||'').slice(0,16).replace('T',' '))+'</div>' : '<div class="pr-exp" style="color:#b45309">ยังไม่มีรูปอ้างอิง</div>')
+      + '<button class="pr-btn" onclick="prShoot(\''+s+'\')">📸 '+(ref?'ถ่ายใหม่':'ถ่ายรูปอ้างอิง')+'</button></div>';
+  }).join('');
+  document.getElementById('prChecks').innerHTML = (d.checks||[]).map(c=>'<div class="pr-check">'+({ok:'✅',missing:'⚠️',extra:'⚠️',unsure:'🤔'}[c.verdict]||'•')+' '+esc((c.at||'').slice(0,16).replace('T',' '))+' มื้อ'+esc(c.slot_th)+' — '+esc(c.verdict)+(c.pills_seen!=null?' ('+c.pills_seen+' เม็ด)':'')+((c.detail||{}).missing||[]).map(x=>' ขาด: '+esc(x)).join('')+((c.detail||{}).extra||[]).map(x=>' ไม่ตรง: '+esc(x)).join('')+(c.notified?' · 📣 แจ้งพยาบาลแล้ว':'')+'</div>').join('') || '<div style="font-size:.85rem;color:var(--fg-muted)">ยังไม่มี</div>';
+}
+function prShoot(s){ _slot=s; document.getElementById('prFile').click(); }
+async function prUpload(inp){
+  const f = inp.files && inp.files[0]; if(!f||!_slot) return; inp.value='';
+  showToast('กำลังบันทึกรูปมื้อ'+SLOTS[_slot]+'…','info');
+  const fd = new FormData(); fd.append('slot',_slot); fd.append('image',f,'ref.jpg');
+  const r = await hdFetch('/hd/api/v1/patients/hn/'+HN+'/pill-refs',{method:'POST',body:fd}); const d = await r.json().catch(()=>({}));
+  if(r.ok){ showToast('บันทึกรูปอ้างอิงแล้ว','success'); prLoad(); } else showToast(d.error||'ไม่สำเร็จ','error');
+}
+prLoad();
+</script>
+{% endblock %}

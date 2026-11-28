@@ -1,0 +1,84 @@
+{% extends "hd_base.html" %}
+{% block title %}🕵️ หมอเงา{% endblock %}
+{% block nav_shadow %}active{% endblock %}
+{% block page_title %}🕵️ หมอเงา — สิ่งที่หมออาจพลาด{% endblock %}
+{% block content %}
+<style>
+  .sd-row{display:flex;gap:10px;align-items:flex-start;padding:10px 12px;border:1px solid var(--border);border-radius:12px;background:var(--card);margin-bottom:8px}
+  .sd-sev{font-size:1.1rem;width:26px;text-align:center;flex:none}
+  .sd-main{flex:1;min-width:0}
+  .sd-name{font-weight:700}
+  .sd-hn{font-family:monospace;font-size:.8rem;color:var(--fg-muted);margin-left:6px}
+  .sd-text{margin-top:2px;line-height:1.5}
+  .sd-meta{font-size:.74rem;color:var(--fg-muted);margin-top:4px}
+  .sd-acts{display:flex;gap:6px;flex-wrap:wrap;flex:none}
+  .sd-btn{padding:5px 9px;border-radius:8px;border:1px solid var(--border);background:var(--card);font-size:.78rem;cursor:pointer}
+  .sd-btn.ok{border-color:#1a7f37;color:#1a7f37}.sd-btn.mute{border-color:#8a6d3b;color:#8a6d3b}
+  .sd-done{color:var(--fg-muted);font-size:.85rem;padding:6px 0}
+  .sd-pill{font-size:.72rem;border-radius:999px;padding:1px 7px;background:var(--bg);border:1px solid var(--border);margin-left:4px}
+</style>
+<div class="card" style="margin-bottom:12px">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+    <div style="flex:1;min-width:240px;font-size:.86rem;color:var(--fg-muted)">
+      ทุกเช้า (<span id="sdHour">06</span>:30) ระบบอ่านผู้ป่วยทุกคน — แล็บล่าสุด · ยาปัจจุบัน · 10 รอบฟอกล่าสุด · IDWG · IDH · access · alert ค้าง — แล้วส่ง LINE แพทย์ 1:1 เฉพาะคนที่ "ควรคิดถึง" คนละ 1–2 บรรทัด
+      · ประเด็นเดิมไม่ส่งซ้ำภายใน <span id="sdQuiet">7</span> วัน เว้นแต่แย่ลง · หายไปเองเมื่อข้อมูลดีขึ้น · <b>ข้อสังเกต ไม่ใช่คำสั่งรักษา</b>
+      <span id="sdSwitch"></span>
+    </div>
+    <select id="sdStatus" onchange="sdLoad()" style="padding:6px 8px;border:1px solid var(--border);border-radius:8px">
+      <option value="open">ที่ยังเปิดอยู่</option><option value="ack">รับทราบแล้ว</option><option value="dismissed">ปิดแล้ว</option><option value="resolved">หายเอง</option><option value="all">ทั้งหมด</option>
+    </select>
+    <button class="btn btn-secondary" onclick="sdRun(true)">👁 ดูตัวอย่าง (ไม่ส่ง)</button>
+    <button class="btn btn-primary" onclick="sdRun(false)">▶️ รันและส่ง LINE ตอนนี้</button>
+  </div>
+  <div id="sdRunOut" style="font-size:.8rem;margin-top:6px;white-space:pre-wrap"></div>
+</div>
+<div id="sdList"><div class="sd-done">⏳ กำลังโหลด…</div></div>
+<script>
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const SEV = {high:'🔴', med:'🟠', low:'🟡'};
+async function sdLoad(){
+  const st = document.getElementById('sdStatus').value;
+  const el = document.getElementById('sdList');
+  try{
+    const r = await hdFetch('/hd/api/v1/shadow/findings?status='+st); const d = await r.json();
+    document.getElementById('sdSwitch').innerHTML = d.enabled ? ' <span class="sd-pill" style="color:#1a7f37">เปิดใช้อยู่</span>' : ' <span class="sd-pill">ปิดอยู่ — เปิดที่ ⚙️ ตั้งค่า → shadow_doc</span>';
+    const rows = d.findings||[];
+    if(!rows.length){ el.innerHTML = '<div class="sd-done">✅ ไม่มีประเด็นในหมวดนี้</div>'; return; }
+    const byHn = {}; rows.forEach(f=>{ (byHn[f.hn]=byHn[f.hn]||{name:f.name, items:[]}).items.push(f); });
+    el.innerHTML = Object.keys(byHn).map(hn=>{
+      const g = byHn[hn];
+      return '<div class="sd-row"><div class="sd-sev">'+(SEV[g.items[0].severity]||'•')+'</div><div class="sd-main">'
+        + '<span class="sd-name">'+esc(g.name||'')+'</span><span class="sd-hn">HN '+esc(hn)+'</span>'
+        + ' <a href="/hd/patient/'+esc(hn)+'/time-machine" class="sd-pill">⏳ Time Machine</a> <a href="/hd/patient/'+esc(hn)+'/360" class="sd-pill">🧭 360</a>'
+        + g.items.map(f=>'<div id="sdF'+f.id+'" style="display:flex;gap:8px;align-items:flex-start;margin-top:6px"><div style="flex:1"><div class="sd-text">'+(SEV[f.severity]||'')+' '+esc(f.text)+'</div>'
+            + '<div class="sd-meta">กฎ '+esc(f.rule)+' · พบครั้งแรก '+esc(f.first_seen)+' · ล่าสุด '+esc(f.last_seen)+(f.last_pushed?' · ส่ง LINE '+f.push_count+' ครั้ง (ล่าสุด '+esc(f.last_pushed)+')':' · ยังไม่ส่ง')+(f.status!=='open'?' · <b>'+esc(f.status)+'</b>'+(f.ack_by?' โดย '+esc(f.ack_by):''):'')+(f.ack_note?' — '+esc(f.ack_note):'')+'</div></div>'
+            + (f.status==='open'||f.status==='ack' ? '<div class="sd-acts"><button class="sd-btn ok" onclick="sdAct('+f.id+',\'ack\')">👍 รับทราบ</button><button class="sd-btn mute" onclick="sdAct('+f.id+',\'dismissed\')">🔕 ปิดประเด็น</button></div>' : '')
+            + '</div>').join('')
+        + '</div></div>';
+    }).join('');
+  }catch(e){ el.innerHTML = '<div class="sd-done">⚠️ โหลดไม่ได้: '+esc(e)+'</div>'; }
+}
+async function sdAct(id, status){
+  let note = '';
+  if(status==='dismissed'){ note = prompt('เหตุผล (ไม่บังคับ) — ประเด็นนี้จะไม่ถูกส่งซ้ำ เว้นแต่แย่ลง') || ''; }
+  const r = await hdFetch('/hd/api/v1/shadow/findings/'+id, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({status, note})});
+  if(r.ok){ showToast(status==='ack'?'รับทราบแล้ว':'ปิดประเด็นแล้ว','success'); sdLoad(); } else showToast('ไม่สำเร็จ','error');
+}
+async function sdRun(dry){
+  if(!dry && !confirm('รันหมอเงาตอนนี้และส่ง LINE ให้แพทย์ที่ตั้งไว้ใน alert_recipients?')) return;
+  const out = document.getElementById('sdRunOut'); out.textContent = '⏳ กำลังอ่านผู้ป่วยทุกคน…';
+  try{
+    const r = await hdFetch('/hd/api/v1/shadow/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({dry_run: !!dry})});
+    const d = await r.json();
+    if(!r.ok){ out.textContent = '⚠️ '+(d.error||r.status); return; }
+    if(dry){
+      out.textContent = `ดู ${d.patients} คน · มีประเด็น ${d.flagged} คน · ${d.findings.length} ประเด็น\n` + d.findings.map(f=>`${SEV[f.severity]||''} ${f.name||''} (HN ${f.hn}) — ${f.text}`).join('\n');
+    } else {
+      out.textContent = `ดู ${d.patients} คน · มีประเด็น ${d.flagged} คน · ส่งใหม่ ${d.pushed_items} ประเด็น · LINE ถึง ${d.sent} คน\n\n` + (d.message||'(ไม่มีประเด็นใหม่ — ไม่ส่งข้อความ)');
+      sdLoad();
+    }
+  }catch(e){ out.textContent = '⚠️ '+e; }
+}
+sdLoad();
+</script>
+{% endblock %}

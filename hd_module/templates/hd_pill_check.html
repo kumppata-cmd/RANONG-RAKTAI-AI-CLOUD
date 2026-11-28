@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ถ่ายรูปกำยา เช็กให้ — คลินิกระนอง รักษ์ไต</title>
+<style>
+  :root{--p:#0f766e;--bg:#f2faf8;--card:#fff;--fg:#1f2937;--muted:#6b7280;--border:#e5e7eb}
+  *{box-sizing:border-box} body{margin:0;font-family:'Noto Sans Thai',system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+  .wrap{max-width:430px;margin:0 auto;padding:18px 16px 40px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:12px}
+  .shoot{display:block;width:100%;padding:18px;font-size:1.15rem;font-weight:800;color:#fff;background:linear-gradient(135deg,#0f766e,#115e59);border:none;border-radius:16px;cursor:pointer;text-align:center}
+  .slots{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin:8px 0}
+  .slot{padding:10px 4px;border:2px solid var(--border);border-radius:12px;text-align:center;font-weight:700;cursor:pointer;background:#fff}
+  .slot.on{border-color:var(--p);background:#e6f7f4;color:var(--p)}
+  #preview{width:100%;border-radius:14px;display:none;margin-top:10px}
+  #ans{white-space:pre-wrap;line-height:1.65;font-size:1rem;display:none}
+  #status{min-height:22px;text-align:center;font-size:.85rem;color:var(--muted);margin-top:8px}
+  .hint{font-size:.78rem;color:var(--muted);text-align:center;margin-top:6px}
+  .exp{font-size:.9rem;line-height:1.6}
+  .notify{display:none;width:100%;padding:14px;font-size:1rem;font-weight:700;color:#fff;background:#b45309;border:none;border-radius:14px;margin-top:8px}
+</style>
+</head>
+<body><div class="wrap">
+  <div style="text-align:center;font-size:2.2rem">💊</div>
+  <h2 style="text-align:center;margin:6px 0 2px">ถ่ายรูปกำยา เช็กให้</h2>
+  <div style="text-align:center;color:var(--muted);font-size:.8rem;margin-bottom:14px">คลินิกระนอง รักษ์ไต · เทียบกับยาที่คลินิกจัดให้คุณ</div>
+  {% if not valid %}
+  <div class="card" style="text-align:center">{% if not enabled %}⏸ บริการนี้ยังไม่เปิดใช้{% else %}⏰ ลิงก์นี้หมดอายุแล้ว{% endif %}<br><span style="color:var(--muted);font-size:.85rem">ขอลิงก์ใหม่จากเจ้าหน้าที่คลินิกได้</span></div>
+  {% else %}
+  <div class="card">
+    <div style="font-weight:700">1) มื้อไหน?</div>
+    <div class="slots">{% for s, th in slots %}<div class="slot {% if s == slot_now %}on{% endif %}" data-slot="{{ s }}" onclick="pickSlot(this)">{{ th }}</div>{% endfor %}</div>
+    <div class="exp" id="exp">⏳ กำลังดูว่าคลินิกจัดยามื้อนี้อะไรไว้…</div>
+  </div>
+  <div style="font-weight:700;margin:4px 0">2) ถ่ายรูปยาในมือ</div>
+  <button class="shoot" onclick="document.getElementById('cam').click()">📸 ถ่ายรูปกำยามื้อนี้</button>
+  <button class="shoot" style="margin-top:8px;background:#fff;color:var(--p);border:2px solid var(--p)" onclick="document.getElementById('gal').click()">🖼 เลือกรูปที่ถ่ายไว้แล้ว</button>
+  <input type="file" id="cam" accept="image/*" capture="environment" style="display:none" onchange="go(this)">
+  <input type="file" id="gal" accept="image/*" style="display:none" onchange="go(this)">
+  <div class="hint">วางเม็ดยาแยกกันบนฝ่ามือหรือกระดาษขาว ในที่สว่าง ถ่ายจากด้านบน</div>
+  <img id="preview" alt="">
+  <div id="status"></div>
+  <div class="card" id="ans"></div>
+  <button class="notify" id="notifyBtn" onclick="notifyNurse()">📣 แจ้งพยาบาล (ส่งข้อความ ไม่ส่งรูป)</button>
+  <div class="card" style="font-size:.8rem;color:var(--muted)">ℹ️ เป็นตัวช่วยเทียบรูปกับที่คลินิกจัด ไม่ใช่คำสั่งแพทย์ · ถ้าไม่แน่ใจให้โทรถามคลินิกก่อนกิน · รูปใช้เทียบแล้วไม่ถูกเก็บ</div>
+  {% endif %}
+</div>
+<script>
+const TOKEN = "{{ token }}";
+let SLOT = "{{ slot_now }}", _lastUp = null, _checkId = null;
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+function pickSlot(el){ document.querySelectorAll('.slot').forEach(x=>x.classList.remove('on')); el.classList.add('on'); SLOT = el.dataset.slot; loadExpected(); }
+async function loadExpected(){
+  const e = document.getElementById('exp'); if(!e) return;
+  try{
+    const r = await fetch('/hd/api/v1/pill/expected?token='+encodeURIComponent(TOKEN)+'&slot='+SLOT); const d = await r.json();
+    if(!r.ok){ e.textContent = d.error||'โหลดไม่ได้'; return; }
+    const n = d.expected.length;
+    e.innerHTML = (n ? 'คลินิกจัดมื้อ<b>'+esc(d.slot_th)+'</b> ไว้ '+n+' รายการ:<br>'+d.expected.map(x=>'• '+esc(x.drug)+(x.dose?' '+esc(x.dose):'')+(x.tabs?' — '+x.tabs+' เม็ด':'')).join('<br>')
+                   : 'ยังไม่มีรายการยามื้อ<b>'+esc(d.slot_th)+'</b>ในระบบ — ถ่ายได้ ระบบจะบอกจำนวน/ลักษณะเม็ดให้')
+      + '<div style="font-size:.78rem;color:var(--muted);margin-top:4px">'+(d.has_reference?'✅ มีรูปอ้างอิงที่พยาบาลถ่ายไว้ (เทียบได้แม่นขึ้น)':'ℹ️ ยังไม่มีรูปอ้างอิงมื้อนี้ — ระบบเทียบกับรายการยาอย่างเดียว')+'</div>';
+  }catch(err){ e.textContent = 'โหลดไม่ได้'; }
+}
+async function shrink(f){
+  try{
+    const bmp = await createImageBitmap(f);
+    const s = Math.min(1, 1280/Math.max(bmp.width, bmp.height));
+    const w = Math.max(1, Math.round(bmp.width*s)), h = Math.max(1, Math.round(bmp.height*s));
+    const c = document.createElement('canvas'); c.width=w; c.height=h; c.getContext('2d').drawImage(bmp,0,0,w,h);
+    const blob = await new Promise(res=>c.toBlob(res,'image/jpeg',0.85));
+    if(blob && blob.size>0) return new File([blob],'pills.jpg',{type:'image/jpeg'});
+  }catch(e){}
+  return f;
+}
+async function go(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  const img = document.getElementById('preview'); img.src = URL.createObjectURL(f); img.style.display='block';
+  _lastUp = await shrink(f); inp.value=''; analyze();
+}
+async function analyze(){
+  if(!_lastUp) return;
+  const st = document.getElementById('status'), ans = document.getElementById('ans'), nb = document.getElementById('notifyBtn');
+  ans.style.display='none'; nb.style.display='none'; _checkId=null;
+  st.textContent = '🤖 กำลังเทียบกับที่คลินิกจัด… (10–20 วินาที)';
+  const fd = new FormData(); fd.append('token',TOKEN); fd.append('slot',SLOT); fd.append('image',_lastUp,'pills.jpg');
+  try{
+    const r = await fetch('/hd/api/v1/pill/analyze',{method:'POST',body:fd}); let d={}; try{ d=await r.json(); }catch(e){}
+    if(!r.ok||d.error){ st.innerHTML = '⚠️ '+esc(d.error||('HTTP '+r.status))+' <button onclick="analyze()" style="margin-left:6px">ลองอีกครั้ง</button>'; return; }
+    st.textContent=''; _checkId = d.check_id;
+    ans.textContent = d.text; ans.style.display='block';
+    ans.style.borderColor = d.verdict==='ok' ? '#1a7f37' : (d.verdict==='unsure' ? '#6b7280' : '#b45309');
+    if(d.verdict!=='ok') nb.style.display='block';
+    ans.scrollIntoView({behavior:'smooth'});
+  }catch(e){ st.innerHTML = '⚠️ เชื่อมต่อไม่ได้ <button onclick="analyze()">ลองอีกครั้ง</button>'; }
+}
+async function notifyNurse(){
+  const nb = document.getElementById('notifyBtn'); nb.disabled = true; nb.textContent = '⏳ กำลังส่ง…';
+  try{
+    const r = await fetch('/hd/api/v1/pill/notify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN, check_id:_checkId})});
+    const d = await r.json();
+    nb.textContent = d.ok ? '✅ แจ้งพยาบาลแล้ว รอคลินิกติดต่อกลับ' : '⚠️ ส่งไม่สำเร็จ — โทรหาคลินิกโดยตรง';
+  }catch(e){ nb.textContent = '⚠️ ส่งไม่สำเร็จ — โทรหาคลินิกโดยตรง'; }
+}
+loadExpected();
+</script>
+</body></html>

@@ -200,6 +200,48 @@
   </div>
 </div>
 
+<!-- 28 พ.ย. 2569: ชุด "ว้าว 3 โลก" — ปิดเป็นค่าเริ่มต้นทุกตัว -->
+<div class="card setting-card">
+  <div class="card-header"><span>🕵️ หมอเงา — AI เตรียมราวด์ให้ทุกเช้า (LINE แพทย์ 1:1)</span><button class="btn btn-primary save-btn" onclick="saveSetting('shadow_doc')">💾 บันทึก</button></div>
+  <div class="form-group">
+    <select class="form-control" id="setting_shadow_doc"><option value="off">ปิด</option><option value="on">เปิด — ส่ง "สิ่งที่หมออาจพลาด" คนละ 1–2 บรรทัด ถึง alert_recipients ทุกเช้า</option></select>
+    <div class="setting-desc">กฎข้ามสัญญาณ 16 ข้อ (K ขึ้นต่อเนื่อง+RAAS · Hb เกินเป้าแต่ ESA เดิม · Phos สูง+binder · Kt/V ตก+VP ขึ้น · IDWG · IDH cluster · DW ไม่ถึง · แล็บเกินกำหนด · anti-HBs · PTH · alert ไม่มีคำสั่ง · ขาดฟอก) · ไม่ส่งซ้ำภายใน N วันเว้นแต่แย่ลง · ดู/ปิดประเด็นที่ <a href="/hd/shadow">/hd/shadow</a> · กด "ดูตัวอย่าง (ไม่ส่ง)" ได้แม้ยังปิดสวิตช์</div>
+    <div class="setting-status" id="status_shadow_doc"></div>
+  </div>
+  <div class="form-group"><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px">
+    <div><div style="font-size:.74rem;color:var(--fg-muted)">ส่งตอน (ชั่วโมง ไทย, นาที 30)</div><div style="display:flex;gap:4px"><input type="number" class="form-control" id="setting_shadow_doc_hour" placeholder="6" min="0" max="23"><button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('shadow_doc_hour')">💾</button></div><div class="setting-status" id="status_shadow_doc_hour"></div></div>
+    <div><div style="font-size:.74rem;color:var(--fg-muted)">ไม่ส่งประเด็นเดิมซ้ำภายใน (วัน)</div><div style="display:flex;gap:4px"><input type="number" class="form-control" id="setting_shadow_doc_quiet_days" placeholder="7"><button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('shadow_doc_quiet_days')">💾</button></div><div class="setting-status" id="status_shadow_doc_quiet_days"></div></div>
+  </div></div>
+</div>
+<div class="card setting-card">
+  <div class="card-header"><span>💬 ถามชาร์ตได้ — พิมพ์ถามข้อมูลหน่วยไตเป็นภาษาคน</span><button class="btn btn-primary save-btn" onclick="saveSetting('ask_chart')">💾 บันทึก</button></div>
+  <div class="form-group">
+    <select class="form-control" id="setting_ask_chart"><option value="off">ปิด</option><option value="on">เปิด — แพทย์/แอดมินถามที่ <a href="/hd/ask">/hd/ask</a> และใน LINE 1:1 ด้วย "@รักษ์ไต &lt;คำถาม&gt;"</option></select>
+    <div class="setting-desc">AI เขียน SELECT เดียวจากตารางที่อนุญาต → ระบบตรวจ (ห้าม DML, บังคับ LIMIT, READ ONLY, timeout 8 วิ) → รัน → สรุปไทย · ไม่มี Anti-HIV ในตารางที่อนุญาต · ทุกคำถามบันทึกใน hd_ask_chart_log</div>
+    <div class="setting-status" id="status_ask_chart"></div>
+  </div>
+  <div class="form-group"><div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:8px">
+    <div><div style="font-size:.74rem;color:var(--fg-muted)">ให้กลุ่มพยาบาลถามได้ด้วย (@รักษ์ไต ประโยคที่ไม่เข้าคำสั่งเดิม)</div><div style="display:flex;gap:4px"><select class="form-control" id="setting_ask_chart_group"><option value="off">ปิด</option><option value="on">เปิด</option></select><button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('ask_chart_group')">💾</button></div><div class="setting-status" id="status_ask_chart_group"></div></div>
+    <div><div style="font-size:.74rem;color:var(--fg-muted)">รุ่น AI (ว่าง = ใช้รุ่นกลาง)</div><div style="display:flex;gap:4px"><input class="form-control" id="setting_ask_chart_model" placeholder="เช่น claude-sonnet-5-5"><button class="btn btn-primary" style="padding:4px 8px" onclick="saveSetting('ask_chart_model')">💾</button></div><div class="setting-status" id="status_ask_chart_model"></div></div>
+  </div></div>
+</div>
+<div class="card setting-card">
+  <div class="card-header"><span>💊 ถ่ายรูปกำยา เช็กให้ — ผู้ป่วยเทียบยาในมือกับที่คลินิกจัด</span><button class="btn btn-primary save-btn" onclick="saveSetting('pill_check')">💾 บันทึก</button></div>
+  <div class="form-group">
+    <select class="form-control" id="setting_pill_check"><option value="off">ปิด</option><option value="on">เปิด — ลิงก์ผู้ป่วยใช้ได้ (กลุ่มพยาบาล: @รักษ์ไต ลิงก์ยา &lt;HN&gt;)</option></select>
+    <div class="setting-desc">พยาบาลถ่ายรูปอ้างอิง 4 มื้อที่หน้าผู้ป่วย → ผู้ป่วยถ่ายกำยาจากบ้าน → Claude Vision เทียบ 2 รูป + รายการยา → ครบ/อาจขาด/ไม่ตรง · ไม่ตรง+กดแจ้ง → ข้อความเข้ากลุ่มพยาบาล (ไม่มีรูป) · ผลที่ <a href="/hd/pill-board">/hd/pill-board</a></div>
+    <div class="setting-status" id="status_pill_check"></div>
+  </div>
+</div>
+<div class="card setting-card">
+  <div class="card-header"><span>🩺 ฟังเสียงเส้นฟอกด้วยมือถือ — เฝ้าระวัง AVF ตีบจากบ้าน</span><button class="btn btn-primary save-btn" onclick="saveSetting('bruit_check')">💾 บันทึก</button></div>
+  <div class="form-group">
+    <select class="form-control" id="setting_bruit_check"><option value="off">ปิด</option><option value="on">เปิด — ลิงก์ผู้ป่วยใช้ได้ (กลุ่มพยาบาล: @รักษ์ไต ลิงก์เส้น &lt;HN&gt;)</option></select>
+    <div class="setting-desc">มือถือคำนวณลักษณะเสียงเอง (ไม่ส่งไฟล์เสียง) · 3 ครั้งแรก = ค่าปกติของตัวเอง · คะแนนเปลี่ยนแปลง 0–100 + VA Watch · 🔴 หรือ 🟠 สองครั้งติด → แจ้งกลุ่มพยาบาล · <b>ต้องสอบเทียบกับ Doppler/fistulogram ก่อนเชื่อถือ</b> · กระดานที่ <a href="/hd/bruit">/hd/bruit</a></div>
+    <div class="setting-status" id="status_bruit_check"></div>
+  </div>
+</div>
+
 <!-- 🩸 Kidney Twin (27 พ.ย. 2569): IDH early warning -->
 <div class="card setting-card">
   <div class="card-header">

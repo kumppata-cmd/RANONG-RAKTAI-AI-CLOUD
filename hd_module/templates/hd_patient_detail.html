@@ -70,10 +70,29 @@
     <a href="/hd/patient/{{ patient_hn }}/card.pdf" target="_blank" class="btn" style="flex:1;padding:10px;text-align:center;">🪪 บัตรผู้ป่วย PDF</a>
     <button onclick="issuePassport()" class="btn" style="flex:1;padding:10px;text-align:center;background:linear-gradient(135deg,#c0392b,#e67e22);color:#fff">🆘 บัตรฟอกไตฉุกเฉิน (ER)</button>
   </div>
+  <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+    <a href="/hd/patient/{{ patient_hn }}/time-machine" class="btn" style="flex:1;padding:10px;text-align:center;background:linear-gradient(135deg,#0f766e,#1e3a8a);color:#fff">⏳ Kidney Time Machine</a>
+    <a href="/hd/pill-ref/{{ patient_hn }}" class="btn" style="flex:1;padding:10px;text-align:center;">💊 รูปอ้างอิงกำยา / ลิงก์ตรวจยา</a>
+    <button onclick="bruitLink()" class="btn" style="flex:1;padding:10px;text-align:center;">🩺 ลิงก์ฟังเสียงเส้นฟอก</button>
+  </div>
+  <div id="bruitLinkResult" style="margin-top:8px;font-size:.82rem;text-align:center"></div>
   <div id="portalLinkResult" style="margin-top:8px;font-size:.82rem;text-align:center"></div>
   <div id="passportResult" style="margin-top:8px;font-size:.82rem;text-align:center"></div>
 </div>
 <script>
+/* 🩺 28 พ.ย. 2569: ลิงก์ฟังเสียงเส้นฟอก (ผู้ป่วยอัดจากบ้าน) */
+async function bruitLink(){
+  const el = document.getElementById('bruitLinkResult'); el.textContent = '⏳';
+  try{
+    const r = await hdFetch('/hd/api/v1/patients/hn/{{ patient_hn }}/bruit'); const d = await r.json();
+    if(!d.enabled){ el.innerHTML = '⚠️ ยังไม่เปิดใช้ — <a href="/hd/settings">⚙️ ตั้งค่า → bruit_check</a>'; return; }
+    const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    el.innerHTML = '<div style="word-break:break-all"><a href="'+esc(d.link)+'" target="_blank">'+esc(d.link)+'</a></div>'
+      + '<button class="btn btn-secondary" onclick="navigator.clipboard.writeText('+JSON.stringify(d.link)+').then(()=>alert(\'คัดลอกลิงก์แล้ว\'))">📋 คัดลอก</button> '
+      + '<a class="btn btn-secondary" href="/hd/bruit">📋 กระดานเสียงเส้น</a>'
+      + '<div style="color:var(--fg-muted);font-size:.74rem;margin-top:4px">ส่งต่อให้ผู้ป่วยทาง LINE · อัด 10 วิ สัปดาห์ละครั้ง · 3 ครั้งแรกเป็นค่าปกติของตัวเอง · ประวัติ '+(d.items||[]).length+' ครั้ง</div>';
+  }catch(e){ el.textContent = '⚠️ '+e; }
+}
 /* 🪪 Dialysis Passport (27 พ.ย. 2569): ลิงก์+QR อ่านอย่างเดียว อายุ 72 ชม. สำหรับ ER/รพ.อื่น */
 async function issuePassport(){
   const el = document.getElementById('passportResult');

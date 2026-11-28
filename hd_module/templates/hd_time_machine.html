@@ -1,0 +1,123 @@
+{% extends "hd_base.html" %}
+{% block title %}⏳ Kidney Time Machine{% endblock %}
+{% block page_title %}⏳ Kidney Time Machine — HN {{ patient_hn }}{% endblock %}
+{% block content %}
+<style>
+  .tm-head{display:flex;gap:12px;flex-wrap:wrap;align-items:stretch}
+  .tm-tile{flex:1;min-width:220px;border:1px solid var(--border);border-radius:12px;padding:12px;background:var(--card)}
+  .tm-idx{font-size:2.2rem;font-weight:800;line-height:1}
+  .tm-comp{font-size:.78rem;color:var(--fg-muted);margin-top:4px;line-height:1.5}
+  .tm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px;margin-top:12px}
+  .tm-ch{border:1px solid var(--border);border-radius:12px;padding:10px;background:var(--card)}
+  .tm-ch h4{margin:0 0 4px;font-size:.92rem;display:flex;justify-content:space-between;gap:6px}
+  .tm-ch .sub{font-size:.74rem;color:var(--fg-muted);min-height:16px}
+  .tm-ch canvas{width:100%!important;height:170px!important}
+  .tm-wi{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px;font-size:.84rem}
+  .tm-wi label{display:block}
+  .tm-ev{font-size:.82rem;padding:5px 0;border-bottom:1px dashed var(--border);display:flex;gap:8px}
+  .tm-ev .d{font-family:monospace;color:var(--fg-muted);flex:none;width:80px}
+  .badge{font-size:.72rem;border-radius:999px;padding:1px 7px;border:1px solid var(--border);background:var(--bg)}
+</style>
+<div class="card">
+  <div class="tm-head">
+    <div class="tm-tile" style="flex:2">
+      <div id="tmPat" style="font-weight:700;font-size:1.05rem">⏳ กำลังโหลด…</div>
+      <div id="tmSum" style="font-size:.82rem;color:var(--fg-muted);margin-top:4px"></div>
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
+        <a class="btn btn-secondary" href="/hd/patient/{{ patient_hn }}">← หน้าผู้ป่วย</a>
+        <a class="btn btn-secondary" href="/hd/patient/{{ patient_hn }}/360">🧭 360</a>
+        <a class="btn btn-secondary" href="/hd/shadow">🕵️ หมอเงา</a>
+      </div>
+    </div>
+    <div class="tm-tile">
+      <div style="font-size:.78rem;color:var(--fg-muted)">ดัชนีเฝ้าระวัง 90 วัน (0–100)</div>
+      <div class="tm-idx" id="tmIdx">–</div>
+      <div class="tm-comp" id="tmComp"></div>
+    </div>
+    <div class="tm-tile">
+      <div style="font-size:.78rem;color:var(--fg-muted)">จุดตัดเป้าที่คาดใน 12 เดือน (ถ้าไม่ทำอะไร)</div>
+      <div id="tmCross" style="font-size:.86rem;line-height:1.6">–</div>
+    </div>
+  </div>
+</div>
+
+<div class="card">
+  <div style="font-weight:700;margin-bottom:6px">🧪 ถ้าปรับ… ล่ะ (What-if) — เส้นส้มคืออนาคตหลังปรับ · ไม่บันทึกอะไรลงระบบ</div>
+  <div class="tm-wi">
+    <label>ESA <span id="esaV">0</span>% <input type="range" id="wiEsa" min="-50" max="50" step="25" value="0" oninput="document.getElementById('esaV').textContent=this.value" style="width:100%"></label>
+    <label><input type="checkbox" id="wiBinder"> เพิ่ม/ปรับ phosphate binder</label>
+    <label><input type="checkbox" id="wiVitd"> ให้ active vitamin D</label>
+    <label><input type="checkbox" id="wiDietK"> ให้คำปรึกษาอาหารโพแทสเซียม</label>
+    <label>เป้า UF รอบหน้า (mL) <input type="number" id="wiUf" placeholder="เช่น 2500" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:8px"></label>
+    <label>ปรับ DW (kg) <input type="number" id="wiDw" step="0.5" placeholder="เช่น -0.5" style="width:100%;padding:6px;border:1px solid var(--border);border-radius:8px"></label>
+  </div>
+  <div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap"><button class="btn btn-primary" onclick="tmWhatIf()">คำนวณอนาคตใหม่</button><button class="btn btn-secondary" onclick="tmReset()">ล้าง</button><span id="tmWiNote" style="font-size:.8rem;color:var(--fg-muted)"></span></div>
+  <div id="tmWiOut" style="font-size:.84rem;margin-top:6px;white-space:pre-wrap"></div>
+</div>
+
+<div class="tm-grid" id="tmCharts"></div>
+
+<div class="card" style="margin-top:12px">
+  <div style="font-weight:700;margin-bottom:6px">📜 เส้นเวลา (ใหม่ → เก่า)</div>
+  <div id="tmEvents"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script>
+const HN = "{{ patient_hn }}"; let DATA = null; const CH = {};
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const KEYS = [["hb","Hb (g/dL)"],["k","K (mmol/L)"],["phos","Phos (mg/dL)"],["pth","PTH (pg/mL)"],["albumin","Albumin (g/dL)"],["ktv","Kt/V"],["vp","VP เฉลี่ยต่อรอบ (mmHg)"],["idwg_pct","IDWG (% DW)"]];
+const HIST = '#0f766e', PROJ = 'rgba(15,118,110,.55)', BAND = 'rgba(15,118,110,.12)', WHATIF = '#c2410c', TGT = 'rgba(107,114,128,.35)';
+async function tmLoad(){
+  const r = await hdFetch('/hd/api/v1/patients/hn/'+HN+'/time-machine'); const d = await r.json();
+  if(!r.ok){ document.getElementById('tmPat').textContent = '⚠️ '+(d.error||r.status); return; }
+  DATA = d; const p = d.patient, s = d.summary;
+  document.getElementById('tmPat').textContent = (p.name||'')+' · HN '+p.hn+(p.age?' · '+p.age+' ปี':'')+(p.access?' · '+p.access:'')+(p.dry_weight?' · DW '+p.dry_weight+' kg':'');
+  document.getElementById('tmSum').textContent = `18 เดือน: ฟอก ${s.completed} รอบ · IDH ${s.idh_last10}/${s.idh_known} รอบล่าสุดที่รู้ผล · ขาดฟอก 60 วัน ${s.missed_60d} รอบ · ESA ${p.esa_drug||'-'} ${p.esa_dose||''}` + (d.va?` · Access: ${d.va.level}`:'');
+  const rk = d.risk; const el = document.getElementById('tmIdx'); el.textContent = rk.index; el.style.color = rk.level==='high'?'#b91c1c':(rk.level==='med'?'#b45309':'#1a7f37');
+  document.getElementById('tmComp').innerHTML = (rk.components.length? rk.components.map(c=>'• '+esc(c.text)+' (+'+c.points+')').join('<br>') : 'ไม่มีปัจจัยเสี่ยงเด่น') + '<div style="margin-top:4px;font-style:italic">'+esc(rk.note)+'</div>';
+  const cr = KEYS.map(([k,lab])=>{ const f=d.forecast[k]; if(!f||!f.crossing) return null; return `• ${lab.split(' ')[0]} จะ${f.crossing.which==='hi'?'เกิน':'ต่ำกว่า'} ${f.crossing.bound} ใน ~${f.crossing.in_days} วัน (${f.crossing.date}) · แนวโน้ม ${f.slope_per_month>0?'+':''}${f.slope_per_month}/เดือน · ความมั่นใจ ${f.confidence}`; }).filter(Boolean);
+  document.getElementById('tmCross').innerHTML = cr.length ? cr.map(esc).join('<br>') : 'ไม่มีค่าที่คาดว่าจะตัดเป้าใน 12 เดือน (หรือข้อมูลไม่พอ)';
+  const g = document.getElementById('tmCharts'); g.innerHTML = KEYS.map(([k,lab])=>'<div class="tm-ch"><h4><span>'+lab+'</span><span class="badge" id="tmB_'+k+'"></span></h4><div class="sub" id="tmS_'+k+'"></div><canvas id="tmC_'+k+'"></canvas></div>').join('');
+  KEYS.forEach(([k,lab])=>drawChart(k));
+  const ev = [];
+  (d.esa_events||[]).forEach(e=>ev.push({d:e.d, t:'💉 ESA: '+e.text}));
+  (d.meds||[]).forEach(m=>{ if(m.start) ev.push({d:m.start.slice(0,10), t:'💊 เริ่ม '+m.drug+' '+(m.dose||'')+' '+(m.freq||'')}); if(m.stop) ev.push({d:m.stop.slice(0,10), t:'⏹ หยุด '+m.drug}); });
+  (d.alerts||[]).forEach(a=>ev.push({d:a.d, t:(a.sev==='critical'?'🔴':'🟠')+' '+a.title}));
+  (d.shadow||[]).forEach(x=>ev.push({d:x.d, t:'🕵️ '+x.text+' ['+x.status+']'}));
+  (d.sessions||[]).filter(s=>s.idh==='idh').forEach(s=>ev.push({d:s.d, t:'📉 IDH ระหว่างฟอก'+(s.min_sbp?' (SBP ต่ำสุด '+s.min_sbp+')':'')}));
+  Object.keys(d.series).filter(k=>['hb','k','phos','pth','albumin'].includes(k)).forEach(k=>{});
+  ev.sort((a,b)=>String(b.d).localeCompare(String(a.d)));
+  document.getElementById('tmEvents').innerHTML = ev.slice(0,150).map(e=>'<div class="tm-ev"><span class="d">'+esc(e.d)+'</span><span>'+esc(e.t)+'</span></div>').join('') || '<div style="color:var(--fg-muted)">ไม่มีเหตุการณ์</div>';
+}
+function drawChart(k, adjusted){
+  const f = DATA.forecast[k]||{}; const hist = (DATA.series[k]||[]).map(x=>({x:x.d, y:x.v}));
+  const proj = (f.points||[]).map(p=>({x:p.d, y:p.v})), lo = (f.points||[]).map(p=>({x:p.d, y:p.lo})), hi = (f.points||[]).map(p=>({x:p.d, y:p.hi}));
+  const labels = Array.from(new Set([...hist.map(h=>h.x), ...proj.map(p=>p.x), ...(adjusted||[]).map(p=>p.d)])).sort();
+  const t = f.target||{}; const ds = [
+    {label:'ที่ผ่านมา', data:hist, borderColor:HIST, backgroundColor:HIST, borderWidth:2, pointRadius:3, tension:.2, spanGaps:true},
+    {label:'คาด', data:proj, borderColor:PROJ, borderDash:[6,4], borderWidth:2, pointRadius:0, tension:.1},
+    {label:'ช่วงคาด', data:hi, borderColor:'transparent', backgroundColor:BAND, fill:'+1', pointRadius:0},
+    {label:'', data:lo, borderColor:'transparent', pointRadius:0}];
+  if(adjusted) ds.push({label:'ถ้าปรับ', data:adjusted.map(p=>({x:p.d, y:p.v})), borderColor:WHATIF, borderDash:[3,3], borderWidth:2, pointRadius:0});
+  if(t.hi!=null && labels.length) ds.push({label:'เป้าบน', data:labels.map(x=>({x, y:t.hi})), borderColor:TGT, borderWidth:1, pointRadius:0});
+  if(t.lo!=null && t.lo>0 && labels.length) ds.push({label:'เป้าล่าง', data:labels.map(x=>({x, y:t.lo})), borderColor:TGT, borderWidth:1, pointRadius:0});
+  if(CH[k]) CH[k].destroy();
+  CH[k] = new Chart(document.getElementById('tmC_'+k), {type:'line', data:{datasets:ds}, options:{animation:false, parsing:{xAxisKey:'x', yAxisKey:'y'}, plugins:{legend:{display:false}, tooltip:{callbacks:{title:i=>i[0].raw.x}}},
+    scales:{x:{type:'category', labels, ticks:{maxTicksLimit:6, font:{size:10}}, grid:{display:false}}, y:{ticks:{font:{size:10}}, grid:{color:'rgba(0,0,0,.05)'}}}}});
+  document.getElementById('tmB_'+k).textContent = f.confidence && f.confidence!=='none' ? ('ความมั่นใจ '+f.confidence+' · n='+f.n) : 'ข้อมูลไม่พอคาด';
+  document.getElementById('tmS_'+k).textContent = f.last ? ('ล่าสุด '+f.last.v+' ('+f.last.d+')'+(f.slope_per_month!=null?' · แนวโน้ม '+(f.slope_per_month>0?'+':'')+f.slope_per_month+'/เดือน':'')) : 'ไม่มีข้อมูล';
+}
+async function tmWhatIf(){
+  const body = {esa_pct:+document.getElementById('wiEsa').value, binder:document.getElementById('wiBinder').checked, vitd:document.getElementById('wiVitd').checked, diet_k:document.getElementById('wiDietK').checked,
+                uf_goal_ml:document.getElementById('wiUf').value||null, dw_delta:document.getElementById('wiDw').value||null};
+  document.getElementById('tmWiNote').textContent='⏳';
+  const r = await hdFetch('/hd/api/v1/patients/hn/'+HN+'/time-machine/what-if',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}); const d = await r.json();
+  document.getElementById('tmWiNote').textContent='';
+  if(!r.ok){ document.getElementById('tmWiOut').textContent='⚠️ '+(d.error||r.status); return; }
+  KEYS.forEach(([k])=>drawChart(k, (d.adjusted||{})[k]));
+  document.getElementById('tmWiOut').textContent = (d.notes||[]).map(n=>'• '+n).join('\n') + (d.uf_plan?'\n• IDH fingerprint: '+d.uf_plan.text:'') + '\n\nสมมติฐานที่ใช้ (หยาบ แสดงให้เห็นทุกข้อ):\n' + Object.values(d.rules||{}).map(x=>'  - '+x).join('\n');
+}
+function tmReset(){ ['wiBinder','wiVitd','wiDietK'].forEach(id=>document.getElementById(id).checked=false); document.getElementById('wiEsa').value=0; document.getElementById('esaV').textContent='0'; document.getElementById('wiUf').value=''; document.getElementById('wiDw').value=''; document.getElementById('tmWiOut').textContent=''; KEYS.forEach(([k])=>drawChart(k)); }
+tmLoad();
+</script>
+{% endblock %}

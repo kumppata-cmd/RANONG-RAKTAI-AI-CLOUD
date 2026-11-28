@@ -975,6 +975,16 @@ def _start_daily_reminder_scheduler(app):
                             # ว้าว รอบ 2 #3: tomorrow's bed plan → nurse group
                             from .blueprint import push_tomorrow_schedule
                             logger.info("Tomorrow bed plan pushed: %s", ops.run_guarded("bed_plan_push", push_tomorrow_schedule, timeout=120))
+                # 28 พ.ย. 2569: 🕵️ หมอเงา — ชั่วโมงที่ตั้ง (ค่าเริ่มต้น 06:xx ไทย) ก่อน Morning Brief · ทำงานเมื่อเปิดสวิตช์เท่านั้น
+                try:
+                    from .blueprint import get_setting_value as _gsv_sd
+                    _sd_hour = int(float(_gsv_sd("shadow_doc_hour", "6") or 6))
+                except Exception:
+                    _sd_hour = 6
+                if now.hour == _sd_hour and now.minute >= 30 and _claim_once(app, "shadow_doc", now.date()):
+                    with app.app_context():
+                        from .blueprint import shadow_doc_scheduled
+                        logger.info("Shadow doc: %s", ops.run_guarded("shadow_doc", shadow_doc_scheduled, timeout=240))
                 # 07:30 Thai time: Morning Brief → physician LINE (B7)
                 if now.hour == 7 and now.minute >= 30 and last_brief_date != now.date():
                     last_brief_date = now.date()

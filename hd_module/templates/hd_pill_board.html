@@ -1,0 +1,26 @@
+{% extends "hd_base.html" %}
+{% block title %}💊 ตรวจกำยาจากบ้าน{% endblock %}
+{% block nav_pill %}active{% endblock %}
+{% block page_title %}💊 ถ่ายรูปกำยา เช็กให้ — ผลจากบ้านทุกคน{% endblock %}
+{% block content %}
+<style>.pb-row{display:flex;gap:10px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:.88rem;align-items:flex-start}.pb-v{width:26px;flex:none;font-size:1.1rem}.pb-m{flex:1}.pb-meta{font-size:.76rem;color:var(--fg-muted)}</style>
+<div class="card" style="margin-bottom:12px;font-size:.86rem">
+  ผู้ป่วยเปิดลิงก์จาก LINE → ถ่ายรูปยาในมือ → ระบบเทียบกับ <b>รูปอ้างอิงที่พยาบาลถ่ายไว้ตอนจัดยา</b> และรายการยาปัจจุบัน · ผลที่ไม่ตรงและกด "แจ้งพยาบาล" จะเข้ากลุ่ม LINE เป็นข้อความ (ไม่มีรูป)
+  <span id="pbSwitch"></span>
+  <div style="margin-top:6px">วิธีเริ่มใช้: เปิดหน้าผู้ป่วย → ปุ่ม "💊 รูปอ้างอิงกำยา" → ถ่าย 4 มื้อ → ส่งลิงก์ (พิมพ์ในกลุ่ม LINE <code>@รักษ์ไต ลิงก์ยา &lt;HN&gt;</code>)</div>
+</div>
+<div class="card"><div style="display:flex;gap:8px;align-items:center"><b>ผลตรวจ 14 วันล่าสุด</b><input id="pbQ" placeholder="กรอง HN/ชื่อ" oninput="pbRender()" style="padding:5px 8px;border:1px solid var(--border);border-radius:8px"></div><div id="pbList" style="margin-top:8px"></div></div>
+<script>
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let _rows=[];
+async function pbLoad(){ const r = await hdFetch('/hd/api/v1/pill/board?days=14'); const d = await r.json(); _rows = d.checks||[];
+  document.getElementById('pbSwitch').innerHTML = d.enabled ? ' · <b style="color:#1a7f37">เปิดใช้อยู่</b>' : ' · <b style="color:#b45309">ปิดอยู่ — ⚙️ ตั้งค่า → pill_check</b>'; pbRender(); }
+function pbRender(){
+  const q = (document.getElementById('pbQ').value||'').trim().toLowerCase();
+  const rows = _rows.filter(c=>!q || String(c.hn).includes(q) || String(c.name||'').toLowerCase().includes(q));
+  document.getElementById('pbList').innerHTML = rows.map(c=>'<div class="pb-row"><div class="pb-v">'+({ok:'✅',missing:'⚠️',extra:'⚠️',unsure:'🤔'}[c.verdict]||'•')+'</div><div class="pb-m"><a href="/hd/pill-ref/'+esc(c.hn)+'"><b>'+esc(c.name||'')+'</b> HN '+esc(c.hn)+'</a> · มื้อ'+esc(c.slot_th)+' · '+esc(c.verdict)+(c.pills_seen!=null?' ('+c.pills_seen+' เม็ด)':'')
+    + '<div class="pb-meta">'+esc((c.at||'').slice(0,16).replace('T',' '))+((c.detail||{}).missing||[]).map(x=>' · ขาด: '+esc(x)).join('')+((c.detail||{}).extra||[]).map(x=>' · ไม่ตรง: '+esc(x)).join('')+((c.detail||{}).note?' · '+esc(c.detail.note):'')+(c.notified?' · 📣 แจ้งพยาบาลแล้ว':'')+'</div></div></div>').join('') || '<div style="color:var(--fg-muted);font-size:.85rem">ยังไม่มีผลตรวจ</div>';
+}
+pbLoad();
+</script>
+{% endblock %}

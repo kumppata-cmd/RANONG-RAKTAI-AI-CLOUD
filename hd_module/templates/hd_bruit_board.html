@@ -1,0 +1,31 @@
+{% extends "hd_base.html" %}
+{% block title %}🩺 เสียงเส้นฟอก{% endblock %}
+{% block nav_bruit %}active{% endblock %}
+{% block page_title %}🩺 ฟังเสียงเส้นฟอกจากบ้าน — กระดานเฝ้าระวัง{% endblock %}
+{% block content %}
+<style>.bb-row{display:flex;gap:10px;padding:10px;border:1px solid var(--border);border-radius:12px;background:var(--card);margin-bottom:8px;align-items:flex-start}.bb-l{width:30px;font-size:1.2rem;flex:none}.bb-m{flex:1}.bb-meta{font-size:.76rem;color:var(--fg-muted)}.bb-sig{font-size:.82rem;margin-top:3px}</style>
+<div class="card" style="margin-bottom:12px;font-size:.86rem">
+  ผู้ป่วยอัดเสียง AVF/AVG 10 วินาทีสัปดาห์ละครั้งจากบ้าน (ลิงก์จาก LINE) · <b>3 ครั้งแรก = ค่าปกติของตัวเอง</b> จากนั้นระบบให้คะแนนการเปลี่ยนแปลง (เสียงแหลมขึ้น · พลังงาน >800 Hz เพิ่ม · ขาดเป็นจังหวะ · เบาลง) + VA Watch จากเครื่องฟอก
+  · 🔴 ≥50 หรือ 🟠 สองครั้งติด → แจ้งกลุ่มพยาบาลอัตโนมัติ · <b>ต้องยืนยันด้วยการตรวจร่างกาย/Doppler เสมอ</b>
+  <span id="bbSwitch"></span>
+  <div style="margin-top:6px">ส่งลิงก์: พิมพ์ในกลุ่ม LINE <code>@รักษ์ไต ลิงก์เส้น &lt;HN&gt;</code> · หลัง PTA/เปลี่ยน access ให้กด "เริ่มค่าปกติใหม่"</div>
+</div>
+<div id="bbList">⏳</div>
+<script>
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const ICON = {alert:'🔴', watch:'🟠', ok:'🟢', baseline:'📊'};
+async function bbLoad(){
+  const r = await hdFetch('/hd/api/v1/bruit/board?days=90'); const d = await r.json();
+  document.getElementById('bbSwitch').innerHTML = d.enabled ? ' · <b style="color:#1a7f37">เปิดใช้อยู่</b>' : ' · <b style="color:#b45309">ปิดอยู่ — ⚙️ ตั้งค่า → bruit_check</b>';
+  const rows = d.rows||[];
+  document.getElementById('bbList').innerHTML = rows.map(x=>'<div class="bb-row"><div class="bb-l">'+(ICON[x.level]||'•')+'</div><div class="bb-m"><b>'+esc(x.name||'')+'</b> HN '+esc(x.hn)
+    + (x.score!=null?' · คะแนน '+x.score:'')+(x.level==='baseline'?' · ค่าปกติ '+x.baseline_n+'/3':'')
+    + '<div class="bb-sig">'+(x.signals||[]).map(s=>'• '+esc(s.text)).join('<br>')+'</div>'
+    + '<div class="bb-meta">ล่าสุด '+esc((x.at||'').slice(0,16).replace('T',' '))+' · อัดคุณภาพดี '+x.n_good+' ครั้ง · <a href="/hd/patient/'+esc(x.hn)+'/time-machine">⏳ Time Machine</a> · <a href="#" onclick="bbReset(\''+esc(x.hn)+'\');return false">↺ เริ่มค่าปกติใหม่</a></div></div></div>').join('')
+    || '<div class="card" style="color:var(--fg-muted)">ยังไม่มีผู้ป่วยอัดเสียง</div>';
+}
+async function bbReset(hn){ if(!confirm('เริ่มค่าปกติใหม่ของ HN '+hn+' (ใช้หลังทำ PTA/เปลี่ยน access) — 3 ครั้งถัดไปจะเป็น baseline ใหม่?')) return;
+  const r = await hdFetch('/hd/api/v1/patients/hn/'+hn+'/bruit/reset-baseline',{method:'POST'}); if(r.ok){ showToast('เริ่มค่าปกติใหม่แล้ว','success'); bbLoad(); } else showToast('ไม่สำเร็จ (เฉพาะแพทย์/แอดมิน)','error'); }
+bbLoad();
+</script>
+{% endblock %}

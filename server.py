@@ -19478,6 +19478,19 @@ def webhook():
                             _ans = "ขออภัย ตอบไม่ได้ตอนนี้ ลองใหม่อีกครั้ง"
                         reply_message(reply_token, _ans[:4900])
                         continue
+                    # 28 พ.ย. 2569 (อนุมัติ "ถามชาร์ตได้"): แพทย์/แอดมินพิมพ์ "@รักษ์ไต …" ในแชท 1:1 →
+                    # hd_module ตอบ (คำสั่งเดิมของกลุ่ม + ถามชาร์ต AI อ่านอย่างเดียว เมื่อเปิด ⚙️ ask_chart) · ไม่เปิด = ผ่านไปตามเดิม
+                    if not _gid and (user_hash in PHYSICIAN_USERS or user_hash in ADMIN_USERS):
+                        try:
+                            from hd_module.blueprint import ask_chart_line as _ask_line
+                            with app.app_context():
+                                _ans = _ask_line(_ga_body, who_label="physician" if user_hash in PHYSICIAN_USERS else "admin")
+                        except Exception as _qe:
+                            logger.warning(f"ask chart 1:1: {type(_qe).__name__}")
+                            _ans = None
+                        if _ans:
+                            reply_message(reply_token, _ans[:4900])
+                            continue
                     # outside the nurse group: ignore silently (fall through to normal handling)
 
                 # ── groupid: บอก groupId ของกลุ่มนี้ (ใช้ตั้ง nurse_group_id ให้

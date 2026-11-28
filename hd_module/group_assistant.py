@@ -31,6 +31,8 @@ HELP = ("🤖 รักษ์ไต ช่วยตอบได้ (พิมพ
         "• ลิงก์อาหาร <HN> — ออกลิงก์โค้ชอาหาร (ถ่ายรูปถาม AI) ส่งต่อผู้ป่วย\n"
         "• แล็บบ้าน <HN> — ดูตัวอย่างแล็บภาษาบ้าน · ส่งแล็บบ้าน <HN> — ส่งเข้า LINE ผู้ป่วย\n"
         "• ยา <HN> — รายการยาปัจจุบัน + แพ้ยา\n"
+        "• ลิงก์ยา <HN> — ลิงก์ 'ถ่ายรูปกำยา เช็กให้' ส่งต่อผู้ป่วย · ลิงก์เส้น <HN> — ลิงก์ 'ฟังเสียงเส้นฟอก'\n"
+        "• ถามอะไรก็ได้เป็นประโยค เช่น 'ใครบ้าง Hb ต่ำกว่า 9' — ถ้าเปิด 💬 ถามชาร์ต\n"
         "• ย้อน เตียง 12 เมื่อวาน / ย้อน HN 1234 ล่าสุด — 📼 ย้อนรอบฟอก (ถ้าเปิดใช้)\n\n"
         "ตอบจากข้อมูลในระบบเท่านั้น ไม่สั่งการรักษา")
 
@@ -210,7 +212,7 @@ def _patient(cur, key, today):
     return "\n".join(L)
 
 
-def answer(conn, body, base_url=""):
+def answer(conn, body, base_url="", ai_fallback=True):
     """Answer one command. Returns the reply text (always non-empty)."""
     today = _thai_now().date()
     b = (body or "").strip()
@@ -228,6 +230,13 @@ def answer(conn, body, base_url=""):
         if low.startswith("แล็บบ้าน") or low.startswith("ส่งแล็บบ้าน") or low.startswith("แลบบ้าน") or low.startswith("ส่งแลบบ้าน"):
             from .patient_engage import lab_friendly_command
             return lab_friendly_command(cur, b)
+        # 28 พ.ย. 2569: ลิงก์ตรวจกำยา / ฟังเสียงเส้น (สะกด ลิงก์/ลิงค์/ลิ้ง ได้หมด)
+        if re.match(r"^(ลิ้?ง[กค]?์?\s*ยา|pill)", low):
+            from .pill_check import link_command as _pill_link
+            return _pill_link(cur, b, base_url or _default_base_url())
+        if re.match(r"^(ลิ้?ง[กค]?์?\s*เส้น|bruit)", low):
+            from .bruit_check import link_command as _bruit_link
+            return _bruit_link(cur, b, base_url or _default_base_url())
         if re.match(r"^ยา\s*\d", low):
             from .medications import meds_list_command
             return meds_list_command(cur, b)
@@ -259,4 +268,20 @@ def answer(conn, body, base_url=""):
         r = _patient(cur, b, today)
         if r:
             return r
+    # 28 พ.ย. 2569: ไม่เข้ากฎไหน → 💬 ถามชาร์ต (AI เขียน SQL อ่านอย่างเดียว) เมื่อเปิด ask_chart + ask_chart_group
+    try:
+        from . import ask_chart as _ac
+        from .blueprint import get_setting_value as _gsv
+        if ai_fallback and _ac.is_enabled() and str(_gsv(_ac.GROUP_KEY, "off") or "off").lower() in ("on", "1", "true", "yes") and len(b) >= 6:
+            res = _ac.answer(conn, b, who="nurse_group", channel="group", base_url=base_url or _default_base_url())
+            if res.get("text"):
+                return res["text"]
+    except Exception as e:  # noqa: BLE001
+        import logging
+        logging.getLogger(__name__).info("group ask_chart: %s", type(e).__name__)
     return f"ไม่พบ \"{b[:40]}\" — ลองพิมพ์ @รักษ์ไต help"
+
+
+def _default_base_url():
+    import os
+    return (os.environ.get("RENDER_EXTERNAL_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")

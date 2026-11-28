@@ -12495,6 +12495,10 @@ def update_settings():
         "family_liff_id",            # 21 พ.ย. 2569: LIFF ID ของหน้า Family Link (ญาติรับสรุปหลังฟอก)
         "ai_vision_model",           # 21 พ.ย. 2569: รุ่น Claude ของ hd_module (default ใน patient_engage)
         "family_summary_push",       # ส่งสรุปจบรอบให้ญาติที่ผูกไว้ (on/off, default on)
+        "shadow_doc", "shadow_doc_hour", "shadow_doc_quiet_days",   # 28 พ.ย. 2569: 🕵️ หมอเงา
+        "ask_chart", "ask_chart_group", "ask_chart_model",          # 28 พ.ย. 2569: 💬 ถามชาร์ตได้
+        "pill_check",                                                # 28 พ.ย. 2569: 💊 ตรวจกำยา
+        "bruit_check",                                               # 28 พ.ย. 2569: 🩺 ฟังเสียงเส้นฟอก
     ]
     if key not in allowed_keys:
         return jsonify({"error": f"Invalid setting key: {key}"}), 400
@@ -17241,3 +17245,536 @@ def save_self_assessment():
     except Exception as e:
         logger.warning("self_assessment POST: %s", e)
         return jsonify({"error": str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 28 พ.ย. 2569 — ชุด "ว้าว 3 โลก": 🕵️ หมอเงา · 💬 ถามชาร์ต · 💊 ตรวจกำยา · 🩺 ฟังเสียงเส้น · ⏳ Time Machine
+# ทั้งหมด additive · สวิตช์ ⚙️ ปิดเป็นค่าเริ่มต้น · ไม่แตะเส้นทางเดิม
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _w3_db():
+    import os
+    import psycopg2
+    db_url = os.environ.get("HD_DATABASE_URL", "") or os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        return None
+    return psycopg2.connect(db_url, connect_timeout=5)
+
+
+def _w3_base_url():
+    import os
+    return (os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("BASE_URL") or "https://ranong-raktai-ai-cloud.onrender.com").rstrip("/")
+
+
+def _w3_physician_ids():
+    ids = get_setting_value("alert_recipients", "") or get_setting_value("physician_line_id", "")
+    return [r.strip() for r in (ids or "").split(",") if r.strip()]
+
+
+# ── 🕵️ หมอเงา ─────────────────────────────────────────────────────────────────
+
+def run_shadow_doc(trigger="manual", user=None, dry_run=False):
+    """รอบเช้า (หรือกดเอง): อ่านผู้ป่วยทุกคน → บันทึก findings → push แพทย์ 1:1 (เฉพาะเมื่อเปิดสวิตช์ หรือ dry_run)."""
+    from flask import current_app
+    from . import shadow_doc as _sd
+    conn = _w3_db()
+    if conn is None:
+        return {"error": "no database"}
+    try:
+        push_fn = current_app.config.get("LINE_PUSH_FN") if not dry_run else None
+        quiet = int(float(get_setting_value(_sd.QUIET_KEY, str(_sd.DEFAULT_QUIET_DAYS)) or _sd.DEFAULT_QUIET_DAYS))
+        res = _sd.run(conn, push_fn=push_fn, recipients=_w3_physician_ids() if push_fn else None, base_url=_w3_base_url(),
+                      quiet_days=quiet, dry_run=dry_run)
+    finally:
+        conn.close()
+    if not dry_run:
+        try:
+            log_action(user_id=user, action="shadow_doc.run", resource_type="shadow_doc",
+                       new_values={k: v for k, v in res.items() if k != "message"} | {"trigger": trigger}, ip_address="")
+        except Exception:
+            pass
+    return res
+
+
+def shadow_doc_scheduled():
+    """เรียกจาก scheduler รายชั่วโมง — ทำงานเฉพาะชั่วโมงที่ตั้ง (ค่าเริ่มต้น 06:xx ไทย) และเมื่อเปิดสวิตช์"""
+    from . import shadow_doc as _sd
+    if not _sd.is_enabled():
+        return {"skipped": "off"}
+    return run_shadow_doc(trigger="scheduled")
+
+
+@hd_bp.route("/shadow/findings", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def shadow_findings():
+    from . import shadow_doc as _sd
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"findings": [], "error": "no db"})
+    try:
+        return jsonify({"findings": _sd.list_findings(conn, request.args.get("status", "open")), "enabled": _sd.is_enabled()})
+    finally:
+        conn.close()
+
+
+@hd_bp.route("/shadow/run", methods=["POST"])
+@require_role("physician", "admin")
+def shadow_run():
+    body = request.get_json(silent=True) or {}
+    dry = bool(body.get("dry_run"))
+    res = run_shadow_doc(trigger="manual", user=g.get("hd_user_id"), dry_run=dry)
+    return jsonify(res)
+
+
+@hd_bp.route("/shadow/findings/<int:fid>", methods=["POST"])
+@require_role("physician", "admin")
+def shadow_ack(fid):
+    from . import shadow_doc as _sd
+    body = request.get_json(silent=True) or {}
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"error": "no db"}), 503
+    try:
+        ok = _sd.ack(conn, fid, body.get("status", "ack"), g.get("hd_username") or str(g.get("hd_user_id") or ""), body.get("note", ""))
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="shadow_doc.ack", resource_type="shadow_finding", resource_id=str(fid),
+               new_values={"status": body.get("status", "ack")}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": ok})
+
+
+@hd_web.route("/shadow")
+def shadow_page():
+    return render_template("hd_shadow.html")
+
+
+# ── 💬 ถามชาร์ตได้ ─────────────────────────────────────────────────────────────
+
+@hd_bp.route("/ask", methods=["POST"])
+@require_role("physician", "admin")
+def ask_chart_api():
+    from . import ask_chart as _ac
+    if not _ac.is_enabled():
+        return jsonify({"error": "ยังไม่เปิดใช้ — ⚙️ ตั้งค่า → ask_chart"}), 409
+    body = request.get_json(silent=True) or {}
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"error": "no db"}), 503
+    try:
+        res = _ac.answer(conn, body.get("question", ""), who=g.get("hd_username") or str(g.get("hd_user_id") or ""), channel="web")
+    finally:
+        conn.close()
+    return jsonify(res)
+
+
+@hd_bp.route("/ask/history", methods=["GET"])
+@require_role("physician", "admin")
+def ask_chart_history():
+    from . import ask_chart as _ac
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"items": []})
+    try:
+        return jsonify({"items": _ac.history(conn), "enabled": _ac.is_enabled(), "schema": _ac.schema_card()})
+    finally:
+        conn.close()
+
+
+@hd_web.route("/ask")
+def ask_chart_page():
+    return render_template("hd_ask_chart.html")
+
+
+def ask_chart_line(question, who_label="physician", channel="line"):
+    """ทางเข้าจาก LINE 1:1 ของแพทย์/แอดมิน (server.py hook) — ลองคำสั่งสำเร็จรูปของ @รักษ์ไต ก่อน
+    (เตียง/วันนี้/HN/ยา/ลิงก์…) ถ้าไม่เข้ากฎ → 💬 ถามชาร์ต (AI, อ่านอย่างเดียว) · คืน None เมื่อปิดสวิตช์ทั้งคู่"""
+    from . import ask_chart as _ac
+    from .group_assistant import answer as _ga_answer
+    conn = _w3_db()
+    if conn is None:
+        return "ฐานข้อมูลไม่พร้อม"
+    try:
+        try:
+            rule = _ga_answer(conn, question, base_url=_w3_base_url(), ai_fallback=False)
+        except Exception as e:
+            logger.info("ask_chart_line rules: %s", type(e).__name__)
+            rule = None
+        if rule and not rule.startswith("ไม่พบ \""):
+            return rule
+        if not _ac.is_enabled():
+            return rule
+        return _ac.answer(conn, question, who=who_label, channel=channel, base_url=_w3_base_url()).get("text") or rule
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+# ── 💊 ตรวจกำยา ──────────────────────────────────────────────────────────────
+
+def _pill_hn_from_token(token):
+    from .patient_engage import parse_token
+    from . import pill_check as _pc
+    hn, _ = parse_token(_pc.TOKEN_KIND, str(token or ""), max_age_days=_pc.TOKEN_DAYS)
+    return hn
+
+
+@hd_web.route("/pill/<token>")
+def pill_page(token):
+    from . import pill_check as _pc
+    hn = _pill_hn_from_token(token)
+    return render_template("hd_pill_check.html", token=token, valid=bool(hn) and _pc.is_enabled(), enabled=_pc.is_enabled(),
+                           slot_now=_pc.slot_now(), slots=[(s, _pc.SLOT_TH[s]) for s in _pc.SLOTS])
+
+
+@hd_bp.route("/pill/expected", methods=["GET"])
+def pill_expected():
+    """ผู้ป่วย (token) ดูว่ามื้อนี้คลินิกจัดอะไรไว้ + มีรูปอ้างอิงไหม"""
+    from . import pill_check as _pc
+    hn = _pill_hn_from_token(request.args.get("token", ""))
+    if not hn or not _pc.is_enabled():
+        return jsonify({"error": "ลิงก์หมดอายุหรือยังไม่เปิดใช้"}), 403
+    slot = request.args.get("slot") or _pc.slot_now()
+    if slot not in _pc.SLOTS:
+        slot = _pc.slot_now()
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"error": "no db"}), 503
+    try:
+        with conn.cursor() as cur:
+            exp = _pc.expected_for(cur, hn, slot)
+            ref = _pc.get_reference(cur, hn, slot, with_image=False)
+        conn.rollback()
+    finally:
+        conn.close()
+    return jsonify({"slot": slot, "slot_th": _pc.SLOT_TH[slot], "expected": [{"drug": e["drug"], "dose": e["dose"], "tabs": e["tabs"]} for e in exp],
+                    "has_reference": bool(ref), "reference_at": (ref or {}).get("created_at")})
+
+
+@hd_bp.route("/pill/analyze", methods=["POST"])
+def pill_analyze():
+    from . import pill_check as _pc
+    hn = _pill_hn_from_token(request.form.get("token", ""))
+    if not hn or not _pc.is_enabled():
+        return jsonify({"error": "ลิงก์หมดอายุหรือยังไม่เปิดใช้ — ขอลิงก์ใหม่จากคลินิก"}), 403
+    slot = request.form.get("slot") or _pc.slot_now()
+    if slot not in _pc.SLOTS:
+        slot = _pc.slot_now()
+    f = request.files.get("image")
+    if not f:
+        return jsonify({"error": "ไม่พบรูป"}), 400
+    data = f.read()
+    if not data or len(data) > _pc.MAX_IMG:
+        return jsonify({"error": "รูปว่างหรือใหญ่เกิน 6 MB"}), 400
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"error": "no db"}), 503
+    try:
+        with conn.cursor() as cur:
+            exp = _pc.expected_for(cur, hn, slot)
+            ref = _pc.get_reference(cur, hn, slot, with_image=True)
+        res = _pc.analyze(data, exp, ref_img=(ref or {}).get("image"), slot=slot)
+        if res.get("error"):
+            err = res["error"]
+            msg = {"busy": "ระบบ AI กำลังยุ่ง รอ 10 วินาทีแล้วกด 'ลองอีกครั้ง'", "no_credit": "ระบบ AI ไม่พร้อม — แจ้งคลินิก",
+                   "no_api_key": "ระบบ AI ยังไม่ตั้งค่า — แจ้งคลินิก"}.get(err, "ระบบตอบไม่ทันรอบนี้ กด 'ลองอีกครั้ง' ด้วยรูปเดิมได้")
+            return jsonify({"error": msg, "code": err}), 502
+        text = _pc.patient_text(res, slot, exp, bool(ref))
+        with conn.cursor() as cur:
+            cid = _pc.record_check(cur, hn, slot, res, text, bool(ref))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"check_id": cid, "verdict": res["verdict"], "text": text, "pills_seen": res.get("pills_seen"),
+                    "missing": res.get("missing"), "extra": res.get("extra"), "has_reference": bool(ref), "slot_th": _pc.SLOT_TH[slot]})
+
+
+@hd_bp.route("/pill/notify", methods=["POST"])
+def pill_notify():
+    """ผู้ป่วยกด 'แจ้งพยาบาล' → ข้อความอย่างเดียวเข้ากลุ่มพยาบาล (ไม่มีรูป)"""
+    from . import pill_check as _pc
+    body = request.get_json(silent=True) or {}
+    hn = _pill_hn_from_token(body.get("token", ""))
+    if not hn or not _pc.is_enabled():
+        return jsonify({"error": "ลิงก์หมดอายุ"}), 403
+    cid = body.get("check_id")
+    conn = _w3_db()
+    name, text, slot_th = "", "", ""
+    if conn is not None:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT patient_name FROM hd_patient_mapping WHERE hn = %s", (hn,))
+                r = cur.fetchone()
+                name = r[0] if r else ""
+                if cid:
+                    cur.execute("SELECT text, slot FROM hd_pill_checks WHERE id = %s AND hn = %s", (cid, hn))
+                    r = cur.fetchone()
+                    if r:
+                        text, slot_th = r[0] or "", _pc.SLOT_TH.get(r[1], r[1] or "")
+                    cur.execute("UPDATE hd_pill_checks SET notified = TRUE WHERE id = %s AND hn = %s", (cid, hn))
+            conn.commit()
+        finally:
+            conn.close()
+    msg = (f"💊 ผู้ป่วย {name or ''} (HN {hn}) ตรวจกำยามื้อ{slot_th}จากบ้าน แล้วกดแจ้งพยาบาล\n" +
+           (text.split("\n")[0] if text else "") + f"\nโทรกลับ/ตรวจรายการยาให้ด้วย · {_w3_base_url()}/hd/pill-board")
+    res = push_nurse_group(msg)
+    return jsonify({"ok": bool(res.get("sent")), "method": res.get("method")})
+
+
+@hd_bp.route("/patients/hn/<hn>/pill-refs", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def pill_refs_list(hn):
+    from . import pill_check as _pc
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"refs": []})
+    try:
+        with conn.cursor() as cur:
+            refs = _pc.list_references(cur, hn)
+            exp = {s: _pc.expected_for(cur, hn, s) for s in _pc.SLOTS}
+            checks = _pc.recent_checks(cur, hn, days=30)
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"refs": refs, "expected": {s: [{"drug": e["drug"], "dose": e["dose"], "tabs": e["tabs"]} for e in v] for s, v in exp.items()},
+                    "checks": checks, "link": _pc.link_for(hn, _w3_base_url()) if _pc.is_enabled() else None, "enabled": _pc.is_enabled()})
+
+
+@hd_bp.route("/patients/hn/<hn>/pill-refs", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def pill_refs_save(hn):
+    from . import pill_check as _pc
+    slot = request.form.get("slot", "")
+    f = request.files.get("image")
+    if slot not in _pc.SLOTS or not f:
+        return jsonify({"error": "ต้องระบุมื้อและรูป"}), 400
+    data = f.read()
+    if not data or len(data) > _pc.MAX_IMG:
+        return jsonify({"error": "รูปว่างหรือใหญ่เกิน 6 MB"}), 400
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"error": "no db"}), 503
+    try:
+        with conn.cursor() as cur:
+            items = _pc.expected_for(cur, hn, slot)
+            rid = _pc.save_reference(cur, hn, slot, data, items=[{"drug": e["drug"], "dose": e["dose"], "tabs": e["tabs"]} for e in items],
+                                     note=request.form.get("note", ""), who=g.get("hd_username") or str(g.get("hd_user_id") or ""))
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="pill_ref.save", resource_type="patient", resource_id=hn,
+               new_values={"slot": slot, "ref_id": rid}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "id": rid, "slot": slot})
+
+
+@hd_bp.route("/patients/hn/<hn>/pill-refs/<int:rid>/image", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def pill_ref_image(hn, rid):
+    from flask import Response
+    conn = _w3_db()
+    if conn is None:
+        return "no db", 503
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT image, mime FROM hd_pill_reference WHERE id = %s AND hn = %s", (rid, hn))
+            r = cur.fetchone()
+    finally:
+        conn.close()
+    if not r:
+        return "not found", 404
+    return Response(bytes(r[0]), mimetype=r[1] or "image/jpeg", headers={"Cache-Control": "private, max-age=300"})
+
+
+@hd_bp.route("/pill/board", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def pill_board():
+    from . import pill_check as _pc
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"checks": []})
+    try:
+        with conn.cursor() as cur:
+            checks = _pc.recent_checks(cur, None, days=int(request.args.get("days", 14)))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"checks": checks, "enabled": _pc.is_enabled()})
+
+
+@hd_web.route("/pill-ref/<hn>")
+def pill_ref_page(hn):
+    return render_template("hd_pill_ref.html", patient_hn=hn)
+
+
+@hd_web.route("/pill-board")
+def pill_board_page():
+    return render_template("hd_pill_board.html")
+
+
+# ── 🩺 ฟังเสียงเส้นฟอก ──────────────────────────────────────────────────────────
+
+def _bruit_hn_from_token(token):
+    from .patient_engage import parse_token
+    from . import bruit_check as _bc
+    hn, _ = parse_token(_bc.TOKEN_KIND, str(token or ""), max_age_days=_bc.TOKEN_DAYS)
+    return hn
+
+
+@hd_web.route("/bruit/<token>")
+def bruit_page(token):
+    from . import bruit_check as _bc
+    hn = _bruit_hn_from_token(token)
+    return render_template("hd_bruit.html", token=token, valid=bool(hn) and _bc.is_enabled(), enabled=_bc.is_enabled())
+
+
+@hd_bp.route("/bruit/record", methods=["POST"])
+def bruit_record():
+    from . import bruit_check as _bc
+    body = request.get_json(silent=True) or {}
+    hn = _bruit_hn_from_token(body.get("token", ""))
+    if not hn or not _bc.is_enabled():
+        return jsonify({"error": "ลิงก์หมดอายุหรือยังไม่เปิดใช้ — ขอลิงก์ใหม่จากคลินิก"}), 403
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"error": "no db"}), 503
+    try:
+        with conn.cursor() as cur:
+            res = _bc.record(cur, hn, body.get("features") or {}, source="patient")
+            cur.execute("SELECT patient_name FROM hd_patient_mapping WHERE hn = %s", (hn,))
+            r = cur.fetchone()
+            name = r[0] if r else ""
+            if res.get("notify"):
+                try:
+                    pr = push_nurse_group(_bc.nurse_text(hn, name, res, _w3_base_url()))
+                    if pr.get("sent"):
+                        cur.execute("UPDATE hd_bruit_records SET notified = TRUE WHERE id = %s", (res["id"],))
+                        res["notified"] = True
+                except Exception as e:
+                    logger.warning("bruit notify: %s", type(e).__name__)
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({k: v for k, v in res.items() if k != "va_level"})
+
+
+@hd_bp.route("/bruit/notify", methods=["POST"])
+def bruit_notify():
+    from . import bruit_check as _bc
+    body = request.get_json(silent=True) or {}
+    hn = _bruit_hn_from_token(body.get("token", ""))
+    if not hn or not _bc.is_enabled():
+        return jsonify({"error": "ลิงก์หมดอายุ"}), 403
+    conn = _w3_db()
+    name = ""
+    last = {}
+    if conn is not None:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT patient_name FROM hd_patient_mapping WHERE hn = %s", (hn,))
+                r = cur.fetchone()
+                name = r[0] if r else ""
+                h = _bc.history(cur, hn, limit=1)
+                last = h[0] if h else {}
+        finally:
+            conn.close()
+    res = push_nurse_group(f"🩺 ผู้ป่วย {name} (HN {hn}) กดแจ้งพยาบาลจากหน้า 'ฟังเสียงเส้นฟอก' — ผลล่าสุด: "
+                           f"{_bc.LEVEL_TH.get(last.get('level'), last.get('level') or '-')}\nโทรกลับสอบถาม thrill/ปวด/บวม · {_w3_base_url()}/hd/bruit")
+    return jsonify({"ok": bool(res.get("sent"))})
+
+
+@hd_bp.route("/bruit/board", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def bruit_board():
+    from . import bruit_check as _bc
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"rows": []})
+    try:
+        with conn.cursor() as cur:
+            rows = _bc.board(cur, days=int(request.args.get("days", 90)))
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"rows": rows, "enabled": _bc.is_enabled()})
+
+
+@hd_bp.route("/patients/hn/<hn>/bruit", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def bruit_history_api(hn):
+    from . import bruit_check as _bc
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"items": []})
+    try:
+        with conn.cursor() as cur:
+            items = _bc.history(cur, hn, limit=60)
+        conn.commit()
+    finally:
+        conn.close()
+    return jsonify({"items": items, "link": _bc.link_for(hn, _w3_base_url()) if _bc.is_enabled() else None, "enabled": _bc.is_enabled()})
+
+
+@hd_bp.route("/patients/hn/<hn>/bruit/reset-baseline", methods=["POST"])
+@require_role("physician", "admin")
+def bruit_reset_baseline(hn):
+    from . import bruit_check as _bc
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"error": "no db"}), 503
+    try:
+        with conn.cursor() as cur:
+            n = _bc.reset_baseline(cur, hn)
+        conn.commit()
+    finally:
+        conn.close()
+    log_action(user_id=g.get("hd_user_id"), action="bruit.reset_baseline", resource_type="patient", resource_id=hn,
+               new_values={"cleared": n}, ip_address=request.remote_addr or "")
+    return jsonify({"ok": True, "cleared": n})
+
+
+@hd_web.route("/bruit")
+def bruit_board_page():
+    return render_template("hd_bruit_board.html")
+
+
+# ── ⏳ Kidney Time Machine ──────────────────────────────────────────────────────
+
+@hd_bp.route("/patients/hn/<hn>/time-machine", methods=["GET"])
+@require_role("physician", "nurse", "admin")
+def time_machine_api(hn):
+    from . import time_machine as _tm
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"error": "no db"}), 503
+    try:
+        data = _tm.build(conn, hn, days=int(request.args.get("days", 548)))
+        conn.rollback()
+    finally:
+        conn.close()
+    if not data:
+        return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+    return jsonify(data)
+
+
+@hd_bp.route("/patients/hn/<hn>/time-machine/what-if", methods=["POST"])
+@require_role("physician", "nurse", "admin")
+def time_machine_whatif(hn):
+    from . import time_machine as _tm
+    body = request.get_json(silent=True) or {}
+    conn = _w3_db()
+    if conn is None:
+        return jsonify({"error": "no db"}), 503
+    try:
+        data = _tm.build(conn, hn)
+        conn.rollback()
+    finally:
+        conn.close()
+    if not data:
+        return jsonify({"error": "ไม่พบผู้ป่วย"}), 404
+    return jsonify(_tm.what_if(data, body))
+
+
+@hd_web.route("/patient/<hn>/time-machine")
+def time_machine_page(hn):
+    return render_template("hd_time_machine.html", patient_hn=hn)

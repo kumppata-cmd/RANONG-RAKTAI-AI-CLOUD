@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>ฟังเสียงเส้นฟอก — คลินิกระนอง รักษ์ไต</title>
+<style>
+  :root{--p:#b91c1c;--bg:#fff5f5;--card:#fff;--fg:#1f2937;--muted:#6b7280;--border:#e5e7eb}
+  *{box-sizing:border-box} body{margin:0;font-family:'Noto Sans Thai',system-ui,sans-serif;background:var(--bg);color:var(--fg)}
+  .wrap{max-width:430px;margin:0 auto;padding:18px 16px 40px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:16px;padding:16px;margin-bottom:12px}
+  .rec{display:block;width:100%;padding:20px;font-size:1.2rem;font-weight:800;color:#fff;background:linear-gradient(135deg,#b91c1c,#7f1d1d);border:none;border-radius:16px;cursor:pointer}
+  .rec:disabled{opacity:.6}
+  .meter{height:14px;border-radius:7px;background:#eee;overflow:hidden;margin-top:10px}
+  .meter>div{height:100%;width:0;background:linear-gradient(90deg,#16a34a,#f59e0b,#dc2626);transition:width .1s}
+  #count{font-size:2.4rem;font-weight:800;text-align:center;margin-top:6px;color:var(--p)}
+  #ans{white-space:pre-wrap;line-height:1.65;font-size:1rem;display:none}
+  #status{min-height:22px;text-align:center;font-size:.85rem;color:var(--muted);margin-top:8px}
+  .notify{display:none;width:100%;padding:14px;font-size:1rem;font-weight:700;color:#fff;background:#b45309;border:none;border-radius:14px;margin-top:8px}
+  ol{padding-left:18px;line-height:1.6;font-size:.9rem;margin:6px 0}
+</style>
+</head>
+<body><div class="wrap">
+  <div style="text-align:center;font-size:2.2rem">🩺</div>
+  <h2 style="text-align:center;margin:6px 0 2px">ฟังเสียงเส้นฟอกด้วยมือถือ</h2>
+  <div style="text-align:center;color:var(--muted);font-size:.8rem;margin-bottom:14px">คลินิกระนอง รักษ์ไต · เทียบกับ "เสียงปกติของคุณเอง"</div>
+  {% if not valid %}
+  <div class="card" style="text-align:center">{% if not enabled %}⏸ บริการนี้ยังไม่เปิดใช้{% else %}⏰ ลิงก์นี้หมดอายุแล้ว{% endif %}<br><span style="color:var(--muted);font-size:.85rem">ขอลิงก์ใหม่จากเจ้าหน้าที่คลินิกได้</span></div>
+  {% else %}
+  <div class="card">
+    <ol>
+      <li>อยู่ในห้องเงียบ ปิดพัดลม/ทีวี</li>
+      <li>เอา<b>ไมโครโฟนด้านล่างมือถือ</b>แนบผิวหนังตรงที่คลำได้ "สั่น" (thrill) ชัดที่สุด</li>
+      <li>กดอัด 10 วินาที อยู่นิ่ง ๆ ไม่พูด</li>
+    </ol>
+    <button class="rec" id="recBtn" onclick="startRec()">🎙️ กดอัดเสียง 10 วินาที</button>
+    <div class="meter"><div id="lvl"></div></div>
+    <div id="count"></div>
+    <div id="status"></div>
+  </div>
+  <div class="card" id="ans"></div>
+  <button class="notify" id="notifyBtn" onclick="notifyNurse()">📣 แจ้งพยาบาล</button>
+  <div class="card" style="font-size:.8rem;color:var(--muted)">🔒 เสียงไม่ถูกส่งออกจากมือถือ — ส่งเฉพาะตัวเลขลักษณะเสียง (ความถี่/จังหวะ/ความดัง) · 3 ครั้งแรกใช้สร้างค่าปกติของคุณ · เป็นการเฝ้าระวังแนวโน้ม ไม่ใช่การวินิจฉัย · ถ้า "สั่น" หายไป ปวด บวม หรือเลือดหยุดยาก ให้ติดต่อคลินิกทันทีไม่ต้องรอผล</div>
+  {% endif %}
+</div>
+<script>
+const TOKEN = "{{ token }}"; const DUR = 10;
+let ctx, stream, proc, chunks = [], sr = 44100, recording = false;
+const esc = s => String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function startRec(){
+  const btn = document.getElementById('recBtn'), st = document.getElementById('status');
+  document.getElementById('ans').style.display='none'; document.getElementById('notifyBtn').style.display='none';
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:false, noiseSuppression:false, autoGainControl:false, channelCount:1}});
+  }catch(e){ st.textContent = '⚠️ เปิดไมโครโฟนไม่ได้ — อนุญาตการใช้ไมค์ในเบราว์เซอร์ (ถ้าเปิดใน LINE ให้กด ⋯ แล้ว "เปิดในเบราว์เซอร์")'; return; }
+  ctx = new (window.AudioContext||window.webkitAudioContext)(); sr = ctx.sampleRate;
+  const src = ctx.createMediaStreamSource(stream);
+  proc = ctx.createScriptProcessor(4096, 1, 1); chunks = []; recording = true;
+  proc.onaudioprocess = e => { if(!recording) return; const d = e.inputBuffer.getChannelData(0); chunks.push(new Float32Array(d));
+    let s=0; for(let i=0;i<d.length;i+=8) s+=d[i]*d[i]; const rms=Math.sqrt(s/(d.length/8)); document.getElementById('lvl').style.width = Math.min(100, rms*600)+'%'; };
+  src.connect(proc); proc.connect(ctx.destination);
+  btn.disabled = true; let left = DUR; const cd = document.getElementById('count'); cd.textContent = left;
+  st.textContent = 'กำลังอัด… อยู่นิ่ง ๆ';
+  const t = setInterval(()=>{ left--; cd.textContent = left>0?left:'✓'; if(left<=0){ clearInterval(t); stopRec(); } }, 1000);
+}
+function stopRec(){
+  recording = false;
+  try{ proc.disconnect(); }catch(e){} try{ stream.getTracks().forEach(t=>t.stop()); }catch(e){} try{ ctx.close(); }catch(e){}
+  document.getElementById('recBtn').disabled = false; document.getElementById('lvl').style.width='0%';
+  const n = chunks.reduce((a,c)=>a+c.length,0); const x = new Float32Array(n); let o=0; chunks.forEach(c=>{ x.set(c,o); o+=c.length; });
+  const f = features(x, sr); send(f);
+}
+/* ───── feature extraction (all on the phone) ───── */
+function fft(re, im){ const n=re.length; for(let i=1,j=0;i<n;i++){ let bit=n>>1; for(;j&bit;bit>>=1) j^=bit; j^=bit; if(i<j){ [re[i],re[j]]=[re[j],re[i]]; [im[i],im[j]]=[im[j],im[i]]; } }
+  for(let len=2;len<=n;len<<=1){ const ang=-2*Math.PI/len, wr=Math.cos(ang), wi=Math.sin(ang); for(let i=0;i<n;i+=len){ let cr=1, ci=0; for(let k=0;k<len/2;k++){ const ur=re[i+k], ui=im[i+k], vr=re[i+k+len/2]*cr-im[i+k+len/2]*ci, vi=re[i+k+len/2]*ci+im[i+k+len/2]*cr; re[i+k]=ur+vr; im[i+k]=ui+vi; re[i+k+len/2]=ur-vr; im[i+k+len/2]=ui-vi; const nr=cr*wr-ci*wi; ci=cr*wi+ci*wr; cr=nr; } } } }
+function features(x, sr){
+  const N = 2048, hop = 1024, nb = N/2; const spec = new Float64Array(nb); const env = [];
+  let frames = 0, sq = 0, clip = 0;
+  for(let i=0;i<x.length;i++){ sq += x[i]*x[i]; if(Math.abs(x[i])>0.98) clip++; }
+  const rms = Math.sqrt(sq/Math.max(1,x.length));
+  const win = new Float64Array(N); for(let i=0;i<N;i++) win[i] = 0.5-0.5*Math.cos(2*Math.PI*i/(N-1));
+  const re = new Float64Array(N), im = new Float64Array(N);
+  for(let s=0; s+N<=x.length; s+=hop){
+    let e=0; for(let i=0;i<N;i++){ re[i]=x[s+i]*win[i]; im[i]=0; e+=x[s+i]*x[s+i]; } env.push(Math.sqrt(e/N));
+    fft(re, im); for(let k=0;k<nb;k++) spec[k] += re[k]*re[k]+im[k]*im[k]; frames++;
+  }
+  if(!frames) return {duration_s: x.length/sr, rms, clipping_pct: 0};
+  const hz = k => k*sr/N; let tot=0, cen=0, pk=0, pkv=0, lo=0, mid=0, hi=0, vhi=0, lg=0, am=0, cnt=0;
+  for(let k=0;k<nb;k++){ const f=hz(k); if(f<50||f>4000) continue; const p=spec[k]/frames; tot+=p; cen+=f*p;
+    if(f<200) lo+=p; else if(f<800) mid+=p; else if(f<1600) hi+=p; else vhi+=p;
+    if(f<=2000){ if(p>pkv){pkv=p;pk=f;} lg+=Math.log(p+1e-20); am+=p; cnt++; } }
+  const flat = cnt ? Math.exp(lg/cnt)/((am/cnt)+1e-20) : 0;
+  // envelope → pulse rate via autocorrelation (lags 0.4–1.7 s)
+  const fps = sr/hop; const m = env.reduce((a,b)=>a+b,0)/env.length; const ev = env.map(v=>v-m);
+  let bestLag=0, best=-1; const minL=Math.round(0.4*fps), maxL=Math.round(1.7*fps);
+  for(let L=minL; L<=maxL && L<ev.length/2; L++){ let s=0,n0=0,n1=0; for(let i=0;i+L<ev.length;i++){ s+=ev[i]*ev[i+L]; n0+=ev[i]*ev[i]; n1+=ev[i+L]*ev[i+L]; } const r = s/Math.sqrt((n0*n1)||1); if(r>best){best=r;bestLag=L;} }
+  const pulse = (bestLag && best>0.15) ? 60*fps/bestLag : null;
+  const sorted = env.slice().sort((a,b)=>a-b); const p95 = sorted[Math.floor(sorted.length*0.95)]||0, med = sorted[Math.floor(sorted.length*0.5)]||1e-9;
+  return {duration_s: +(x.length/sr).toFixed(2), rms: +rms.toFixed(5), centroid_hz: +(tot?cen/tot:0).toFixed(1), peak_hz: +pk.toFixed(1), flatness: +flat.toFixed(4),
+          pulse_bpm: pulse?+pulse.toFixed(1):null, pulsatility: +(p95/med).toFixed(3), clipping_pct: +(100*clip/x.length).toFixed(3),
+          band_lo: +(tot?lo/tot:0).toFixed(4), band_mid: +(tot?mid/tot:0).toFixed(4), band_hi: +(tot?hi/tot:0).toFixed(4), band_vhi: +(tot?vhi/tot:0).toFixed(4), autocorr: +best.toFixed(3)};
+}
+async function send(f){
+  const st = document.getElementById('status'), ans = document.getElementById('ans'), nb = document.getElementById('notifyBtn');
+  st.textContent = '📡 กำลังเทียบกับค่าปกติของคุณ…';
+  try{
+    const r = await fetch('/hd/api/v1/bruit/record',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN, features:f})});
+    const d = await r.json();
+    if(!r.ok){ st.textContent = '⚠️ '+(d.error||('HTTP '+r.status)); return; }
+    st.textContent = ''; ans.textContent = d.text || ''; ans.style.display='block';
+    ans.style.borderColor = d.level==='alert' ? '#b91c1c' : (d.level==='watch' ? '#b45309' : (d.level==='ok' ? '#1a7f37' : 'var(--border)'));
+    if(d.level==='alert' || d.level==='watch') nb.style.display='block';
+    if(d.notified) nb.textContent = '✅ ระบบแจ้งพยาบาลให้แล้ว (กดซ้ำได้ถ้ามีอาการ)';
+  }catch(e){ st.textContent = '⚠️ เชื่อมต่อไม่ได้ ลองใหม่'; }
+}
+async function notifyNurse(){
+  const nb = document.getElementById('notifyBtn'); nb.disabled=true; nb.textContent='⏳ กำลังส่ง…';
+  try{ const r = await fetch('/hd/api/v1/bruit/notify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN})}); const d = await r.json();
+    nb.textContent = d.ok ? '✅ แจ้งพยาบาลแล้ว รอคลินิกติดต่อกลับ' : '⚠️ ส่งไม่สำเร็จ — โทรหาคลินิกโดยตรง'; }catch(e){ nb.textContent='⚠️ ส่งไม่สำเร็จ — โทรหาคลินิกโดยตรง'; }
+}
+</script>
+</body></html>
