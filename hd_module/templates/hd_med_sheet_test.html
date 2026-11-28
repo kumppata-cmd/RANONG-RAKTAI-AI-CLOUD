@@ -88,7 +88,7 @@ async function msRun(inp){
     try{ const r = await hdFetch('/hd/api/v1/med-sheet/read', {method:'POST', body: fd}); status = r.status; d = await r.json().catch(()=>({})); }catch(e){ status = 0; }
     if(status===429){ st.textContent='AI คิวเต็ม รอ 10 วิ…'; await new Promise(r=>setTimeout(r,10000)); i--; continue; }
     if(status!==200){ out.insertAdjacentHTML('afterbegin', `<div class="ms-card"><b>${esc(f.name)}</b> <span class="ms-pill bad">⚠️ ${esc(d.error||('HTTP '+status))}</span></div>`); continue; }
-    (d.pages||[]).forEach(p=>out.insertAdjacentHTML('afterbegin', renderPage(p, f.name)));
+    (d.pages||[]).forEach(p=>{ out.insertAdjacentHTML('afterbegin', renderPage(p, f.name)); msSave(p, f.name); });
   }
   bar.style.width = '100%'; st.textContent = `✅ อ่านเสร็จ ${files.length} ไฟล์ — เลื่อนดูผลด้านล่าง แล้วกด "📝 สร้างร่างให้ผู้ป่วย"`; inp.value='';
   setTimeout(()=>{ prog.style.display='none'; bar.style.width='0%'; }, 6000);
@@ -106,6 +106,21 @@ async function msDrafts(rid){
     st.innerHTML = `✅ สร้างร่าง ${d.drafts} รายการให้ HN ${esc(d.hn)}${d.allergy?' · '+esc(d.allergy):''} — <a href="/hd/pending-inbox">ไปยืนยันในกล่องรอยืนยัน →</a>`;
   }catch(e){ st.textContent = '❌ '+(e.message||e); }
 }
+/* ผลล่าสุดค้างไว้ในเครื่องนี้ 24 ชม. (ไม่มีรูป มีแต่ตัวเลข) — ออกจากหน้าแล้วกลับมายังเห็น */
+const MS_KEY = 'hd_med_sheet_recent_v1';
+function msSave(p, fname){
+  try{ const arr = JSON.parse(localStorage.getItem(MS_KEY)||'[]').filter(x=>Date.now()-x.t < 86400000);
+    arr.unshift({t: Date.now(), fname, page: p}); localStorage.setItem(MS_KEY, JSON.stringify(arr.slice(0,12))); }catch(e){}
+}
+function msRestore(){
+  try{ const arr = JSON.parse(localStorage.getItem(MS_KEY)||'[]').filter(x=>Date.now()-x.t < 86400000);
+    if(!arr.length) return;
+    const out = document.getElementById('msOut');
+    out.insertAdjacentHTML('beforeend', `<div class="ms-card" style="display:flex;justify-content:space-between;align-items:center"><span style="font-size:.82rem">🕘 ผลที่อ่านล่าสุดในเครื่องนี้ (${arr.length} ใบ, เก็บ 24 ชม.) — ปุ่ม "สร้างร่าง" ใช้ได้ภายใน 30 นาทีหลังอ่าน</span><button class="btn btn-secondary" onclick="localStorage.removeItem(MS_KEY);location.reload()">🗑 ล้าง</button></div>`);
+    arr.forEach(x=>out.insertAdjacentHTML('beforeend', renderPage(x.page, x.fname + ' · ' + new Date(x.t).toLocaleTimeString('th-TH',{hour:'2-digit',minute:'2-digit'}))));
+  }catch(e){}
+}
+msRestore();
 hdFetch('/hd/api/v1/med-sheet/accuracy').then(r=>r.ok?r.json():null).then(a=>{ if(!a) return;
   document.getElementById('msAcc').innerHTML = `<div>📄 ใบที่อ่าน 30 วัน: <b>${a.sheets}</b></div><div>ตัดสินแล้ว <b>${a.judged}</b> รายการ · ถูก ${a.totals.accepted} · ต้องแก้ ${a.totals.changed} · ผิด ${a.totals.rejected} · รอ ${a.totals.pending}</div><div>ความแม่น <b>${a.accuracy_pct==null?'-':a.accuracy_pct+'%'}</b> · เกณฑ์เปิด LINE ${a.gate.ok?'✅ ผ่าน':'⏳ ยังไม่ครบ (≥50 ใบ ผิด 0)'}</div>`; }).catch(()=>{});
 </script>
